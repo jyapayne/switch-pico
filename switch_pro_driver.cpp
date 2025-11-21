@@ -50,6 +50,7 @@ static uint16_t leftMaxX, leftMaxY;
 static uint16_t rightMinX, rightMinY;
 static uint16_t rightCenX, rightCenY;
 static uint16_t rightMaxX, rightMaxY;
+static SwitchRumbleCallback rumble_callback = nullptr;
 
 static const uint8_t factory_config_data[0xEFF] = {
     // serial number
@@ -202,6 +203,16 @@ static void read_spi_flash(uint8_t* dest, uint32_t address, uint8_t size) {
     } else {
         memset(dest, 0xFF, size);
     }
+}
+
+static void forward_rumble_to_host(const uint8_t* report, uint16_t length) {
+    // Output reports 0x10/0x21 include 8 rumble bytes starting at offset 2.
+    if (!rumble_callback || length < 10) {
+        return;
+    }
+    uint8_t rumble[8];
+    memcpy(rumble, report + 2, sizeof(rumble));
+    rumble_callback(rumble);
 }
 
 static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSubID, const uint8_t *reportData, uint16_t reportLength) {
@@ -640,6 +651,10 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchI
     return true;
 }
 
+void switch_pro_set_rumble_callback(SwitchRumbleCallback cb) {
+    rumble_callback = cb;
+}
+
 bool switch_pro_is_ready() {
     return is_ready;
 }
@@ -667,6 +682,9 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     uint8_t switchReportSubID = buffer[1];
     LOG_PRINTF("[HID] set_report type=%d id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
                report_type, report_id, switchReportID, switchReportSubID, bufsize);
+    if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
+        forward_rumble_to_host(buffer, bufsize);
+    }
     if (switchReportID == REPORT_OUTPUT_00) {
         // No-op, just acknowledge to clear any stalls.
         return;
@@ -688,6 +706,9 @@ void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id, uint8_t con
     uint8_t switchReportSubID = buffer[1];
     LOG_PRINTF("[HID] report_received id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
                report_id, switchReportID, switchReportSubID, bufsize);
+    if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
+        forward_rumble_to_host(buffer, bufsize);
+    }
     if (switchReportID == REPORT_OUTPUT_00) {
         return;
     } else if (switchReportID == REPORT_FEATURE) {

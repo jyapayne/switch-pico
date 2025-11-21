@@ -21,22 +21,21 @@
 #define SWITCH_PRO_HAT_UPLEFT    0x07
 #define SWITCH_PRO_HAT_NOTHING   0x08
 
-#define SWITCH_PRO_MASK_ZR (1U << 7)
-#define SWITCH_PRO_MASK_R (1U << 6)
-#define SWITCH_PRO_MASK_A (1U << 3)
-#define SWITCH_PRO_MASK_B (1U << 2)
-#define SWITCH_PRO_MASK_X (1U << 1)
-#define SWITCH_PRO_MASK_Y 1U
+#define SWITCH_PRO_MASK_Y       (1U << 0)
+#define SWITCH_PRO_MASK_B       (1U << 1)
+#define SWITCH_PRO_MASK_A       (1U << 2)
+#define SWITCH_PRO_MASK_X       (1U << 3)
+#define SWITCH_PRO_MASK_L       (1U << 4)
+#define SWITCH_PRO_MASK_R       (1U << 5)
+#define SWITCH_PRO_MASK_ZL      (1U << 6)
+#define SWITCH_PRO_MASK_ZR      (1U << 7)
 
-#define SWITCH_PRO_MASK_CAPTURE (1U << 5)
-#define SWITCH_PRO_MASK_HOME (1U << 4)
-#define SWITCH_PRO_MASK_L3 (1U << 3)
-#define SWITCH_PRO_MASK_R3 (1U << 2)
-#define SWITCH_PRO_MASK_PLUS (1U << 1)
-#define SWITCH_PRO_MASK_MINUS 1U
-
-#define SWITCH_PRO_MASK_ZL (1U << 7)
-#define SWITCH_PRO_MASK_L (1U << 6)
+#define SWITCH_PRO_MASK_MINUS   (1U << 8)
+#define SWITCH_PRO_MASK_PLUS    (1U << 9)
+#define SWITCH_PRO_MASK_L3      (1U << 10)
+#define SWITCH_PRO_MASK_R3      (1U << 11)
+#define SWITCH_PRO_MASK_HOME    (1U << 12)
+#define SWITCH_PRO_MASK_CAPTURE (1U << 13)
 
 #define SWITCH_PRO_JOYSTICK_MIN 0x0000
 #define SWITCH_PRO_JOYSTICK_MID 0x7FFF

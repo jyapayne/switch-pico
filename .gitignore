@@ -2,4 +2,7 @@
 Switch-Fightstick
 GP2040-CE
 build
+debug
+.pycache
+__pycache__
 !.vscode/*

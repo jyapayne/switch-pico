@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include "bsp/board.h"
 #include "hardware/uart.h"
 #include "pico/stdlib.h"
@@ -13,9 +14,11 @@
 
 // UART1 is reserved for external input frames from the host PC.
 #define UART_ID uart1
-#define BAUD_RATE 1000000
+#define BAUD_RATE 900000
 #define UART_TX_PIN 4
 #define UART_RX_PIN 5
+#define UART_RUMBLE_HEADER 0xBB
+#define UART_RUMBLE_RUMBLE_TYPE 0x01
 
 static bool g_last_mounted = false;
 static bool g_last_ready = false;
@@ -45,6 +48,24 @@ static SwitchInputState neutral_input() {
     state.rx = SWITCH_PRO_JOYSTICK_MID;
     state.ry = SWITCH_PRO_JOYSTICK_MID;
     return state;
+}
+
+static void send_rumble_uart_frame(const uint8_t rumble[8]) {
+    uint8_t frame[11];
+    frame[0] = UART_RUMBLE_HEADER;
+    frame[1] = UART_RUMBLE_RUMBLE_TYPE;
+    memcpy(&frame[2], rumble, 8);
+
+    uint8_t checksum = 0;
+    for (int i = 0; i < 10; ++i) {
+        checksum = static_cast<uint8_t>(checksum + frame[i]);
+    }
+    frame[10] = checksum;
+    uart_write_blocking(UART_ID, frame, sizeof(frame));
+}
+
+static void on_rumble_from_switch(const uint8_t rumble[8]) {
+    send_rumble_uart_frame(rumble);
 }
 
 // Consume UART bytes and forward complete frames to the Switch Pro driver.
@@ -183,6 +204,7 @@ int main() {
 
     tusb_init();
     switch_pro_init();
+    switch_pro_set_rumble_callback(on_rumble_from_switch);
     g_user_state = neutral_input();
     switch_pro_set_input(g_user_state);
 
