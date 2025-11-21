@@ -52,3 +52,7 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchI
 
 // Driver state helpers
 bool switch_pro_is_ready();
+
+// Optional callback fired when the host sends a rumble payload (the raw 8 rumble bytes).
+typedef void (*SwitchRumbleCallback)(const uint8_t rumble_data[8]);
+void switch_pro_set_rumble_callback(SwitchRumbleCallback cb);
