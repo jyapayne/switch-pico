@@ -153,13 +153,24 @@ def is_usb_serial(path: str) -> bool:
     return True
 
 
+def is_usb_serial_port(port: list_ports.ListPortInfo) -> bool:
+    """Heuristic: prefer ports with USB VID/PID; fall back to path hints."""
+    if getattr(port, "vid", None) is not None or getattr(port, "pid", None) is not None:
+        return True
+    path = port.device or ""
+    manufacturer = (getattr(port, "manufacturer", "") or "").upper()
+    if "USB" in manufacturer:
+        return True
+    return is_usb_serial(path)
+
+
 def discover_ports(include_non_usb: bool = False) -> List[Dict[str, str]]:
     results: List[Dict[str, str]] = []
     for port in list_ports.comports():
         path = port.device or ""
         if not path:
             continue
-        if not include_non_usb and not is_usb_serial(path):
+        if not include_non_usb and not is_usb_serial_port(port):
             continue
         results.append(
             {
