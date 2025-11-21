@@ -164,13 +164,24 @@ def is_usb_serial_port(port: list_ports.ListPortInfo) -> bool:
     return is_usb_serial(path)
 
 
-def discover_ports(include_non_usb: bool = False) -> List[Dict[str, str]]:
+def discover_ports(
+    include_non_usb: bool = False,
+    ignore_descriptions: Optional[List[str]] = None,
+    include_descriptions: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
+    ignored = [d.lower() for d in ignore_descriptions or []]
+    includes = [d.lower() for d in include_descriptions or []]
     results: List[Dict[str, str]] = []
     for port in list_ports.comports():
         path = port.device or ""
         if not path:
             continue
         if not include_non_usb and not is_usb_serial_port(port):
+            continue
+        desc_lower = (port.description or "").lower()
+        if includes and not any(keep in desc_lower for keep in includes):
+            continue
+        if any(skip in desc_lower for skip in ignored):
             continue
         results.append(
             {
@@ -384,6 +395,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"UART baud rate (default {UART_BAUD}; must match switch-pico firmware)",
     )
     parser.add_argument(
+        "--ignore-port-desc",
+        action="append",
+        default=[],
+        help="Substring filter to exclude serial ports by description (case-insensitive). Repeatable.",
+    )
+    parser.add_argument(
+        "--include-port-desc",
+        action="append",
+        default=[],
+        help="Only include serial ports whose description contains this substring (case-insensitive). Repeatable.",
+    )
+    parser.add_argument(
         "--sdl-mapping",
         action="append",
         default=[],
@@ -432,6 +455,8 @@ def main() -> None:
         available_ports: List[str] = []
         auto_assigned_indices: set[int] = set()
         include_non_usb = args.all_ports or False
+        ignore_port_desc = [d.lower() for d in args.ignore_port_desc]
+        include_port_desc = [d.lower() for d in args.include_port_desc]
         for index in range(controller_count):
             if sdl2.SDL_IsGameController(index):
                 name = sdl2.SDL_GameControllerNameForIndex(index)
@@ -448,7 +473,11 @@ def main() -> None:
         if args.interactive:
             if not controller_indices:
                 parser.error("No controllers detected for interactive pairing.")
-            discovered = discover_ports(include_non_usb=include_non_usb)
+            discovered = discover_ports(
+                include_non_usb=include_non_usb,
+                ignore_descriptions=ignore_port_desc,
+                include_descriptions=include_port_desc,
+            )
             if not discovered:
                 parser.error("No UART devices found for interactive pairing.")
             mappings = interactive_pairing(console, controller_names, discovered)
@@ -459,7 +488,11 @@ def main() -> None:
                 available_ports.extend(list(args.ports))
                 console.print(f"[green]Prepared {len(available_ports)} specified UART port(s) for auto-pairing.[/green]")
             else:
-                discovered = discover_ports(include_non_usb=include_non_usb)
+                discovered = discover_ports(
+                    include_non_usb=include_non_usb,
+                    ignore_descriptions=ignore_port_desc,
+                    include_descriptions=include_port_desc,
+                )
                 if discovered:
                     available_ports.extend(info["device"] for info in discovered)
                     console.print("[green]Auto-detected UARTs:[/green]")
@@ -527,7 +560,11 @@ def main() -> None:
         def discover_new_ports() -> None:
             if not auto_discover_ports:
                 return
-            discovered = discover_ports(include_non_usb=include_non_usb)
+            discovered = discover_ports(
+                include_non_usb=include_non_usb,
+                ignore_descriptions=ignore_port_desc,
+                include_descriptions=include_port_desc,
+            )
             in_use = ports_in_use()
             for info in discovered:
                 path = info["device"]
