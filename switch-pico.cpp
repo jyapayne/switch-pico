@@ -136,13 +136,18 @@ static SwitchInputState autopilot_state(const SwitchInputState& fallback) {
     state.ry = SWITCH_PRO_JOYSTICK_MID;
 
     // Fire L+R twice then A twice, loop every ~300ms to keep trying.
+    // Hold each press for a few ms so it survives the 5ms USB report throttle.
     uint32_t step = g_autopilot_counter % 300;
-    if (step == 25 || step == 50) {
-        state.button_l = true;
-        state.button_r = true;
-    } else if (step == 75 || step == 100) {
-        state.button_a = true;
-    }
+    constexpr uint32_t press_width = 50; // ~12ms
+    auto in_window = [](uint32_t v, uint32_t start, uint32_t width) {
+        return v >= start && v < start + width;
+    };
+    bool lr_down = in_window(step, 25, press_width) || in_window(step, 50, press_width);
+    bool a_down = in_window(step, 75, press_width) || in_window(step, 100, press_width);
+
+    state.button_r = lr_down;
+    state.button_l = lr_down;
+    state.button_a = a_down;
 
     g_autopilot_counter++;
 
