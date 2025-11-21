@@ -20,6 +20,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import serial
@@ -362,6 +363,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=UART_BAUD,
         help=f"UART baud rate (default {UART_BAUD}; must match switch-pico firmware)",
     )
+    parser.add_argument(
+        "--sdl-mapping",
+        action="append",
+        default=[],
+        help="Path to an SDL2 controller mapping database (e.g. controllerdb.txt). Repeatable.",
+    )
     return parser
 
 
@@ -372,7 +379,24 @@ def main() -> None:
     deadzone_raw = int(max(0.0, min(args.deadzone, 1.0)) * 32767)
     trigger_threshold = int(max(0.0, min(args.trigger_threshold, 1.0)) * 32767)
 
-    sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER)
+    # Load bundled mapping plus any user-supplied mapping files.
+    default_mapping = Path(__file__).parent / "controller_db" / "gamecontrollerdb.txt"
+    mappings_to_load = []
+    if default_mapping.exists():
+        mappings_to_load.append(str(default_mapping))
+    mappings_to_load.extend(args.sdl_mapping)
+    for mapping_path in mappings_to_load:
+        try:
+            loaded = sdl2.SDL_GameControllerAddMappingsFromFile(mapping_path.encode())
+            console = Console()
+            console.print(f"[green]Loaded {loaded} SDL mapping(s) from {mapping_path}[/green]")
+        except Exception as exc:
+            console = Console()
+            console.print(f"[red]Failed to load SDL mapping {mapping_path}: {exc}[/red]")
+
+    sdl2.SDL_SetHint(sdl2.SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
+    if sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER | sdl2.SDL_INIT_JOYSTICK) != 0:
+        parser.error(f"SDL init failed: {sdl2.SDL_GetError().decode(errors='ignore')}")
     contexts: Dict[int, ControllerContext] = {}
     uarts: List[PicoUART] = []
     mapping_by_index: Dict[int, str] = {}
@@ -390,6 +414,10 @@ def main() -> None:
                 console.print(f"[cyan]Detected controller {index}: {name_str}[/cyan]")
                 controller_indices.append(index)
                 controller_names[index] = name_str
+            else:
+                name = sdl2.SDL_JoystickNameForIndex(index)
+                name_str = name.decode() if isinstance(name, bytes) else str(name)
+                console.print(f"[yellow]Found joystick {index} (not a GameController): {name_str}[/yellow]")
 
         mappings = list(args.map)
         if args.interactive:
@@ -442,6 +470,11 @@ def main() -> None:
         # Open currently connected controllers that match the mapping.
         for index, port in mappings:
             if index >= sdl2.SDL_NumJoysticks() or not sdl2.SDL_IsGameController(index):
+                # Try to turn non-GameController into a controller via hint reload.
+                if index < sdl2.SDL_NumJoysticks():
+                    name = sdl2.SDL_JoystickNameForIndex(index)
+                    name_str = name.decode() if isinstance(name, bytes) else str(name)
+                    console.print(f"[yellow]Index {index} is not a GameController ({name_str}). Trying raw open failed.[/yellow]")
                 continue
             try:
                 controller, instance_id = open_controller(index)
