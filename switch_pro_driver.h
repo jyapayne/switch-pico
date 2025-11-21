@@ -47,4 +47,11 @@ void switch_pro_set_input(const SwitchInputState& state);
 void switch_pro_task();
 
 // Convert a packed UART message into controller state (returns true if parsed).
-bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length);
+// If out_state is null the parsed state is written directly to the driver.
+bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchInputState* out_state = nullptr);
+
+// Driver state helpers
+bool switch_pro_is_ready();
+
+// Mark that the host has sent any OUT traffic (allows starting IN reports).
+void switch_pro_mark_host_active();
