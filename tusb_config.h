@@ -32,7 +32,7 @@ extern "C" {
 #ifdef CFG_TUSB_DEBUG
 #undef CFG_TUSB_DEBUG
 #endif
-#define CFG_TUSB_DEBUG 2
+#define CFG_TUSB_DEBUG 0
 
 #define CFG_TUD_HID_EP_BUFSIZE 64
 
