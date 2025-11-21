@@ -24,6 +24,7 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 option(SWITCH_PICO_AUTOTEST "Auto-play grip-screen connection sequence on startup" OFF)
+option(SWITCH_PICO_LOG "Enable UART debug logging" OFF)
 set(PICO_BOARD pico CACHE STRING "Board type")
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -60,6 +61,9 @@ target_link_libraries(switch-pico
 
 if (SWITCH_PICO_AUTOTEST)
     target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_AUTOTEST=1)
+endif()
+if (SWITCH_PICO_LOG)
+    target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_LOG=1)
 endif()
 
 # Add the standard include files to the build

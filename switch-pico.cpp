@@ -5,9 +5,15 @@
 #include "tusb.h"
 #include "switch_pro_driver.h"
 
+#ifdef SWITCH_PICO_LOG
+#define LOG_PRINTF(...) printf(__VA_ARGS__)
+#else
+#define LOG_PRINTF(...) ((void)0)
+#endif
+
 // UART1 is reserved for external input frames from the host PC.
 #define UART_ID uart1
-#define BAUD_RATE 115200
+#define BAUD_RATE 1000000
 #define UART_TX_PIN 4
 #define UART_RX_PIN 5
 
@@ -69,26 +75,26 @@ static void poll_uart_frames() {
             SwitchInputState parsed{};
             if (switch_pro_apply_uart_packet(buffer, sizeof(buffer), &parsed)) {
                 g_user_state = parsed;
-                printf("[UART] packet buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
-                       (parsed.button_a   ? SWITCH_PRO_MASK_A   : 0) |
-                       (parsed.button_b   ? SWITCH_PRO_MASK_B   : 0) |
-                       (parsed.button_x   ? SWITCH_PRO_MASK_X   : 0) |
-                       (parsed.button_y   ? SWITCH_PRO_MASK_Y   : 0) |
-                       (parsed.button_l   ? SWITCH_PRO_MASK_L   : 0) |
-                       (parsed.button_r   ? SWITCH_PRO_MASK_R   : 0) |
-                       (parsed.button_zl  ? SWITCH_PRO_MASK_ZL  : 0) |
-                       (parsed.button_zr  ? SWITCH_PRO_MASK_ZR  : 0) |
-                       (parsed.button_plus? SWITCH_PRO_MASK_PLUS: 0) |
-                       (parsed.button_minus?SWITCH_PRO_MASK_MINUS:0) |
-                       (parsed.button_home?SWITCH_PRO_MASK_HOME:0) |
-                       (parsed.button_capture?SWITCH_PRO_MASK_CAPTURE:0) |
-                       (parsed.button_l3  ? SWITCH_PRO_MASK_L3  : 0) |
-                       (parsed.button_r3  ? SWITCH_PRO_MASK_R3  : 0),
-                       parsed.dpad_up ? SWITCH_PRO_HAT_UP :
-                       parsed.dpad_down ? SWITCH_PRO_HAT_DOWN :
-                       parsed.dpad_left ? SWITCH_PRO_HAT_LEFT :
-                       parsed.dpad_right ? SWITCH_PRO_HAT_RIGHT : SWITCH_PRO_HAT_NOTHING,
-                       parsed.lx >> 8, parsed.ly >> 8, parsed.rx >> 8, parsed.ry >> 8);
+                LOG_PRINTF("[UART] packet buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
+                           (parsed.button_a   ? SWITCH_PRO_MASK_A   : 0) |
+                           (parsed.button_b   ? SWITCH_PRO_MASK_B   : 0) |
+                           (parsed.button_x   ? SWITCH_PRO_MASK_X   : 0) |
+                           (parsed.button_y   ? SWITCH_PRO_MASK_Y   : 0) |
+                           (parsed.button_l   ? SWITCH_PRO_MASK_L   : 0) |
+                           (parsed.button_r   ? SWITCH_PRO_MASK_R   : 0) |
+                           (parsed.button_zl  ? SWITCH_PRO_MASK_ZL  : 0) |
+                           (parsed.button_zr  ? SWITCH_PRO_MASK_ZR  : 0) |
+                           (parsed.button_plus? SWITCH_PRO_MASK_PLUS: 0) |
+                           (parsed.button_minus?SWITCH_PRO_MASK_MINUS:0) |
+                           (parsed.button_home?SWITCH_PRO_MASK_HOME:0) |
+                           (parsed.button_capture?SWITCH_PRO_MASK_CAPTURE:0) |
+                           (parsed.button_l3  ? SWITCH_PRO_MASK_L3  : 0) |
+                           (parsed.button_r3  ? SWITCH_PRO_MASK_R3  : 0),
+                           parsed.dpad_up ? SWITCH_PRO_HAT_UP :
+                           parsed.dpad_down ? SWITCH_PRO_HAT_DOWN :
+                           parsed.dpad_left ? SWITCH_PRO_HAT_LEFT :
+                           parsed.dpad_right ? SWITCH_PRO_HAT_RIGHT : SWITCH_PRO_HAT_NOTHING,
+                           parsed.lx >> 8, parsed.ly >> 8, parsed.rx >> 8, parsed.ry >> 8);
             }
 #ifdef SWITCH_PICO_AUTOTEST
             g_uart_activity = true;
@@ -150,16 +156,16 @@ static void log_usb_state() {
 
     if (mounted != g_last_mounted) {
         g_last_mounted = mounted;
-        printf("[USB] %s\n", mounted ? "mounted" : "unmounted");
+        LOG_PRINTF("[USB] %s\n", mounted ? "mounted" : "unmounted");
     }
     if (ready != g_last_ready) {
         g_last_ready = ready;
-        printf("[SWITCH] driver %s\n", ready ? "ready (handshake OK)" : "not ready");
+        LOG_PRINTF("[SWITCH] driver %s\n", ready ? "ready (handshake OK)" : "not ready");
     }
 #ifdef SWITCH_PICO_AUTOTEST
     if (ready && !g_ready_logged) {
         g_ready_logged = true;
-        printf("[AUTO] ready -> autopilot active=%s\n", g_autopilot_active ? "true" : "false");
+        LOG_PRINTF("[AUTO] ready -> autopilot active=%s\n", g_autopilot_active ? "true" : "false");
     }
 #endif
 }
@@ -175,8 +181,8 @@ int main() {
     g_user_state = neutral_input();
     switch_pro_set_input(g_user_state);
 
-    printf("[BOOT] switch-pico starting (UART0 log @ 115200)\n");
-    printf("[INFO] AUTOTEST=%s UART1 pins TX=%d RX=%d baud=%d\n",
+    LOG_PRINTF("[BOOT] switch-pico starting (UART0 log @ 115200)\n");
+    LOG_PRINTF("[INFO] AUTOTEST=%s UART1 pins TX=%d RX=%d baud=%d\n",
            #ifdef SWITCH_PICO_AUTOTEST
            "ON"
            #else

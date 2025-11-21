@@ -28,6 +28,7 @@ extern "C" {
 #define CFG_TUD_MSC 0
 #define CFG_TUD_MIDI 0
 #define CFG_TUD_VENDOR 0
+// Always enable TinyUSB debug at level 2; LOG_PRINTF controls user-facing logs.
 #ifdef CFG_TUSB_DEBUG
 #undef CFG_TUSB_DEBUG
 #endif

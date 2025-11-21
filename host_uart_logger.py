@@ -12,7 +12,7 @@ except ImportError:
 def main():
     parser = argparse.ArgumentParser(description="Read debug logs from Pico UART")
     parser.add_argument("-p", "--port", required=True, help="Serial port (e.g. /dev/ttyUSB0 or COM3)")
-    parser.add_argument("-b", "--baud", type=int, default=115200, help="Baud rate (default: 115200)")
+    parser.add_argument("-b", "--baud", type=int, default=1000000, help="Baud rate (default: 1000000)")
     args = parser.parse_args()
 
     with serial.Serial(args.port, args.baud, timeout=1) as ser:
