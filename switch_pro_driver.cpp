@@ -44,6 +44,31 @@ static uint8_t input_mode = 0x30;
 static bool is_imu_enabled = false;
 static bool is_vibration_enabled = false;
 
+// Optional compile-time colour override (body/buttons/grips).
+#if __has_include("controller_color_config.h")
+#include "controller_color_config.h"
+#endif
+#ifndef SWITCH_COLOR_BODY_R
+#define SWITCH_COLOR_BODY_R 0x1B
+#define SWITCH_COLOR_BODY_G 0x1B
+#define SWITCH_COLOR_BODY_B 0x1D
+#endif
+#ifndef SWITCH_COLOR_BUTTON_R
+#define SWITCH_COLOR_BUTTON_R 0xFF
+#define SWITCH_COLOR_BUTTON_G 0xFF
+#define SWITCH_COLOR_BUTTON_B 0xFF
+#endif
+#ifndef SWITCH_COLOR_LEFT_GRIP_R
+#define SWITCH_COLOR_LEFT_GRIP_R 0xEC
+#define SWITCH_COLOR_LEFT_GRIP_G 0x00
+#define SWITCH_COLOR_LEFT_GRIP_B 0x8C
+#endif
+#ifndef SWITCH_COLOR_RIGHT_GRIP_R
+#define SWITCH_COLOR_RIGHT_GRIP_R 0xEC
+#define SWITCH_COLOR_RIGHT_GRIP_G 0x00
+#define SWITCH_COLOR_RIGHT_GRIP_B 0x8C
+#endif
+
 static uint16_t leftMinX, leftMinY;
 static uint16_t leftCenX, leftCenY;
 static uint16_t leftMaxX, leftMaxY;
@@ -91,16 +116,16 @@ static const uint8_t factory_config_data[0xEFF] = {
     0xFF,
 
     // body color
-    0x1B, 0x1B, 0x1D,
+    SWITCH_COLOR_BODY_R, SWITCH_COLOR_BODY_G, SWITCH_COLOR_BODY_B,
 
     // button color
-    0xFF, 0xFF, 0xFF,
+    SWITCH_COLOR_BUTTON_R, SWITCH_COLOR_BUTTON_G, SWITCH_COLOR_BUTTON_B,
 
     // left grip color
-    0xEC, 0x00, 0x8C,
+    SWITCH_COLOR_LEFT_GRIP_R, SWITCH_COLOR_LEFT_GRIP_G, SWITCH_COLOR_LEFT_GRIP_B,
 
     // right grip color
-    0xEC, 0x00, 0x8C,
+    SWITCH_COLOR_RIGHT_GRIP_R, SWITCH_COLOR_RIGHT_GRIP_G, SWITCH_COLOR_RIGHT_GRIP_B,
 
     0x01,
 

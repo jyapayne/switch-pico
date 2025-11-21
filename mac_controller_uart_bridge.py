@@ -581,6 +581,11 @@ def main() -> None:
                     contexts[instance_id] = ctx
                 elif event.type == sdl2.SDL_CONTROLLERDEVICEREMOVED:
                     instance_id = event.cdevice.which
+                    # ctx = contexts.get(instance_id)
+                    # if ctx and sdl2.SDL_GameControllerGetAttached(ctx.controller):
+                    #     # Spurious detach; ignore.
+                    #     console.print(f"[yellow]Ignoring spurious remove for controller {instance_id}[/yellow]")
+                    #     continue
                     ctx = contexts.pop(instance_id, None)
                     if ctx:
                         console.print(f"[yellow]Controller {instance_id} removed[/yellow]")
