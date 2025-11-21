@@ -3,9 +3,16 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <stdio.h>
 #include "pico/rand.h"
 #include "pico/time.h"
 #include "tusb.h"
+
+#ifdef SWITCH_PICO_LOG
+#define LOG_PRINTF(...) printf(__VA_ARGS__)
+#else
+#define LOG_PRINTF(...) ((void)0)
+#endif
 
 // force a report to be sent every X ms
 #define SWITCH_PRO_KEEPALIVE_TIMER 5
@@ -180,7 +187,7 @@ static bool send_report(uint8_t reportID, const void* reportData, uint16_t repor
         last_report_counter = 0;
     }
     if (!result) {
-        printf("[HID] send_report failed id=%u len=%u\n", reportID, reportLength);
+        LOG_PRINTF("[HID] send_report failed id=%u len=%u\n", reportID, reportLength);
     }
     return result;
 }
@@ -207,19 +214,19 @@ static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSub
         case IDENTIFY:
             send_identify();
             canSend = true;
-            printf("[HID] CONFIG IDENTIFY\n");
+            LOG_PRINTF("[HID] CONFIG IDENTIFY\n");
             break;
         case HANDSHAKE:
             report_buffer[0] = REPORT_USB_INPUT_81;
             report_buffer[1] = HANDSHAKE;
             canSend = true;
-            printf("[HID] CONFIG HANDSHAKE\n");
+            LOG_PRINTF("[HID] CONFIG HANDSHAKE\n");
             break;
         case BAUD_RATE:
             report_buffer[0] = REPORT_USB_INPUT_81;
             report_buffer[1] = BAUD_RATE;
             canSend = true;
-            printf("[HID] CONFIG BAUD_RATE\n");
+            LOG_PRINTF("[HID] CONFIG BAUD_RATE\n");
             break;
         case DISABLE_USB_TIMEOUT:
             report_buffer[0] = REPORT_OUTPUT_30;
@@ -230,19 +237,19 @@ static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSub
                 is_ready = true;
             //}
             canSend = true;
-            printf("[HID] CONFIG DISABLE_USB_TIMEOUT -> ready\n");
+            LOG_PRINTF("[HID] CONFIG DISABLE_USB_TIMEOUT -> ready\n");
             break;
         case ENABLE_USB_TIMEOUT:
             report_buffer[0] = REPORT_OUTPUT_30;
             report_buffer[1] = switchReportSubID;
             canSend = true;
-            printf("[HID] CONFIG ENABLE_USB_TIMEOUT\n");
+            LOG_PRINTF("[HID] CONFIG ENABLE_USB_TIMEOUT\n");
             break;
         default:
             report_buffer[0] = REPORT_OUTPUT_30;
             report_buffer[1] = switchReportSubID;
             canSend = true;
-            printf("[HID] CONFIG unknown subid=0x%02x\n", switchReportSubID);
+            LOG_PRINTF("[HID] CONFIG unknown subid=0x%02x\n", switchReportSubID);
             break;
     }
 
@@ -267,21 +274,21 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
-            printf("[HID] FEATURE GET_CONTROLLER_STATE\n");
+            LOG_PRINTF("[HID] FEATURE GET_CONTROLLER_STATE\n");
             break;
         case BLUETOOTH_PAIR_REQUEST:
             report_buffer[13] = 0x81;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
-            printf("[HID] FEATURE BLUETOOTH_PAIR_REQUEST\n");
+            LOG_PRINTF("[HID] FEATURE BLUETOOTH_PAIR_REQUEST\n");
             break;
         case REQUEST_DEVICE_INFO:
             report_buffer[13] = 0x82;
             report_buffer[14] = 0x02;
             memcpy(&report_buffer[15], &device_info, sizeof(device_info));
             canSend = true;
-            printf("[HID] FEATURE REQUEST_DEVICE_INFO\n");
+            LOG_PRINTF("[HID] FEATURE REQUEST_DEVICE_INFO\n");
             break;
         case SET_MODE:
             input_mode = reportData[11];
@@ -289,19 +296,19 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = 0x03;
             report_buffer[15] = input_mode;
             canSend = true;
-            printf("[HID] FEATURE SET_MODE 0x%02x\n", input_mode);
+            LOG_PRINTF("[HID] FEATURE SET_MODE 0x%02x\n", input_mode);
             break;
         case TRIGGER_BUTTONS:
             report_buffer[13] = 0x83;
             report_buffer[14] = 0x04;
             canSend = true;
-            printf("[HID] FEATURE TRIGGER_BUTTONS\n");
+            LOG_PRINTF("[HID] FEATURE TRIGGER_BUTTONS\n");
             break;
         case SET_SHIPMENT:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
-            printf("[HID] FEATURE SET_SHIPMENT\n");
+            LOG_PRINTF("[HID] FEATURE SET_SHIPMENT\n");
             break;
         case SPI_READ:
             spiReadAddress = (reportData[14] << 24) | (reportData[13] << 16) | (reportData[12] << 8) | (reportData[11]);
@@ -315,26 +322,26 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[19] = reportData[15];
             read_spi_flash(&report_buffer[20], spiReadAddress, spiReadSize);
             canSend = true;
-            printf("[HID] FEATURE SPI_READ addr=0x%08lx size=%u\n", (unsigned long)spiReadAddress, spiReadSize);
+            LOG_PRINTF("[HID] FEATURE SPI_READ addr=0x%08lx size=%u\n", (unsigned long)spiReadAddress, spiReadSize);
             break;
         case SET_NFC_IR_CONFIG:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
-            printf("[HID] FEATURE SET_NFC_IR_CONFIG\n");
+            LOG_PRINTF("[HID] FEATURE SET_NFC_IR_CONFIG\n");
             break;
         case SET_NFC_IR_STATE:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
-            printf("[HID] FEATURE SET_NFC_IR_STATE\n");
+            LOG_PRINTF("[HID] FEATURE SET_NFC_IR_STATE\n");
             break;
         case SET_PLAYER_LIGHTS:
             player_id = reportData[11];
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
-            printf("[HID] FEATURE SET_PLAYER_LIGHTS player=%u\n", player_id);
+            LOG_PRINTF("[HID] FEATURE SET_PLAYER_LIGHTS player=%u\n", player_id);
             break;
         case GET_PLAYER_LIGHTS:
             player_id = reportData[11];
@@ -342,21 +349,21 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = player_id;
             canSend = true;
-            printf("[HID] FEATURE GET_PLAYER_LIGHTS player=%u\n", player_id);
+            LOG_PRINTF("[HID] FEATURE GET_PLAYER_LIGHTS player=%u\n", player_id);
             break;
         case COMMAND_UNKNOWN_33:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
-            printf("[HID] FEATURE COMMAND_UNKNOWN_33\n");
+            LOG_PRINTF("[HID] FEATURE COMMAND_UNKNOWN_33\n");
             break;
         case SET_HOME_LIGHT:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x00;
             canSend = true;
-            printf("[HID] FEATURE SET_HOME_LIGHT\n");
+            LOG_PRINTF("[HID] FEATURE SET_HOME_LIGHT\n");
             break;
         case TOGGLE_IMU:
             is_imu_enabled = reportData[11];
@@ -364,13 +371,13 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = 0x00;
             canSend = true;
-            printf("[HID] FEATURE TOGGLE_IMU %u\n", is_imu_enabled);
+            LOG_PRINTF("[HID] FEATURE TOGGLE_IMU %u\n", is_imu_enabled);
             break;
         case IMU_SENSITIVITY:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
-            printf("[HID] FEATURE IMU_SENSITIVITY\n");
+            LOG_PRINTF("[HID] FEATURE IMU_SENSITIVITY\n");
             break;
         case ENABLE_VIBRATION:
             is_vibration_enabled = reportData[11];
@@ -378,7 +385,7 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = 0x00;
             canSend = true;
-            printf("[HID] FEATURE ENABLE_VIBRATION %u\n", is_vibration_enabled);
+            LOG_PRINTF("[HID] FEATURE ENABLE_VIBRATION %u\n", is_vibration_enabled);
             break;
         case READ_IMU:
             report_buffer[13] = 0xC0;
@@ -386,7 +393,7 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[15] = reportData[11];
             report_buffer[16] = reportData[12];
             canSend = true;
-            printf("[HID] FEATURE READ_IMU addr=%u size=%u\n", reportData[11], reportData[12]);
+            LOG_PRINTF("[HID] FEATURE READ_IMU addr=%u size=%u\n", reportData[11], reportData[12]);
             break;
         case GET_VOLTAGE:
             report_buffer[13] = 0xD0;
@@ -394,14 +401,14 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[15] = 0x83;
             report_buffer[16] = 0x06;
             canSend = true;
-            printf("[HID] FEATURE GET_VOLTAGE\n");
+            LOG_PRINTF("[HID] FEATURE GET_VOLTAGE\n");
             break;
         default:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
-            printf("[HID] FEATURE unknown cmd=0x%02x\n", commandID);
+            LOG_PRINTF("[HID] FEATURE unknown cmd=0x%02x\n", commandID);
             break;
     }
 
@@ -546,7 +553,12 @@ void switch_pro_task() {
         report_sent = true;
     }
 
-    // If the host never sends feature/config reports (seen on Switch), force readiness after a timeout.
+    // Start sending full reports only after the host has talked to us on OUT.
+    if (!is_ready && host_sent_out) {
+        is_ready = true;
+        LOG_PRINTF("[HID] ready because host sent OUT traffic\n");
+    }
+
     if (is_ready && !report_sent && host_sent_out) {
         if ((now - last_report_timer) > SWITCH_PRO_KEEPALIVE_TIMER) {
             switch_report.timestamp = last_report_counter;
@@ -645,7 +657,7 @@ void switch_pro_mark_host_active() {
 // HID callbacks
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen) {
     (void)instance;
-    printf("[HID] get_report id=%u type=%u len=%u\n", report_id, report_type, reqlen);
+    LOG_PRINTF("[HID] get_report id=%u type=%u len=%u\n", report_id, report_type, reqlen);
     if (!buffer) return 0;
 
     // Serve the current input report for any GET_REPORT request.
@@ -663,8 +675,8 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 
     uint8_t switchReportID = buffer[0];
     uint8_t switchReportSubID = buffer[1];
-    printf("[HID] set_report type=%d id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
-           report_type, report_id, switchReportID, switchReportSubID, bufsize);
+    LOG_PRINTF("[HID] set_report type=%d id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
+               report_type, report_id, switchReportID, switchReportSubID, bufsize);
     host_sent_out = true;
     if (switchReportID == REPORT_OUTPUT_00) {
         // No-op, just acknowledge to clear any stalls.
@@ -685,8 +697,8 @@ void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id, uint8_t con
     memset(report_buffer, 0x00, bufsize);
     uint8_t switchReportID = buffer[0];
     uint8_t switchReportSubID = buffer[1];
-    printf("[HID] report_received id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
-           report_id, switchReportID, switchReportSubID, bufsize);
+    LOG_PRINTF("[HID] report_received id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
+               report_id, switchReportID, switchReportSubID, bufsize);
     host_sent_out = true;
     if (switchReportID == REPORT_OUTPUT_00) {
         return;
@@ -715,13 +727,13 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index) {
 
 bool tud_control_request_cb(uint8_t rhport, tusb_control_request_t const * request) {
     (void)rhport;
-    printf("[CTRL] bmReq=0x%02x bReq=0x%02x wValue=0x%04x wIndex=0x%04x wLen=%u\n",
-           request->bmRequestType, request->bRequest, request->wValue, request->wIndex, request->wLength);
+    LOG_PRINTF("[CTRL] bmReq=0x%02x bReq=0x%02x wValue=0x%04x wIndex=0x%04x wLen=%u\n",
+               request->bmRequestType, request->bRequest, request->wValue, request->wIndex, request->wLength);
     return false; // let TinyUSB handle it normally
 }
 
 void tud_mount_cb(void) {
-    printf("[USB] mount_cb\n");
+    LOG_PRINTF("[USB] mount_cb\n");
     last_host_activity_ms = to_ms_since_boot(get_absolute_time());
     forced_ready = false;
     is_ready = false;
@@ -730,7 +742,7 @@ void tud_mount_cb(void) {
 }
 
 void tud_umount_cb(void) {
-    printf("[USB] umount_cb\n");
+    LOG_PRINTF("[USB] umount_cb\n");
     forced_ready = false;
     is_ready = false;
     is_initialized = false;
