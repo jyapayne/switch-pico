@@ -546,9 +546,9 @@ void switch_pro_task() {
     if (is_report_queued) {
         if ((now - last_report_timer) > SWITCH_PRO_KEEPALIVE_TIMER) {
             if (tud_hid_ready() && send_report(queued_report_id, report_buffer, 64) == true ) {
+                is_report_queued = false;
+                last_report_timer = now;
             }
-            is_report_queued = false;
-            last_report_timer = now;
         }
         report_sent = true;
     }
