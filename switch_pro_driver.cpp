@@ -36,7 +36,6 @@ static bool is_report_queued = false;
 static bool report_sent = false;
 static uint8_t queued_report_id = 0;
 static bool forced_ready = false;
-static bool host_sent_out = false;
 static uint8_t handshake_counter = 0;
 
 static SwitchDeviceInfo device_info{};
@@ -208,7 +207,6 @@ static void read_spi_flash(uint8_t* dest, uint32_t address, uint8_t size) {
 static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSubID, const uint8_t *reportData, uint16_t reportLength) {
     bool canSend = false;
     last_host_activity_ms = to_ms_since_boot(get_absolute_time());
-    host_sent_out = true;
 
     switch (switchReportSubID) {
         case IDENTIFY:
@@ -262,7 +260,6 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
     uint8_t spiReadSize = 0;
     bool canSend = false;
     last_host_activity_ms = to_ms_since_boot(get_absolute_time());
-    host_sent_out = true;
 
     report_buffer[0] = REPORT_OUTPUT_21;
     report_buffer[1] = last_report_counter;
@@ -464,7 +461,10 @@ void switch_pro_init() {
     is_report_queued = false;
     report_sent = false;
     forced_ready = false;
-    host_sent_out = false;
+    forced_ready = true;
+    is_ready = true;
+    is_initialized = true;
+    last_report_timer = 0;
 
     device_info = {
         .majorVersion = 0x04,
@@ -553,13 +553,7 @@ void switch_pro_task() {
         report_sent = true;
     }
 
-    // Start sending full reports only after the host has talked to us on OUT.
-    if (!is_ready && host_sent_out) {
-        is_ready = true;
-        LOG_PRINTF("[HID] ready because host sent OUT traffic\n");
-    }
-
-    if (is_ready && !report_sent && host_sent_out) {
+    if (is_ready && !report_sent) {
         if ((now - last_report_timer) > SWITCH_PRO_KEEPALIVE_TIMER) {
             switch_report.timestamp = last_report_counter;
             void * inputReport = &switch_report;
@@ -650,10 +644,6 @@ bool switch_pro_is_ready() {
     return is_ready;
 }
 
-void switch_pro_mark_host_active() {
-    host_sent_out = true;
-}
-
 // HID callbacks
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen) {
     (void)instance;
@@ -677,7 +667,6 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     uint8_t switchReportSubID = buffer[1];
     LOG_PRINTF("[HID] set_report type=%d id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
                report_type, report_id, switchReportID, switchReportSubID, bufsize);
-    host_sent_out = true;
     if (switchReportID == REPORT_OUTPUT_00) {
         // No-op, just acknowledge to clear any stalls.
         return;
@@ -699,7 +688,6 @@ void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id, uint8_t con
     uint8_t switchReportSubID = buffer[1];
     LOG_PRINTF("[HID] report_received id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
                report_id, switchReportID, switchReportSubID, bufsize);
-    host_sent_out = true;
     if (switchReportID == REPORT_OUTPUT_00) {
         return;
     } else if (switchReportID == REPORT_FEATURE) {
@@ -738,7 +726,6 @@ void tud_mount_cb(void) {
     forced_ready = false;
     is_ready = false;
     is_initialized = false;
-    host_sent_out = false;
 }
 
 void tud_umount_cb(void) {
@@ -746,7 +733,6 @@ void tud_umount_cb(void) {
     forced_ready = false;
     is_ready = false;
     is_initialized = false;
-    host_sent_out = false;
 }
 
 static uint16_t desc_str[32];

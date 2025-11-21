@@ -52,6 +52,3 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchI
 
 // Driver state helpers
 bool switch_pro_is_ready();
-
-// Mark that the host has sent any OUT traffic (allows starting IN reports).
-void switch_pro_mark_host_active();
