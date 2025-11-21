@@ -11,6 +11,20 @@
 #define UART_TX_PIN 4
 #define UART_RX_PIN 5
 
+static bool g_last_mounted = false;
+static bool g_last_ready = false;
+
+// Track the latest state provided by UART or the autopilot.
+static SwitchInputState g_user_state;
+
+#ifdef SWITCH_PICO_AUTOTEST
+static bool g_autopilot_active = true;
+static uint32_t g_autopilot_counter = 0;
+static absolute_time_t g_autopilot_last_tick = {0};
+static bool g_uart_activity = false;
+static bool g_ready_logged = false;
+#endif
+
 static void init_uart_input() {
     uart_init(UART_ID, BAUD_RATE);
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
@@ -52,10 +66,102 @@ static void poll_uart_frames() {
 
         buffer[index++] = byte;
         if (index >= sizeof(buffer)) {
-            switch_pro_apply_uart_packet(buffer, sizeof(buffer));
+            SwitchInputState parsed{};
+            if (switch_pro_apply_uart_packet(buffer, sizeof(buffer), &parsed)) {
+                g_user_state = parsed;
+                printf("[UART] packet buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
+                       (parsed.button_a   ? SWITCH_PRO_MASK_A   : 0) |
+                       (parsed.button_b   ? SWITCH_PRO_MASK_B   : 0) |
+                       (parsed.button_x   ? SWITCH_PRO_MASK_X   : 0) |
+                       (parsed.button_y   ? SWITCH_PRO_MASK_Y   : 0) |
+                       (parsed.button_l   ? SWITCH_PRO_MASK_L   : 0) |
+                       (parsed.button_r   ? SWITCH_PRO_MASK_R   : 0) |
+                       (parsed.button_zl  ? SWITCH_PRO_MASK_ZL  : 0) |
+                       (parsed.button_zr  ? SWITCH_PRO_MASK_ZR  : 0) |
+                       (parsed.button_plus? SWITCH_PRO_MASK_PLUS: 0) |
+                       (parsed.button_minus?SWITCH_PRO_MASK_MINUS:0) |
+                       (parsed.button_home?SWITCH_PRO_MASK_HOME:0) |
+                       (parsed.button_capture?SWITCH_PRO_MASK_CAPTURE:0) |
+                       (parsed.button_l3  ? SWITCH_PRO_MASK_L3  : 0) |
+                       (parsed.button_r3  ? SWITCH_PRO_MASK_R3  : 0),
+                       parsed.dpad_up ? SWITCH_PRO_HAT_UP :
+                       parsed.dpad_down ? SWITCH_PRO_HAT_DOWN :
+                       parsed.dpad_left ? SWITCH_PRO_HAT_LEFT :
+                       parsed.dpad_right ? SWITCH_PRO_HAT_RIGHT : SWITCH_PRO_HAT_NOTHING,
+                       parsed.lx >> 8, parsed.ly >> 8, parsed.rx >> 8, parsed.ry >> 8);
+            }
+#ifdef SWITCH_PICO_AUTOTEST
+            g_uart_activity = true;
+#endif
             index = 0;
         }
     }
+}
+
+#ifdef SWITCH_PICO_AUTOTEST
+// Replays the Switch-Fightstick grip-screen sequence: press L+R twice, then A twice.
+static SwitchInputState autopilot_state(const SwitchInputState& fallback) {
+    if (!g_autopilot_active || g_uart_activity) {
+        g_autopilot_active = false;
+        return fallback;
+    }
+
+    if (!tud_mounted()) {
+        g_autopilot_counter = 0;
+        g_autopilot_last_tick = {0};
+        return fallback;
+    }
+
+    absolute_time_t now = get_absolute_time();
+    if (!to_us_since_boot(g_autopilot_last_tick)) {
+        g_autopilot_last_tick = now;
+    }
+
+    // Run at ~1ms cadence similar to the LUFA fightstick timing.
+    if (absolute_time_diff_us(g_autopilot_last_tick, now) < 1000) {
+        return fallback;
+    }
+    g_autopilot_last_tick = now;
+
+    SwitchInputState state = fallback;
+    state.lx = SWITCH_PRO_JOYSTICK_MID;
+    state.ly = SWITCH_PRO_JOYSTICK_MID;
+    state.rx = SWITCH_PRO_JOYSTICK_MID;
+    state.ry = SWITCH_PRO_JOYSTICK_MID;
+
+    // Fire L+R twice then A twice, loop every ~300ms to keep trying.
+    uint32_t step = g_autopilot_counter % 300;
+    if (step == 25 || step == 50) {
+        state.button_l = true;
+        state.button_r = true;
+    } else if (step == 75 || step == 100) {
+        state.button_a = true;
+    }
+
+    g_autopilot_counter++;
+
+    return state;
+}
+#endif
+
+static void log_usb_state() {
+    bool mounted = tud_mounted();
+    bool ready = switch_pro_is_ready();
+
+    if (mounted != g_last_mounted) {
+        g_last_mounted = mounted;
+        printf("[USB] %s\n", mounted ? "mounted" : "unmounted");
+    }
+    if (ready != g_last_ready) {
+        g_last_ready = ready;
+        printf("[SWITCH] driver %s\n", ready ? "ready (handshake OK)" : "not ready");
+    }
+#ifdef SWITCH_PICO_AUTOTEST
+    if (ready && !g_ready_logged) {
+        g_ready_logged = true;
+        printf("[AUTO] ready -> autopilot active=%s\n", g_autopilot_active ? "true" : "false");
+    }
+#endif
 }
 
 int main() {
@@ -66,11 +172,27 @@ int main() {
 
     tusb_init();
     switch_pro_init();
-    switch_pro_set_input(neutral_input());
+    g_user_state = neutral_input();
+    switch_pro_set_input(g_user_state);
+
+    printf("[BOOT] switch-pico starting (UART0 log @ 115200)\n");
+    printf("[INFO] AUTOTEST=%s UART1 pins TX=%d RX=%d baud=%d\n",
+           #ifdef SWITCH_PICO_AUTOTEST
+           "ON"
+           #else
+           "OFF"
+           #endif
+           , UART_TX_PIN, UART_RX_PIN, BAUD_RATE);
 
     while (true) {
         tud_task();          // USB device tasks
         poll_uart_frames();  // Pull controller state from UART1
+        SwitchInputState state = g_user_state;
+#ifdef SWITCH_PICO_AUTOTEST
+        state = autopilot_state(state);
+#endif
+        switch_pro_set_input(state);
         switch_pro_task();   // Push state to the Switch host
+        log_usb_state();
     }
 }

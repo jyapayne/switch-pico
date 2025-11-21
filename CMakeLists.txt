@@ -23,6 +23,7 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
+option(SWITCH_PICO_AUTOTEST "Auto-play grip-screen connection sequence on startup" OFF)
 set(PICO_BOARD pico CACHE STRING "Board type")
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -44,7 +45,8 @@ pico_set_program_name(switch-pico "switch-pico")
 pico_set_program_version(switch-pico "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(switch-pico 0)
+# UART0 is enabled for debug logging; USB stdio remains off.
+pico_enable_stdio_uart(switch-pico 1)
 pico_enable_stdio_usb(switch-pico 0)
 
 # Add the standard library to the build
@@ -55,6 +57,10 @@ target_link_libraries(switch-pico
         hardware_uart
         pico_rand
 )
+
+if (SWITCH_PICO_AUTOTEST)
+    target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_AUTOTEST=1)
+endif()
 
 # Add the standard include files to the build
 target_include_directories(switch-pico PRIVATE

@@ -322,8 +322,10 @@ typedef struct
 } SwitchProOutReport;
 
 static const uint8_t switch_pro_string_language[]     = { 0x09, 0x04 };
-static const uint8_t switch_pro_string_manufacturer[] = "Open Stick Community";
-static const uint8_t switch_pro_string_product[]      = "GP2040-CE (Pro Controller)";
+static const uint8_t switch_pro_string_manufacturer[] = "Nintendo Co., Ltd.";
+static const uint8_t switch_pro_string_product[]      = "Pro Controller";
+// static const uint8_t switch_pro_string_manufacturer[] = "Open Stick Community";
+// static const uint8_t switch_pro_string_product[]      = "GP2040-CE (Pro Controller)";
 static const uint8_t switch_pro_string_version[]      = "000000000001";
 
 static const uint8_t *switch_pro_string_descriptors[] __attribute__((unused)) =
@@ -340,8 +342,8 @@ static const uint8_t switch_pro_device_descriptor[] =
     0x01,        // bDescriptorType (Device)
     0x00, 0x02,  // bcdUSB 2.00
     0x00,        // bDeviceClass (Use class information in the Interface Descriptors)
-    0x00,        // bDeviceSubClass 
-    0x00,        // bDeviceProtocol 
+    0x00,        // bDeviceSubClass
+    0x00,        // bDeviceProtocol
     0x40,        // bMaxPacketSize0 64
     0x7E, 0x05,  // idVendor 0x057E
     0x09, 0x20,  // idProduct 0x2009
@@ -394,7 +396,7 @@ static const uint8_t switch_pro_configuration_descriptor[] =
 
     0x07,        // bLength
     0x05,        // bDescriptorType (Endpoint)
-    0x05,        // bEndpointAddress (IN/D2H)
+    0x81,        // bEndpointAddress (IN/D2H)
     0x03,        // bmAttributes (Interrupt)
     0x40, 0x00,  // wMaxPacketSize 64
     0x08,        // bInterval 8 (unit depends on device speed)

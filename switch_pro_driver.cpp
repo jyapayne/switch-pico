@@ -22,11 +22,14 @@ static uint8_t last_report[SWITCH_PRO_ENDPOINT_SIZE] = {};
 static SwitchProReport switch_report{};
 static uint8_t last_report_counter = 0;
 static uint32_t last_report_timer = 0;
+static uint32_t last_host_activity_ms = 0;
 static bool is_ready = false;
 static bool is_initialized = false;
 static bool is_report_queued = false;
 static bool report_sent = false;
 static uint8_t queued_report_id = 0;
+static bool forced_ready = false;
+static bool host_sent_out = false;
 static uint8_t handshake_counter = 0;
 
 static SwitchDeviceInfo device_info{};
@@ -47,31 +50,31 @@ static const uint8_t factory_config_data[0xEFF] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 
-    0xFF, 0xFF, 
+    0xFF, 0xFF,
 
     // device type
-    SWITCH_TYPE_PRO_CONTROLLER, 
+    SWITCH_TYPE_PRO_CONTROLLER,
 
     // unknown
-    0xA0, 
+    0xA0,
 
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 
     // color options
     0x02,
 
-    0xFF, 0xFF, 0xFF, 0xFF, 
+    0xFF, 0xFF, 0xFF, 0xFF,
 
     // config & calibration 1
     0xE3, 0xFF, 0x39, 0xFF, 0xED, 0x01, 0x00, 0x40,
     0x00, 0x40, 0x00, 0x40, 0x09, 0x00, 0xEA, 0xFF,
     0xA1, 0xFF, 0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34,
 
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 
     // config & calibration 2
     // left stick
-    0xa4, 0x46, 0x6a, 0x00, 0x08, 0x80, 0xa4, 0x46, 
+    0xa4, 0x46, 0x6a, 0x00, 0x08, 0x80, 0xa4, 0x46,
     0x6a,
 
     // right stick
@@ -92,32 +95,32 @@ static const uint8_t factory_config_data[0xEFF] = {
     // right grip color
     0xEC, 0x00, 0x8C,
 
-    0x01, 
+    0x01,
 
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF,
-    
-    0x50, 0xFD, 0x00, 0x00, 0xC6, 0x0F, 
-    0x0F, 0x30, 0x61, 0xAE, 0x90, 0xD9, 0xD4, 0x14, 
-    0x54, 0x41, 0x15, 0x54, 0xC7, 0x79, 0x9C, 0x33, 
-    0x36, 0x63, 
-    
-    0x0F, 0x30, 0x61, 0xAE, 0x90, 0xD9, 0xD4, 0x14, 
+
+    0x50, 0xFD, 0x00, 0x00, 0xC6, 0x0F,
+    0x0F, 0x30, 0x61, 0xAE, 0x90, 0xD9, 0xD4, 0x14,
+    0x54, 0x41, 0x15, 0x54, 0xC7, 0x79, 0x9C, 0x33,
+    0x36, 0x63,
+
+    0x0F, 0x30, 0x61, 0xAE, 0x90, 0xD9, 0xD4, 0x14,
     0x54, 0x41, 0x15, 0x54,
-    
+
     0xC7,
 
-    0x79, 
-    
-    0x9C, 
+    0x79,
 
-    0x33, 
-    
-    0x36, 
-    
+    0x9C,
+
+    0x33,
+
+    0x36,
+
     0x63, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF
 };
@@ -125,9 +128,9 @@ static const uint8_t factory_config_data[0xEFF] = {
 static const uint8_t user_calibration_data[0x3F] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    
+
     // Left Stick
-    0xB2, 0xA1, 0xa4, 0x46, 0x6a, 0x00, 0x08, 0x80, 
+    0xB2, 0xA1, 0xa4, 0x46, 0x6a, 0x00, 0x08, 0x80,
     0xa4, 0x46, 0x6a,
 
     // Right Stick
@@ -176,6 +179,9 @@ static bool send_report(uint8_t reportID, const void* reportData, uint16_t repor
     } else {
         last_report_counter = 0;
     }
+    if (!result) {
+        printf("[HID] send_report failed id=%u len=%u\n", reportID, reportLength);
+    }
     return result;
 }
 
@@ -194,21 +200,26 @@ static void read_spi_flash(uint8_t* dest, uint32_t address, uint8_t size) {
 
 static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSubID, const uint8_t *reportData, uint16_t reportLength) {
     bool canSend = false;
+    last_host_activity_ms = to_ms_since_boot(get_absolute_time());
+    host_sent_out = true;
 
     switch (switchReportSubID) {
         case IDENTIFY:
             send_identify();
             canSend = true;
+            printf("[HID] CONFIG IDENTIFY\n");
             break;
         case HANDSHAKE:
             report_buffer[0] = REPORT_USB_INPUT_81;
             report_buffer[1] = HANDSHAKE;
             canSend = true;
+            printf("[HID] CONFIG HANDSHAKE\n");
             break;
         case BAUD_RATE:
             report_buffer[0] = REPORT_USB_INPUT_81;
             report_buffer[1] = BAUD_RATE;
             canSend = true;
+            printf("[HID] CONFIG BAUD_RATE\n");
             break;
         case DISABLE_USB_TIMEOUT:
             report_buffer[0] = REPORT_OUTPUT_30;
@@ -219,16 +230,19 @@ static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSub
                 is_ready = true;
             //}
             canSend = true;
+            printf("[HID] CONFIG DISABLE_USB_TIMEOUT -> ready\n");
             break;
         case ENABLE_USB_TIMEOUT:
             report_buffer[0] = REPORT_OUTPUT_30;
             report_buffer[1] = switchReportSubID;
             canSend = true;
+            printf("[HID] CONFIG ENABLE_USB_TIMEOUT\n");
             break;
         default:
             report_buffer[0] = REPORT_OUTPUT_30;
             report_buffer[1] = switchReportSubID;
             canSend = true;
+            printf("[HID] CONFIG unknown subid=0x%02x\n", switchReportSubID);
             break;
     }
 
@@ -240,6 +254,8 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
     uint32_t spiReadAddress = 0;
     uint8_t spiReadSize = 0;
     bool canSend = false;
+    last_host_activity_ms = to_ms_since_boot(get_absolute_time());
+    host_sent_out = true;
 
     report_buffer[0] = REPORT_OUTPUT_21;
     report_buffer[1] = last_report_counter;
@@ -251,18 +267,21 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
+            printf("[HID] FEATURE GET_CONTROLLER_STATE\n");
             break;
         case BLUETOOTH_PAIR_REQUEST:
             report_buffer[13] = 0x81;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
+            printf("[HID] FEATURE BLUETOOTH_PAIR_REQUEST\n");
             break;
         case REQUEST_DEVICE_INFO:
             report_buffer[13] = 0x82;
             report_buffer[14] = 0x02;
             memcpy(&report_buffer[15], &device_info, sizeof(device_info));
             canSend = true;
+            printf("[HID] FEATURE REQUEST_DEVICE_INFO\n");
             break;
         case SET_MODE:
             input_mode = reportData[11];
@@ -270,16 +289,19 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = 0x03;
             report_buffer[15] = input_mode;
             canSend = true;
+            printf("[HID] FEATURE SET_MODE 0x%02x\n", input_mode);
             break;
         case TRIGGER_BUTTONS:
             report_buffer[13] = 0x83;
             report_buffer[14] = 0x04;
             canSend = true;
+            printf("[HID] FEATURE TRIGGER_BUTTONS\n");
             break;
         case SET_SHIPMENT:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
+            printf("[HID] FEATURE SET_SHIPMENT\n");
             break;
         case SPI_READ:
             spiReadAddress = (reportData[14] << 24) | (reportData[13] << 16) | (reportData[12] << 8) | (reportData[11]);
@@ -293,22 +315,26 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[19] = reportData[15];
             read_spi_flash(&report_buffer[20], spiReadAddress, spiReadSize);
             canSend = true;
+            printf("[HID] FEATURE SPI_READ addr=0x%08lx size=%u\n", (unsigned long)spiReadAddress, spiReadSize);
             break;
         case SET_NFC_IR_CONFIG:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
+            printf("[HID] FEATURE SET_NFC_IR_CONFIG\n");
             break;
         case SET_NFC_IR_STATE:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
+            printf("[HID] FEATURE SET_NFC_IR_STATE\n");
             break;
         case SET_PLAYER_LIGHTS:
             player_id = reportData[11];
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
+            printf("[HID] FEATURE SET_PLAYER_LIGHTS player=%u\n", player_id);
             break;
         case GET_PLAYER_LIGHTS:
             player_id = reportData[11];
@@ -316,18 +342,21 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = player_id;
             canSend = true;
+            printf("[HID] FEATURE GET_PLAYER_LIGHTS player=%u\n", player_id);
             break;
         case COMMAND_UNKNOWN_33:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
+            printf("[HID] FEATURE COMMAND_UNKNOWN_33\n");
             break;
         case SET_HOME_LIGHT:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x00;
             canSend = true;
+            printf("[HID] FEATURE SET_HOME_LIGHT\n");
             break;
         case TOGGLE_IMU:
             is_imu_enabled = reportData[11];
@@ -335,11 +364,13 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = 0x00;
             canSend = true;
+            printf("[HID] FEATURE TOGGLE_IMU %u\n", is_imu_enabled);
             break;
         case IMU_SENSITIVITY:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             canSend = true;
+            printf("[HID] FEATURE IMU_SENSITIVITY\n");
             break;
         case ENABLE_VIBRATION:
             is_vibration_enabled = reportData[11];
@@ -347,6 +378,7 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[14] = commandID;
             report_buffer[15] = 0x00;
             canSend = true;
+            printf("[HID] FEATURE ENABLE_VIBRATION %u\n", is_vibration_enabled);
             break;
         case READ_IMU:
             report_buffer[13] = 0xC0;
@@ -354,6 +386,7 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[15] = reportData[11];
             report_buffer[16] = reportData[12];
             canSend = true;
+            printf("[HID] FEATURE READ_IMU addr=%u size=%u\n", reportData[11], reportData[12]);
             break;
         case GET_VOLTAGE:
             report_buffer[13] = 0xD0;
@@ -361,12 +394,14 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             report_buffer[15] = 0x83;
             report_buffer[16] = 0x06;
             canSend = true;
+            printf("[HID] FEATURE GET_VOLTAGE\n");
             break;
         default:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x03;
             canSend = true;
+            printf("[HID] FEATURE unknown cmd=0x%02x\n", commandID);
             break;
     }
 
@@ -404,7 +439,7 @@ static void update_switch_report_from_state() {
     uint16_t scaleLeftStickY = scale16To12(g_input_state.ly);
     uint16_t scaleRightStickX = scale16To12(g_input_state.rx);
     uint16_t scaleRightStickY = scale16To12(g_input_state.ry);
-    
+
     switch_report.inputs.leftStick.setX(std::min(std::max(scaleLeftStickX,leftMinX), leftMaxX));
     switch_report.inputs.leftStick.setY(-std::min(std::max(scaleLeftStickY,leftMinY), leftMaxY));
     switch_report.inputs.rightStick.setX(std::min(std::max(scaleRightStickX,rightMinX), rightMaxX));
@@ -421,6 +456,8 @@ void switch_pro_init() {
     is_initialized = false;
     is_report_queued = false;
     report_sent = false;
+    forced_ready = false;
+    host_sent_out = false;
 
     device_info = {
         .majorVersion = 0x04,
@@ -437,8 +474,8 @@ void switch_pro_init() {
         .timestamp = 0,
 
         .inputs {
-            .connectionInfo = 0,
-            .batteryLevel = 0x08,
+            .connectionInfo = 0x08, // wired connection
+            .batteryLevel = 0x0F,   // full battery
 
             .buttonY = 0,
             .buttonX = 0,
@@ -475,6 +512,7 @@ void switch_pro_init() {
     };
 
     last_report_timer = to_ms_since_boot(get_absolute_time());
+    last_host_activity_ms = last_report_timer;
 
     factory_config->leftStickCalibration.getRealMin(leftMinX, leftMinY);
     factory_config->leftStickCalibration.getCenter(leftCenX, leftCenY);
@@ -508,7 +546,8 @@ void switch_pro_task() {
         report_sent = true;
     }
 
-    if (is_ready && !report_sent) {
+    // If the host never sends feature/config reports (seen on Switch), force readiness after a timeout.
+    if (is_ready && !report_sent && host_sent_out) {
         if ((now - last_report_timer) > SWITCH_PRO_KEEPALIVE_TIMER) {
             switch_report.timestamp = last_report_counter;
             void * inputReport = &switch_report;
@@ -535,7 +574,7 @@ void switch_pro_task() {
     }
 }
 
-bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length) {
+bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchInputState* out_state) {
     // Packet format: 0xAA, buttons(2 LE), hat, lx, ly, rx, ry
     if (length < 8 || packet[0] != 0xAA) {
         return false;
@@ -587,18 +626,33 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length) {
     state.rx = expand_axis(out.rx);
     state.ry = expand_axis(out.ry);
 
-    switch_pro_set_input(state);
+    if (out_state) {
+        *out_state = state;
+    } else {
+        switch_pro_set_input(state);
+    }
     return true;
+}
+
+bool switch_pro_is_ready() {
+    return is_ready;
+}
+
+void switch_pro_mark_host_active() {
+    host_sent_out = true;
 }
 
 // HID callbacks
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen) {
     (void)instance;
-    (void)report_id;
-    (void)report_type;
-    (void)buffer;
-    (void)reqlen;
-    return 0;
+    printf("[HID] get_report id=%u type=%u len=%u\n", report_id, report_type, reqlen);
+    if (!buffer) return 0;
+
+    // Serve the current input report for any GET_REPORT request.
+    uint16_t report_size = sizeof(switch_report);
+    if (reqlen < report_size) report_size = reqlen;
+    memcpy(buffer, &switch_report, report_size);
+    return report_size;
 }
 
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize) {
@@ -609,7 +663,12 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 
     uint8_t switchReportID = buffer[0];
     uint8_t switchReportSubID = buffer[1];
+    printf("[HID] set_report type=%d id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
+           report_type, report_id, switchReportID, switchReportSubID, bufsize);
+    host_sent_out = true;
     if (switchReportID == REPORT_OUTPUT_00) {
+        // No-op, just acknowledge to clear any stalls.
+        return;
     } else if (switchReportID == REPORT_FEATURE) {
         queued_report_id = report_id;
         handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
@@ -617,6 +676,26 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
         queued_report_id = report_id;
         handle_config_report(switchReportID, switchReportSubID, buffer, bufsize);
     } else {
+    }
+}
+
+void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id, uint8_t const* buffer, uint16_t bufsize) {
+    (void)instance;
+    // Host sent data on interrupt OUT; mirror the control path handling.
+    memset(report_buffer, 0x00, bufsize);
+    uint8_t switchReportID = buffer[0];
+    uint8_t switchReportSubID = buffer[1];
+    printf("[HID] report_received id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
+           report_id, switchReportID, switchReportSubID, bufsize);
+    host_sent_out = true;
+    if (switchReportID == REPORT_OUTPUT_00) {
+        return;
+    } else if (switchReportID == REPORT_FEATURE) {
+        queued_report_id = report_id;
+        handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
+    } else if (switchReportID == REPORT_CONFIGURATION) {
+        queued_report_id = report_id;
+        handle_config_report(switchReportID, switchReportSubID, buffer, bufsize);
     }
 }
 
@@ -632,6 +711,30 @@ uint8_t const * tud_descriptor_device_cb(void) {
 uint8_t const * tud_descriptor_configuration_cb(uint8_t index) {
     (void)index;
     return switch_pro_configuration_descriptor;
+}
+
+bool tud_control_request_cb(uint8_t rhport, tusb_control_request_t const * request) {
+    (void)rhport;
+    printf("[CTRL] bmReq=0x%02x bReq=0x%02x wValue=0x%04x wIndex=0x%04x wLen=%u\n",
+           request->bmRequestType, request->bRequest, request->wValue, request->wIndex, request->wLength);
+    return false; // let TinyUSB handle it normally
+}
+
+void tud_mount_cb(void) {
+    printf("[USB] mount_cb\n");
+    last_host_activity_ms = to_ms_since_boot(get_absolute_time());
+    forced_ready = false;
+    is_ready = false;
+    is_initialized = false;
+    host_sent_out = false;
+}
+
+void tud_umount_cb(void) {
+    printf("[USB] umount_cb\n");
+    forced_ready = false;
+    is_ready = false;
+    is_initialized = false;
+    host_sent_out = false;
 }
 
 static uint16_t desc_str[32];
