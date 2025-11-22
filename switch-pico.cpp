@@ -14,7 +14,7 @@
 
 // UART1 is reserved for external input frames from the host PC.
 #define UART_ID uart1
-#define BAUD_RATE 900000
+#define BAUD_RATE 921600
 #define UART_TX_PIN 4
 #define UART_RX_PIN 5
 #define UART_RUMBLE_HEADER 0xBB

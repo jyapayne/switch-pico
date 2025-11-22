@@ -36,7 +36,7 @@ from rich.table import Table
 UART_HEADER = 0xAA
 RUMBLE_HEADER = 0xBB
 RUMBLE_TYPE_RUMBLE = 0x01
-UART_BAUD = 900000
+UART_BAUD = 921600
 RUMBLE_IDLE_TIMEOUT = 0.25  # seconds without packets before forcing rumble off
 RUMBLE_STUCK_TIMEOUT = 0.60  # continuous same-energy rumble will be stopped after this
 RUMBLE_MIN_ACTIVE = 0.50  # below this, rumble is treated as off/noise
@@ -94,6 +94,14 @@ def axis_to_stick(value: int, deadzone: int) -> int:
 
 def trigger_to_button(value: int, threshold: int) -> bool:
     return value >= threshold
+
+
+def set_hint(name: str, value: str) -> None:
+    """Set an SDL hint safely even if the constant is missing in PySDL2."""
+    try:
+        sdl2.SDL_SetHint(name.encode(), value.encode())
+    except Exception:
+        pass
 
 
 BUTTON_MAP = {
@@ -446,6 +454,10 @@ def main() -> None:
             console.print(f"[red]Failed to load SDL mapping {mapping_path}: {exc}[/red]")
 
     sdl2.SDL_SetHint(sdl2.SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
+    set_hint("SDL_JOYSTICK_HIDAPI", "1")
+    set_hint("SDL_JOYSTICK_HIDAPI_SWITCH", "1")
+    # Use controller button labels so Nintendo layouts (ABXY) map correctly on Linux.
+    set_hint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "1")
     if sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER | sdl2.SDL_INIT_JOYSTICK) != 0:
         parser.error(f"SDL init failed: {sdl2.SDL_GetError().decode(errors='ignore')}")
     contexts: Dict[int, ControllerContext] = {}
