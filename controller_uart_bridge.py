@@ -423,6 +423,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only include serial ports whose description contains this substring (case-insensitive). Repeatable.",
     )
     parser.add_argument(
+        "--include-controller-name",
+        action="append",
+        default=[],
+        help="Only open controllers whose name contains this substring (case-insensitive). Repeatable.",
+    )
+    parser.add_argument(
         "--swap-abxy",
         action="store_true",
         help="Swap AB/XY mapping (useful if Linux reports Switch controllers as Xbox layout).",
@@ -496,16 +502,23 @@ def main() -> None:
         include_non_usb = args.all_ports or False
         ignore_port_desc = [d.lower() for d in args.ignore_port_desc]
         include_port_desc = [d.lower() for d in args.include_port_desc]
+        include_controller_name = [n.lower() for n in args.include_controller_name]
         for index in range(controller_count):
             if sdl2.SDL_IsGameController(index):
                 name = sdl2.SDL_GameControllerNameForIndex(index)
                 name_str = name.decode() if isinstance(name, bytes) else str(name)
+                if include_controller_name and all(substr not in name_str.lower() for substr in include_controller_name):
+                    console.print(f"[yellow]Skipping controller {index} ({name_str}) due to name filter[/yellow]")
+                    continue
                 console.print(f"[cyan]Detected controller {index}: {name_str}[/cyan]")
                 controller_indices.append(index)
                 controller_names[index] = name_str
             else:
                 name = sdl2.SDL_JoystickNameForIndex(index)
                 name_str = name.decode() if isinstance(name, bytes) else str(name)
+                if include_controller_name and all(substr not in name_str.lower() for substr in include_controller_name):
+                    console.print(f"[yellow]Skipping joystick {index} ({name_str}) due to name filter[/yellow]")
+                    continue
                 console.print(f"[yellow]Found joystick {index} (not a GameController): {name_str}[/yellow]")
 
         mappings = list(args.map)
