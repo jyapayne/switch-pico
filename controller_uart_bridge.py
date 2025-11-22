@@ -423,6 +423,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only include serial ports whose description contains this substring (case-insensitive). Repeatable.",
     )
     parser.add_argument(
+        "--swap-abxy",
+        action="store_true",
+        help="Swap AB/XY mapping (useful if Linux reports Switch controllers as Xbox layout).",
+    )
+    parser.add_argument(
+        "--swap-abxy-index",
+        action="append",
+        type=int,
+        default=[],
+        help="Swap AB/XY mapping for specific controller indices (repeatable).",
+    )
+    parser.add_argument(
         "--sdl-mapping",
         action="append",
         default=[],
@@ -444,6 +456,13 @@ def main() -> None:
     if default_mapping.exists():
         mappings_to_load.append(str(default_mapping))
     mappings_to_load.extend(args.sdl_mapping)
+    button_map_default = dict(BUTTON_MAP)
+    button_map_swapped = dict(BUTTON_MAP)
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_A] = SwitchButton.B
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_B] = SwitchButton.A
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_X] = SwitchButton.Y
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_Y] = SwitchButton.X
+    swap_abxy_indices = set(idx for idx in args.swap_abxy_index if idx is not None and idx >= 0)
     for mapping_path in mappings_to_load:
         try:
             loaded = sdl2.SDL_GameControllerAddMappingsFromFile(mapping_path.encode())
@@ -658,10 +677,15 @@ def main() -> None:
                     ctx = contexts.get(event.cbutton.which)
                     if not ctx:
                         continue
+                    current_button_map = (
+                        button_map_swapped
+                        if (args.swap_abxy or ctx.controller_index in swap_abxy_indices)
+                        else button_map_default
+                    )
                     button = event.cbutton.button
                     pressed = event.type == sdl2.SDL_CONTROLLERBUTTONDOWN
-                    if button in BUTTON_MAP:
-                        bit = BUTTON_MAP[button]
+                    if button in current_button_map:
+                        bit = current_button_map[button]
                         if pressed:
                             ctx.report.buttons |= bit
                         else:
