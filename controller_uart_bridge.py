@@ -354,6 +354,14 @@ def try_open_uart(port: str, baud: int) -> Optional[PicoUART]:
         return None
 
 
+def open_uart_or_warn(port: str, baud: int, console: Console) -> Optional[PicoUART]:
+    try:
+        return PicoUART(port, baud)
+    except Exception as exc:
+        console.print(f"[yellow]Failed to open UART {port}: {exc}[/yellow]")
+        return None
+
+
 def start_rumble_listener(ctx: ControllerContext) -> threading.Thread:
     # No-op placeholder (rumble is polled in the main loop for hotplug safety).
     return None
@@ -532,7 +540,7 @@ def main() -> None:
             except Exception as exc:
                 console.print(f"[red]Failed to open controller {index}: {exc}[/red]")
                 continue
-            uart = try_open_uart(port, args.baud) if port else None
+            uart = open_uart_or_warn(port, args.baud, console) if port else None
             if uart:
                 uarts.append(uart)
                 console.print(f"[green]Controller {index} ({instance_id}) paired to {port}[/green]")
@@ -581,7 +589,7 @@ def main() -> None:
                 if port_choice is None:
                     continue
                 ctx.port = port_choice
-                uart = try_open_uart(port_choice, args.baud)
+                uart = open_uart_or_warn(port_choice, args.baud, console)
                 ctx.last_reopen_attempt = time.monotonic()
                 if uart:
                     uarts.append(uart)
@@ -668,7 +676,7 @@ def main() -> None:
                     except Exception as exc:
                         console.print(f"[red]Hotplug open failed for controller {idx}: {exc}[/red]")
                         continue
-                    uart = try_open_uart(port, args.baud) if port else None
+                    uart = open_uart_or_warn(port, args.baud, console) if port else None
                     if uart:
                         uarts.append(uart)
                         console.print(f"[green]Controller {idx} ({instance_id}) paired to {port}[/green]")
@@ -713,7 +721,7 @@ def main() -> None:
                 # Reconnect UART if needed.
                 if ctx.port and ctx.uart is None and (now - ctx.last_reopen_attempt) > 1.0:
                     ctx.last_reopen_attempt = now
-                    uart = try_open_uart(ctx.port, args.baud)
+                    uart = open_uart_or_warn(ctx.port, args.baud, console)
                     if uart:
                         uarts.append(uart)
                         console.print(f"[green]Reconnected UART {ctx.port} for controller {ctx.controller_index}[/green]")
