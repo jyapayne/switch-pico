@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import serial
 from serial import SerialException
 from serial.tools import list_ports
+from serial.tools import list_ports_common
 
 import sdl2
 import sdl2.ext
@@ -161,7 +162,7 @@ def is_usb_serial(path: str) -> bool:
     return True
 
 
-def is_usb_serial_port(port: list_ports.ListPortInfo) -> bool:
+def is_usb_serial_port(port: list_ports_common.ListPortInfo) -> bool:
     """Heuristic: prefer ports with USB VID/PID; fall back to path hints."""
     if getattr(port, "vid", None) is not None or getattr(port, "pid", None) is not None:
         return True
@@ -259,6 +260,9 @@ class PicoUART:
             parity=serial.PARITY_NONE,
             timeout=0.0,
             write_timeout=0.0,
+            xonxoff=False,
+            rtscts=False,
+            dsrdtr=False
         )
         self._buffer = bytearray()
 
