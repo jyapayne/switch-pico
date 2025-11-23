@@ -52,11 +52,14 @@ Options:
 - `--all-ports` to include non-USB serial devices in discovery.
 - `--ignore-port-desc SUBSTR` / `--include-port-desc SUBSTR` to filter serial ports by description (repeatable).
 - `--include-controller-name SUBSTR` to only open controllers whose name matches (repeatable).
+- `--list-controllers` to print detected controllers and their GUIDs, then exit (useful for GUID-based options).
 - `--baud 921600` (default 921600; use `500000` if your adapter can’t do 900K).
 - `--frequency 1000` to send at 1 kHz.
 - `--deadzone 0.08` to change stick deadzone (0.0-1.0).
 - `--trigger-threshold 0.35` to change analog trigger press threshold (0.0-1.0).
-- `--swap-abxy` or `--swap-abxy-index N` to flip AB/XY globally or for specific controller indices (repeatable).
+- `--swap-abxy` to flip AB/XY globally.
+- `--swap-abxy-index N` (repeatable) to flip AB/XY for controllers first seen at index N (auto-converts to a stable GUID).
+- `--swap-abxy-guid GUID` (repeatable) to flip AB/XY for a specific physical controller (GUID is stable across runs).
 - `--sdl-mapping path/to/gamecontrollerdb.txt` to load extra SDL mappings (defaults to `controller_db/gamecontrollerdb.txt`).
 
 Hot‑plugging: controllers and UARTs can be plugged/unplugged while running; the bridge will auto reconnect when possible.

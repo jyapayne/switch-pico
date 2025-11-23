@@ -370,7 +370,7 @@ class ControllerContext:
     controller: sdl2.SDL_GameController
     instance_id: int
     controller_index: int
-    stable_id: int
+    stable_id: str
     port: Optional[str]
     uart: Optional[PicoUART]
     report: SwitchReport = field(default_factory=SwitchReport)
@@ -392,10 +392,7 @@ def open_controller(index: int) -> Tuple[sdl2.SDL_GameController, int, str]:
         raise RuntimeError(f"Failed to open controller {index}: {sdl2.SDL_GetError().decode()}")
     joystick = sdl2.SDL_GameControllerGetJoystick(controller)
     instance_id = sdl2.SDL_JoystickInstanceID(joystick)
-    guid = sdl2.SDL_JoystickGetGUID(joystick)
-    buf = create_string_buffer(33)
-    sdl2.SDL_JoystickGetGUIDString(guid, buf, 33)
-    guid_str = buf.value.decode() if buf.value else ""
+    guid_str = guid_string_from_joystick(joystick)
     return controller, instance_id, guid_str
 
 
@@ -405,6 +402,22 @@ def try_open_uart(port: str, baud: int) -> Optional[PicoUART]:
         return PicoUART(port, baud)
     except Exception:
         return None
+
+
+def guid_string_from_joystick(joystick: sdl2.SDL_Joystick) -> str:
+    """Return a GUID string for an already-open joystick."""
+    guid = sdl2.SDL_JoystickGetGUID(joystick)
+    buf = create_string_buffer(33)
+    sdl2.SDL_JoystickGetGUIDString(guid, buf, 33)
+    return buf.value.decode().lower() if buf.value else ""
+
+
+def guid_string_for_device_index(index: int) -> str:
+    """Return a GUID string for a joystick device index without opening it."""
+    guid = sdl2.SDL_JoystickGetDeviceGUID(index)
+    buf = create_string_buffer(33)
+    sdl2.SDL_JoystickGetGUIDString(guid, buf, 33)
+    return buf.value.decode().lower() if buf.value else ""
 
 
 def open_uart_or_warn(port: str, baud: int, console: Console) -> Optional[PicoUART]:
@@ -471,6 +484,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only open controllers whose name contains this substring (case-insensitive). Repeatable.",
     )
     parser.add_argument(
+        "--list-controllers",
+        action="store_true",
+        help="List detected controllers with GUIDs and exit.",
+    )
+    parser.add_argument(
         "--swap-abxy",
         action="store_true",
         help="Swap AB/XY mapping (useful if Linux reports Switch controllers as Xbox layout).",
@@ -481,6 +499,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=[],
         help="Swap AB/XY mapping for specific controller indices (repeatable).",
+    )
+    parser.add_argument(
+        "--swap-abxy-guid",
+        action="append",
+        default=[],
+        help="Swap AB/XY mapping for specific controller GUIDs (see --list-controllers). Repeatable.",
     )
     parser.add_argument(
         "--sdl-mapping",
@@ -526,6 +550,7 @@ class BridgeConfig:
     button_map_default: Dict[int, int]
     button_map_swapped: Dict[int, int]
     swap_abxy_indices: set[int]
+    swap_abxy_ids: set[str]
 
 
 @dataclass
@@ -538,19 +563,6 @@ class PairingState:
     include_non_usb: bool = False
     ignore_port_desc: List[str] = field(default_factory=list)
     include_port_desc: List[str] = field(default_factory=list)
-
-
-@dataclass
-class ControllerIdRegistry:
-    """Assign stable IDs to controllers based on their GUID."""
-    guid_to_id: Dict[str, int] = field(default_factory=dict)
-    next_id: int = 0
-
-    def stable_id_for_guid(self, guid: str) -> int:
-        if guid not in self.guid_to_id:
-            self.guid_to_id[guid] = self.next_id
-            self.next_id += 1
-        return self.guid_to_id[guid]
 
 
 def load_button_maps(console: Console, args: argparse.Namespace) -> Tuple[Dict[int, int], Dict[int, int], set[int]]:
@@ -582,6 +594,7 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
     deadzone_raw = int(max(0.0, min(args.deadzone, 1.0)) * 32767)
     trigger_threshold = int(max(0.0, min(args.trigger_threshold, 1.0)) * 32767)
     button_map_default, button_map_swapped, swap_abxy_indices = load_button_maps(console, args)
+    swap_abxy_guids = {g.lower() for g in args.swap_abxy_guid}
     return BridgeConfig(
         interval=interval,
         deadzone_raw=deadzone_raw,
@@ -589,6 +602,7 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         button_map_default=button_map_default,
         button_map_swapped=button_map_swapped,
         swap_abxy_indices=swap_abxy_indices,
+        swap_abxy_ids=set(swap_abxy_guids),  # filled later once stable IDs are known
     )
 
 
@@ -631,6 +645,28 @@ def detect_controllers(
                 continue
             console.print(f"[yellow]Found joystick {index} (not a GameController): {name_str}[/yellow]")
     return controller_indices, controller_names
+
+
+def list_controllers_with_guids(console: Console, parser: argparse.ArgumentParser) -> None:
+    """Print detected controllers with their GUID strings and exit."""
+    count = sdl2.SDL_NumJoysticks()
+    if count < 0:
+        parser.error(f"SDL error: {sdl2.SDL_GetError().decode()}")
+    if count == 0:
+        console.print("[yellow]No controllers detected.[/yellow]")
+        return
+    table = Table(title="Detected Controllers (GUIDs)")
+    table.add_column("Index", justify="center")
+    table.add_column("Type")
+    table.add_column("Name")
+    table.add_column("GUID")
+    for idx in range(count):
+        is_gc = sdl2.SDL_IsGameController(idx)
+        name = sdl2.SDL_GameControllerNameForIndex(idx) if is_gc else sdl2.SDL_JoystickNameForIndex(idx)
+        name_str = name.decode() if isinstance(name, bytes) else str(name)
+        guid_str = guid_string_for_device_index(idx)
+        table.add_row(str(idx), "GameController" if is_gc else "Joystick", name_str, guid_str)
+    console.print(table)
 
 
 def prepare_pairing_state(
@@ -804,7 +840,7 @@ def open_initial_contexts(
     pairing: PairingState,
     controller_indices: List[int],
     console: Console,
-    id_registry: ControllerIdRegistry,
+    config: BridgeConfig,
 ) -> Tuple[Dict[int, ControllerContext], List[PicoUART]]:
     """Open initial controllers and UARTs for detected indices."""
     contexts: Dict[int, ControllerContext] = {}
@@ -823,7 +859,9 @@ def open_initial_contexts(
         except Exception as exc:
             console.print(f"[red]Failed to open controller {index}: {exc}[/red]")
             continue
-        stable_id = id_registry.stable_id_for_guid(guid)
+        stable_id = guid
+        if index in config.swap_abxy_indices:
+            config.swap_abxy_ids.add(stable_id)
         uart = open_uart_or_warn(port, args.baud, console) if port else None
         if uart:
             uarts.append(uart)
@@ -891,7 +929,7 @@ def handle_button_event(
         return
     current_button_map = (
         config.button_map_swapped
-        if (args.swap_abxy or ctx.controller_index in config.swap_abxy_indices)
+        if (args.swap_abxy or ctx.stable_id in config.swap_abxy_ids)
         else config.button_map_default
     )
     button = event.cbutton.button
@@ -915,7 +953,7 @@ def handle_device_added(
     contexts: Dict[int, ControllerContext],
     uarts: List[PicoUART],
     console: Console,
-    id_registry: ControllerIdRegistry,
+    config: BridgeConfig,
 ) -> None:
     """Handle controller hotplug by opening and pairing UART if possible."""
     idx = event.cdevice.which
@@ -935,7 +973,10 @@ def handle_device_added(
     except Exception as exc:
         console.print(f"[red]Hotplug open failed for controller {idx}: {exc}[/red]")
         return
-    stable_id = id_registry.stable_id_for_guid(guid)
+    stable_id = guid
+    # Promote any index-based swap flags to stable IDs on first sight.
+    if idx in config.swap_abxy_indices:
+        config.swap_abxy_ids.add(stable_id)
     uart = open_uart_or_warn(port, args.baud, console) if port else None
     if uart:
         uarts.append(uart)
@@ -991,7 +1032,7 @@ def service_contexts(
     for ctx in list(contexts.values()):
         current_button_map = (
             config.button_map_swapped
-            if (args.swap_abxy or ctx.controller_index in config.swap_abxy_indices)
+            if (args.swap_abxy or ctx.stable_id in config.swap_abxy_ids)
             else config.button_map_default
         )
         poll_controller_buttons(ctx, current_button_map)
@@ -1055,7 +1096,6 @@ def run_bridge_loop(
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
     uarts: List[PicoUART],
-    id_registry: ControllerIdRegistry,
 ) -> None:
     """Main event loop for bridging controllers to UART and handling rumble."""
     event = sdl2.SDL_Event()
@@ -1073,7 +1113,7 @@ def run_bridge_loop(
             elif event.type in (sdl2.SDL_CONTROLLERBUTTONDOWN, sdl2.SDL_CONTROLLERBUTTONUP):
                 handle_button_event(event, args, config, contexts)
             elif event.type == sdl2.SDL_CONTROLLERDEVICEADDED:
-                handle_device_added(event, args, pairing, contexts, uarts, console, id_registry)
+                handle_device_added(event, args, pairing, contexts, uarts, console, config)
             elif event.type == sdl2.SDL_CONTROLLERDEVICEREMOVED:
                 handle_device_removed(event, pairing, contexts, console)
 
@@ -1105,16 +1145,18 @@ def main() -> None:
     console = Console()
     config = build_bridge_config(console, args)
     initialize_sdl(parser)
-    id_registry = ControllerIdRegistry()
     contexts: Dict[int, ControllerContext] = {}
     uarts: List[PicoUART] = []
     try:
+        if args.list_controllers:
+            list_controllers_with_guids(console, parser)
+            return
         controller_indices, controller_names = detect_controllers(console, args, parser)
         pairing = prepare_pairing_state(args, console, parser, controller_indices, controller_names)
-        contexts, uarts = open_initial_contexts(args, pairing, controller_indices, console, id_registry)
+        contexts, uarts = open_initial_contexts(args, pairing, controller_indices, console, config)
         if not contexts:
             console.print("[yellow]No controllers opened; waiting for hotplug events...[/yellow]")
-        run_bridge_loop(args, console, config, pairing, contexts, uarts, id_registry)
+        run_bridge_loop(args, console, config, pairing, contexts, uarts)
     finally:
         cleanup(contexts, uarts)
 
