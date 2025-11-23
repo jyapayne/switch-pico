@@ -13,7 +13,7 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
   - **TX**: GPIO4 (Pico pin 6) → RX of your USB‑serial adapter.
   - **RX**: GPIO5 (Pico pin 7) → TX of your USB‑serial adapter.
   - **GND**: common ground between Pico and adapter.
-- Baud rate: **1,000,000** (default). Some adapters only handle 500,000; both bridges accept a `--baud` flag.
+- Baud rate: **921600** (default). Some adapters only handle 500,000; both bridges accept a `--baud` flag.
 - Keep logic at 3.3V; do not feed 5V UART into the Pico.
 
 ## Building and flashing firmware
@@ -49,7 +49,7 @@ python controller_uart_bridge.py --interactive
 Options:
 - `--map index:PORT` (repeatable) to pin controller index to serial (e.g., `--map 0:/dev/cu.usbserial-0001` or `--map 0:COM5`).
 - `--ports PORTS...` or `--interactive` for auto/interactive pairing.
-- `--baud 900000` (default 900,000; use `500000` if your adapter can’t do 900K).
+- `--baud 921600` (default 921600; use `500000` if your adapter can’t do 900K).
 - `--frequency 1000` to send at 1 kHz.
 - `--sdl-mapping path/to/gamecontrollerdb.txt` to load extra SDL mappings (defaults to `controller_db/gamecontrollerdb.txt`).
 
@@ -71,7 +71,6 @@ Note: Rust toolchain not currently present in this setup. If you install Rust + 
 
 ## Troubleshooting
 - **No input on Switch**: verify UART wiring (Pico GPIO4/5), baud matches both sides, Pico flashed with current firmware, Switch sees a “Pro Controller”.
-- **Rumble lag**: increase baud to 900,000 (default) or 1,000,000 if your adapter supports it; otherwise increase `--frequency`.
 - **Constant buzzing rumble**: the bridge filters small rumble payloads; ensure baud isn’t dropping bytes. Try lowering rumble scale in `controller_uart_bridge.py` if needed.
 - **Guide/Home triggers system menu (macOS)**: try different controller mode (XInput/DInput), disable Steam overlay/controller support, or connect wired.
 - **SDL can’t see controller**: load `controller_db/gamecontrollerdb.txt` (default), add your own mapping, or try a different mode on the pad (e.g., XInput).
