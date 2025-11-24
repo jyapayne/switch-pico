@@ -70,8 +70,9 @@ static void on_rumble_from_switch(const uint8_t rumble[8]) {
 
 // Consume UART bytes and forward complete frames to the Switch Pro driver.
 static void poll_uart_frames() {
-    static uint8_t buffer[8];
+    static uint8_t buffer[64];
     static uint8_t index = 0;
+    static uint8_t expected_len = 0;
     static absolute_time_t last_byte_time = {0};
     static bool has_last_byte = false;
 
@@ -81,6 +82,7 @@ static void poll_uart_frames() {
         uint64_t now = to_ms_since_boot(get_absolute_time());
         if (has_last_byte && (now - to_ms_since_boot(last_byte_time)) > 20) {
             index = 0; // stale data, restart frame
+            expected_len = 0;
         }
         last_byte_time = get_absolute_time();
         has_last_byte = true;
@@ -92,9 +94,19 @@ static void poll_uart_frames() {
         }
 
         buffer[index++] = byte;
-        if (index >= sizeof(buffer)) {
+        if (index == 3) {
+            // We just stored payload_len; compute expected frame length (payload + header/version/len/checksum).
+            expected_len = static_cast<uint8_t>(buffer[2] + 4);
+            if (expected_len > sizeof(buffer) || expected_len < 8) {
+                index = 0;
+                expected_len = 0;
+                continue;
+            }
+        }
+
+        if (expected_len && index >= expected_len) {
             SwitchInputState parsed{};
-            if (switch_pro_apply_uart_packet(buffer, sizeof(buffer), &parsed)) {
+            if (switch_pro_apply_uart_packet(buffer, expected_len, &parsed)) {
                 g_user_state = parsed;
                 LOG_PRINTF("[UART] packet buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
                            (parsed.button_a   ? SWITCH_PRO_MASK_A   : 0) |
@@ -121,6 +133,7 @@ static void poll_uart_frames() {
             g_uart_activity = true;
 #endif
             index = 0;
+            expected_len = 0;
         }
     }
 }

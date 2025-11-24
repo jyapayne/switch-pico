@@ -11,6 +11,15 @@
 #include "switch_pro_descriptors.h"
 
 typedef struct {
+    int16_t accel_x;
+    int16_t accel_y;
+    int16_t accel_z;
+    int16_t gyro_x;
+    int16_t gyro_y;
+    int16_t gyro_z;
+} SwitchImuSample;
+
+typedef struct {
     bool dpad_up;
     bool dpad_down;
     bool dpad_left;
@@ -35,6 +44,8 @@ typedef struct {
     uint16_t ly;
     uint16_t rx;
     uint16_t ry;
+    uint8_t imu_sample_count;
+    SwitchImuSample imu_samples[3];
 } SwitchInputState;
 
 // Initialize USB state and calibration before entering the main loop.

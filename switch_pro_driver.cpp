@@ -190,7 +190,38 @@ static SwitchInputState make_neutral_state() {
     s.ly = SWITCH_PRO_JOYSTICK_MID;
     s.rx = SWITCH_PRO_JOYSTICK_MID;
     s.ry = SWITCH_PRO_JOYSTICK_MID;
+    s.imu_sample_count = 0;
     return s;
+}
+
+static void fill_imu_report_data(const SwitchInputState& state) {
+    // Only include IMU data when the host explicitly enabled it.
+    if (!is_imu_enabled || state.imu_sample_count == 0) {
+        memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
+        return;
+    }
+
+    uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
+    uint8_t* dst = switch_report.imuData;
+    for (uint8_t i = 0; i < 3; ++i) {
+        SwitchImuSample sample{};
+        if (i < sample_count) {
+            sample = state.imu_samples[i];
+        }
+        dst[0] = static_cast<uint8_t>(sample.accel_x & 0xFF);
+        dst[1] = static_cast<uint8_t>((sample.accel_x >> 8) & 0xFF);
+        dst[2] = static_cast<uint8_t>(sample.accel_y & 0xFF);
+        dst[3] = static_cast<uint8_t>((sample.accel_y >> 8) & 0xFF);
+        dst[4] = static_cast<uint8_t>(sample.accel_z & 0xFF);
+        dst[5] = static_cast<uint8_t>((sample.accel_z >> 8) & 0xFF);
+        dst[6] = static_cast<uint8_t>(sample.gyro_x & 0xFF);
+        dst[7] = static_cast<uint8_t>((sample.gyro_x >> 8) & 0xFF);
+        dst[8] = static_cast<uint8_t>(sample.gyro_y & 0xFF);
+        dst[9] = static_cast<uint8_t>((sample.gyro_y >> 8) & 0xFF);
+        dst[10] = static_cast<uint8_t>(sample.gyro_z & 0xFF);
+        dst[11] = static_cast<uint8_t>((sample.gyro_z >> 8) & 0xFF);
+        dst += 12;
+    }
 }
 
 static void send_identify() {
@@ -485,6 +516,7 @@ static void update_switch_report_from_state() {
     switch_report.inputs.rightStick.setX(std::min(std::max(scaleRightStickX,rightMinX), rightMaxX));
     switch_report.inputs.rightStick.setY(-std::min(std::max(scaleRightStickY,rightMinY), rightMaxY));
 
+    fill_imu_report_data(g_input_state);
     switch_report.rumbleReport = 0x09;
 }
 
@@ -617,24 +649,74 @@ void switch_pro_task() {
 }
 
 bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchInputState* out_state) {
-    // Packet format: 0xAA, buttons(2 LE), hat, lx, ly, rx, ry
+    // Packet v2 format:
+    // 0:0xAA header
+    // 1:version (0x02)
+    // 2:payload_len (bytes 3..3+len-1)
+    // 3-4: buttons LE
+    // 5: hat
+    // 6-9: lx, ly, rx, ry (0-255)
+    // 10: imu_sample_count (0-3)
+    // 11-46: up to 3 samples of accel/gyro (int16 LE each axis)
+    // 47: checksum (sum of bytes 0..46) & 0xFF
     if (length < 8 || packet[0] != 0xAA) {
         return false;
     }
 
+    if (packet[1] != 0x02) {
+        return false;
+    }
+
+    uint8_t payload_len = packet[2];
+    uint16_t expected_len = static_cast<uint16_t>(payload_len) + 4; // header+version+len+checksum
+    if (length < expected_len) {
+        return false;
+    }
+
+    uint16_t checksum_end = static_cast<uint16_t>(3 + payload_len - 1); // last payload byte
+    uint16_t checksum_index = static_cast<uint16_t>(3 + payload_len);
+    if (checksum_index >= length) {
+        return false;
+    }
+
+    uint16_t sum = 0;
+    for (uint16_t i = 0; i <= checksum_end; ++i) {
+        sum = static_cast<uint16_t>(sum + packet[i]);
+    }
+    if ((sum & 0xFF) != packet[checksum_index]) {
+        return false;
+    }
+
     SwitchProOutReport out{};
-    out.buttons = static_cast<uint16_t>(packet[1]) | (static_cast<uint16_t>(packet[2]) << 8);
-    out.hat = packet[3];
-    out.lx = packet[4];
-    out.ly = packet[5];
-    out.rx = packet[6];
-    out.ry = packet[7];
+    out.buttons = static_cast<uint16_t>(packet[3]) | (static_cast<uint16_t>(packet[4]) << 8);
+    out.hat = packet[5];
+    out.lx = packet[6];
+    out.ly = packet[7];
+    out.rx = packet[8];
+    out.ry = packet[9];
 
     auto expand_axis = [](uint8_t v) -> uint16_t {
         return static_cast<uint16_t>(v) << 8 | v;
     };
 
     SwitchInputState state = make_neutral_state();
+
+    state.imu_sample_count = std::min<uint8_t>(packet[10], 3);
+
+    auto read_int16 = [](const uint8_t* src) -> int16_t {
+        return static_cast<int16_t>(static_cast<uint16_t>(src[0]) | (static_cast<uint16_t>(src[1]) << 8));
+    };
+
+    const uint8_t* imu_base = &packet[11];
+    for (uint8_t i = 0; i < state.imu_sample_count; ++i) {
+        const uint8_t* sample_ptr = imu_base + (i * 12);
+        state.imu_samples[i].accel_x = read_int16(sample_ptr + 0);
+        state.imu_samples[i].accel_y = read_int16(sample_ptr + 2);
+        state.imu_samples[i].accel_z = read_int16(sample_ptr + 4);
+        state.imu_samples[i].gyro_x = read_int16(sample_ptr + 6);
+        state.imu_samples[i].gyro_y = read_int16(sample_ptr + 8);
+        state.imu_samples[i].gyro_z = read_int16(sample_ptr + 10);
+    }
 
     switch (out.hat) {
         case SWITCH_PRO_HAT_UP: state.dpad_up = true; break;

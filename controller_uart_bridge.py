@@ -16,11 +16,12 @@ Features inspired by ``host/controller_bridge.py``:
 from __future__ import annotations
 
 import argparse
+import math
 import struct
 import threading
 import time
 from dataclasses import dataclass, field
-from ctypes import create_string_buffer
+from ctypes import create_string_buffer, c_float
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -36,6 +37,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 UART_HEADER = 0xAA
+UART_VERSION = 0x02
 RUMBLE_HEADER = 0xBB
 RUMBLE_TYPE_RUMBLE = 0x01
 UART_BAUD = 921600
@@ -43,6 +45,15 @@ RUMBLE_IDLE_TIMEOUT = 0.25  # seconds without packets before forcing rumble off
 RUMBLE_STUCK_TIMEOUT = 0.60  # continuous same-energy rumble will be stopped after this
 RUMBLE_MIN_ACTIVE = 0.50  # below this, rumble is treated as off/noise
 RUMBLE_SCALE = 0.8
+IMU_SAMPLES_PER_REPORT = 3
+IMU_SAMPLE_BYTES = 12
+IMU_PAYLOAD_BYTES = IMU_SAMPLES_PER_REPORT * IMU_SAMPLE_BYTES
+IMU_PAYLOAD_LEN = 44  # buttons+hat+sticks+count (8 bytes) + IMU payload (36 bytes)
+RAD_TO_DEG = 180.0 / math.pi
+MS2_PER_G = 9.80665
+SENSOR_ACCEL = getattr(sdl2, "SDL_SENSOR_ACCEL", None)
+SENSOR_GYRO = getattr(sdl2, "SDL_SENSOR_GYRO", None)
+SDL_TRUE = getattr(sdl2, "SDL_TRUE", 1)
 
 
 class SwitchButton:
@@ -73,6 +84,16 @@ class SwitchHat:
     LEFT = 0x06
     TOP_LEFT = 0x07
     CENTER = 0x08
+
+
+@dataclass
+class IMUSample:
+    accel_x: int = 0
+    accel_y: int = 0
+    accel_z: int = 0
+    gyro_x: int = 0
+    gyro_y: int = 0
+    gyro_z: int = 0
 
 
 def parse_mapping(value: str) -> Tuple[int, str]:
@@ -252,12 +273,45 @@ class SwitchReport:
     ly: int = 128
     rx: int = 128
     ry: int = 128
+    imu_samples: List[IMUSample] = field(default_factory=list)
 
     def to_bytes(self) -> bytes:
         """Serialize the report into the UART packet format."""
-        return struct.pack(
-            "<BHBBBBB", UART_HEADER, self.buttons & 0xFFFF, self.hat & 0xFF, self.lx, self.ly, self.rx, self.ry
-        )
+        sample_count = min(len(self.imu_samples), IMU_SAMPLES_PER_REPORT)
+        payload = bytearray()
+        payload.append(self.buttons & 0xFF)
+        payload.append((self.buttons >> 8) & 0xFF)
+        payload.append(self.hat & 0xFF)
+        payload.append(self.lx & 0xFF)
+        payload.append(self.ly & 0xFF)
+        payload.append(self.rx & 0xFF)
+        payload.append(self.ry & 0xFF)
+        payload.append(sample_count)
+
+        imu_bytes = bytearray(IMU_PAYLOAD_BYTES)
+        for i in range(IMU_SAMPLES_PER_REPORT):
+            sample = self.imu_samples[i] if i < sample_count else IMUSample()
+            struct.pack_into(
+                "<hhhhhh",
+                imu_bytes,
+                i * IMU_SAMPLE_BYTES,
+                sample.accel_x,
+                sample.accel_y,
+                sample.accel_z,
+                sample.gyro_x,
+                sample.gyro_y,
+                sample.gyro_z,
+            )
+        payload.extend(imu_bytes)
+
+        frame = bytearray()
+        frame.append(UART_HEADER)
+        frame.append(UART_VERSION)
+        frame.append(IMU_PAYLOAD_LEN)
+        frame.extend(payload)
+        checksum = sum(frame) & 0xFF
+        frame.append(checksum)
+        return bytes(frame)
 
 
 class PicoUART:
@@ -383,6 +437,10 @@ class ControllerContext:
     last_rumble_change: float = 0.0
     last_rumble_energy: float = 0.0
     rumble_active: bool = False
+    sensors_supported: bool = False
+    sensors_enabled: bool = False
+    imu_samples: List[IMUSample] = field(default_factory=list)
+    last_sensor_poll: float = 0.0
 
 
 def open_controller(index: int) -> Tuple[sdl2.SDL_GameController, int, str]:
@@ -563,6 +621,74 @@ class PairingState:
     include_non_usb: bool = False
     ignore_port_desc: List[str] = field(default_factory=list)
     include_port_desc: List[str] = field(default_factory=list)
+
+
+def clamp_int16(value: float) -> int:
+    return int(max(-32768, min(32767, round(value))))
+
+
+def read_sensor_triplet(controller: sdl2.SDL_GameController, sensor_type: int) -> Optional[Tuple[float, float, float]]:
+    if not hasattr(sdl2, "SDL_GameControllerGetSensorData"):
+        return None
+    data = (c_float * 3)()
+    result = sdl2.SDL_GameControllerGetSensorData(controller, sensor_type, data, 3)
+    if result != 0:
+        return None
+    return float(data[0]), float(data[1]), float(data[2])
+
+
+def convert_accel_to_raw(accel_ms2: float) -> int:
+    g_units = accel_ms2 / MS2_PER_G
+    return clamp_int16(g_units * 4096.0)
+
+
+def convert_gyro_to_raw(gyro_rad: float) -> int:
+    dps = gyro_rad * RAD_TO_DEG
+    return clamp_int16(dps / 0.070)
+
+
+def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> None:
+    if not all(
+        hasattr(sdl2, name)
+        for name in ("SDL_GameControllerHasSensor", "SDL_GameControllerSetSensorEnabled", "SDL_GameControllerGetSensorData")
+    ):
+        return
+
+    if SENSOR_ACCEL is None or SENSOR_GYRO is None:
+        return
+
+    accel_supported = bool(sdl2.SDL_GameControllerHasSensor(ctx.controller, SENSOR_ACCEL))
+    gyro_supported = bool(sdl2.SDL_GameControllerHasSensor(ctx.controller, SENSOR_GYRO))
+    ctx.sensors_supported = accel_supported and gyro_supported
+    if not ctx.sensors_supported:
+        console.print(f"[yellow]Controller {ctx.controller_index} has no accelerometer/gyro sensors[/yellow]")
+        return
+
+    accel_enabled = sdl2.SDL_GameControllerSetSensorEnabled(ctx.controller, SENSOR_ACCEL, SDL_TRUE) == 0
+    gyro_enabled = sdl2.SDL_GameControllerSetSensorEnabled(ctx.controller, SENSOR_GYRO, SDL_TRUE) == 0
+    ctx.sensors_enabled = accel_enabled and gyro_enabled
+    if not ctx.sensors_enabled:
+        console.print(f"[yellow]Controller {ctx.controller_index} failed to enable sensors[/yellow]")
+
+
+def collect_imu_sample(ctx: ControllerContext) -> None:
+    if not ctx.sensors_enabled or SENSOR_ACCEL is None or SENSOR_GYRO is None:
+        return
+    accel = read_sensor_triplet(ctx.controller, SENSOR_ACCEL)
+    gyro = read_sensor_triplet(ctx.controller, SENSOR_GYRO)
+    if not accel or not gyro:
+        return
+    sample = IMUSample(
+        accel_x=convert_accel_to_raw(accel[0]),
+        accel_y=convert_accel_to_raw(accel[1]),
+        accel_z=convert_accel_to_raw(accel[2]),
+        gyro_x=convert_gyro_to_raw(gyro[0]),
+        gyro_y=convert_gyro_to_raw(gyro[1]),
+        gyro_z=convert_gyro_to_raw(gyro[2]),
+    )
+    ctx.imu_samples.append(sample)
+    if len(ctx.imu_samples) > 6:
+        ctx.imu_samples = ctx.imu_samples[-6:]
 
 
 def load_button_maps(console: Console, args: argparse.Namespace) -> Tuple[Dict[int, int], Dict[int, int], set[int]]:
@@ -880,6 +1006,7 @@ def open_initial_contexts(
             port=port,
             uart=uart,
         )
+        initialize_controller_sensors(ctx, console)
         contexts[instance_id] = ctx
     return contexts, uarts
 
@@ -995,6 +1122,7 @@ def handle_device_added(
         port=port,
         uart=uart,
     )
+    initialize_controller_sensors(ctx, console)
     contexts[instance_id] = ctx
 
 
@@ -1036,6 +1164,7 @@ def service_contexts(
             else config.button_map_default
         )
         poll_controller_buttons(ctx, current_button_map)
+        collect_imu_sample(ctx)
         # Reconnect UART if needed.
         if ctx.port and ctx.uart is None and (now - ctx.last_reopen_attempt) > 1.0:
             ctx.last_reopen_attempt = now
@@ -1048,6 +1177,10 @@ def service_contexts(
             continue
         try:
             if now - ctx.last_send >= config.interval:
+                if ctx.imu_samples:
+                    ctx.report.imu_samples = ctx.imu_samples[-IMU_SAMPLES_PER_REPORT:]
+                else:
+                    ctx.report.imu_samples = []
                 ctx.uart.send_report(ctx.report)
                 ctx.last_send = now
 
