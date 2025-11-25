@@ -1,4 +1,4 @@
-#include <stdio.h>
+ginclude <stdio.h>
 #include <string.h>
 #include "bsp/board.h"
 #include "hardware/uart.h"
@@ -61,12 +61,13 @@ static void on_rumble_from_switch(const uint8_t rumble[8]) {
 }
 
 // Consume UART bytes and forward complete frames to the Switch Pro driver.
-static void poll_uart_frames() {
+static bool poll_uart_frames() {
     static uint8_t buffer[64];
     static uint8_t index = 0;
     static uint8_t expected_len = 0;
     static absolute_time_t last_byte_time = {0};
     static bool has_last_byte = false;
+    bool new_data = false;
 
     while (uart_is_readable(UART_ID)) {
         uint8_t byte = uart_getc(UART_ID);
@@ -123,8 +124,10 @@ static void poll_uart_frames() {
             }
             index = 0;
             expected_len = 0;
+            new_data = true;
         }
     }
+    return new_data;
 }
 
 static void log_usb_state() {
@@ -159,9 +162,13 @@ int main() {
 
     while (true) {
         tud_task();          // USB device tasks
-        poll_uart_frames();  // Pull controller state from UART1
+        bool new_data = poll_uart_frames();  // Pull controller state from UART1
         SwitchInputState state = g_user_state;
         switch_pro_set_input(state);
+        bool should_update = new_data;
+        if (should_update) {
+            switch_pro_set_input(state);
+        }
         switch_pro_task();   // Push state to the Switch host
         log_usb_state();
     }

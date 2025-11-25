@@ -632,6 +632,9 @@ void switch_pro_task() {
             if (tud_hid_ready() && send_report(0, inputReport, report_size) == true ) {
                 memcpy(last_report, inputReport, report_size);
                 report_sent = true;
+                // Clear IMU samples so they aren't repeated in the next report
+                // if no new data arrives.
+                g_input_state.imu_sample_count = 0;
             }
 
             last_report_timer = now;

@@ -58,8 +58,11 @@ RUMBLE_SCALE = 1.0
 CONTROLLER_DB_URL_DEFAULT = "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
 
 SDL_TRUE = getattr(sdl2, "SDL_TRUE", 1)
+SDL_CONTROLLERSENSORUPDATE = getattr(sdl2, "SDL_CONTROLLERSENSORUPDATE", 0x658)
 GYRO_BIAS_SAMPLES = 200
-GYRO_DEADZONE_COUNTS = 15
+GYRO_DEADZONE_COUNTS = 0
+# Keep a small window of IMU samples to pack into the next report
+IMU_BUFFER_SIZE = 32
 
 
 def parse_mapping(value: str) -> Tuple[int, str]:
@@ -246,7 +249,7 @@ class ControllerContext:
     sensors_supported: bool = False
     sensors_enabled: bool = False
     imu_samples: List[IMUSample] = field(default_factory=list)
-    last_sensor_poll: float = 0.0
+    last_accel: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     gyro_bias_x: float = 0.0
     gyro_bias_y: float = 0.0
     gyro_bias_z: float = 0.0
@@ -602,8 +605,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--frequency",
         type=float,
-        default=1000.0,
-        help="Report send frequency per controller (Hz, default 1000)",
+        default=66.7,
+        help="Report send frequency per controller (Hz, default ~66.7 => ~15ms)",
     )
     parser.add_argument(
         "--deadzone",
@@ -710,6 +713,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print raw IMU readings (float and converted int16) for debugging.",
     )
+    parser.add_argument(
+        "--gyro-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for gyro sensitivity (default 1.0). Reduce to < 1.0 if camera moves too fast.",
+    )
+    parser.add_argument(
+        "--no-gyro-bias",
+        action="store_true",
+        help="Disable automatic gyro bias calibration at startup.",
+    )
     return parser
 
 
@@ -756,6 +770,8 @@ class BridgeConfig:
     swap_abxy_ids: set[str]
     swap_abxy_global: bool
     debug_imu: bool
+    gyro_scale: float
+    no_gyro_bias: bool
 
 
 @dataclass
@@ -792,10 +808,11 @@ def convert_accel_to_raw(accel_ms2: float) -> int:
     return clamp_int16(g_units * 4000.0)
 
 
-def convert_gyro_to_raw(gyro_rad: float) -> int:
+def convert_gyro_to_raw(gyro_rad: float, scale: float = 1.0) -> int:
     # SDL reports gyroscope data in radians/second; convert to dps then to Switch counts.
     dps = gyro_rad * RAD_TO_DEG
-    counts = clamp_int16(dps / 0.070)
+    # 0.070 dps/LSB is approx 14.28 LSB/dps.
+    counts = clamp_int16((dps / 0.061) * scale)
     if abs(counts) < GYRO_DEADZONE_COUNTS:
         return 0
     return counts
@@ -841,13 +858,24 @@ def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> N
         )
 
 
-def collect_imu_sample(ctx: ControllerContext, config: BridgeConfig) -> None:
-    if not ctx.sensors_enabled or SENSOR_ACCEL is None or SENSOR_GYRO is None:
+def handle_sensor_update(event: sdl2.SDL_Event, contexts: Dict[int, ControllerContext], config: BridgeConfig) -> None:
+    ctx = contexts.get(event.csensor.which)
+    if not ctx:
         return
-    accel = read_sensor_triplet(ctx.controller, SENSOR_ACCEL)
-    gyro = read_sensor_triplet(ctx.controller, SENSOR_GYRO)
-    if not accel or not gyro:
+
+    sensor_type = event.csensor.sensor
+    data = event.csensor.data
+
+    if sensor_type == SENSOR_ACCEL:
+        ctx.last_accel = (data[0], data[1], data[2])
         return
+
+    if sensor_type != SENSOR_GYRO:
+        return
+
+    # Process Gyro update (and combine with last accel)
+    gyro = (data[0], data[1], data[2])
+
     if not ctx.gyro_bias_locked and ctx.gyro_bias_samples < GYRO_BIAS_SAMPLES:
         ctx.gyro_bias_x += gyro[0]
         ctx.gyro_bias_y += gyro[1]
@@ -862,20 +890,17 @@ def collect_imu_sample(ctx: ControllerContext, config: BridgeConfig) -> None:
     bias_x = ctx.gyro_bias_x if ctx.gyro_bias_locked else 0.0
     bias_y = ctx.gyro_bias_y if ctx.gyro_bias_locked else 0.0
     bias_z = ctx.gyro_bias_z if ctx.gyro_bias_locked else 0.0
-    gyro_bias_corrected = (
-        gyro[0] - bias_x,
-        gyro[1] - bias_y,
-        gyro[2] - bias_z,
-    )
+
+    # Use last known accel
+    accel = ctx.last_accel
 
     # Map SDL sensor axes to Pro Controller axes: gravity should land on Z.
-    # print(accel[2] / MS2_PER_G)
     accel_raw_x = convert_accel_to_raw(accel[0])
     accel_raw_y = convert_accel_to_raw(accel[1])
     accel_raw_z = convert_accel_to_raw(accel[2])
-    gyro_raw_x = convert_gyro_to_raw(gyro[0])
-    gyro_raw_y = convert_gyro_to_raw(gyro[1])
-    gyro_raw_z = convert_gyro_to_raw(gyro[2])
+    gyro_raw_x = convert_gyro_to_raw(gyro[0] - bias_x, config.gyro_scale)
+    gyro_raw_y = convert_gyro_to_raw(gyro[1] - bias_y, config.gyro_scale)
+    gyro_raw_z = convert_gyro_to_raw(gyro[2] - bias_z, config.gyro_scale)
 
     # Map SDL axes to Pro axes to match the native Pro USB output:
     # Pro accel: ax = SDL_, ay = SDL_Z, az = SDL_Y (gravity).
@@ -884,13 +909,13 @@ def collect_imu_sample(ctx: ControllerContext, config: BridgeConfig) -> None:
         accel_x=-accel_raw_z,
         accel_y=-accel_raw_x,
         accel_z=accel_raw_y,
-        gyro_x=-gyro_raw_z,
-        gyro_y=-gyro_raw_x,
-        gyro_z=gyro_raw_y,
+        gyro_x=convert_gyro_to_raw(-(gyro[2] - bias_z), config.gyro_scale),
+        gyro_y=convert_gyro_to_raw(-(gyro[0] - bias_x), config.gyro_scale),
+        gyro_z=convert_gyro_to_raw(gyro[1] - bias_y, config.gyro_scale),
     )
     ctx.imu_samples.append(sample)
-    if len(ctx.imu_samples) > 6:
-        ctx.imu_samples = ctx.imu_samples[-6:]
+    if len(ctx.imu_samples) > IMU_BUFFER_SIZE:
+        ctx.imu_samples = ctx.imu_samples[-IMU_BUFFER_SIZE:]
 
     if config.debug_imu:
         now = time.monotonic()
@@ -936,7 +961,7 @@ def load_button_maps(
             console.print(
                 f"[red]Failed to load SDL mapping {mapping_path}: {exc}[/red]"
             )
-    return button_map_default, button_map_swapped, swap_abxy_indices
+    geturn button_map_default, button_map_swapped, swap_abxy_indices
 
 
 def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeConfig:
@@ -961,6 +986,8 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         swap_abxy_ids=set(swap_abxy_guids),  # filled later once stable IDs are known
         swap_abxy_global=bool(args.swap_abxy),
         debug_imu=bool(args.debug_imu),
+        gyro_scale=args.gyro_scale,
+        no_gyro_bias=args.no_gyro_bias,
     )
 
 
@@ -1466,7 +1493,7 @@ def service_contexts(
             else config.button_map_default
         )
         poll_controller_buttons(ctx, current_button_map)
-        collect_imu_sample(ctx, config)
+        # collect_imu_sample(ctx, config)  <-- Removed, using event loop
         # Reconnect UART if needed.
         if ctx.port and ctx.uart is None and (now - ctx.last_reopen_attempt) > 1.0:
             ctx.last_reopen_attempt = now
@@ -1481,8 +1508,11 @@ def service_contexts(
             continue
         try:
             if now - ctx.last_send >= config.interval:
-                if ctx.imu_samples:
-                    ctx.report.imu_samples = ctx.imu_samples[-IMU_SAMPLES_PER_REPORT:]
+                # Consume up to 3 samples from the head of the queue (FIFO)
+                count = min(len(ctx.imu_samples), IMU_SAMPLES_PER_REPORT)
+                if count > 0:
+                    ctx.report.imu_samples = ctx.imu_samples[:count]
+                    ctx.imu_samples = ctx.imu_samples[count:]
                 else:
                     ctx.report.imu_samples = []
                 ctx.uart.send_report(ctx.report)
@@ -1556,12 +1586,16 @@ def run_bridge_loop(
                 sdl2.SDL_CONTROLLERBUTTONUP,
             ):
                 handle_button_event(event, config, contexts)
+            elif event.type in (sdl2.SDL_CONTROLLERBUTTONDOWN, sdl2.SDL_CONTROLLERBUTTONUP):
+                handle_button_event(event, args, config, contexts)
+            elif event.type == SDL_CONTROLLERSENSORUPDATE:
+                handle_sensor_update(event, contexts, config)
             elif event.type == sdl2.SDL_CONTROLLERDEVICEADDED:
                 handle_device_added(
                     event, args, pairing, contexts, uarts, console, config
                 )
             elif event.type == sdl2.SDL_CONTROLLERDEVICEREMOVED:
-                handle_device_removed(event, pairing, contexts, console)
+                gandle_device_removed(event, pairing, contexts, console)
 
         now = time.monotonic()
         if now - last_port_scan > port_scan_interval:
