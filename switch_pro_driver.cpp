@@ -14,8 +14,8 @@
 #define LOG_PRINTF(...) ((void)0)
 #endif
 
-// force a report to be sent every X ms
-#define SWITCH_PRO_KEEPALIVE_TIMER 5
+// force a report to be sent every X ms (roughly matches Pro Controller cadence)
+#define SWITCH_PRO_KEEPALIVE_TIMER 15
 
 static SwitchInputState g_input_state{
     false, false, false, false,
@@ -195,14 +195,16 @@ static SwitchInputState make_neutral_state() {
 }
 
 static void fill_imu_report_data(const SwitchInputState& state) {
-    // Only include IMU data when the host explicitly enabled it.
-    if (!is_imu_enabled || state.imu_sample_count == 0) {
+    // Include IMU data when the host provided samples; otherwise zero.
+    if (state.imu_sample_count == 0) {
         memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
         return;
     }
 
     uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
     uint8_t* dst = switch_report.imuData;
+    // Map host IMU axes (host already sends Pro-oriented X,Z,Y) into report layout:
+    // Report order per sample: accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z.
     for (uint8_t i = 0; i < 3; ++i) {
         SwitchImuSample sample{};
         if (i < sample_count) {
@@ -525,6 +527,7 @@ void switch_pro_init() {
     last_report_counter = 0;
     handshake_counter = 0;
     is_ready = false;
+    is_imu_enabled = true; // default on to allow IMU during host bring-up/debug
     is_initialized = false;
     is_report_queued = false;
     report_sent = false;
@@ -626,14 +629,12 @@ void switch_pro_task() {
             switch_report.timestamp = last_report_counter;
             void * inputReport = &switch_report;
             uint16_t report_size = sizeof(switch_report);
-            if (memcmp(last_report, inputReport, report_size) != 0) {
-                if (tud_hid_ready() && send_report(0, inputReport, report_size) == true ) {
-                    memcpy(last_report, inputReport, report_size);
-                    report_sent = true;
-                }
-
-                last_report_timer = now;
+            if (tud_hid_ready() && send_report(0, inputReport, report_size) == true ) {
+                memcpy(last_report, inputReport, report_size);
+                report_sent = true;
             }
+
+            last_report_timer = now;
         }
     } else {
         if (!is_initialized) {
@@ -851,9 +852,9 @@ bool tud_control_request_cb(uint8_t rhport, tusb_control_request_t const * reque
 void tud_mount_cb(void) {
     LOG_PRINTF("[USB] mount_cb\n");
     last_host_activity_ms = to_ms_since_boot(get_absolute_time());
-    forced_ready = false;
-    is_ready = false;
-    is_initialized = false;
+    forced_ready = true;
+    is_ready = true;
+    is_initialized = true;
 }
 
 void tud_umount_cb(void) {

@@ -58,6 +58,8 @@ RUMBLE_SCALE = 1.0
 CONTROLLER_DB_URL_DEFAULT = "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
 
 SDL_TRUE = getattr(sdl2, "SDL_TRUE", 1)
+GYRO_BIAS_SAMPLES = 200
+GYRO_DEADZONE_COUNTS = 15
 
 
 def parse_mapping(value: str) -> Tuple[int, str]:
@@ -245,6 +247,12 @@ class ControllerContext:
     sensors_enabled: bool = False
     imu_samples: List[IMUSample] = field(default_factory=list)
     last_sensor_poll: float = 0.0
+    gyro_bias_x: float = 0.0
+    gyro_bias_y: float = 0.0
+    gyro_bias_z: float = 0.0
+    gyro_bias_samples: int = 0
+    gyro_bias_locked: bool = False
+    last_debug_imu_print: float = 0.0
 
 
 def capture_stick_offsets(controller: sdl2.SDL_GameController) -> Dict[int, int]:
@@ -594,8 +602,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--frequency",
         type=float,
-        default=500.0,
-        help="Report send frequency per controller (Hz, default 500)",
+        default=1000.0,
+        help="Report send frequency per controller (Hz, default 1000)",
     )
     parser.add_argument(
         "--deadzone",
@@ -697,6 +705,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=[],
         help="Path to an SDL2 controller mapping database (e.g. controllerdb.txt). Repeatable.",
     )
+    parser.add_argument(
+        "--debug-imu",
+        action="store_true",
+        help="Print raw IMU readings (float and converted int16) for debugging.",
+    )
     return parser
 
 
@@ -742,6 +755,7 @@ class BridgeConfig:
     swap_abxy_indices: set[int]
     swap_abxy_ids: set[str]
     swap_abxy_global: bool
+    debug_imu: bool
 
 
 @dataclass
@@ -775,12 +789,16 @@ def read_sensor_triplet(
 
 def convert_accel_to_raw(accel_ms2: float) -> int:
     g_units = accel_ms2 / MS2_PER_G
-    return clamp_int16(g_units * 4096.0)
+    return clamp_int16(g_units * 4000.0)
 
 
 def convert_gyro_to_raw(gyro_rad: float) -> int:
+    # SDL reports gyroscope data in radians/second; convert to dps then to Switch counts.
     dps = gyro_rad * RAD_TO_DEG
-    return clamp_int16(dps / 0.070)
+    counts = clamp_int16(dps / 0.070)
+    if abs(counts) < GYRO_DEADZONE_COUNTS:
+        return 0
+    return counts
 
 
 def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> None:
@@ -823,24 +841,69 @@ def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> N
         )
 
 
-def collect_imu_sample(ctx: ControllerContext) -> None:
+def collect_imu_sample(ctx: ControllerContext, config: BridgeConfig) -> None:
     if not ctx.sensors_enabled or SENSOR_ACCEL is None or SENSOR_GYRO is None:
         return
     accel = read_sensor_triplet(ctx.controller, SENSOR_ACCEL)
     gyro = read_sensor_triplet(ctx.controller, SENSOR_GYRO)
     if not accel or not gyro:
         return
+    if not ctx.gyro_bias_locked and ctx.gyro_bias_samples < GYRO_BIAS_SAMPLES:
+        ctx.gyro_bias_x += gyro[0]
+        ctx.gyro_bias_y += gyro[1]
+        ctx.gyro_bias_z += gyro[2]
+        ctx.gyro_bias_samples += 1
+        if ctx.gyro_bias_samples >= GYRO_BIAS_SAMPLES:
+            ctx.gyro_bias_x /= ctx.gyro_bias_samples
+            ctx.gyro_bias_y /= ctx.gyro_bias_samples
+            ctx.gyro_bias_z /= ctx.gyro_bias_samples
+            ctx.gyro_bias_locked = True
+
+    bias_x = ctx.gyro_bias_x if ctx.gyro_bias_locked else 0.0
+    bias_y = ctx.gyro_bias_y if ctx.gyro_bias_locked else 0.0
+    bias_z = ctx.gyro_bias_z if ctx.gyro_bias_locked else 0.0
+    gyro_bias_corrected = (
+        gyro[0] - bias_x,
+        gyro[1] - bias_y,
+        gyro[2] - bias_z,
+    )
+
+    # Map SDL sensor axes to Pro Controller axes: gravity should land on Z.
+    # print(accel[2] / MS2_PER_G)
+    accel_raw_x = convert_accel_to_raw(accel[0])
+    accel_raw_y = convert_accel_to_raw(accel[1])
+    accel_raw_z = convert_accel_to_raw(accel[2])
+    gyro_raw_x = convert_gyro_to_raw(gyro[0])
+    gyro_raw_y = convert_gyro_to_raw(gyro[1])
+    gyro_raw_z = convert_gyro_to_raw(gyro[2])
+
+    # Map SDL axes to Pro axes to match the native Pro USB output:
+    # Pro accel: ax = SDL_, ay = SDL_Z, az = SDL_Y (gravity).
+    # Pro gyro:  gx = SDL_X, gy = SDL_Z, gz = SDL_Y.
     sample = IMUSample(
-        accel_x=convert_accel_to_raw(accel[0]),
-        accel_y=convert_accel_to_raw(accel[1]),
-        accel_z=convert_accel_to_raw(accel[2]),
-        gyro_x=convert_gyro_to_raw(gyro[0]),
-        gyro_y=convert_gyro_to_raw(gyro[1]),
-        gyro_z=convert_gyro_to_raw(gyro[2]),
+        accel_x=-accel_raw_z,
+        accel_y=-accel_raw_x,
+        accel_z=accel_raw_y,
+        gyro_x=-gyro_raw_z,
+        gyro_y=-gyro_raw_x,
+        gyro_z=gyro_raw_y,
     )
     ctx.imu_samples.append(sample)
     if len(ctx.imu_samples) > 6:
         ctx.imu_samples = ctx.imu_samples[-6:]
+
+    if config.debug_imu:
+        now = time.monotonic()
+        if now - ctx.last_debug_imu_print > 0.2:
+            ctx.last_debug_imu_print = now
+            print(
+                f"[IMU dbg idx={ctx.controller_index}] "
+                f"accel_ms2=({accel[0]:.3f},{accel[1]:.3f},{accel[2]:.3f}) "
+                f"gyro_dps=({gyro[0]:.3f},{gyro[1]:.3f},{gyro[2]:.3f}) "
+                f"bias_dps=({bias_x:.3f},{bias_y:.3f},{bias_z:.3f}) "
+                f"raw=({sample.accel_x},{sample.accel_y},{sample.accel_z};"
+                f"{sample.gyro_x},{sample.gyro_y},{sample.gyro_z})"
+            )
 
 
 def load_button_maps(
@@ -897,6 +960,7 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         swap_abxy_indices=swap_abxy_indices,
         swap_abxy_ids=set(swap_abxy_guids),  # filled later once stable IDs are known
         swap_abxy_global=bool(args.swap_abxy),
+        debug_imu=bool(args.debug_imu),
     )
 
 
@@ -1402,7 +1466,7 @@ def service_contexts(
             else config.button_map_default
         )
         poll_controller_buttons(ctx, current_button_map)
-        collect_imu_sample(ctx)
+        collect_imu_sample(ctx, config)
         # Reconnect UART if needed.
         if ctx.port and ctx.uart is None and (now - ctx.last_reopen_attempt) > 1.0:
             ctx.last_reopen_attempt = now

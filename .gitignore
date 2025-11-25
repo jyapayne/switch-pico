@@ -7,4 +7,9 @@ debug
 *.egg-info
 hid-nintendo.c
 __pycache__
+Nintendo_Switch_Reverse_Engineering
+nxbt
+hid-nintendo.c
+*.png
+switch
 !.vscode/*
