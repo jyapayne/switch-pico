@@ -92,9 +92,6 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 ### Linux tips
 - You may need udev permissions for `/dev/ttyUSB*`/`/dev/ttyACM*` (add user to `dialout`/`uucp` or use `udev` rules).
 
-## Rust bridge (optional)
-Note: Rust toolchain not currently present in this setup. If you install Rust + SDL2 dev libraries, an experimental Rust bridge lives in `fast_uart_bridge/`.
-
 ## Troubleshooting
 - **No input on Switch**: verify UART wiring (Pico GPIO4/5), baud matches both sides, Pico flashed with current firmware, Switch sees a “Pro Controller”.
 - **Constant buzzing rumble**: the bridge filters small rumble payloads; ensure baud isn’t dropping bytes. Try lowering rumble scale in `controller_uart_bridge.py` if needed.
