@@ -1,0 +1,3 @@
+pyserial
+pysdl2
+rich
