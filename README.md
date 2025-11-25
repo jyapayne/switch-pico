@@ -66,6 +66,21 @@ Options:
 
 Hot‑plugging: controllers and UARTs can be plugged/unplugged while running; the bridge will auto reconnect when possible.
 
+### Using the lightweight UART helper (no SDL needed)
+For simple scripts or tests you can skip SDL and drive the Pico directly with `switch_pico_uart.py`:
+```python
+from switch_pico_uart import SwitchUARTClient, SwitchButton, SwitchHat
+
+with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
+    client.press(SwitchButton.A)
+    client.release(SwitchButton.A)
+    client.move_left_stick(0.0, -1.0)  # push up
+    client.set_hat(SwitchHat.TOP_RIGHT)
+    print(client.poll_rumble())  # returns (left, right) amplitudes 0.0-1.0 or None
+```
+- `SwitchButton` is an `IntFlag` (bitwise friendly) and `SwitchHat` is an `IntEnum` for the DPAD/hat values.
+- The helper only depends on `pyserial`; SDL is not required.
+
 ### macOS tips
 - Ensure the USB‑serial adapter shows up (use `/dev/cu.usb*` for TX).
 - Some controllers’ Guide/Home buttons are intercepted by macOS; using XInput/DInput mode or disabling Steam’s controller handling helps.
