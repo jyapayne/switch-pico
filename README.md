@@ -28,7 +28,9 @@ Flags:
 - `SWITCH_PICO_LOG`: enable/disable UART logging on the Pico.
 
 ### Changing controller colours
-Edit `controller_color_config.h` (RGB values) and rebuild; the Switch will show the new colours on reconnect.
+`./build.sh` now writes a random colour into `controller_color_config.h` before building so the Switch shows a fresh colour when you flash.
+- Use `./build.sh --color FF00AA` (or `--color 12,34,56`) to pick a specific colour applied to the body/buttons/grips.
+- Use `./build.sh --keep-color` if you want to build without touching `controller_color_config.h`.
 
 ## Python bridge (recommended)
 Works on macOS, Windows, Linux. Uses SDL2 + pyserial.
