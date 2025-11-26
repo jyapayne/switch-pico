@@ -97,12 +97,27 @@ DPAD_BUTTONS = {
 
 
 def is_usb_serial(path: str) -> bool:
-    """Heuristic for USB serial path prefixes."""
-    if path.startswith("/dev/tty.") and not path.startswith("/dev/tty.usb"):
+    """
+    Heuristic for USB serial path prefixes (best-effort when VID/PID are missing).
+
+    Accepts common USB-adapter patterns; rejects generic /dev/tty* unless they
+    clearly indicate USB.
+    """
+    lower = path.lower()
+    usb_prefixes = (
+        "/dev/ttyusb",   # Linux USB serial
+        "/dev/ttyacm",   # Linux CDC ACM
+        "/dev/cu.usb",   # macOS cu/tty USB adapters
+        "/dev/tty.usb",
+    )
+    if lower.startswith(usb_prefixes):
+        return True
+    if "usb" in lower:
+        return True
+    if lower.startswith(("/dev/tty", "/dev/cu", "com")):
         return False
-    if path.startswith("/dev/cu.") and not path.startswith("/dev/cu.usb"):
-        return False
-    return True
+    # Default to False for unknown paths; caller can include_non_usb to override.
+    return False
 
 
 def is_usb_serial_port(port: list_ports_common.ListPortInfo) -> bool:
