@@ -112,10 +112,6 @@ def is_usb_serial(path: str) -> bool:
     )
     if lower.startswith(usb_prefixes):
         return True
-    if "usb" in lower:
-        return True
-    if lower.startswith(("/dev/tty", "/dev/cu", "com")):
-        return False
     # Default to False for unknown paths; caller can include_non_usb to override.
     return False
 
