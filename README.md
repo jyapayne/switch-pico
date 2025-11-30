@@ -58,6 +58,8 @@ Options:
 - `--baud 921600` (default 921600; use `500000` if your adapter can’t do 900K).
 - `--frequency 1000` to send at 1 kHz.
 - `--deadzone 0.08` to change stick deadzone (0.0-1.0).
+- `--zero-sticks` to sample the current stick positions on connect and treat them as neutral (cancel drift).
+- `--zero-hotkey z` to choose the terminal hotkey that re-zeroes all connected controllers on demand (press `z` by default; pass an empty string to disable).
 - `--trigger-threshold 0.35` to change analog trigger press threshold (0.0-1.0).
 - `--swap-abxy` to flip AB/XY globally.
 - `--swap-abxy-index N` (repeatable) to flip AB/XY for controllers first seen at index N (auto-converts to a stable GUID).
