@@ -5,16 +5,44 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 ## What you get
 - **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a wired Switch Pro. Takes controller reports over UART1 and passes rumble from the Switch back over UART.
 - **Python bridge** (`controller_uart_bridge.py`): reads SDL2 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
-- **Optional Rust bridge** (`fast_uart_bridge/`): higher‑performance alternative if the Python bridge has rumble latency.
 - **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
 
 ## Hardware wiring (Pico)
 - UART1 pins (fixed in firmware):
-  - **TX**: GPIO4 (Pico pin 6) → RX of your USB‑serial adapter.
-  - **RX**: GPIO5 (Pico pin 7) → TX of your USB‑serial adapter.
+  - **TX**: GPIO4 (Pico pin 6) → RX of your USB-serial adapter.
+  - **RX**: GPIO5 (Pico pin 7) → TX of your USB-serial adapter.
   - **GND**: common ground between Pico and adapter.
 - Baud rate: **921600** (default). Some adapters only handle 500,000; both bridges accept a `--baud` flag.
 - Keep logic at 3.3V; do not feed 5V UART into the Pico.
+
+### Full hookup checklist
+1. **Gather the hardware**
+   - Raspberry Pi Pico flashed with the provided firmware.
+   - USB-A-to-micro USB cable (or USB-C if you use a Pico W) to connect the Pico to the Switch or a PC for testing.
+   - USB-to-UART adapter capable of 3.3 V logic at 921600 baud (FT232, CP2102, CH340, etc.).
+   - Three dupont wires (TX, RX, GND). Optionally add heat-shrink or a small proto board if you want something more permanent.
+
+2. **Wire the Pico to the USB-to-UART adapter**
+   - Pico GPIO4 → adapter RX (sometimes labelled RXD, DI, or R).
+   - Pico GPIO5 → adapter TX (TXD, DO, or T).
+   - Pico GND → adapter GND. Tie grounds even if the adapter is already USB-powered.
+   - Leave VBUS/VCC unconnected unless your adapter explicitly supports 3.3 V power output and you intend to power the Pico from it (the bridge expects the Pico to be powered from USB instead).
+
+3. **Connect everything to the host and Switch**
+   - Plug the USB-to-UART adapter into the computer that will run `controller_uart_bridge.py`. Note the COM port (`Device Manager > Ports`) on Windows or `/dev/cu.*`/`/dev/ttyUSB*` path on macOS/Linux; pass it via `--map`/`--ports`.
+   - Connect the Pico's micro USB port to the Nintendo Switch (via the dock's USB-A port, a USB-C OTG adapter, or a PC if you are only testing). The Pico enumerates as a Switch Pro Controller over USB.
+   - Any SDL-compatible gamepads you want to use should also be plugged into (or paired with) the same host computer that runs the Python bridge; the bridge is the one reading them.
+
+4. **Power-on order and sanity checks**
+   - Power the Switch/dock so the Pico gets 5 V over USB; its USB stack must stay alive while the bridge streams data.
+   - On the host computer, run `python controller_uart_bridge.py --list-controllers` to make sure SDL sees your pads, then start the bridge with `--map`/`--ports` (or `--interactive`) referencing the adapter path you found earlier.
+   - Watch the Rich console output: you should see each controller paired with a UART port and the rumble loop logging reconnects if cables are unplugged.
+
+5. **Common pitfalls**
+   - A flipped TX/RX pair results in silence (no button presses); swap them if the Pico never shows input.
+   - Some adapters default to 5 V logic—move the jumper to 3.3 V before touching the Pico.
+   - If you use multiple adapters, label each cable; COM port numbers can change between boots.
+   - When testing on a PC before plugging into a Switch, you can verify activity with the lightweight `switch_pico_uart.py` helper or the Windows "Game Controllers" panel.
 
 ## Building and flashing firmware
 Prereqs: Pico SDK + CMake toolchain set up.
@@ -67,7 +95,13 @@ Options:
 - `--swap-hotkey x` to pick the runtime hotkey that prompts you to toggle ABXY layout for a specific connected controller (default `x`; empty string disables).
 - `--sdl-mapping path/to/gamecontrollerdb.txt` to load extra SDL mappings (defaults to `controller_db/gamecontrollerdb.txt`).
 
-Hot‑plugging: controllers and UARTs can be plugged/unplugged while running; the bridge will auto reconnect when possible.
+### Runtime hotkeys
+- By default, pressing `z` in the terminal re-samples every connected controller's sticks and re-applies neutral offsets. Change/disable with `--zero-hotkey`.
+- Press `x` (configurable via `--swap-hotkey`) to open an in-CLI prompt and toggle the ABXY layout for a specific connected controller. This updates the controller's stable GUID list immediately; press again to revert.
+- Hotkeys work only when the bridge is started from a TTY/console that currently has focus. Pass an empty string to either flag to disable that shortcut (useful when running unattended).
+- If you launch the bridge with `--swap-abxy` (global swap), the per-controller toggle hotkey will show that the layout is enforced globally and will not override it.
+
+Hot-plugging: controllers and UARTs can be plugged/unplugged while running; the bridge will auto reconnect when possible.
 
 ### Using the lightweight UART helper (no SDL needed)
 For simple scripts or tests you can skip SDL and drive the Pico directly with `switch_pico_uart.py`:
