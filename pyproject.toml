@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "switch-pico-bridge"
+version = "0.1.0"
+description = "SDL2-to-UART host bridge and helpers for the switch-pico firmware."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Switch Pico Maintainers" }]
+dependencies = [
+    "pyserial",
+    "pysdl2",
+    "rich",
+]
+
+[project.scripts]
+controller-uart-bridge = "controller_uart_bridge:main"
+host-uart-logger = "host_uart_logger:main"
+
+[tool.setuptools]
+py-modules = [
+    "controller_uart_bridge",
+    "host_uart_logger",
+    "switch_pico_uart",
+]

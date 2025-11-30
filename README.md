@@ -63,17 +63,31 @@ Flags:
 ## Python bridge (recommended)
 Works on macOS, Windows, Linux. Uses SDL2 + pyserial.
 
-### Install dependencies with uv (or pip)
+### Install dependencies (pyproject-enabled)
+The repository now includes a `pyproject.toml`, so you can install the bridge and helper scripts as an editable package:
+
 ```sh
 # from repo root
 uv venv .venv
-uv pip install pyserial pysdl2
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+uv pip install -e .
 ```
+
+Prefer stock pip?
+
+```sh
+python -m venv .venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+pip install -e .
+```
+
 - SDL2 runtime: install via your OS package manager (macOS: `brew install sdl2`; Windows: place `SDL2.dll` on PATH or next to the script; Linux: `sudo apt install libsdl2-2.0-0` or equivalent).
 
 ### Run
 ```sh
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+controller-uart-bridge --interactive
+# or, equivalently
 python controller_uart_bridge.py --interactive
 ```
 Options:
@@ -88,6 +102,8 @@ Options:
 - `--deadzone 0.08` to change stick deadzone (0.0-1.0).
 - `--zero-sticks` to sample the current stick positions on connect and treat them as neutral (cancel drift).
 - `--zero-hotkey z` to choose the terminal hotkey that re-zeroes all connected controllers on demand (press `z` by default; pass an empty string to disable).
+- `--update-controller-db` to download the latest SDL GameController database before launching (defaults to the copy in `controller_db/` if present).
+- `--controller-db-url URL` to override the source URL when updating the controller database (defaults to the official mdqinc repo).
 - `--trigger-threshold 0.35` to change analog trigger press threshold (0.0-1.0).
 - `--swap-abxy` to flip AB/XY globally.
 - `--swap-abxy-index N` (repeatable) to flip AB/XY for controllers first seen at index N (auto-converts to a stable GUID).
@@ -100,6 +116,11 @@ Options:
 - Press `x` (configurable via `--swap-hotkey`) to open an in-CLI prompt and toggle the ABXY layout for a specific connected controller. This updates the controller's stable GUID list immediately; press again to revert.
 - Hotkeys work only when the bridge is started from a TTY/console that currently has focus. Pass an empty string to either flag to disable that shortcut (useful when running unattended).
 - If you launch the bridge with `--swap-abxy` (global swap), the per-controller toggle hotkey will show that the layout is enforced globally and will not override it.
+
+### Updating SDL controller mappings
+- The bridge ships with a pinned `controller_db/gamecontrollerdb.txt`. Run `controller-uart-bridge --update-controller-db ...` to download the latest database from the official upstream (`mdqinc/SDL_GameControllerDB`).
+- The download only touches `controller_db/gamecontrollerdb.txt`; add `--controller-db-url https://.../custom.txt` if you maintain your own fork.
+- If the file is missing, the bridge will automatically attempt a download on startup.
 
 Hot-plugging: controllers and UARTs can be plugged/unplugged while running; the bridge will auto reconnect when possible.
 
