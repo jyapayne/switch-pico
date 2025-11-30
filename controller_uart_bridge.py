@@ -275,65 +275,108 @@ def calibrate_axis_value(value: int, axis: int, ctx: ControllerContext) -> int:
     return max(-32768, min(32767, value - offset))
 
 
-class ZeroHotkeyMonitor:
-    """Platform-aware helper that watches for a single keypress without blocking the main loop."""
+class HotkeyMonitor:
+    """Platform-aware helper that watches for configured hotkeys without blocking the main loop."""
 
-    def __init__(self, key: str, console: Console) -> None:
-        self.key = (key or "").lower()
+    def __init__(self, console: Console, key_messages: Optional[Dict[str, str]] = None) -> None:
         self.console = console
-        self._active = False
         self._platform = os.name
         self._fd: Optional[int] = None
-        self._old_termios = None
+        self._orig_termios = None
         self._msvcrt = None
+        self._active = False
+        self._started = False
+        self._keys: Dict[str, str] = {}
+        if key_messages:
+            for key, message in key_messages.items():
+                self.register_key(key, message)
+
+    def register_key(self, key: str, message: str) -> None:
+        key = (key or "").lower()
+        if not key:
+            return
+        self._keys[key] = message
+
+    def has_keys(self) -> bool:
+        return bool(self._keys)
 
     def start(self) -> bool:
-        if not self.key:
+        if not self._keys or self._started:
             return False
         if self._platform == "nt":
             try:
                 import msvcrt  # type: ignore
             except ImportError:
-                self.console.print("[yellow]Zero hotkey disabled: msvcrt unavailable.[/yellow]")
+                self.console.print("[yellow]Hotkeys disabled: msvcrt unavailable.[/yellow]")
                 return False
             self._msvcrt = msvcrt
             self._active = True
-            self.console.print(
-                f"[magenta]Press '{self.key.upper()}' in this terminal to re-zero controller sticks.[/magenta]"
-            )
+            self._started = True
+            self._print_instructions()
             return True
 
         if not sys.stdin.isatty():
-            self.console.print("[yellow]Zero hotkey disabled: stdin is not a TTY.[/yellow]")
+            self.console.print("[yellow]Hotkeys disabled: stdin is not a TTY.[/yellow]")
             return False
         import termios
         import tty
 
         self._fd = sys.stdin.fileno()
-        self._old_termios = termios.tcgetattr(self._fd)
+        self._orig_termios = termios.tcgetattr(self._fd)
         tty.setcbreak(self._fd)
         self._active = True
-        self.console.print(
-            f"[magenta]Press '{self.key.upper()}' in this terminal to re-zero controller sticks.[/magenta]"
-        )
+        self._started = True
+        self._print_instructions()
         return True
 
-    def stop(self) -> None:
+    def suspend(self) -> None:
         if not self._active:
             return
-        if self._platform != "nt" and self._fd is not None and self._old_termios is not None:
+        if self._platform != "nt" and self._fd is not None and self._orig_termios is not None:
             import termios
 
-            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_termios)
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._orig_termios)
         self._active = False
 
-    def poll_trigger(self) -> bool:
+    def resume(self) -> None:
+        if not self._started or self._active:
+            return
+        if self._platform == "nt":
+            self._active = True
+            return
+        if self._fd is None:
+            return
+        import tty
+
+        tty.setcbreak(self._fd)
+        self._active = True
+
+    def stop(self) -> None:
+        if self._platform != "nt" and self._fd is not None and self._orig_termios is not None:
+            import termios
+
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._orig_termios)
+        self._active = False
+        self._started = False
+
+    def poll_keys(self) -> List[str]:
         if not self._active:
-            return False
-        key = self._read_key()
-        if key and key.lower() == self.key:
-            return True
-        return False
+            return []
+        pressed: List[str] = []
+        while True:
+            key = self._read_key()
+            if not key:
+                break
+            lowered = key.lower()
+            if lowered in self._keys:
+                pressed.append(lowered)
+        return pressed
+
+    def _print_instructions(self) -> None:
+        if not self._keys:
+            return
+        instructions = " | ".join(f"'{key.upper()}' to {message}" for key, message in self._keys.items())
+        self.console.print(f"[magenta]Hotkeys active: {instructions}[/magenta]")
 
     def _read_key(self) -> Optional[str]:
         if self._platform == "nt":
@@ -371,6 +414,83 @@ def zero_all_context_sticks(contexts: Dict[int, ControllerContext], console: Con
         return
     for ctx in contexts.values():
         zero_context_sticks(ctx, console, reason="Re-zeroed stick centers")
+
+
+def controller_display_name(ctx: ControllerContext) -> str:
+    """Return a human-readable controller name."""
+    name = sdl2.SDL_GameControllerName(ctx.controller)
+    if not name:
+        return "Unknown"
+    if isinstance(name, bytes):
+        return name.decode(errors="ignore")
+    return str(name)
+
+
+def toggle_abxy_for_context(ctx: ControllerContext, config: BridgeConfig, console: Console) -> None:
+    """Toggle the ABXY layout for a single controller."""
+    if config.swap_abxy_global:
+        console.print("[yellow]Global --swap-abxy is enabled; disable it to use per-controller toggles.[/yellow]")
+        return
+    swapped = ctx.stable_id in config.swap_abxy_ids
+    action = "standard" if swapped else "swapped"
+    if swapped:
+        config.swap_abxy_ids.discard(ctx.stable_id)
+    else:
+        config.swap_abxy_ids.add(ctx.stable_id)
+    console.print(
+        f"[cyan]Controller {ctx.controller_index} ({controller_display_name(ctx)}, inst {ctx.instance_id}) now using {action} ABXY layout.[/cyan]"
+    )
+
+
+def prompt_swap_abxy_controller(
+    contexts: Dict[int, ControllerContext],
+    config: BridgeConfig,
+    console: Console,
+    hotkey: Optional[HotkeyMonitor] = None,
+) -> None:
+    """Prompt the user to choose a controller whose ABXY layout should be toggled."""
+    if not contexts:
+        console.print("[yellow]No controllers connected to toggle ABXY layout.[/yellow]")
+        return
+    controllers = sorted(contexts.values(), key=lambda ctx: (ctx.controller_index, ctx.instance_id))
+    table = Table(title="Toggle ABXY layout for a controller")
+    table.add_column("Choice", justify="center")
+    table.add_column("SDL Index", justify="center")
+    table.add_column("Instance", justify="center")
+    table.add_column("Name")
+    table.add_column("GUID")
+    table.add_column("Layout", justify="center")
+    for idx, ctx in enumerate(controllers):
+        swapped = config.swap_abxy_global or (ctx.stable_id in config.swap_abxy_ids)
+        state = "Swapped" if swapped else "Standard"
+        if config.swap_abxy_global:
+            state += " (global)"
+        table.add_row(
+            str(idx),
+            str(ctx.controller_index),
+            str(ctx.instance_id),
+            controller_display_name(ctx),
+            ctx.stable_id or "unknown",
+            state,
+        )
+    console.print(table)
+    choices = [str(i) for i in range(len(controllers))] + ["q"]
+    if hotkey:
+        hotkey.suspend()
+    try:
+        selection = Prompt.ask(
+            "Select controller index to toggle ABXY (or 'q' to cancel)",
+            choices=choices,
+            default="q",
+        )
+    finally:
+        if hotkey:
+            hotkey.resume()
+    if selection == "q":
+        console.print("[yellow]ABXY toggle canceled.[/yellow]")
+        return
+    ctx = controllers[int(selection)]
+    toggle_abxy_for_context(ctx, config, console)
 
 
 def open_controller(index: int) -> Tuple[sdl2.SDL_GameController, int, str]:
@@ -457,6 +577,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="z",
         metavar="KEY",
         help="Press this key in the terminal to re-zero sticks at runtime (default: 'z', empty string disables).",
+    )
+    parser.add_argument(
+        "--swap-hotkey",
+        type=parse_hotkey,
+        default="x",
+        metavar="KEY",
+        help="Press this key in the terminal to toggle ABXY layout for a connected controller (default: 'x'; empty string disables).",
     )
     parser.add_argument(
         "--trigger-threshold",
@@ -554,10 +681,12 @@ class BridgeConfig:
     trigger_threshold: int
     zero_sticks: bool
     zero_hotkey: str
+    swap_hotkey: str
     button_map_default: Dict[int, SwitchButton]
     button_map_swapped: Dict[int, SwitchButton]
     swap_abxy_indices: set[int]
     swap_abxy_ids: set[str]
+    swap_abxy_global: bool
 
 
 @dataclass
@@ -608,10 +737,12 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         trigger_threshold=trigger_threshold,
         zero_sticks=bool(args.zero_sticks),
         zero_hotkey=args.zero_hotkey or "",
+        swap_hotkey=args.swap_hotkey or "",
         button_map_default=button_map_default,
         button_map_swapped=button_map_swapped,
         swap_abxy_indices=swap_abxy_indices,
         swap_abxy_ids=set(swap_abxy_guids),  # filled later once stable IDs are known
+        swap_abxy_global=bool(args.swap_abxy),
     )
 
 
@@ -930,7 +1061,6 @@ def handle_axis_motion(event: sdl2.SDL_Event, contexts: Dict[int, ControllerCont
 
 def handle_button_event(
     event: sdl2.SDL_Event,
-    args: argparse.Namespace,
     config: BridgeConfig,
     contexts: Dict[int, ControllerContext],
 ) -> None:
@@ -940,7 +1070,7 @@ def handle_button_event(
         return
     current_button_map = (
         config.button_map_swapped
-        if (args.swap_abxy or ctx.stable_id in config.swap_abxy_ids)
+        if (config.swap_abxy_global or ctx.stable_id in config.swap_abxy_ids)
         else config.button_map_default
     )
     button = event.cbutton.button
@@ -1045,7 +1175,7 @@ def service_contexts(
     for ctx in list(contexts.values()):
         current_button_map = (
             config.button_map_swapped
-            if (args.swap_abxy or ctx.stable_id in config.swap_abxy_ids)
+            if (config.swap_abxy_global or ctx.stable_id in config.swap_abxy_ids)
             else config.button_map_default
         )
         poll_controller_buttons(ctx, current_button_map)
@@ -1109,7 +1239,7 @@ def run_bridge_loop(
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
     uarts: List[PicoUART],
-    hotkey: Optional[ZeroHotkeyMonitor] = None,
+    hotkey: Optional[HotkeyMonitor] = None,
 ) -> None:
     """Main event loop for bridging controllers to UART and handling rumble."""
     event = sdl2.SDL_Event()
@@ -1125,7 +1255,7 @@ def run_bridge_loop(
             if event.type == sdl2.SDL_CONTROLLERAXISMOTION:
                 handle_axis_motion(event, contexts, config)
             elif event.type in (sdl2.SDL_CONTROLLERBUTTONDOWN, sdl2.SDL_CONTROLLERBUTTONUP):
-                handle_button_event(event, args, config, contexts)
+                handle_button_event(event, config, contexts)
             elif event.type == sdl2.SDL_CONTROLLERDEVICEADDED:
                 handle_device_added(event, args, pairing, contexts, uarts, console, config)
             elif event.type == sdl2.SDL_CONTROLLERDEVICEREMOVED:
@@ -1140,8 +1270,12 @@ def run_bridge_loop(
         else:
             pair_waiting_contexts(args, pairing, contexts, uarts, console)
         service_contexts(now, args, config, contexts, uarts, console)
-        if hotkey and hotkey.poll_trigger():
-            zero_all_context_sticks(contexts, console)
+        if hotkey:
+            for key in hotkey.poll_keys():
+                if key == config.zero_hotkey:
+                    zero_all_context_sticks(contexts, console)
+                elif key == config.swap_hotkey:
+                    prompt_swap_abxy_controller(contexts, config, console, hotkey)
         sdl2.SDL_Delay(1)
 
 
@@ -1163,15 +1297,25 @@ def main() -> None:
     initialize_sdl(parser)
     contexts: Dict[int, ControllerContext] = {}
     uarts: List[PicoUART] = []
-    hotkey_monitor: Optional[ZeroHotkeyMonitor] = None
+    hotkey_monitor: Optional[HotkeyMonitor] = None
     try:
         if args.list_controllers:
             list_controllers_with_guids(console, parser)
             return
         controller_indices, controller_names = detect_controllers(console, args, parser)
         pairing = prepare_pairing_state(args, console, parser, controller_indices, controller_names)
+        hotkey_messages: Dict[str, str] = {}
         if config.zero_hotkey:
-            candidate = ZeroHotkeyMonitor(config.zero_hotkey, console)
+            hotkey_messages[config.zero_hotkey] = "re-zero controller sticks"
+        if config.swap_hotkey:
+            if config.swap_hotkey in hotkey_messages:
+                hotkey_messages[config.swap_hotkey] = (
+                    hotkey_messages[config.swap_hotkey] + "; toggle ABXY layout"
+                )
+            else:
+                hotkey_messages[config.swap_hotkey] = "toggle ABXY layout for a controller"
+        if hotkey_messages:
+            candidate = HotkeyMonitor(console, hotkey_messages)
             if candidate.start():
                 hotkey_monitor = candidate
         contexts, uarts = open_initial_contexts(args, pairing, controller_indices, console, config)

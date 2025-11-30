@@ -64,6 +64,7 @@ Options:
 - `--swap-abxy` to flip AB/XY globally.
 - `--swap-abxy-index N` (repeatable) to flip AB/XY for controllers first seen at index N (auto-converts to a stable GUID).
 - `--swap-abxy-guid GUID` (repeatable) to flip AB/XY for a specific physical controller (GUID is stable across runs).
+- `--swap-hotkey x` to pick the runtime hotkey that prompts you to toggle ABXY layout for a specific connected controller (default `x`; empty string disables).
 - `--sdl-mapping path/to/gamecontrollerdb.txt` to load extra SDL mappings (defaults to `controller_db/gamecontrollerdb.txt`).
 
 Hot‑plugging: controllers and UARTs can be plugged/unplugged while running; the bridge will auto reconnect when possible.
