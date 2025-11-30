@@ -19,6 +19,7 @@ import argparse
 import os
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from ctypes import create_string_buffer
 from pathlib import Path
@@ -50,6 +51,9 @@ RUMBLE_IDLE_TIMEOUT = 0.25  # seconds without packets before forcing rumble off
 RUMBLE_STUCK_TIMEOUT = 0.60  # continuous same-energy rumble will be stopped after this
 RUMBLE_MIN_ACTIVE = 0.50  # below this, rumble is treated as off/noise
 RUMBLE_SCALE = 0.8
+CONTROLLER_DB_URL_DEFAULT = (
+    "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
+)
 
 
 def parse_mapping(value: str) -> Tuple[int, str]:
@@ -64,6 +68,28 @@ def parse_mapping(value: str) -> Tuple[int, str]:
     if not port:
         raise argparse.ArgumentTypeError("Serial port cannot be empty")
     return idx, port.strip()
+
+
+def download_controller_db(console: Console, destination: Path, url: str) -> bool:
+    """Download the latest SDL controller DB to the local controller_db directory."""
+    console.print(f"[cyan]Fetching SDL controller database from {url}...[/cyan]")
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise RuntimeError(f"HTTP {status}")
+            data = response.read()
+    except Exception as exc:
+        console.print(f"[red]Failed to download controller database: {exc}[/red]")
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.write_bytes(data)
+    except Exception as exc:
+        console.print(f"[red]Failed to write controller database to {destination}: {exc}[/red]")
+        return False
+    console.print(f"[green]Updated controller database ({len(data)} bytes) at {destination}[/green]")
+    return True
 
 
 def parse_hotkey(value: str) -> str:
@@ -579,6 +605,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Press this key in the terminal to re-zero sticks at runtime (default: 'z', empty string disables).",
     )
     parser.add_argument(
+        "--update-controller-db",
+        action="store_true",
+        help="Download the latest SDL GameController database before loading mappings.",
+    )
+    parser.add_argument(
+        "--controller-db-url",
+        default=CONTROLLER_DB_URL_DEFAULT,
+        help="Override the URL used to download the SDL GameController database.",
+    )
+    parser.add_argument(
         "--swap-hotkey",
         type=parse_hotkey,
         default="x",
@@ -704,6 +740,8 @@ class PairingState:
 def load_button_maps(console: Console, args: argparse.Namespace) -> Tuple[Dict[int, SwitchButton], Dict[int, SwitchButton], set[int]]:
     """Load SDL controller mappings and return button map variants."""
     default_mapping = Path(__file__).parent / "controller_db" / "gamecontrollerdb.txt"
+    if args.update_controller_db or not default_mapping.exists():
+        download_controller_db(console, default_mapping, args.controller_db_url)
     mappings_to_load: List[str] = []
     if default_mapping.exists():
         mappings_to_load.append(str(default_mapping))
