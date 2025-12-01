@@ -175,7 +175,7 @@ static const uint8_t user_calibration_data[0x3F] = {
 };
 
 static const SwitchFactoryConfig* factory_config = reinterpret_cast<const SwitchFactoryConfig*>(factory_config_data);
-static const SwitchUserCalibration* user_calibration [[maybe_unused]] = reinterpret_cast<const SwitchUserCalibration*>(user_calibration_data);
+static const SwitchUserCalibration* user_calibration = reinterpret_cast<const SwitchUserCalibration*>(user_calibration_data);
 
 static std::map<uint32_t, const uint8_t*> spi_flash_data = {
     {0x6000, factory_config_data},
@@ -557,12 +557,25 @@ void switch_pro_init() {
     last_report_timer = to_ms_since_boot(get_absolute_time());
     last_host_activity_ms = last_report_timer;
 
-    factory_config->leftStickCalibration.getRealMin(leftMinX, leftMinY);
-    factory_config->leftStickCalibration.getCenter(leftCenX, leftCenY);
-    factory_config->leftStickCalibration.getRealMax(leftMaxX, leftMaxY);
-    factory_config->rightStickCalibration.getRealMin(rightMinX, rightMinY);
-    factory_config->rightStickCalibration.getCenter(rightCenX, rightCenY);
-    factory_config->rightStickCalibration.getRealMax(rightMaxX, rightMaxY);
+    // Prefer user calibration if magic bytes are present; otherwise use factory calibration.
+    const bool userLeftValid = user_calibration &&
+        user_calibration->leftCalibrationMagic[0] == 0xB2 &&
+        user_calibration->leftCalibrationMagic[1] == 0xA1;
+    const bool userRightValid = user_calibration &&
+        user_calibration->rightCalibrationMagic[0] == 0xB2 &&
+        user_calibration->rightCalibrationMagic[1] == 0xA1;
+
+    const SwitchLeftCalibration* leftCal = userLeftValid ? &user_calibration->leftCalibration
+                                                         : &factory_config->leftStickCalibration;
+    const SwitchRightCalibration* rightCal = userRightValid ? &user_calibration->rightCalibration
+                                                            : &factory_config->rightStickCalibration;
+
+    leftCal->getRealMin(leftMinX, leftMinY);
+    leftCal->getCenter(leftCenX, leftCenY);
+    leftCal->getRealMax(leftMaxX, leftMaxY);
+    rightCal->getRealMin(rightMinX, rightMinY);
+    rightCal->getCenter(rightCenX, rightCenY);
+    rightCal->getRealMax(rightMaxX, rightMaxY);
 }
 
 void switch_pro_set_input(const SwitchInputState& state) {

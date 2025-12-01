@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from ctypes import create_string_buffer
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import statistics
 
 from serial import SerialException
 import sdl2
@@ -217,11 +218,33 @@ class ControllerContext:
 
 
 def capture_stick_offsets(controller: sdl2.SDL_GameController) -> Dict[int, int]:
-    """Sample the current stick axes so they can be treated as the neutral center."""
-    offsets: Dict[int, int] = {}
-    for axis in STICK_AXES:
-        offsets[axis] = int(sdl2.SDL_GameControllerGetAxis(controller, axis))
-    return offsets
+    """Sample stick axes multiple times and return a robust median offset."""
+    readings: Dict[int, List[int]] = {axis: [] for axis in STICK_AXES}
+    samples = 64
+    interval = 0.004  # seconds between samples (~256 ms total)
+
+    # Small settle window in case the stick was just moved.
+    time.sleep(0.02)
+
+    for _ in range(samples):
+        sdl2.SDL_PumpEvents()
+        for axis in STICK_AXES:
+            readings[axis].append(int(sdl2.SDL_GameControllerGetAxis(controller, axis)))
+        time.sleep(interval)
+
+    def robust_median(values: List[int]) -> int:
+        med = statistics.median(values)
+        mad = statistics.median(abs(v - med) for v in values)
+        if mad == 0:
+            return int(med)
+        # Drop outliers beyond 3 * MAD and recompute.
+        lo, hi = med - (3 * mad), med + (3 * mad)
+        filtered = [v for v in values if lo <= v <= hi]
+        if len(filtered) >= max(8, samples // 4):
+            med = statistics.median(filtered)
+        return int(med)
+
+    return {axis: robust_median(values) for axis, values in readings.items()}
 
 
 def format_axis_offsets(offsets: Dict[int, int]) -> str:
@@ -229,14 +252,13 @@ def format_axis_offsets(offsets: Dict[int, int]) -> str:
     return ", ".join(f"{label}={offsets.get(axis, 0):+d}" for axis, label in STICK_AXIS_LABELS)
 
 
-def calibrate_axis_value(value: int, axis: int, ctx: ControllerContext) -> int:
-    """Apply any stored calibration offset to a raw axis reading."""
-    if not ctx.axis_offsets:
-        return value
-    offset = ctx.axis_offsets.get(axis)
-    if offset is None:
-        return value
-    return max(-32768, min(32767, value - offset))
+def calibrate_axis_value(value: int, axis: int, ctx: ControllerContext, zero_band: int) -> int:
+    """Apply stored offset and squash tiny wobble near center."""
+    if ctx.axis_offsets and axis in ctx.axis_offsets:
+        value -= ctx.axis_offsets[axis]
+    if abs(value) < zero_band:
+        return 0
+    return max(-32768, min(32767, value))
 
 
 class HotkeyMonitor:
@@ -536,6 +558,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Capture stick positions on connect and treat them as neutral to cancel drift.",
     )
     parser.add_argument(
+        "--zero-band",
+        type=int,
+        default=1200,
+        help="Axis range around the stored center treated as neutral (SDL units, default 1200).",
+    )
+    parser.add_argument(
         "--zero-hotkey",
         type=parse_hotkey,
         default="z",
@@ -653,6 +681,7 @@ class BridgeConfig:
     interval: float
     deadzone_raw: int
     trigger_threshold: int
+    zero_band: int
     zero_sticks: bool
     zero_hotkey: str
     swap_hotkey: str
@@ -711,6 +740,7 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         interval=interval,
         deadzone_raw=deadzone_raw,
         trigger_threshold=trigger_threshold,
+        zero_band=max(0, int(args.zero_band)),
         zero_sticks=bool(args.zero_sticks),
         zero_hotkey=args.zero_hotkey or "",
         swap_hotkey=args.swap_hotkey or "",
@@ -727,6 +757,8 @@ def initialize_sdl(parser: argparse.ArgumentParser) -> None:
     sdl2.SDL_SetHint(sdl2.SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
     set_hint("SDL_JOYSTICK_HIDAPI", "1")
     set_hint("SDL_JOYSTICK_HIDAPI_SWITCH", "1")
+    # Force enhanced reports so the HIDAPI driver reads stick calibration data.
+    set_hint("SDL_JOYSTICK_ENHANCED_REPORTS", "1")
     # Use controller button labels so Nintendo layouts (ABXY) map correctly on Linux.
     set_hint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "1")
     if sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER | sdl2.SDL_INIT_JOYSTICK | sdl2.SDL_INIT_EVERYTHING) != 0:
@@ -1008,7 +1040,7 @@ def handle_axis_motion(event: sdl2.SDL_Event, contexts: Dict[int, ControllerCont
     if not ctx:
         return
     axis = event.caxis.axis
-    value = calibrate_axis_value(event.caxis.value, axis, ctx)
+    value = calibrate_axis_value(event.caxis.value, axis, ctx, config.zero_band)
     if axis == sdl2.SDL_CONTROLLER_AXIS_LEFTX:
         ctx.report.lx = axis_to_stick(value, config.deadzone_raw)
     elif axis == sdl2.SDL_CONTROLLER_AXIS_LEFTY:
