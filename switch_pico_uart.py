@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import struct
 import time
+import threading
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
 from typing import Iterable, Mapping, Optional, Tuple, Union
@@ -44,15 +45,15 @@ class SwitchButton(IntFlag):
     CAPTURE = 1 << 13
 
 
-class SwitchHat(IntEnum):
-    TOP = 0x00
-    TOP_RIGHT = 0x01
+class SwitchDpad(IntEnum):
+    UP = 0x00
+    UP_RIGHT = 0x01
     RIGHT = 0x02
-    BOTTOM_RIGHT = 0x03
-    BOTTOM = 0x04
-    BOTTOM_LEFT = 0x05
+    DOWN_RIGHT = 0x03
+    DOWN = 0x04
+    DOWN_LEFT = 0x05
     LEFT = 0x06
-    TOP_LEFT = 0x07
+    UP_LEFT = 0x07
     CENTER = 0x08
 
 
@@ -88,7 +89,7 @@ def trigger_to_button(value: int, threshold: int) -> bool:
     return value >= threshold
 
 
-def dpad_to_hat(flags: Mapping[str, bool]) -> SwitchHat:
+def str_to_dpad(flags: Mapping[str, bool]) -> SwitchDpad:
     """Translate DPAD button flags into a Switch hat value."""
     up = flags.get("up", False)
     down = flags.get("down", False)
@@ -96,28 +97,28 @@ def dpad_to_hat(flags: Mapping[str, bool]) -> SwitchHat:
     right = flags.get("right", False)
 
     if up and right:
-        return SwitchHat.TOP_RIGHT
+        return SwitchDpad.UP_RIGHT
     if up and left:
-        return SwitchHat.TOP_LEFT
+        return SwitchDpad.UP_LEFT
     if down and right:
-        return SwitchHat.BOTTOM_RIGHT
+        return SwitchDpad.DOWN_RIGHT
     if down and left:
-        return SwitchHat.BOTTOM_LEFT
+        return SwitchDpad.DOWN_LEFT
     if up:
-        return SwitchHat.TOP
+        return SwitchDpad.UP
     if down:
-        return SwitchHat.BOTTOM
+        return SwitchDpad.DOWN
     if right:
-        return SwitchHat.RIGHT
+        return SwitchDpad.RIGHT
     if left:
-        return SwitchHat.LEFT
-    return SwitchHat.CENTER
+        return SwitchDpad.LEFT
+    return SwitchDpad.CENTER
 
 
 @dataclass
 class SwitchReport:
     buttons: int = 0
-    hat: SwitchHat = SwitchHat.CENTER
+    hat: SwitchDpad = SwitchDpad.CENTER
     lx: int = 128
     ly: int = 128
     rx: int = 128
@@ -215,24 +216,31 @@ class SwitchControllerState:
 
     report: SwitchReport = field(default_factory=SwitchReport)
 
-    def press(self, *buttons: Union[SwitchButton, int]) -> None:
-        """Set one or more buttons as pressed."""
-        for button in buttons:
-            self.report.buttons |= int(button)
+    def press(self, *buttons_or_hat: Union[SwitchButton, SwitchDpad, int]) -> None:
+        """Press one or more buttons, or set the hat if a SwitchDpad is provided."""
+        for item in buttons_or_hat:
+            if isinstance(item, SwitchDpad):
+                # If multiple hats are provided, the last one wins.
+                self.report.hat = SwitchDpad(int(item) & 0xFF)
+            else:
+                self.report.buttons |= int(item)
 
-    def release(self, *buttons: Union[SwitchButton, int]) -> None:
-        """Release one or more buttons."""
-        for button in buttons:
-            self.report.buttons &= ~int(button)
+    def release(self, *buttons_or_hat: Union[SwitchButton, SwitchDpad, int]) -> None:
+        """Release one or more buttons, or center the hat if a SwitchDpad is provided."""
+        for item in buttons_or_hat:
+            if isinstance(item, SwitchDpad):
+                self.report.hat = SwitchDpad.CENTER
+            else:
+                self.report.buttons &= ~int(item)
 
     def set_buttons(self, buttons: Iterable[Union[SwitchButton, int]]) -> None:
         """Replace the current button bitmask with the provided buttons."""
         self.report.buttons = 0
         self.press(*buttons)
 
-    def set_hat(self, hat: Union[SwitchHat, int]) -> None:
+    def set_hat(self, hat: Union[SwitchDpad, int]) -> None:
         """Set the DPAD/hat value directly."""
-        self.report.hat = int(hat) & 0xFF
+        self.report.hat = SwitchDpad(int(hat) & 0xFF)
 
     def move_left_stick(self, x: Union[int, float], y: Union[int, float]) -> None:
         """Move the left stick using normalized floats (-1..1) or raw bytes (0-255)."""
@@ -247,7 +255,7 @@ class SwitchControllerState:
     def neutral(self) -> None:
         """Clear all input back to the neutral controller state."""
         self.report.buttons = 0
-        self.report.hat = SwitchHat.CENTER
+        self.report.hat = SwitchDpad.CENTER
         self.report.lx = 128
         self.report.ly = 128
         self.report.rx = 128
@@ -266,11 +274,30 @@ class SwitchUARTClient:
             client.move_left_stick(0.0, -1.0)  # push up
     """
 
-    def __init__(self, port: str, baud: int = UART_BAUD, send_interval: float = 0.0) -> None:
+    def __init__(
+        self,
+        port: str,
+        baud: int = UART_BAUD,
+        send_interval: float = 1.0 / 500.0,
+        auto_send: bool = True,
+    ) -> None:
+        """
+        Args:
+            port: Serial port path (e.g., 'COM5' or '/dev/cu.usbserial-0001').
+            baud: UART baud rate.
+            send_interval: Minimum interval between sends in seconds (defaults to 500 Hz).
+            auto_send: If True, keep sending the current state in a background thread so the
+                       Pico continuously sees the latest input (mirrors controller_uart_bridge).
+        """
         self.uart = PicoUART(port, baud)
         self.state = SwitchControllerState()
         self.send_interval = max(0.0, send_interval)
         self._last_send = 0.0
+        self._auto_send = auto_send
+        self._stop_event = threading.Event()
+        self._auto_thread: Optional[threading.Thread] = None
+        if self._auto_send:
+            self._start_auto_send_thread()
 
     def send(self) -> None:
         """Send the current state to the Pico, throttled by send_interval if set."""
@@ -280,19 +307,35 @@ class SwitchUARTClient:
         self.uart.send_report(self.state.report)
         self._last_send = now
 
-    def press(self, *buttons: int) -> None:
+    def _start_auto_send_thread(self) -> None:
+        """Continuously send the current state so the Pico stays active."""
+        if self._auto_thread is not None:
+            return
+        sleep_time = self.send_interval if self.send_interval > 0 else 0.002
+
+        def loop() -> None:
+            while not self._stop_event.is_set():
+                self.send()
+                self._stop_event.wait(sleep_time)
+
+        self._auto_thread = threading.Thread(target=loop, daemon=True)
+        self._auto_thread.start()
+
+    def press(self, *buttons: SwitchButton | SwitchDpad | int) -> None:
+        """Press buttons or set hat using SwitchButton/SwitchDpad (ints also allowed)."""
         self.state.press(*buttons)
         self.send()
 
-    def release(self, *buttons: int) -> None:
+    def release(self, *buttons: SwitchButton | SwitchDpad | int) -> None:
+        """Release buttons or center hat when given a SwitchDpad."""
         self.state.release(*buttons)
         self.send()
 
-    def set_buttons(self, buttons: Iterable[int]) -> None:
+    def set_buttons(self, buttons: Iterable[SwitchButton | int]) -> None:
         self.state.set_buttons(buttons)
         self.send()
 
-    def set_hat(self, hat: int) -> None:
+    def set_hat(self, hat: SwitchDpad | int) -> None:
         self.state.set_hat(hat)
         self.send()
 
@@ -303,6 +346,32 @@ class SwitchUARTClient:
     def move_right_stick(self, x: Union[int, float], y: Union[int, float]) -> None:
         self.state.move_right_stick(x, y)
         self.send()
+
+    def press_for(self, duration: float, *buttons: SwitchButton | SwitchDpad | int) -> None:
+        """Press buttons/hat for a duration, then release."""
+        self.press(*buttons)
+        time.sleep(max(0.0, duration))
+        self.release(*buttons)
+
+    def move_left_stick_for(
+        self, x: Union[int, float], y: Union[int, float], duration: float, neutral_after: bool = True
+    ) -> None:
+        """Move left stick for a duration, optionally returning it to neutral afterward."""
+        self.move_left_stick(x, y)
+        time.sleep(max(0.0, duration))
+        if neutral_after:
+            self.state.move_left_stick(128, 128)
+            self.send()
+
+    def move_right_stick_for(
+        self, x: Union[int, float], y: Union[int, float], duration: float, neutral_after: bool = True
+    ) -> None:
+        """Move right stick for a duration, optionally returning it to neutral afterward."""
+        self.move_right_stick(x, y)
+        time.sleep(max(0.0, duration))
+        if neutral_after:
+            self.state.move_right_stick(128, 128)
+            self.send()
 
     def neutral(self) -> None:
         self.state.neutral()
@@ -319,6 +388,10 @@ class SwitchUARTClient:
         return None
 
     def close(self) -> None:
+        if self._auto_thread:
+            self._stop_event.set()
+            self._auto_thread.join(timeout=0.5)
+        self._auto_thread = None
         self.uart.close()
 
     def __enter__(self) -> "SwitchUARTClient":
