@@ -39,10 +39,10 @@ from switch_pico_uart import (
     UART_BAUD,
     PicoUART,
     SwitchButton,
-    SwitchHat,
+    SwitchDpad,
     SwitchReport,
     axis_to_stick,
-    dpad_to_hat,
+    str_to_dpad,
     decode_rumble,
     trigger_to_button,
 )
@@ -707,7 +707,7 @@ def poll_controller_buttons(ctx: ControllerContext, button_map: Dict[int, Switch
         dpad_changed = True
 
     if dpad_changed:
-        ctx.report.hat = dpad_to_hat(ctx.dpad)
+        ctx.report.hat = str_to_dpad(ctx.dpad)
 
 
 @dataclass
@@ -1122,7 +1122,7 @@ def handle_button_event(
         ctx.button_state[button] = pressed
     elif button in DPAD_BUTTONS:
         ctx.dpad[DPAD_BUTTONS[button]] = pressed
-        ctx.report.hat = dpad_to_hat(ctx.dpad)
+        ctx.report.hat = str_to_dpad(ctx.dpad)
 
 
 def handle_device_added(

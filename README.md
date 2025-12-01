@@ -127,16 +127,16 @@ Hot-plugging: controllers and UARTs can be plugged/unplugged while running; the 
 ### Using the lightweight UART helper (no SDL needed)
 For simple scripts or tests you can skip SDL and drive the Pico directly with `switch_pico_uart.py`:
 ```python
-from switch_pico_uart import SwitchUARTClient, SwitchButton, SwitchHat
+from switch_pico_uart import SwitchUARTClient, SwitchButton, SwitchDpad
 
 with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
     client.press(SwitchButton.A)
     client.release(SwitchButton.A)
     client.move_left_stick(0.0, -1.0)  # push up
-    client.set_hat(SwitchHat.TOP_RIGHT)
+    client.set_hat(SwitchDpad.UP_RIGHT)
     print(client.poll_rumble())  # returns (left, right) amplitudes 0.0-1.0 or None
 ```
-- `SwitchButton` is an `IntFlag` (bitwise friendly) and `SwitchHat` is an `IntEnum` for the DPAD/hat values.
+- `SwitchButton` is an `IntFlag` (bitwise friendly) and `SwitchDpad` is an `IntEnum` for the DPAD/hat values (alias `SwitchHat` remains for older scripts).
 - The helper only depends on `pyserial`; SDL is not required.
 
 ### macOS tips
