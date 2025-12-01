@@ -17,9 +17,10 @@ import time
 import threading
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
-from typing import Iterable, Mapping, Optional, Tuple, Union
+from typing import Iterable, Mapping, Optional, Tuple, Union, List, Dict
 
 import serial
+from serial.tools import list_ports, list_ports_common
 
 UART_HEADER = 0xAA
 RUMBLE_HEADER = 0xBB
@@ -57,6 +58,74 @@ class SwitchDpad(IntEnum):
     CENTER = 0x08
 
 
+def _is_usb_serial_path(path: str) -> bool:
+    """Heuristic for USB serial path prefixes."""
+    lower = path.lower()
+    usb_prefixes = (
+        "/dev/ttyusb",   # Linux USB serial
+        "/dev/ttyacm",   # Linux CDC ACM
+        "/dev/cu.usb",   # macOS cu/tty USB adapters
+        "/dev/tty.usb",
+    )
+    if lower.startswith(usb_prefixes):
+        return True
+    # Windows COM ports don't clearly indicate USB; treat as unknown here.
+    return False
+
+
+def _is_usb_serial_port(port: list_ports_common.ListPortInfo) -> bool:
+    """Heuristic: prefer ports with USB VID/PID; fall back to path hints."""
+    if getattr(port, "vid", None) is not None or getattr(port, "pid", None) is not None:
+        return True
+    path = port.device or ""
+    manufacturer = (getattr(port, "manufacturer", "") or "").upper()
+    if "USB" in manufacturer:
+        return True
+    return _is_usb_serial_path(path)
+
+
+def discover_serial_ports(
+    include_non_usb: bool = False,
+    ignore_descriptions: Optional[List[str]] = None,
+    include_descriptions: Optional[List[str]] = None,
+) -> List[Dict[str, str]]:
+    """
+    List serial ports with simple filtering similar to controller_uart_bridge.
+
+    Args:
+        include_non_usb: Include ports that don't look USB-based (e.g., onboard UARTs).
+        ignore_descriptions: Substrings (case-insensitive) to exclude by description.
+        include_descriptions: If provided, only include ports whose description contains one of these substrings.
+    """
+    ignored = [d.lower() for d in (ignore_descriptions or [])]
+    includes = [d.lower() for d in (include_descriptions or [])]
+    results: List[Dict[str, str]] = []
+    for port in list_ports.comports():
+        path = port.device or ""
+        if not path:
+            continue
+        if not include_non_usb and not _is_usb_serial_port(port):
+            continue
+        desc_lower = (port.description or "").lower()
+        if includes and not any(keep in desc_lower for keep in includes):
+            continue
+        if any(skip in desc_lower for skip in ignored):
+            continue
+        results.append({"device": path, "description": port.description or "Unknown"})
+    return results
+
+
+def first_serial_port(
+    include_non_usb: bool = False,
+    ignore_descriptions: Optional[List[str]] = None,
+    include_descriptions: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Return the first discovered serial port path (or None if none are found)."""
+    ports = discover_serial_ports(include_non_usb, ignore_descriptions, include_descriptions)
+    if not ports:
+        return None
+    return ports[0]["device"]
+
 def clamp_byte(value: Union[int, float]) -> int:
     """Clamp a numeric value to the 0-255 byte range."""
     return max(0, min(255, int(value)))
@@ -90,7 +159,7 @@ def trigger_to_button(value: int, threshold: int) -> bool:
 
 
 def str_to_dpad(flags: Mapping[str, bool]) -> SwitchDpad:
-    """Translate DPAD button flags into a Switch hat value."""
+    """Translate DPAD button flags into a Switch hat/DPAD value."""
     up = flags.get("up", False)
     down = flags.get("down", False)
     left = flags.get("left", False)
