@@ -26,9 +26,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from serial import SerialException
-from serial.tools import list_ports
-from serial.tools import list_ports_common
-
 import sdl2
 import sdl2.ext
 from rich.console import Console
@@ -44,13 +41,14 @@ from switch_pico_uart import (
     axis_to_stick,
     str_to_dpad,
     decode_rumble,
+    discover_serial_ports,
     trigger_to_button,
 )
 
 RUMBLE_IDLE_TIMEOUT = 0.25  # seconds without packets before forcing rumble off
 RUMBLE_STUCK_TIMEOUT = 0.60  # continuous same-energy rumble will be stopped after this
-RUMBLE_MIN_ACTIVE = 0.50  # below this, rumble is treated as off/noise
-RUMBLE_SCALE = 0.8
+RUMBLE_MIN_ACTIVE = 0.40  # below this, rumble is treated as off/noise
+RUMBLE_SCALE = 1.0
 CONTROLLER_DB_URL_DEFAULT = (
     "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
 )
@@ -143,66 +141,6 @@ STICK_AXIS_LABELS = (
 )
 
 STICK_AXES = tuple(axis for axis, _ in STICK_AXIS_LABELS)
-
-
-def is_usb_serial(path: str) -> bool:
-    """
-    Heuristic for USB serial path prefixes (best-effort when VID/PID are missing).
-
-    Accepts common USB-adapter patterns; rejects generic /dev/tty* unless they
-    clearly indicate USB.
-    """
-    lower = path.lower()
-    usb_prefixes = (
-        "/dev/ttyusb",   # Linux USB serial
-        "/dev/ttyacm",   # Linux CDC ACM
-        "/dev/cu.usb",   # macOS cu/tty USB adapters
-        "/dev/tty.usb",
-    )
-    if lower.startswith(usb_prefixes):
-        return True
-    # Default to False for unknown paths; caller can include_non_usb to override.
-    return False
-
-
-def is_usb_serial_port(port: list_ports_common.ListPortInfo) -> bool:
-    """Heuristic: prefer ports with USB VID/PID; fall back to path hints."""
-    if getattr(port, "vid", None) is not None or getattr(port, "pid", None) is not None:
-        return True
-    path = port.device or ""
-    manufacturer = (getattr(port, "manufacturer", "") or "").upper()
-    if "USB" in manufacturer:
-        return True
-    return is_usb_serial(path)
-
-
-def discover_ports(
-    include_non_usb: bool = False,
-    ignore_descriptions: Optional[List[str]] = None,
-    include_descriptions: Optional[List[str]] = None,
-) -> List[Dict[str, str]]:
-    """List serial ports, optionally filtering by description and USB-ness."""
-    ignored = [d.lower() for d in ignore_descriptions or []]
-    includes = [d.lower() for d in include_descriptions or []]
-    results: List[Dict[str, str]] = []
-    for port in list_ports.comports():
-        path = port.device or ""
-        if not path:
-            continue
-        if not include_non_usb and not is_usb_serial_port(port):
-            continue
-        desc_lower = (port.description or "").lower()
-        if includes and not any(keep in desc_lower for keep in includes):
-            continue
-        if any(skip in desc_lower for skip in ignored):
-            continue
-        results.append(
-            {
-                "device": path,
-                "description": port.description or "Unknown",
-            }
-        )
-    return results
 
 
 def interactive_pairing(
@@ -867,7 +805,7 @@ def prepare_pairing_state(
         if not controller_indices:
             parser.error("No controllers detected for interactive pairing.")
         # Interactive pairing shows the discovered ports and lets the user bind explicitly.
-        discovered = discover_ports(
+        discovered = discover_serial_ports(
             include_non_usb=include_non_usb,
             ignore_descriptions=ignore_port_desc,
             include_descriptions=include_port_desc,
@@ -883,7 +821,7 @@ def prepare_pairing_state(
             console.print(f"[green]Prepared {len(available_ports)} specified UART port(s) for auto-pairing.[/green]")
         else:
             # Passive mode: grab whatever UARTs exist now, and keep looking later.
-            discovered = discover_ports(
+            discovered = discover_serial_ports(
                 include_non_usb=include_non_usb,
                 ignore_descriptions=ignore_port_desc,
                 include_descriptions=include_port_desc,
@@ -960,7 +898,7 @@ def discover_new_ports(pairing: PairingState, contexts: Dict[int, ControllerCont
     """Scan for new serial ports and add unused ones to the available pool."""
     if not pairing.auto_discover_ports:
         return
-    discovered = discover_ports(
+    discovered = discover_serial_ports(
         include_non_usb=pairing.include_non_usb,
         ignore_descriptions=pairing.ignore_port_desc,
         include_descriptions=pairing.include_port_desc,
