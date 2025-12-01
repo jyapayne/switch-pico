@@ -715,10 +715,10 @@ def load_button_maps(console: Console, args: argparse.Namespace) -> Tuple[Dict[i
     mappings_to_load.extend(args.sdl_mapping)
     button_map_default = dict(BUTTON_MAP)
     button_map_swapped = dict(BUTTON_MAP)
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_A] = SwitchButton.B
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_B] = SwitchButton.A
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_X] = SwitchButton.Y
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_Y] = SwitchButton.X
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_A] = SwitchButton.A
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_B] = SwitchButton.B
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_X] = SwitchButton.X
+    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_Y] = SwitchButton.Y
     swap_abxy_indices = {idx for idx in args.swap_abxy_index if idx is not None and idx >= 0}
     for mapping_path in mappings_to_load:
         try:
