@@ -584,6 +584,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only include serial ports whose description contains this substring (case-insensitive). Repeatable.",
     )
     parser.add_argument(
+        "--include-port-manufacturer",
+        action="append",
+        default=[],
+        help="Only include serial ports whose manufacturer contains this substring (case-insensitive). Repeatable.",
+    )
+    parser.add_argument(
         "--include-controller-name",
         action="append",
         default=[],
@@ -673,6 +679,7 @@ class PairingState:
     include_non_usb: bool = False
     ignore_port_desc: List[str] = field(default_factory=list)
     include_port_desc: List[str] = field(default_factory=list)
+    include_port_mfr: List[str] = field(default_factory=list)
 
 
 def load_button_maps(console: Console, args: argparse.Namespace) -> Tuple[Dict[int, SwitchButton], Dict[int, SwitchButton], set[int]]:
@@ -798,6 +805,7 @@ def prepare_pairing_state(
     include_non_usb = args.all_ports or False
     ignore_port_desc = [d.lower() for d in args.ignore_port_desc]
     include_port_desc = [d.lower() for d in args.include_port_desc]
+    include_port_mfr = [m.lower() for m in args.include_port_manufacturer]
     available_ports: List[str] = []
 
     mappings = list(args.map)
@@ -809,6 +817,7 @@ def prepare_pairing_state(
             include_non_usb=include_non_usb,
             ignore_descriptions=ignore_port_desc,
             include_descriptions=include_port_desc,
+            include_manufacturers=include_port_mfr,
         )
         if not discovered:
             parser.error("No UART devices found for interactive pairing.")
@@ -825,6 +834,7 @@ def prepare_pairing_state(
                 include_non_usb=include_non_usb,
                 ignore_descriptions=ignore_port_desc,
                 include_descriptions=include_port_desc,
+                include_manufacturers=include_port_mfr,
             )
             if discovered:
                 available_ports.extend(info["device"] for info in discovered)
@@ -843,6 +853,7 @@ def prepare_pairing_state(
         include_non_usb=include_non_usb,
         ignore_port_desc=ignore_port_desc,
         include_port_desc=include_port_desc,
+        include_port_mfr=include_port_mfr,
     )
 
 
@@ -902,6 +913,7 @@ def discover_new_ports(pairing: PairingState, contexts: Dict[int, ControllerCont
         include_non_usb=pairing.include_non_usb,
         ignore_descriptions=pairing.ignore_port_desc,
         include_descriptions=pairing.include_port_desc,
+        include_manufacturers=pairing.include_port_mfr,
     )
     current_paths = {info["device"] for info in discovered}
     known_paths = set(pairing.available_ports)
