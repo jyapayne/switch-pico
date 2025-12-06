@@ -88,6 +88,7 @@ def discover_serial_ports(
     include_non_usb: bool = False,
     ignore_descriptions: Optional[List[str]] = None,
     include_descriptions: Optional[List[str]] = None,
+    include_manufacturers: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
     """
     List serial ports with simple filtering similar to controller_uart_bridge.
@@ -96,9 +97,11 @@ def discover_serial_ports(
         include_non_usb: Include ports that don't look USB-based (e.g., onboard UARTs).
         ignore_descriptions: Substrings (case-insensitive) to exclude by description.
         include_descriptions: If provided, only include ports whose description contains one of these substrings.
+        include_manufacturers: If provided, only include ports whose manufacturer contains one of these substrings.
     """
     ignored = [d.lower() for d in (ignore_descriptions or [])]
     includes = [d.lower() for d in (include_descriptions or [])]
+    include_mfrs = [m.lower() for m in (include_manufacturers or [])]
     results: List[Dict[str, str]] = []
     for port in list_ports.comports():
         path = port.device or ""
@@ -107,11 +110,20 @@ def discover_serial_ports(
         if not include_non_usb and not _is_usb_serial_port(port):
             continue
         desc_lower = (port.description or "").lower()
+        mfr_lower = (port.manufacturer or "").lower()
+        if include_mfrs and not any(keep in mfr_lower for keep in include_mfrs):
+            continue
         if includes and not any(keep in desc_lower for keep in includes):
             continue
         if any(skip in desc_lower for skip in ignored):
             continue
-        results.append({"device": path, "description": port.description or "Unknown"})
+        results.append(
+            {
+                "device": path,
+                "description": port.description or "Unknown",
+                "manufacturer": port.manufacturer or "",
+            }
+        )
     return results
 
 
@@ -119,9 +131,15 @@ def first_serial_port(
     include_non_usb: bool = False,
     ignore_descriptions: Optional[List[str]] = None,
     include_descriptions: Optional[List[str]] = None,
+    include_manufacturers: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Return the first discovered serial port path (or None if none are found)."""
-    ports = discover_serial_ports(include_non_usb, ignore_descriptions, include_descriptions)
+    ports = discover_serial_ports(
+        include_non_usb,
+        ignore_descriptions,
+        include_descriptions,
+        include_manufacturers,
+    )
     if not ports:
         return None
     return ports[0]["device"]
