@@ -2,6 +2,7 @@
  * Switch Pro controller descriptor and data definitions.
  * Copied from the GP2040-CE project to mirror the behaviour of its
  * SwitchProDriver without pulling in the rest of the codebase.
+ * https://github.com/OpenStickCommunity/GP2040-CE
  */
 
 #pragma once
