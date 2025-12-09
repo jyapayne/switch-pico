@@ -26,14 +26,6 @@ static bool g_last_ready = false;
 // Track the latest state provided by UART or the autopilot.
 static SwitchInputState g_user_state;
 
-#ifdef SWITCH_PICO_AUTOTEST
-static bool g_autopilot_active = true;
-static uint32_t g_autopilot_counter = 0;
-static absolute_time_t g_autopilot_last_tick = {0};
-static bool g_uart_activity = false;
-static bool g_ready_logged = false;
-#endif
-
 static void init_uart_input() {
     uart_init(UART_ID, BAUD_RATE);
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
@@ -117,64 +109,10 @@ static void poll_uart_frames() {
                            parsed.dpad_right ? SWITCH_PRO_HAT_RIGHT : SWITCH_PRO_HAT_NOTHING,
                            parsed.lx >> 8, parsed.ly >> 8, parsed.rx >> 8, parsed.ry >> 8);
             }
-#ifdef SWITCH_PICO_AUTOTEST
-            g_uart_activity = true;
-#endif
             index = 0;
         }
     }
 }
-
-#ifdef SWITCH_PICO_AUTOTEST
-// Replays the Switch-Fightstick grip-screen sequence: press L+R twice, then A twice.
-static SwitchInputState autopilot_state(const SwitchInputState& fallback) {
-    if (!g_autopilot_active || g_uart_activity) {
-        g_autopilot_active = false;
-        return fallback;
-    }
-
-    if (!tud_mounted()) {
-        g_autopilot_counter = 0;
-        g_autopilot_last_tick = {0};
-        return fallback;
-    }
-
-    absolute_time_t now = get_absolute_time();
-    if (!to_us_since_boot(g_autopilot_last_tick)) {
-        g_autopilot_last_tick = now;
-    }
-
-    // Run at ~1ms cadence similar to the LUFA fightstick timing.
-    if (absolute_time_diff_us(g_autopilot_last_tick, now) < 1000) {
-        return fallback;
-    }
-    g_autopilot_last_tick = now;
-
-    SwitchInputState state = fallback;
-    state.lx = SWITCH_PRO_JOYSTICK_MID;
-    state.ly = SWITCH_PRO_JOYSTICK_MID;
-    state.rx = SWITCH_PRO_JOYSTICK_MID;
-    state.ry = SWITCH_PRO_JOYSTICK_MID;
-
-    // Fire L+R twice then A twice, loop every ~300ms to keep trying.
-    // Hold each press for a few ms so it survives the 5ms USB report throttle.
-    uint32_t step = g_autopilot_counter % 300;
-    constexpr uint32_t press_width = 50; // ~12ms
-    auto in_window = [](uint32_t v, uint32_t start, uint32_t width) {
-        return v >= start && v < start + width;
-    };
-    bool lr_down = in_window(step, 25, press_width) || in_window(step, 50, press_width);
-    bool a_down = in_window(step, 75, press_width) || in_window(step, 100, press_width);
-
-    state.button_r = lr_down;
-    state.button_l = lr_down;
-    state.button_a = a_down;
-
-    g_autopilot_counter++;
-
-    return state;
-}
-#endif
 
 static void log_usb_state() {
     bool mounted = tud_mounted();
@@ -188,12 +126,6 @@ static void log_usb_state() {
         g_last_ready = ready;
         LOG_PRINTF("[SWITCH] driver %s\n", ready ? "ready (handshake OK)" : "not ready");
     }
-#ifdef SWITCH_PICO_AUTOTEST
-    if (ready && !g_ready_logged) {
-        g_ready_logged = true;
-        LOG_PRINTF("[AUTO] ready -> autopilot active=%s\n", g_autopilot_active ? "true" : "false");
-    }
-#endif
 }
 
 int main() {
@@ -209,21 +141,13 @@ int main() {
     switch_pro_set_input(g_user_state);
 
     LOG_PRINTF("[BOOT] switch-pico starting (UART0 log @ 115200)\n");
-    LOG_PRINTF("[INFO] AUTOTEST=%s UART1 pins TX=%d RX=%d baud=%d\n",
-           #ifdef SWITCH_PICO_AUTOTEST
-           "ON"
-           #else
-           "OFF"
-           #endif
-           , UART_TX_PIN, UART_RX_PIN, BAUD_RATE);
+    LOG_PRINTF("[INFO] UART1 pins TX=%d RX=%d baud=%d\n",
+           UART_TX_PIN, UART_RX_PIN, BAUD_RATE);
 
     while (true) {
         tud_task();          // USB device tasks
         poll_uart_frames();  // Pull controller state from UART1
         SwitchInputState state = g_user_state;
-#ifdef SWITCH_PICO_AUTOTEST
-        state = autopilot_state(state);
-#endif
         switch_pro_set_input(state);
         switch_pro_task();   // Push state to the Switch host
         log_usb_state();
