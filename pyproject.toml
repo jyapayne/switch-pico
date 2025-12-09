@@ -16,12 +16,16 @@ dependencies = [
 ]
 
 [project.scripts]
-controller-uart-bridge = "controller_uart_bridge:main"
-host-uart-logger = "host_uart_logger:main"
+controller-uart-bridge = "switch_pico_bridge.controller_uart_bridge:main"
+host-uart-logger = "switch_pico_bridge.host_uart_logger:main"
 
 [tool.setuptools]
-py-modules = [
-    "controller_uart_bridge",
-    "host_uart_logger",
-    "switch_pico_uart",
-]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["switch_pico_bridge*"]
+
+[tool.setuptools.package-data]
+switch_pico_bridge = ["controller_db/gamecontrollerdb.txt"]

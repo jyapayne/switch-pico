@@ -4,7 +4,7 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 
 ## What you get
 - **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a wired Switch Pro. Takes controller reports over UART1 and passes rumble from the Switch back over UART.
-- **Python bridge** (`controller_uart_bridge.py`): reads SDL2 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
+- **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL2 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
 
 ## Hardware wiring (Pico)
@@ -29,20 +29,20 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
    - Leave VBUS/VCC unconnected unless your adapter explicitly supports 3.3 V power output and you intend to power the Pico from it (the bridge expects the Pico to be powered from USB instead).
 
 3. **Connect everything to the host and Switch**
-   - Plug the USB-to-UART adapter into the computer that will run `controller_uart_bridge.py`. Note the COM port (`Device Manager > Ports`) on Windows or `/dev/cu.*`/`/dev/ttyUSB*` path on macOS/Linux; pass it via `--map`/`--ports`.
+   - Plug the USB-to-UART adapter into the computer that will run the Python bridge. Note the COM port (`Device Manager > Ports`) on Windows or `/dev/cu.*`/`/dev/ttyUSB*` path on macOS/Linux; pass it via `--map`/`--ports`.
    - Connect the Pico's micro USB port to the Nintendo Switch (via the dock's USB-A port, a USB-C OTG adapter, or a PC if you are only testing). The Pico enumerates as a Switch Pro Controller over USB.
    - Any SDL-compatible gamepads you want to use should also be plugged into (or paired with) the same host computer that runs the Python bridge; the bridge is the one reading them.
 
 4. **Power-on order and sanity checks**
    - Power the Switch/dock so the Pico gets 5 V over USB; its USB stack must stay alive while the bridge streams data.
-   - On the host computer, run `python controller_uart_bridge.py --list-controllers` to make sure SDL sees your pads, then start the bridge with `--map`/`--ports` (or `--interactive`) referencing the adapter path you found earlier.
+   - On the host computer, run `controller-uart-bridge --list-controllers` to make sure SDL sees your pads, then start the bridge with `--map`/`--ports` (or `--interactive`) referencing the adapter path you found earlier.
    - Watch the Rich console output: you should see each controller paired with a UART port and the rumble loop logging reconnects if cables are unplugged.
 
 5. **Common pitfalls**
    - A flipped TX/RX pair results in silence (no button presses); swap them if the Pico never shows input.
    - Some adapters default to 5 V logic—move the jumper to 3.3 V before touching the Pico.
    - If you use multiple adapters, label each cable; COM port numbers can change between boots.
-   - When testing on a PC before plugging into a Switch, you can verify activity with the lightweight `switch_pico_uart.py` helper or the Windows "Game Controllers" panel.
+- When testing on a PC before plugging into a Switch, you can verify activity with the lightweight `switch_pico_bridge.switch_pico_uart` helper or the Windows "Game Controllers" panel.
 
 ## Building and flashing firmware
 Prereqs: Pico SDK + CMake toolchain set up.
@@ -88,7 +88,7 @@ pip install -e .
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 controller-uart-bridge --interactive
 # or, equivalently
-python controller_uart_bridge.py --interactive
+python -m switch_pico_bridge.controller_uart_bridge --interactive
 ```
 Options:
 - `--map index:PORT` (repeatable) to pin controller index to serial (e.g., `--map 0:/dev/cu.usbserial-0001` or `--map 0:COM5`).
@@ -102,14 +102,14 @@ Options:
 - `--deadzone 0.08` to change stick deadzone (0.0-1.0).
 - `--zero-sticks` to sample the current stick positions on connect and treat them as neutral (cancel drift).
 - `--zero-hotkey z` to choose the terminal hotkey that re-zeroes all connected controllers on demand (press `z` by default; pass an empty string to disable).
-- `--update-controller-db` to download the latest SDL GameController database before launching (defaults to the copy in `controller_db/` if present).
+- `--update-controller-db` to download the latest SDL GameController database before launching (defaults to the bundled copy in `switch_pico_bridge/controller_db/`).
 - `--controller-db-url URL` to override the source URL when updating the controller database (defaults to the official mdqinc repo).
 - `--trigger-threshold 0.35` to change analog trigger press threshold (0.0-1.0).
 - `--swap-abxy` to flip AB/XY globally.
 - `--swap-abxy-index N` (repeatable) to flip AB/XY for controllers first seen at index N (auto-converts to a stable GUID).
 - `--swap-abxy-guid GUID` (repeatable) to flip AB/XY for a specific physical controller (GUID is stable across runs).
 - `--swap-hotkey x` to pick the runtime hotkey that prompts you to toggle ABXY layout for a specific connected controller (default `x`; empty string disables).
-- `--sdl-mapping path/to/gamecontrollerdb.txt` to load extra SDL mappings (defaults to `controller_db/gamecontrollerdb.txt`).
+- `--sdl-mapping path/to/gamecontrollerdb.txt` to load extra SDL mappings (defaults to `switch_pico_bridge/controller_db/gamecontrollerdb.txt`).
 
 ### Runtime hotkeys
 - By default, pressing `z` in the terminal re-samples every connected controller's sticks and re-applies neutral offsets. Change/disable with `--zero-hotkey`.
@@ -118,16 +118,16 @@ Options:
 - If you launch the bridge with `--swap-abxy` (global swap), the per-controller toggle hotkey will show that the layout is enforced globally and will not override it.
 
 ### Updating SDL controller mappings
-- The bridge ships with a pinned `controller_db/gamecontrollerdb.txt`. Run `controller-uart-bridge --update-controller-db ...` to download the latest database from the official upstream (`mdqinc/SDL_GameControllerDB`).
-- The download only touches `controller_db/gamecontrollerdb.txt`; add `--controller-db-url https://.../custom.txt` if you maintain your own fork.
+- The bridge ships with a pinned `switch_pico_bridge/controller_db/gamecontrollerdb.txt`. Run `controller-uart-bridge --update-controller-db ...` to download the latest database from the official upstream (`mdqinc/SDL_GameControllerDB`).
+- The download only touches `switch_pico_bridge/controller_db/gamecontrollerdb.txt`; add `--controller-db-url https://.../custom.txt` if you maintain your own fork.
 - If the file is missing, the bridge will automatically attempt a download on startup.
 
 Hot-plugging: controllers and UARTs can be plugged/unplugged while running; the bridge will auto reconnect when possible.
 
 ### Using the lightweight UART helper (no SDL needed)
-For simple scripts or tests you can skip SDL and drive the Pico directly with `switch_pico_uart.py`:
+For simple scripts or tests you can skip SDL and drive the Pico directly with `switch_pico_bridge.switch_pico_uart`:
 ```python
-from switch_pico_uart import SwitchUARTClient, SwitchButton, SwitchDpad
+from switch_pico_bridge import SwitchUARTClient, SwitchButton, SwitchDpad
 
 with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
     client.press(SwitchButton.A)
@@ -152,6 +152,6 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 
 ## Troubleshooting
 - **No input on Switch**: verify UART wiring (Pico GPIO4/5), baud matches both sides, Pico flashed with current firmware, Switch sees a “Pro Controller”.
-- **Constant buzzing rumble**: the bridge filters small rumble payloads; ensure baud isn’t dropping bytes. Try lowering rumble scale in `controller_uart_bridge.py` if needed.
+- **Constant buzzing rumble**: the bridge filters small rumble payloads; ensure baud isn’t dropping bytes. Try lowering rumble scale in `switch_pico_bridge.controller_uart_bridge` if needed.
 - **Guide/Home triggers system menu (macOS)**: try different controller mode (XInput/DInput), disable Steam overlay/controller support, or connect wired.
-- **SDL can’t see controller**: load `controller_db/gamecontrollerdb.txt` (default), add your own mapping, or try a different mode on the pad (e.g., XInput).
+- **SDL can’t see controller**: load `switch_pico_bridge/controller_db/gamecontrollerdb.txt` (default), add your own mapping, or try a different mode on the pad (e.g., XInput).

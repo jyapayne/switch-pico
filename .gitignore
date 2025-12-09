@@ -4,5 +4,7 @@ GP2040-CE
 build
 debug
 .pycache
+*.egg-info
+hid-nintendo.c
 __pycache__
 !.vscode/*
