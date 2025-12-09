@@ -32,7 +32,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from switch_pico_uart import (
+from .switch_pico_uart import (
     UART_BAUD,
     PicoUART,
     SwitchButton,

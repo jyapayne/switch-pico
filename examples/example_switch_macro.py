@@ -1,6 +1,6 @@
 # example_switch_macro.py
 import time
-from switch_pico_uart import SwitchUARTClient, SwitchButton, SwitchDpad, first_serial_port
+from switch_pico_bridge import SwitchUARTClient, SwitchButton, SwitchDpad, first_serial_port
 
 PORT = first_serial_port(include_descriptions=["USB to UART"]) or "COM5"  # auto-pick first serial port, or fall back
 SEND_INTERVAL = 1 / 500  # optional: match controller_uart_bridge default
