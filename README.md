@@ -228,6 +228,12 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 ### Linux tips
 - You may need udev permissions for `/dev/ttyUSB*`/`/dev/ttyACM*` (add user to `dialout`/`uucp` or use `udev` rules).
 
+## References
+- GP2040-CE (controller firmware ecosystem): https://github.com/OpenStickCommunity/GP2040-CE
+- nxbt (Switch controller research/tools): https://github.com/Brikwerk/nxbt
+- Nintendo Switch Reverse Engineering notes: https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering
+- `hid-nintendo` driver reference: https://github.com/DanielOgorchock/linux/blob/ogorchock/drivers/hid/hid-nintendo.c
+
 ## Troubleshooting
 - **No input on Switch**: verify UART wiring (Pico GPIO4/5), baud matches both sides, Pico flashed with current firmware, and `Pro Controller Wired Communication` is enabled on the Switch.
 - **Constant buzzing rumble**: the bridge filters small rumble payloads; ensure baud isn’t dropping bytes. Try lowering rumble scale in `switch_pico_bridge.controller_uart_bridge` if needed.
