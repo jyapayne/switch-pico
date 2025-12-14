@@ -67,19 +67,39 @@ RUMBLE (force feedback)
 
 ## Building and flashing firmware
 Prereqs: Pico SDK + CMake toolchain set up.
+
+### One-shot build + flash (picotool)
 ```sh
-cmake -S . -B build -DSWITCH_PICO_AUTOTEST=OFF -DSWITCH_PICO_LOG=OFF
+python3 build.py
+```
+- Requires `picotool` on your `PATH` (or set `PICOTOOL_PATH=/path/to/picotool`) and a connected Pico in BOOTSEL mode to automatically flash.
+- Set `ELF_PATH` to override the default `build/switch-pico.elf`.
+
+### Manual build
+```sh
+cmake -S . -B build -DSWITCH_PICO_LOG=OFF
 cmake --build build -j
 ```
-Flash the UF2 to the Pico (e.g., bootsel + drag-drop or `picotool load`).
+This produces a `.uf2` you can flash (typically `build/switch-pico.uf2`).
+
+### Manual UF2 flashing (BOOTSEL, no tools)
+If you already have a built (or use the pre-built one in `firmware/`) `.uf2`, you can flash it without rebuilding:
+1. Unplug the Pico.
+2. Hold the **BOOTSEL** button.
+3. While holding BOOTSEL, plug the Pico into your computer over USB (not the Switch), then release BOOTSEL.
+4. A USB mass-storage drive (usually `RPI-RP2`) will appear. Copy the `.uf2` onto it (drag-and-drop).
+5. The Pico will reboot automatically and the `RPI-RP2` drive will disappear when flashing completes.
+
+Tip: if you don’t see `RPI-RP2`, try a different USB cable (some are charge-only) or a different USB port/hub.
+
+Flash alternatives: bootsel + drag-drop or `picotool load`.
 Flags:
-- `SWITCH_PICO_AUTOTEST` (default ON in some configs): disable autopilot/test replay with `OFF`.
 - `SWITCH_PICO_LOG`: enable/disable UART logging on the Pico.
 
 ### Changing controller colours
-`./build.sh` now writes a random colour into `controller_color_config.h` before building so the Switch shows a fresh colour when you flash.
-- Use `./build.sh --color FF00AA` (or `--color 12,34,56`) to pick a specific colour applied to the body/buttons/grips.
-- Use `./build.sh --keep-color` if you want to build without touching `controller_color_config.h`.
+`build.py` can optionally update the **grip** colours in `controller_color_config.h` before building/flashing (default leaves the file unchanged):
+- Random grip colours: `python3 build.py --random-grip-color`
+- Set grip colours: `python3 build.py --grip-color FF00AA`
 
 ## Python bridge (recommended)
 Works on macOS, Windows, Linux. Uses SDL2 + pyserial.
