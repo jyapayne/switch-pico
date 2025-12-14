@@ -15,7 +15,7 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 5. Connect the Pico to the Switch (dock USB-A or USB-C OTG); the Switch should see it as a wired Pro Controller.
 
 ## Planned features
-- IMU support for motion controls (gyro/accelerometer passthrough for controllers that support it to the Switch).
+- IMU support for motion controls (gyro/accelerometer passthrough for controllers that support it to the Switch) (WIP branch on `gyrov3`).
 
 ## Limitations
 - No motion controls/IMU passthrough yet (planned).
