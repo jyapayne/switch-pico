@@ -7,13 +7,34 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL2 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
 
+## Quick start
+1. Flash the Pico with `firmware/switch-pico.uf2` (or build your own) using BOOTSEL drag-and-drop (see “Manual UF2 flashing” below).
+2. Wire Pico UART1 to a USB↔UART adapter (GPIO4 TX, GPIO5 RX, GND) and plug that adapter into your host PC.
+3. Enable `System Settings → Controllers and Sensors → Pro Controller Wired Communication` on the Switch.
+4. Install the Python bridge (see “Python bridge”) and run `controller-uart-bridge --interactive`.
+5. Connect the Pico to the Switch (dock USB-A or USB-C OTG); the Switch should see it as a wired Pro Controller.
+
 ## Planned features
 - IMU support for motion controls (gyro/accelerometer passthrough for controllers that support it to the Switch).
 
+## Limitations
+- No motion controls/IMU passthrough yet (planned).
+- No NFC/amiibo/IR support.
+- Rumble is best-effort: it depends on the Switch sending rumble and SDL2 being able to drive haptics on your specific controller.
+- Requires a host computer running the bridge; the Pico is not a Bluetooth/USB host for controllers.
+
 ## Uses
-- **Remote couch co-op**: This was my motivation for the project and my main use case. Let friends play “locally” over Parsec while you feed the Switch a low-latency capture stream (e.g., Magewell Pro Capture) and the bridge provides the controller input path. Simply have the controller_uart_bridge.py script running on the host machine and connect the Pico to the Switch. Then have your friends connect to the host machine via parsec and play as if they were sitting next to you. I use OBS to capture the Switch screen from the capture card and just display it on my monitor for my friends to see. Audio is captured via Voicemeeter Potato and a virtual audio cable. See [here](https://vb-audio.com/Voicemeeter/potato.htm) and [here](https://vb-audio.com/Cable/index.htm) for the ones I use. [Note: Example setup video coming soon]
-- **Switch automation (Python)**: write scripts/bots that drive the Pico directly using `switch_pico_uart.py` / `switch_pico_bridge.switch_pico_uart` (press buttons, move sticks, read rumble).
+- **Remote couch co-op**: friends connect via Parsec while the host streams the Switch via a low-latency capture device (e.g., Magewell Pro Capture) and runs the bridge (see setup below).
+- **Switch automation (Python)**: write scripts/bots that drive the Pico directly using `switch_pico_bridge.switch_pico_uart` (see `examples/example_switch_macro.py`).
 - **Twitch chat plays**: translate chat messages into controller actions on the host, then forward them over UART to the Pico.
+
+### Remote couch co-op setup (example)
+1. Connect the Switch to a low-latency capture device on the host PC; view it in OBS (or your preferred viewer).
+2. Run `controller-uart-bridge` on the host PC and connect the Pico to the Switch for input.
+3. Have friends connect to the host PC using Parsec; they use their controllers on their end, which Parsec forwards to the host (SDL2 sees them).
+4. Optional audio routing: Voicemeeter Potato + a virtual audio cable can help manage capture/voice/game audio mixing:
+   - Voicemeeter Potato: https://vb-audio.com/Voicemeeter/potato.htm
+   - VB-CABLE: https://vb-audio.com/Cable/index.htm
 
 ## End-to-end data flow (input + rumble)
 ```
@@ -52,7 +73,23 @@ RUMBLE (force feedback)
 3. **Connect everything to the host and Switch**
    - Plug the USB-to-UART adapter into the computer that will run the Python bridge. Note the COM port (`Device Manager > Ports`) on Windows or `/dev/cu.*`/`/dev/ttyUSB*` path on macOS/Linux; pass it via `--map`/`--ports`.
    - Connect the Pico's micro USB port to the Nintendo Switch (via the dock's USB-A port, a USB-C OTG adapter, or a PC if you are only testing). The Pico enumerates as a Switch Pro Controller over USB.
+   - On the Switch, enable `System Settings → Controllers and Sensors → Pro Controller Wired Communication`.
    - Any SDL-compatible gamepads you want to use should also be plugged into (or paired with) the same host computer that runs the Python bridge; the bridge is the one reading them.
+
+### Finding your USB↔UART adapter “description” (port filtering)
+If you have multiple serial/COM devices, you can filter which ports the bridge will consider using the port **description** (or vendor/product text) shown by the OS.
+
+- **macOS/Linux (terminal)**:
+  - Quick list with descriptions: `python -m serial.tools.list_ports -v`
+  - Then run the bridge with a filter, for example: `controller-uart-bridge --interactive --include-port-desc CP210`
+- **Windows**:
+  - Device Manager → **Ports (COM & LPT)** → open your adapter → copy the device name/vendor text.
+  - Then run: `controller-uart-bridge --interactive --include-port-desc "USB-SERIAL CH340"`
+
+Filters you can use:
+- `--include-port-desc SUBSTR` (repeatable): only consider ports whose description contains the substring.
+- `--ignore-port-desc SUBSTR` (repeatable): exclude ports whose description contains the substring.
+- `--all-ports`: include non-USB serial devices in discovery (useful if your adapter isn’t tagged as USB by the OS).
 
 4. **Power-on order and sanity checks**
    - Power the Switch/dock so the Pico gets 5 V over USB; its USB stack must stay alive while the bridge streams data.
@@ -192,7 +229,7 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 - You may need udev permissions for `/dev/ttyUSB*`/`/dev/ttyACM*` (add user to `dialout`/`uucp` or use `udev` rules).
 
 ## Troubleshooting
-- **No input on Switch**: verify UART wiring (Pico GPIO4/5), baud matches both sides, Pico flashed with current firmware, Switch sees a “Pro Controller”.
+- **No input on Switch**: verify UART wiring (Pico GPIO4/5), baud matches both sides, Pico flashed with current firmware, and `Pro Controller Wired Communication` is enabled on the Switch.
 - **Constant buzzing rumble**: the bridge filters small rumble payloads; ensure baud isn’t dropping bytes. Try lowering rumble scale in `switch_pico_bridge.controller_uart_bridge` if needed.
 - **Guide/Home triggers system menu (macOS)**: try different controller mode (XInput/DInput), disable Steam overlay/controller support, or connect wired.
 - **SDL can’t see controller**: load `switch_pico_bridge/controller_db/gamecontrollerdb.txt` (default), add your own mapping, or try a different mode on the pad (e.g., XInput).
