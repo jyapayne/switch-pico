@@ -115,7 +115,6 @@ def build():
             str(SCRIPT_DIR),
             "-B",
             str(BUILD_DIR),
-            "-DSWITCH_PICO_AUTOTEST=OFF",
             "-DSWITCH_PICO_LOG=OFF",
         ]
     )
