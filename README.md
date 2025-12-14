@@ -7,6 +7,27 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL2 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
 
+## Planned features
+- IMU support for motion controls (gyro/accelerometer passthrough for controllers that support it to the Switch).
+
+## Uses
+- **Remote couch co-op**: This was my motivation for the project and my main use case. Let friends play “locally” over Parsec while you feed the Switch a low-latency capture stream (e.g., Magewell Pro Capture) and the bridge provides the controller input path. Simply have the controller_uart_bridge.py script running on the host machine and connect the Pico to the Switch. Then have your friends connect to the host machine via parsec and play as if they were sitting next to you. I use OBS to capture the Switch screen from the capture card and just display it on my monitor for my friends to see. Audio is captured via Voicemeeter Potato and a virtual audio cable. See [here](https://vb-audio.com/Voicemeeter/potato.htm) and [here](https://vb-audio.com/Cable/index.htm) for the ones I use. [Note: Example setup video coming soon]
+- **Switch automation (Python)**: write scripts/bots that drive the Pico directly using `switch_pico_uart.py` / `switch_pico_bridge.switch_pico_uart` (press buttons, move sticks, read rumble).
+- **Twitch chat plays**: translate chat messages into controller actions on the host, then forward them over UART to the Pico.
+
+## End-to-end data flow (input + rumble)
+```
+INPUT (buttons/sticks)
+[Any controller] -> [Host OS HID] -> [SDL2 GameController] -> [controller-uart-bridge]
+                 -> [USB↔UART adapter + UART serial] -> [Pico firmware] -> [USB (Switch Pro)]
+                 -> [Nintendo Switch]
+
+RUMBLE (force feedback)
+[Nintendo Switch] -> [USB rumble output report] -> [Pico firmware]
+                 -> [UART serial + USB↔UART adapter] -> [controller-uart-bridge]
+                 -> [SDL2 haptics] -> [Any controller motors]
+```
+
 ## Hardware wiring (Pico)
 - UART1 pins (fixed in firmware):
   - **TX**: GPIO4 (Pico pin 6) → RX of your USB-serial adapter.
