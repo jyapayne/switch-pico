@@ -214,6 +214,7 @@ class ControllerContext:
     last_rumble_energy: float = 0.0
     rumble_active: bool = False
     axis_offsets: Dict[int, int] = field(default_factory=dict)
+    swap_abxy: bool = False
 
 
 def capture_stick_offsets(controller: sdl2.SDL_GameController) -> Dict[int, int]:
@@ -395,12 +396,9 @@ def toggle_abxy_for_context(ctx: ControllerContext, config: BridgeConfig, consol
     if config.swap_abxy_global:
         console.print("[yellow]Global --swap-abxy is enabled; disable it to use per-controller toggles.[/yellow]")
         return
-    swapped = ctx.stable_id in config.swap_abxy_ids
+    swapped = ctx.swap_abxy
     action = "standard" if swapped else "swapped"
-    if swapped:
-        config.swap_abxy_ids.discard(ctx.stable_id)
-    else:
-        config.swap_abxy_ids.add(ctx.stable_id)
+    ctx.swap_abxy = not swapped
     console.print(
         f"[cyan]Controller {ctx.controller_index} ({controller_display_name(ctx)}, inst {ctx.instance_id}) now using {action} ABXY layout.[/cyan]"
     )
@@ -425,7 +423,7 @@ def prompt_swap_abxy_controller(
     table.add_column("GUID")
     table.add_column("Layout", justify="center")
     for idx, ctx in enumerate(controllers):
-        swapped = config.swap_abxy_global or (ctx.stable_id in config.swap_abxy_ids)
+        swapped = config.swap_abxy_global or ctx.swap_abxy
         state = "Swapped" if swapped else "Standard"
         if config.swap_abxy_global:
             state += " (global)"
@@ -988,8 +986,7 @@ def open_initial_contexts(
             console.print(f"[red]Failed to open controller {index}: {exc}[/red]")
             continue
         stable_id = guid
-        if index in config.swap_abxy_indices:
-            config.swap_abxy_ids.add(stable_id)
+        should_swap = index in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
         uart = open_uart_or_warn(port, args.baud, console) if port else None
         if uart:
             uarts.append(uart)
@@ -1007,6 +1004,7 @@ def open_initial_contexts(
             stable_id=stable_id,
             port=port,
             uart=uart,
+            swap_abxy=should_swap,
         )
         if config.zero_sticks:
             zero_context_sticks(ctx, console)
@@ -1058,7 +1056,7 @@ def handle_button_event(
         return
     current_button_map = (
         config.button_map_swapped
-        if (config.swap_abxy_global or ctx.stable_id in config.swap_abxy_ids)
+        if (config.swap_abxy_global or ctx.swap_abxy)
         else config.button_map_default
     )
     button = event.cbutton.button
@@ -1103,9 +1101,8 @@ def handle_device_added(
         console.print(f"[red]Hotplug open failed for controller {idx}: {exc}[/red]")
         return
     stable_id = guid
-    # Promote any index-based swap flags to stable IDs on first sight.
-    if idx in config.swap_abxy_indices:
-        config.swap_abxy_ids.add(stable_id)
+    # Determine if this controller should have swapped ABXY based on index or GUID
+    should_swap = idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
     uart = open_uart_or_warn(port, args.baud, console) if port else None
     if uart:
         uarts.append(uart)
@@ -1123,6 +1120,7 @@ def handle_device_added(
         stable_id=stable_id,
         port=port,
         uart=uart,
+        swap_abxy=should_swap,
     )
     if config.zero_sticks:
         zero_context_sticks(ctx, console)
@@ -1163,7 +1161,7 @@ def service_contexts(
     for ctx in list(contexts.values()):
         current_button_map = (
             config.button_map_swapped
-            if (config.swap_abxy_global or ctx.stable_id in config.swap_abxy_ids)
+            if (config.swap_abxy_global or ctx.swap_abxy)
             else config.button_map_default
         )
         poll_controller_buttons(ctx, current_button_map)
