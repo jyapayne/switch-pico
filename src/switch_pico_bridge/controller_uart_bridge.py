@@ -62,12 +62,10 @@ SDL_TRUE = True
 SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(
     sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE", 0x658
 )
-GYRO_BIAS_SAMPLES = 200
+GYRO_BIAS_SAMPLES = 100  # samples to collect for bias (~0.5 s at 200 Hz)
+GYRO_BIAS_WARMUP_S = 1.5  # seconds to wait before starting calibration
+GYRO_BIAS_TIMEOUT_S = 10.0  # force-lock after this many seconds even if still moving
 IMU_BUFFER_SIZE = 32
-# Gyro samples exceeding this magnitude (rad/s) during calibration are treated as
-# motion and discarded. ~0.5 rad/s = ~28 deg/s covers all realistic hand tremor
-# while excluding deliberate movement or controller-pickup events.
-GYRO_MOTION_THRESHOLD = 0.5
 
 
 def parse_mapping(value: str) -> Tuple[int, str]:
@@ -264,6 +262,7 @@ class ControllerContext:
     gyro_bias_z: float = 0.0
     gyro_bias_samples: int = 0
     gyro_bias_locked: bool = False
+    gyro_bias_start_time: float = 0.0  # monotonic time when calibration began
     last_debug_imu_print: float = 0.0
 
 
@@ -1366,32 +1365,51 @@ def handle_sensor_update(
     gx, gy, gz = float(data[0]), float(data[1]), float(data[2])
 
     if not ctx.gyro_bias_locked:
-        # Reject motion samples — only accumulate when controller is still.
-        # This prevents startup movement (typing, setting down controller) from
-        # corrupting the bias estimate, which would cause constant camera drift.
-        magnitude = (gx * gx + gy * gy + gz * gz) ** 0.5
-        if magnitude < GYRO_MOTION_THRESHOLD:
+        now = time.monotonic()
+
+        # Track when the first gyro event arrived so we can enforce the warmup.
+        if ctx.gyro_bias_start_time == 0.0:
+            ctx.gyro_bias_start_time = now
+            print(
+                f"[IMU idx={ctx.controller_index}] Gyro bias calibration started — "
+                f"hold controller still for {GYRO_BIAS_WARMUP_S:.0f}s..."
+            )
+
+        elapsed = now - ctx.gyro_bias_start_time
+
+        # Phase 1: warmup — discard all samples, just wait.
+        if elapsed < GYRO_BIAS_WARMUP_S:
+            return
+
+        # Phase 2: collect samples unconditionally.
+        # Timeout: after GYRO_BIAS_TIMEOUT_S total, force-lock with whatever we have.
+        if ctx.gyro_bias_samples < GYRO_BIAS_SAMPLES:
             ctx.gyro_bias_x += gx
             ctx.gyro_bias_y += gy
             ctx.gyro_bias_z += gz
             ctx.gyro_bias_samples += 1
-        if ctx.gyro_bias_samples >= GYRO_BIAS_SAMPLES:
-            n = ctx.gyro_bias_samples
+
+        force_lock = elapsed > GYRO_BIAS_TIMEOUT_S and ctx.gyro_bias_samples > 10
+
+        if ctx.gyro_bias_samples >= GYRO_BIAS_SAMPLES or force_lock:
+            n = max(ctx.gyro_bias_samples, 1)
             ctx.gyro_bias_x /= n
             ctx.gyro_bias_y /= n
             ctx.gyro_bias_z /= n
             ctx.gyro_bias_locked = True
-            if config.debug_imu:
-                import math
+            import math
 
-                mag = math.sqrt(
-                    ctx.gyro_bias_x**2 + ctx.gyro_bias_y**2 + ctx.gyro_bias_z**2
-                )
-                print(
-                    f"[IMU idx={ctx.controller_index}] bias locked: "
-                    f"({ctx.gyro_bias_x:.5f}, {ctx.gyro_bias_y:.5f}, {ctx.gyro_bias_z:.5f}) rad/s  "
-                    f"magnitude={mag:.5f} rad/s = {mag * 180 / math.pi:.2f} deg/s"
-                )
+            mag = math.sqrt(
+                ctx.gyro_bias_x**2 + ctx.gyro_bias_y**2 + ctx.gyro_bias_z**2
+            )
+            quality = (
+                "OK" if mag < 0.05 else "WARN: controller was moving during calibration"
+            )
+            print(
+                f"[IMU idx={ctx.controller_index}] Bias locked{' (timeout)' if force_lock else ''}: "
+                f"({ctx.gyro_bias_x:.5f}, {ctx.gyro_bias_y:.5f}, {ctx.gyro_bias_z:.5f}) rad/s  "
+                f"magnitude={mag:.4f} rad/s = {mag * 180 / math.pi:.2f} deg/s  [{quality}]"
+            )
         # Don't send IMU until bias is locked — raw unbiased values cause drift.
         return
 
