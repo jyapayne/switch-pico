@@ -12,6 +12,7 @@ depending on SDL. It mirrors the framing in ``switch-pico.cpp``:
 
 from __future__ import annotations
 
+import math
 import struct
 import time
 import threading
@@ -23,9 +24,28 @@ import serial
 from serial.tools import list_ports, list_ports_common
 
 UART_HEADER = 0xAA
+UART_PROTOCOL_VERSION = 0x02
 RUMBLE_HEADER = 0xBB
 RUMBLE_TYPE_RUMBLE = 0x01
 UART_BAUD = 921600
+IMU_SAMPLES_PER_REPORT = 3
+
+MS2_PER_G = 9.80665
+RAD_TO_DEG = 180.0 / math.pi
+ACCEL_LSB_PER_G = 4096.0
+GYRO_LSB_PER_RAD_S = 818.5
+
+try:
+    import sdl2 as _sdl2  # type: ignore[import-not-found]
+
+    _sensor_accel = getattr(_sdl2, "SDL_SENSOR_ACCEL", 1)
+    _sensor_gyro = getattr(_sdl2, "SDL_SENSOR_GYRO", 2)
+except ImportError:
+    _sensor_accel = 1
+    _sensor_gyro = 2
+
+SENSOR_ACCEL: int = _sensor_accel
+SENSOR_GYRO: int = _sensor_gyro
 
 
 class SwitchButton(IntFlag):
@@ -62,9 +82,9 @@ def _is_usb_serial_path(path: str) -> bool:
     """Heuristic for USB serial path prefixes."""
     lower = path.lower()
     usb_prefixes = (
-        "/dev/ttyusb",   # Linux USB serial
-        "/dev/ttyacm",   # Linux CDC ACM
-        "/dev/cu.usb",   # macOS cu/tty USB adapters
+        "/dev/ttyusb",  # Linux USB serial
+        "/dev/ttyacm",  # Linux CDC ACM
+        "/dev/cu.usb",  # macOS cu/tty USB adapters
         "/dev/tty.usb",
     )
     if lower.startswith(usb_prefixes):
@@ -144,6 +164,7 @@ def first_serial_port(
         return None
     return ports[0]["device"]
 
+
 def clamp_byte(value: Union[int, float]) -> int:
     """Clamp a numeric value to the 0-255 byte range."""
     return max(0, min(255, int(value)))
@@ -202,6 +223,21 @@ def str_to_dpad(flags: Mapping[str, bool]) -> SwitchDpad:
     return SwitchDpad.CENTER
 
 
+def compute_checksum(data: bytes) -> int:
+    """Compute UART checksum as sum of bytes modulo 256."""
+    return sum(data) & 0xFF
+
+
+@dataclass
+class IMUSample:
+    accel_x: int = 0
+    accel_y: int = 0
+    accel_z: int = 0
+    gyro_x: int = 0
+    gyro_y: int = 0
+    gyro_z: int = 0
+
+
 @dataclass
 class SwitchReport:
     buttons: int = 0
@@ -210,12 +246,37 @@ class SwitchReport:
     ly: int = 128
     rx: int = 128
     ry: int = 128
+    imu_samples: List[IMUSample] = field(default_factory=list)
 
     def to_bytes(self) -> bytes:
-        """Serialize the report into the UART packet format."""
-        return struct.pack(
-            "<BHBBBBB", UART_HEADER, self.buttons & 0xFFFF, self.hat & 0xFF, self.lx, self.ly, self.rx, self.ry
+        """Serialize the report into UART v2 framed packet format."""
+        count = min(len(self.imu_samples), IMU_SAMPLES_PER_REPORT)
+        payload = struct.pack(
+            "<HBBBBBB",
+            self.buttons & 0xFFFF,
+            int(self.hat) & 0xFF,
+            clamp_byte(self.lx),
+            clamp_byte(self.ly),
+            clamp_byte(self.rx),
+            clamp_byte(self.ry),
+            count,
         )
+
+        for i in range(count):
+            sample = self.imu_samples[i]
+            payload += struct.pack(
+                "<hhhhhh",
+                max(-32768, min(32767, int(sample.accel_x))),
+                max(-32768, min(32767, int(sample.accel_y))),
+                max(-32768, min(32767, int(sample.accel_z))),
+                max(-32768, min(32767, int(sample.gyro_x))),
+                max(-32768, min(32767, int(sample.gyro_y))),
+                max(-32768, min(32767, int(sample.gyro_z))),
+            )
+
+        payload_len = len(payload)
+        frame = bytes([UART_HEADER, UART_PROTOCOL_VERSION, payload_len]) + payload
+        return frame + bytes([compute_checksum(frame)])
 
 
 class PicoUART:
@@ -267,15 +328,15 @@ class PicoUART:
                     del self._buffer[:start]
                 return None
 
-            frame = self._buffer[start:start + 11]
-            checksum = sum(frame[:10]) & 0xFF
+            frame = self._buffer[start : start + 11]
+            checksum = compute_checksum(bytes(frame[:10]))
 
             if frame[1] == RUMBLE_TYPE_RUMBLE and checksum == frame[10]:
                 payload = bytes(frame[2:10])
-                del self._buffer[:start + 11]
+                del self._buffer[: start + 11]
                 return payload
 
-            del self._buffer[:start + 1]
+            del self._buffer[: start + 1]
 
     def close(self) -> None:
         """Close the UART connection."""
@@ -434,14 +495,20 @@ class SwitchUARTClient:
         self.state.move_right_stick(x, y)
         self.send()
 
-    def press_for(self, duration: float, *buttons: SwitchButton | SwitchDpad | int) -> None:
+    def press_for(
+        self, duration: float, *buttons: SwitchButton | SwitchDpad | int
+    ) -> None:
         """Press buttons/hat for a duration, then release."""
         self.press(*buttons)
         time.sleep(max(0.0, duration))
         self.release(*buttons)
 
     def move_left_stick_for(
-        self, x: Union[int, float], y: Union[int, float], duration: float, neutral_after: bool = True
+        self,
+        x: Union[int, float],
+        y: Union[int, float],
+        duration: float,
+        neutral_after: bool = True,
     ) -> None:
         """Move left stick for a duration, optionally returning it to neutral afterward."""
         self.move_left_stick(x, y)
@@ -451,7 +518,11 @@ class SwitchUARTClient:
             self.send()
 
     def move_right_stick_for(
-        self, x: Union[int, float], y: Union[int, float], duration: float, neutral_after: bool = True
+        self,
+        x: Union[int, float],
+        y: Union[int, float],
+        duration: float,
+        neutral_after: bool = True,
     ) -> None:
         """Move right stick for a duration, optionally returning it to neutral afterward."""
         self.move_right_stick(x, y)
