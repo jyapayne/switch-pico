@@ -1322,13 +1322,22 @@ def handle_sensor_update(
     uz -= bz
 
     ax, ay, az = ctx.last_accel
+    # SDL (hidapi_switch.c SendSensorUpdate) remaps Nintendo's native axes to match
+    # PlayStation convention before emitting sensor events:
+    #   SDL_out[0] (X) = -(Nintendo_Y * scale)
+    #   SDL_out[1] (Y) = +(Nintendo_Z * scale)
+    #   SDL_out[2] (Z) = -(Nintendo_X * scale)
+    # We must reverse that to recover Nintendo-native values:
+    #   Nintendo_X = -SDL_Z
+    #   Nintendo_Y = -SDL_X
+    #   Nintendo_Z = +SDL_Y
     sample = IMUSample(
-        accel_x=convert_accel_to_raw(ax),
-        accel_y=convert_accel_to_raw(ay),
-        accel_z=convert_accel_to_raw(az),
-        gyro_x=convert_gyro_to_raw(ux, config.gyro_scale),
-        gyro_y=convert_gyro_to_raw(uy, config.gyro_scale),
-        gyro_z=convert_gyro_to_raw(uz, config.gyro_scale),
+        accel_x=convert_accel_to_raw(-az),
+        accel_y=convert_accel_to_raw(-ax),
+        accel_z=convert_accel_to_raw(ay),
+        gyro_x=convert_gyro_to_raw(-uz, config.gyro_scale),
+        gyro_y=convert_gyro_to_raw(-ux, config.gyro_scale),
+        gyro_z=convert_gyro_to_raw(uy, config.gyro_scale),
     )
 
     ctx.imu_samples.append(sample)
