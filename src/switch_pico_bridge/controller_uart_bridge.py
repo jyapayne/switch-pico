@@ -16,6 +16,7 @@ Features inspired by ``host/controller_bridge.py``:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import sys
 import time
@@ -26,8 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from serial import SerialException
-import sdl2
-import sdl2.ext
+import sdl3
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
@@ -58,8 +58,8 @@ RUMBLE_STUCK_TIMEOUT = 0.60  # continuous same-energy rumble will be stopped aft
 RUMBLE_MIN_ACTIVE = 0.40  # below this, rumble is treated as off/noise
 RUMBLE_SCALE = 1.0
 CONTROLLER_DB_URL_DEFAULT = "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
-SDL_TRUE = getattr(sdl2, "SDL_TRUE", 1)
-SDL_CONTROLLERSENSORUPDATE = getattr(sdl2, "SDL_CONTROLLERSENSORUPDATE", 0x658)
+SDL_TRUE = True
+SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE", 0x658)
 GYRO_BIAS_SAMPLES = 200
 IMU_BUFFER_SIZE = 32
 
@@ -121,41 +121,41 @@ def parse_hotkey(value: str) -> str:
 
 
 def set_hint(name: str, value: str) -> None:
-    """Set an SDL hint safely even if the constant is missing in PySDL2."""
+    """Set an SDL hint safely even if the constant is missing."""
     try:
-        sdl2.SDL_SetHint(name.encode(), value.encode())
+        sdl3.SDL_SetHint(name.encode(), value.encode())
     except Exception:
         pass
 
 
 BUTTON_MAP = {
     # Direct mapping to the Switch PRO mask definitions in switch_pro_descriptors.h
-    sdl2.SDL_CONTROLLER_BUTTON_A: SwitchButton.A,
-    sdl2.SDL_CONTROLLER_BUTTON_B: SwitchButton.B,
-    sdl2.SDL_CONTROLLER_BUTTON_X: SwitchButton.X,
-    sdl2.SDL_CONTROLLER_BUTTON_Y: SwitchButton.Y,
-    sdl2.SDL_CONTROLLER_BUTTON_LEFTSHOULDER: SwitchButton.L,
-    sdl2.SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: SwitchButton.R,
-    sdl2.SDL_CONTROLLER_BUTTON_BACK: SwitchButton.MINUS,
-    sdl2.SDL_CONTROLLER_BUTTON_START: SwitchButton.PLUS,
-    sdl2.SDL_CONTROLLER_BUTTON_GUIDE: SwitchButton.HOME,
-    sdl2.SDL_CONTROLLER_BUTTON_MISC1: SwitchButton.CAPTURE,
-    sdl2.SDL_CONTROLLER_BUTTON_LEFTSTICK: SwitchButton.LCLICK,
-    sdl2.SDL_CONTROLLER_BUTTON_RIGHTSTICK: SwitchButton.RCLICK,
+    sdl3.SDL_GAMEPAD_BUTTON_SOUTH: SwitchButton.B,
+    sdl3.SDL_GAMEPAD_BUTTON_EAST: SwitchButton.A,
+    sdl3.SDL_GAMEPAD_BUTTON_WEST: SwitchButton.Y,
+    sdl3.SDL_GAMEPAD_BUTTON_NORTH: SwitchButton.X,
+    sdl3.SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: SwitchButton.L,
+    sdl3.SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: SwitchButton.R,
+    sdl3.SDL_GAMEPAD_BUTTON_BACK: SwitchButton.MINUS,
+    sdl3.SDL_GAMEPAD_BUTTON_START: SwitchButton.PLUS,
+    sdl3.SDL_GAMEPAD_BUTTON_GUIDE: SwitchButton.HOME,
+    sdl3.SDL_GAMEPAD_BUTTON_MISC1: SwitchButton.CAPTURE,
+    sdl3.SDL_GAMEPAD_BUTTON_LEFT_STICK: SwitchButton.LCLICK,
+    sdl3.SDL_GAMEPAD_BUTTON_RIGHT_STICK: SwitchButton.RCLICK,
 }
 
 DPAD_BUTTONS = {
-    sdl2.SDL_CONTROLLER_BUTTON_DPAD_UP: "up",
-    sdl2.SDL_CONTROLLER_BUTTON_DPAD_DOWN: "down",
-    sdl2.SDL_CONTROLLER_BUTTON_DPAD_LEFT: "left",
-    sdl2.SDL_CONTROLLER_BUTTON_DPAD_RIGHT: "right",
+    sdl3.SDL_GAMEPAD_BUTTON_DPAD_UP: "up",
+    sdl3.SDL_GAMEPAD_BUTTON_DPAD_DOWN: "down",
+    sdl3.SDL_GAMEPAD_BUTTON_DPAD_LEFT: "left",
+    sdl3.SDL_GAMEPAD_BUTTON_DPAD_RIGHT: "right",
 }
 
 STICK_AXIS_LABELS = (
-    (sdl2.SDL_CONTROLLER_AXIS_LEFTX, "LX"),
-    (sdl2.SDL_CONTROLLER_AXIS_LEFTY, "LY"),
-    (sdl2.SDL_CONTROLLER_AXIS_RIGHTX, "RX"),
-    (sdl2.SDL_CONTROLLER_AXIS_RIGHTY, "RY"),
+    (sdl3.SDL_GAMEPAD_AXIS_LEFTX, "LX"),
+    (sdl3.SDL_GAMEPAD_AXIS_LEFTY, "LY"),
+    (sdl3.SDL_GAMEPAD_AXIS_RIGHTX, "RX"),
+    (sdl3.SDL_GAMEPAD_AXIS_RIGHTY, "RY"),
 )
 
 STICK_AXES = tuple(axis for axis, _ in STICK_AXIS_LABELS)
@@ -200,26 +200,26 @@ def interactive_pairing(
     return mappings
 
 
-def apply_rumble(controller: sdl2.SDL_GameController, payload: bytes) -> float:
+def apply_rumble(controller: sdl3.SDL_Gamepad, payload: bytes) -> float:
     """Apply rumble payload to SDL controller and return max normalized energy."""
     left_norm, right_norm = decode_rumble(payload)
     max_norm = max(left_norm, right_norm)
     # Treat small rumble as "off" to avoid idle buzz.
     if max_norm < RUMBLE_MIN_ACTIVE:
-        sdl2.SDL_GameControllerRumble(controller, 0, 0, 0)
+        sdl3.SDL_RumbleGamepad(controller, 0, 0, 0)
         return 0.0
     # Attenuate to feel closer to a real controller; cap at ~25% strength.
     scale = RUMBLE_SCALE
     low = int(min(1.0, left_norm * scale) * 0xFFFF)  # SDL: low_frequency_rumble
     high = int(min(1.0, right_norm * scale) * 0xFFFF)  # SDL: high_frequency_rumble
     duration = 10
-    sdl2.SDL_GameControllerRumble(controller, low, high, duration)
+    sdl3.SDL_RumbleGamepad(controller, low, high, duration)
     return max_norm
 
 
 @dataclass
 class ControllerContext:
-    controller: sdl2.SDL_GameController
+    controller: sdl3.SDL_Gamepad
     instance_id: int
     controller_index: int
     stable_id: str
@@ -258,11 +258,11 @@ class ControllerContext:
     last_debug_imu_print: float = 0.0
 
 
-def capture_stick_offsets(controller: sdl2.SDL_GameController) -> Dict[int, int]:
+def capture_stick_offsets(controller: sdl3.SDL_Gamepad) -> Dict[int, int]:
     """Sample the current stick axes so they can be treated as the neutral center."""
     offsets: Dict[int, int] = {}
     for axis in STICK_AXES:
-        offsets[axis] = int(sdl2.SDL_GameControllerGetAxis(controller, axis))
+        offsets[axis] = int(sdl3.SDL_GetGamepadAxis(controller, axis))
     return offsets
 
 
@@ -298,11 +298,11 @@ def convert_gyro_to_raw(rad_s: float, scale: float = 1.0) -> int:
 def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> None:
     """Enable SDL accelerometer and gyroscope on the controller if available."""
     if not all(
-        hasattr(sdl2, name)
+        hasattr(sdl3, name)
         for name in (
-            "SDL_GameControllerHasSensor",
-            "SDL_GameControllerSetSensorEnabled",
-            "SDL_GameControllerGetSensorData",
+            "SDL_GamepadHasSensor",
+            "SDL_SetGamepadSensorEnabled",
+            "SDL_GetGamepadSensorData",
         )
     ):
         ctx.sensors_supported = False
@@ -311,22 +311,18 @@ def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> N
     if SENSOR_ACCEL is None or SENSOR_GYRO is None:
         ctx.sensors_supported = False
         return
-    accel_ok = bool(sdl2.SDL_GameControllerHasSensor(ctx.controller, SENSOR_ACCEL))
-    gyro_ok = bool(sdl2.SDL_GameControllerHasSensor(ctx.controller, SENSOR_GYRO))
+    accel_ok = bool(sdl3.SDL_GamepadHasSensor(ctx.controller, SENSOR_ACCEL))
+    gyro_ok = bool(sdl3.SDL_GamepadHasSensor(ctx.controller, SENSOR_GYRO))
     ctx.sensors_supported = accel_ok and gyro_ok
     if not ctx.sensors_supported:
         console.print(
             f"[yellow]Controller {ctx.controller_index} has no accelerometer/gyro sensors[/yellow]"
         )
         return
-    accel_enabled = (
-        sdl2.SDL_GameControllerSetSensorEnabled(ctx.controller, SENSOR_ACCEL, SDL_TRUE)
-        == 0
+    accel_enabled = sdl3.SDL_SetGamepadSensorEnabled(
+        ctx.controller, SENSOR_ACCEL, SDL_TRUE
     )
-    gyro_enabled = (
-        sdl2.SDL_GameControllerSetSensorEnabled(ctx.controller, SENSOR_GYRO, SDL_TRUE)
-        == 0
-    )
+    gyro_enabled = sdl3.SDL_SetGamepadSensorEnabled(ctx.controller, SENSOR_GYRO, SDL_TRUE)
     ctx.sensors_enabled = accel_enabled and gyro_enabled
     if not ctx.sensors_enabled:
         console.print(
@@ -502,7 +498,7 @@ def zero_all_context_sticks(
 
 def controller_display_name(ctx: ControllerContext) -> str:
     """Return a human-readable controller name."""
-    name = sdl2.SDL_GameControllerName(ctx.controller)
+    name = sdl3.SDL_GetGamepadName(ctx.controller)
     if not name:
         return "Unknown"
     if isinstance(name, bytes):
@@ -582,15 +578,15 @@ def prompt_swap_abxy_controller(
     toggle_abxy_for_context(ctx, config, console)
 
 
-def open_controller(index: int) -> Tuple[sdl2.SDL_GameController, int, str]:
+def open_controller(instance_id: int) -> Tuple[sdl3.SDL_Gamepad, int, str]:
     """Open an SDL GameController by index and return it with instance ID and GUID string."""
-    controller = sdl2.SDL_GameControllerOpen(index)
+    controller = sdl3.SDL_OpenGamepad(instance_id)
     if not controller:
         raise RuntimeError(
-            f"Failed to open controller {index}: {sdl2.SDL_GetError().decode()}"
+            f"Failed to open controller {instance_id}: {sdl3.SDL_GetError().decode()}"
         )
-    joystick = sdl2.SDL_GameControllerGetJoystick(controller)
-    instance_id = sdl2.SDL_JoystickInstanceID(joystick)
+    joystick = sdl3.SDL_GetGamepadJoystick(controller)
+    instance_id = sdl3.SDL_GetJoystickID(joystick)
     guid_str = guid_string_from_joystick(joystick)
     return controller, instance_id, guid_str
 
@@ -603,19 +599,19 @@ def try_open_uart(port: str, baud: int) -> Optional[PicoUART]:
         return None
 
 
-def guid_string_from_joystick(joystick: sdl2.SDL_Joystick) -> str:
+def guid_string_from_joystick(joystick: sdl3.SDL_Joystick) -> str:
     """Return a GUID string for an already-open joystick."""
-    guid = sdl2.SDL_JoystickGetGUID(joystick)
+    guid = sdl3.SDL_GetJoystickGUID(joystick)
     buf = create_string_buffer(33)
-    sdl2.SDL_JoystickGetGUIDString(guid, buf, 33)
+    sdl3.SDL_GUIDToString(guid, buf, 33)
     return buf.value.decode().lower() if buf.value else ""
 
 
-def guid_string_for_device_index(index: int) -> str:
-    """Return a GUID string for a joystick device index without opening it."""
-    guid = sdl2.SDL_JoystickGetDeviceGUID(index)
+def guid_string_for_instance_id(instance_id: int) -> str:
+    """Return a GUID string for a joystick instance ID without opening it."""
+    guid = sdl3.SDL_GetJoystickGUIDForID(instance_id)
     buf = create_string_buffer(33)
-    sdl2.SDL_JoystickGetGUIDString(guid, buf, 33)
+    sdl3.SDL_GUIDToString(guid, buf, 33)
     return buf.value.decode().lower() if buf.value else ""
 
 
@@ -786,7 +782,7 @@ def poll_controller_buttons(
     """Update button/hat state based on current SDL controller readings."""
     changed = False
     for sdl_button, switch_bit in button_map.items():
-        pressed = bool(sdl2.SDL_GameControllerGetButton(ctx.controller, sdl_button))
+        pressed = bool(sdl3.SDL_GetGamepadButton(ctx.controller, sdl_button))
         previous = ctx.button_state.get(sdl_button)
         if previous == pressed:
             continue
@@ -799,7 +795,7 @@ def poll_controller_buttons(
 
     dpad_changed = False
     for sdl_button, name in DPAD_BUTTONS.items():
-        pressed = bool(sdl2.SDL_GameControllerGetButton(ctx.controller, sdl_button))
+        pressed = bool(sdl3.SDL_GetGamepadButton(ctx.controller, sdl_button))
         if ctx.dpad[name] == pressed:
             continue
         ctx.dpad[name] = pressed
@@ -827,6 +823,25 @@ class BridgeConfig:
     gyro_scale: float = 1.0
 
 
+class DisplayIndexAllocator:
+    """Assigns stable 0-based display indices to controllers, recycling freed slots."""
+
+    def __init__(self) -> None:
+        self._next: int = 0
+        self._free: List[int] = []
+
+    def allocate(self) -> int:
+        if self._free:
+            return self._free.pop(0)
+        idx = self._next
+        self._next += 1
+        return idx
+
+    def release(self, idx: int) -> None:
+        self._free.append(idx)
+        self._free.sort()
+
+
 @dataclass
 class PairingState:
     mapping_by_index: Dict[int, str]
@@ -838,6 +853,7 @@ class PairingState:
     ignore_port_desc: List[str] = field(default_factory=list)
     include_port_desc: List[str] = field(default_factory=list)
     include_port_mfr: List[str] = field(default_factory=list)
+    display_index_alloc: DisplayIndexAllocator = field(default_factory=DisplayIndexAllocator)
 
 
 def load_button_maps(
@@ -853,16 +869,16 @@ def load_button_maps(
     mappings_to_load.extend(args.sdl_mapping)
     button_map_default = dict(BUTTON_MAP)
     button_map_swapped = dict(BUTTON_MAP)
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_A] = SwitchButton.B
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_B] = SwitchButton.A
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_X] = SwitchButton.Y
-    button_map_swapped[sdl2.SDL_CONTROLLER_BUTTON_Y] = SwitchButton.X
+    button_map_swapped[sdl3.SDL_GAMEPAD_BUTTON_SOUTH] = SwitchButton.A
+    button_map_swapped[sdl3.SDL_GAMEPAD_BUTTON_EAST] = SwitchButton.B
+    button_map_swapped[sdl3.SDL_GAMEPAD_BUTTON_WEST] = SwitchButton.X
+    button_map_swapped[sdl3.SDL_GAMEPAD_BUTTON_NORTH] = SwitchButton.Y
     swap_abxy_indices = {
         idx for idx in args.swap_abxy_index if idx is not None and idx >= 0
     }
     for mapping_path in mappings_to_load:
         try:
-            loaded = sdl2.SDL_GameControllerAddMappingsFromFile(mapping_path.encode())
+            loaded = sdl3.SDL_AddGamepadMappingsFromFile(mapping_path.encode())
             console.print(
                 f"[green]Loaded {loaded} SDL mapping(s) from {mapping_path}[/green]"
             )
@@ -902,70 +918,76 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
 
 def initialize_sdl(parser: argparse.ArgumentParser) -> None:
     """Set SDL hints and initialize subsystems needed for controllers."""
-    sdl2.SDL_SetHint(sdl2.SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
+    sdl3.SDL_SetHint(sdl3.SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, b"1")
     set_hint("SDL_JOYSTICK_HIDAPI", "1")
     set_hint("SDL_JOYSTICK_HIDAPI_SWITCH", "1")
-    # Use controller button labels so Nintendo layouts (ABXY) map correctly on Linux.
-    set_hint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "1")
-    if (
-        sdl2.SDL_Init(
-            sdl2.SDL_INIT_GAMECONTROLLER
-            | sdl2.SDL_INIT_JOYSTICK
-            | sdl2.SDL_INIT_EVERYTHING
-        )
-        != 0
-    ):
-        parser.error(f"SDL init failed: {sdl2.SDL_GetError().decode(errors='ignore')}")
+    if not sdl3.SDL_Init(sdl3.SDL_INIT_GAMEPAD | sdl3.SDL_INIT_JOYSTICK):
+        parser.error(f"SDL init failed: {sdl3.SDL_GetError().decode(errors='ignore')}")
 
 
 def detect_controllers(
     console: Console, args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> Tuple[List[int], Dict[int, str]]:
     """Detect available controllers and return usable indices and names."""
-    controller_indices: List[int] = []
+    controller_ids: List[int] = []
     controller_names: Dict[int, str] = {}
-    controller_count = sdl2.SDL_NumJoysticks()
-    if controller_count < 0:
-        parser.error(f"SDL error: {sdl2.SDL_GetError().decode()}")
+    count = ctypes.c_int(0)
+    joystick_ids = sdl3.SDL_GetJoysticks(ctypes.byref(count))
+    if not joystick_ids:
+        if count.value < 0:
+            parser.error(f"SDL error: {sdl3.SDL_GetError().decode()}")
+        return controller_ids, controller_names
     include_controller_name = [n.lower() for n in args.include_controller_name]
-    for index in range(controller_count):
-        if sdl2.SDL_IsGameController(index):
-            name = sdl2.SDL_GameControllerNameForIndex(index)
-            name_str = name.decode() if isinstance(name, bytes) else str(name)
+    display_counter = 0
+    for i in range(count.value):
+        instance_id = joystick_ids[i]
+        if sdl3.SDL_IsGamepad(instance_id):
+            name = sdl3.SDL_GetGamepadNameForID(instance_id)
+            name_str = (
+                name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+            )
             if include_controller_name and all(
                 substr not in name_str.lower() for substr in include_controller_name
             ):
                 console.print(
-                    f"[yellow]Skipping controller {index} ({name_str}) due to name filter[/yellow]"
+                    f"[yellow]Skipping controller ({name_str}) due to name filter[/yellow]"
                 )
                 continue
-            console.print(f"[cyan]Detected controller {index}: {name_str}[/cyan]")
-            controller_indices.append(index)
-            controller_names[index] = name_str
+            console.print(f"[cyan]Detected controller {display_counter}: ({name_str})[/cyan]")
+            display_counter += 1
+            controller_ids.append(instance_id)
+            controller_names[instance_id] = name_str
         else:
-            name = sdl2.SDL_JoystickNameForIndex(index)
-            name_str = name.decode() if isinstance(name, bytes) else str(name)
+            name = sdl3.SDL_GetJoystickNameForID(instance_id)
+            name_str = (
+                name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+            )
             if include_controller_name and all(
                 substr not in name_str.lower() for substr in include_controller_name
             ):
                 console.print(
-                    f"[yellow]Skipping joystick {index} ({name_str}) due to name filter[/yellow]"
+                    f"[yellow]Skipping joystick {instance_id} ({name_str}) due to name filter[/yellow]"
                 )
                 continue
             console.print(
-                f"[yellow]Found joystick {index} (not a GameController): {name_str}[/yellow]"
+                f"[yellow]Found joystick {instance_id} (not a GameController): {name_str}[/yellow]"
             )
-    return controller_indices, controller_names
+    sdl3.SDL_free(joystick_ids)
+    return controller_ids, controller_names
 
 
 def list_controllers_with_guids(
     console: Console, parser: argparse.ArgumentParser
 ) -> None:
     """Print detected controllers with their GUID strings and exit."""
-    count = sdl2.SDL_NumJoysticks()
-    if count < 0:
-        parser.error(f"SDL error: {sdl2.SDL_GetError().decode()}")
-    if count == 0:
+    count = ctypes.c_int(0)
+    joystick_ids = sdl3.SDL_GetJoysticks(ctypes.byref(count))
+    if not joystick_ids:
+        if count.value < 0:
+            parser.error(f"SDL error: {sdl3.SDL_GetError().decode()}")
+        console.print("[yellow]No controllers detected.[/yellow]")
+        return
+    if count.value == 0:
         console.print("[yellow]No controllers detected.[/yellow]")
         return
     table = Table(title="Detected Controllers (GUIDs)")
@@ -973,18 +995,20 @@ def list_controllers_with_guids(
     table.add_column("Type")
     table.add_column("Name")
     table.add_column("GUID")
-    for idx in range(count):
-        is_gc = sdl2.SDL_IsGameController(idx)
+    for i in range(count.value):
+        instance_id = joystick_ids[i]
+        is_gc = sdl3.SDL_IsGamepad(instance_id)
         name = (
-            sdl2.SDL_GameControllerNameForIndex(idx)
+            sdl3.SDL_GetGamepadNameForID(instance_id)
             if is_gc
-            else sdl2.SDL_JoystickNameForIndex(idx)
+            else sdl3.SDL_GetJoystickNameForID(instance_id)
         )
-        name_str = name.decode() if isinstance(name, bytes) else str(name)
-        guid_str = guid_string_for_device_index(idx)
+        name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+        guid_str = guid_string_for_instance_id(instance_id)
         table.add_row(
-            str(idx), "GameController" if is_gc else "Joystick", name_str, guid_str
+            str(instance_id), "GameController" if is_gc else "Joystick", name_str, guid_str
         )
+    sdl3.SDL_free(joystick_ids)
     console.print(table)
 
 
@@ -1074,7 +1098,7 @@ def assign_port_for_index(
     return port_choice
 
 
-def ports_in_use(pairing: PairingState, contexts: Dict[int, ControllerContext]) -> set:
+def ports_in_use(pairing: PairingState, contexts: Dict[int, ControllerContext]) -> set[str]:
     """Return a set of UART paths currently reserved or mapped."""
     used = set(pairing.mapping_by_index.values())
     used.update(ctx.port for ctx in contexts.values() if ctx.port)
@@ -1107,7 +1131,7 @@ def handle_removed_port(
                 ctx.uart.close()
             except Exception:
                 pass
-        sdl2.SDL_GameControllerRumble(ctx.controller, 0, 0, 0)
+        sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
         ctx.uart = None
         ctx.port = None
         ctx.rumble_active = False
@@ -1190,44 +1214,47 @@ def open_initial_contexts(
     """Open initial controllers and UARTs for detected indices."""
     contexts: Dict[int, ControllerContext] = {}
     uarts: List[PicoUART] = []
-    for index in controller_indices:
-        if index >= sdl2.SDL_NumJoysticks() or not sdl2.SDL_IsGameController(index):
-            name = sdl2.SDL_JoystickNameForIndex(index)
-            name_str = name.decode() if isinstance(name, bytes) else str(name)
+    for instance_id in controller_indices:
+        if not sdl3.SDL_IsGamepad(instance_id):
+            name = sdl3.SDL_GetJoystickNameForID(instance_id)
+            name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
             console.print(
-                f"[yellow]Index {index} is not a GameController ({name_str}). Trying raw open failed.[/yellow]"
+                f"[yellow]ID {instance_id} is not a GameController ({name_str}). Trying raw open failed.[/yellow]"
             )
             continue
-        port = assign_port_for_index(pairing, index, console)
+        display_idx = pairing.display_index_alloc.allocate()
+        port = assign_port_for_index(pairing, display_idx, console)
         if port is None and not pairing.auto_pairing_enabled:
+            pairing.display_index_alloc.release(display_idx)
             continue
         try:
-            controller, instance_id, guid = open_controller(index)
+            controller, opened_instance_id, guid = open_controller(instance_id)
         except Exception as exc:
-            console.print(f"[red]Failed to open controller {index}: {exc}[/red]")
+            console.print(f"[red]Failed to open controller {display_idx}: {exc}[/red]")
+            pairing.display_index_alloc.release(display_idx)
             continue
         stable_id = guid
         should_swap = (
-            index in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
+            display_idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
         )
         uart = open_uart_or_warn(port, args.baud, console) if port else None
         if uart:
             uarts.append(uart)
             console.print(
-                f"[green]Controller {index} (id {stable_id}, inst {instance_id}) paired to {port}[/green]"
+                f"[green]Controller {display_idx} (id {stable_id}, inst {opened_instance_id}) paired to {port}[/green]"
             )
         elif port:
             console.print(
-                f"[yellow]Controller {index} (id {stable_id}, inst {instance_id}) waiting for UART {port}[/yellow]"
+                f"[yellow]Controller {display_idx} (id {stable_id}, inst {opened_instance_id}) waiting for UART {port}[/yellow]"
             )
         else:
             console.print(
-                f"[yellow]Controller {index} (id {stable_id}, inst {instance_id}) connected; waiting for an available UART[/yellow]"
+                f"[yellow]Controller {display_idx} (id {stable_id}, inst {opened_instance_id}) connected; waiting for an available UART[/yellow]"
             )
         ctx = ControllerContext(
             controller=controller,
-            instance_id=instance_id,
-            controller_index=index,
+            instance_id=opened_instance_id,
+            controller_index=display_idx,
             stable_id=stable_id,
             port=port,
             uart=uart,
@@ -1237,28 +1264,28 @@ def open_initial_contexts(
             initialize_controller_sensors(ctx, console)
         if config.zero_sticks:
             zero_context_sticks(ctx, console)
-        contexts[instance_id] = ctx
+        contexts[opened_instance_id] = ctx
     return contexts, uarts
 
 
 def handle_axis_motion(
-    event: sdl2.SDL_Event, contexts: Dict[int, ControllerContext], config: BridgeConfig
+    event: sdl3.SDL_Event, contexts: Dict[int, ControllerContext], config: BridgeConfig
 ) -> None:
     """Process axis motion event into stick/trigger state."""
-    ctx = contexts.get(event.caxis.which)
+    ctx = contexts.get(event.gaxis.which)
     if not ctx:
         return
-    axis = event.caxis.axis
-    value = calibrate_axis_value(event.caxis.value, axis, ctx)
-    if axis == sdl2.SDL_CONTROLLER_AXIS_LEFTX:
+    axis = event.gaxis.axis
+    value = calibrate_axis_value(event.gaxis.value, axis, ctx)
+    if axis == sdl3.SDL_GAMEPAD_AXIS_LEFTX:
         ctx.report.lx = axis_to_stick(value, config.deadzone_raw)
-    elif axis == sdl2.SDL_CONTROLLER_AXIS_LEFTY:
+    elif axis == sdl3.SDL_GAMEPAD_AXIS_LEFTY:
         ctx.report.ly = axis_to_stick(value, config.deadzone_raw)
-    elif axis == sdl2.SDL_CONTROLLER_AXIS_RIGHTX:
+    elif axis == sdl3.SDL_GAMEPAD_AXIS_RIGHTX:
         ctx.report.rx = axis_to_stick(value, config.deadzone_raw)
-    elif axis == sdl2.SDL_CONTROLLER_AXIS_RIGHTY:
+    elif axis == sdl3.SDL_GAMEPAD_AXIS_RIGHTY:
         ctx.report.ry = axis_to_stick(value, config.deadzone_raw)
-    elif axis == sdl2.SDL_CONTROLLER_AXIS_TRIGGERLEFT:
+    elif axis == sdl3.SDL_GAMEPAD_AXIS_LEFT_TRIGGER:
         pressed = trigger_to_button(value, config.trigger_threshold)
         if pressed != ctx.last_trigger_state["left"]:
             if pressed:
@@ -1266,7 +1293,7 @@ def handle_axis_motion(
             else:
                 ctx.report.buttons &= ~SwitchButton.ZL
             ctx.last_trigger_state["left"] = pressed
-    elif axis == sdl2.SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
+    elif axis == sdl3.SDL_GAMEPAD_AXIS_RIGHT_TRIGGER:
         pressed = trigger_to_button(value, config.trigger_threshold)
         if pressed != ctx.last_trigger_state["right"]:
             if pressed:
@@ -1277,17 +1304,17 @@ def handle_axis_motion(
 
 
 def handle_sensor_update(
-    event: sdl2.SDL_Event,
+    event: sdl3.SDL_Event,
     contexts: Dict[int, ControllerContext],
     config: BridgeConfig,
 ) -> None:
     """Process SDL sensor update event into IMU samples."""
-    ctx = contexts.get(event.csensor.which)
+    ctx = contexts.get(event.gsensor.which)
     if ctx is None or not ctx.sensors_enabled or config.no_imu:
         return
 
-    sensor_type = event.csensor.sensor
-    data = event.csensor.data
+    sensor_type = event.gsensor.sensor
+    data = event.gsensor.data
 
     if sensor_type == SENSOR_ACCEL:
         ctx.last_accel = (float(data[0]), float(data[1]), float(data[2]))
@@ -1359,12 +1386,12 @@ def handle_sensor_update(
 
 
 def handle_button_event(
-    event: sdl2.SDL_Event,
+    event: sdl3.SDL_Event,
     config: BridgeConfig,
     contexts: Dict[int, ControllerContext],
 ) -> None:
     """Process button events into report/dpad state."""
-    ctx = contexts.get(event.cbutton.which)
+    ctx = contexts.get(event.gbutton.which)
     if not ctx:
         return
     current_button_map = (
@@ -1372,8 +1399,8 @@ def handle_button_event(
         if (config.swap_abxy_global or ctx.swap_abxy)
         else config.button_map_default
     )
-    button = event.cbutton.button
-    pressed = event.type == sdl2.SDL_CONTROLLERBUTTONDOWN
+    button = event.gbutton.button
+    pressed = event.type == sdl3.SDL_EVENT_GAMEPAD_BUTTON_DOWN
     if button in current_button_map:
         bit = current_button_map[button]
         if pressed:
@@ -1387,7 +1414,7 @@ def handle_button_event(
 
 
 def handle_device_added(
-    event: sdl2.SDL_Event,
+    event: sdl3.SDL_Event,
     args: argparse.Namespace,
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
@@ -1396,46 +1423,47 @@ def handle_device_added(
     config: BridgeConfig,
 ) -> None:
     """Handle controller hotplug by opening and pairing UART if possible."""
-    idx = event.cdevice.which
-    # If we already have a context for this logical index, ignore the duplicate event.
-    if any(c.controller_index == idx for c in contexts.values()):
+    sdl_id = event.gdevice.which
+    if sdl_id in contexts:
         return
-    port = assign_port_for_index(pairing, idx, console)
-    if port is None and not pairing.auto_pairing_enabled:
-        return
-    if idx >= sdl2.SDL_NumJoysticks() or not sdl2.SDL_IsGameController(idx):
-        name = sdl2.SDL_JoystickNameForIndex(idx)
-        name_str = name.decode() if isinstance(name, bytes) else str(name)
+    if not sdl3.SDL_IsGamepad(sdl_id):
+        name = sdl3.SDL_GetJoystickNameForID(sdl_id)
+        name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
         console.print(
-            f"[yellow]Index {idx} is not a GameController ({name_str}). Trying raw open failed.[/yellow]"
+            f"[yellow]Device {sdl_id} is not a GameController ({name_str}).[/yellow]"
         )
         return
+    display_idx = pairing.display_index_alloc.allocate()
+    port = assign_port_for_index(pairing, display_idx, console)
+    if port is None and not pairing.auto_pairing_enabled:
+        pairing.display_index_alloc.release(display_idx)
+        return
     try:
-        controller, instance_id, guid = open_controller(idx)
+        controller, instance_id, guid = open_controller(sdl_id)
     except Exception as exc:
-        console.print(f"[red]Hotplug open failed for controller {idx}: {exc}[/red]")
+        console.print(f"[red]Hotplug open failed for controller {display_idx}: {exc}[/red]")
+        pairing.display_index_alloc.release(display_idx)
         return
     stable_id = guid
-    # Determine if this controller should have swapped ABXY based on index or GUID
-    should_swap = idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
+    should_swap = display_idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
     uart = open_uart_or_warn(port, args.baud, console) if port else None
     if uart:
         uarts.append(uart)
         console.print(
-            f"[green]Controller {idx} (id {stable_id}, inst {instance_id}) paired to {port}[/green]"
+            f"[green]Controller {display_idx} (id {stable_id}, inst {instance_id}) paired to {port}[/green]"
         )
     elif port:
         console.print(
-            f"[yellow]Controller {idx} (id {stable_id}, inst {instance_id}) waiting for UART {port}[/yellow]"
+            f"[yellow]Controller {display_idx} (id {stable_id}, inst {instance_id}) waiting for UART {port}[/yellow]"
         )
     else:
         console.print(
-            f"[yellow]Controller {idx} (id {stable_id}, inst {instance_id}) connected; waiting for an available UART[/yellow]"
+            f"[yellow]Controller {display_idx} (id {stable_id}, inst {instance_id}) connected; waiting for an available UART[/yellow]"
         )
     ctx = ControllerContext(
         controller=controller,
         instance_id=instance_id,
-        controller_index=idx,
+        controller_index=display_idx,
         stable_id=stable_id,
         port=port,
         uart=uart,
@@ -1449,19 +1477,31 @@ def handle_device_added(
 
 
 def handle_device_removed(
-    event: sdl2.SDL_Event,
+    event: sdl3.SDL_Event,
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
+    uarts: List[PicoUART],
     console: Console,
 ) -> None:
     """Handle controller removal and release any auto-assigned UART."""
-    instance_id = event.cdevice.which
+    instance_id = event.gdevice.which
     ctx = contexts.pop(instance_id, None)
     if not ctx:
         return
     console.print(
-        f"[yellow]Controller {instance_id} (id {ctx.stable_id}) removed[/yellow]"
+        f"[yellow]Controller {ctx.controller_index} (id {ctx.stable_id}) removed[/yellow]"
     )
+    # Close the UART handle *before* returning the port to the pool so the
+    # next consumer can actually open it (Windows holds the port exclusively).
+    if ctx.uart:
+        try:
+            ctx.uart.close()
+        except Exception:
+            pass
+        if ctx.uart in uarts:
+            uarts.remove(ctx.uart)
+        ctx.uart = None
+    sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
     if ctx.controller_index in pairing.auto_assigned_indices:
         # Return auto-paired UART back to the pool so a future device can use it.
         freed = pairing.mapping_by_index.pop(ctx.controller_index, None)
@@ -1469,7 +1509,8 @@ def handle_device_removed(
         if freed and freed not in pairing.available_ports:
             pairing.available_ports.append(freed)
             console.print(f"[cyan]Released UART {freed} back to pool[/cyan]")
-    sdl2.SDL_GameControllerClose(ctx.controller)
+    pairing.display_index_alloc.release(ctx.controller_index)
+    sdl3.SDL_CloseGamepad(ctx.controller)
 
 
 def service_contexts(
@@ -1530,14 +1571,14 @@ def service_contexts(
                 ctx.last_rumble_energy = energy
                 ctx.last_rumble = now
             elif ctx.rumble_active and (now - ctx.last_rumble) > RUMBLE_IDLE_TIMEOUT:
-                sdl2.SDL_GameControllerRumble(ctx.controller, 0, 0, 0)
+                sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
                 ctx.rumble_active = False
                 ctx.last_rumble_energy = 0.0
             elif (
                 ctx.rumble_active
                 and (now - ctx.last_rumble_change) > RUMBLE_STUCK_TIMEOUT
             ):
-                sdl2.SDL_GameControllerRumble(ctx.controller, 0, 0, 0)
+                sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
                 ctx.rumble_active = False
                 ctx.last_rumble_energy = 0.0
         except SerialException as exc:
@@ -1546,7 +1587,7 @@ def service_contexts(
                 ctx.uart.close()
             except Exception:
                 pass
-            sdl2.SDL_GameControllerRumble(ctx.controller, 0, 0, 0)
+            sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
             ctx.uart = None
             ctx.rumble_active = False
             ctx.last_rumble_energy = 0.0
@@ -1565,31 +1606,31 @@ def run_bridge_loop(
     hotkey: Optional[HotkeyMonitor] = None,
 ) -> None:
     """Main event loop for bridging controllers to UART and handling rumble."""
-    event = sdl2.SDL_Event()
+    event = sdl3.SDL_Event()
     port_scan_interval = 2.0
     last_port_scan = time.monotonic()
     running = True
 
     while running:
-        while sdl2.SDL_PollEvent(event):
-            if event.type == sdl2.SDL_QUIT:
+        while sdl3.SDL_PollEvent(ctypes.byref(event)):
+            if event.type == sdl3.SDL_EVENT_QUIT:
                 running = False
                 break
-            if event.type == sdl2.SDL_CONTROLLERAXISMOTION:
+            if event.type == sdl3.SDL_EVENT_GAMEPAD_AXIS_MOTION:
                 handle_axis_motion(event, contexts, config)
             elif event.type in (
-                sdl2.SDL_CONTROLLERBUTTONDOWN,
-                sdl2.SDL_CONTROLLERBUTTONUP,
+                sdl3.SDL_EVENT_GAMEPAD_BUTTON_DOWN,
+                sdl3.SDL_EVENT_GAMEPAD_BUTTON_UP,
             ):
                 handle_button_event(event, config, contexts)
-            elif event.type == SDL_CONTROLLERSENSORUPDATE:
+            elif event.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
                 handle_sensor_update(event, contexts, config)
-            elif event.type == sdl2.SDL_CONTROLLERDEVICEADDED:
+            elif event.type == sdl3.SDL_EVENT_GAMEPAD_ADDED:
                 handle_device_added(
                     event, args, pairing, contexts, uarts, console, config
                 )
-            elif event.type == sdl2.SDL_CONTROLLERDEVICEREMOVED:
-                handle_device_removed(event, pairing, contexts, console)
+            elif event.type == sdl3.SDL_EVENT_GAMEPAD_REMOVED:
+                handle_device_removed(event, pairing, contexts, uarts, console)
 
         now = time.monotonic()
         if now - last_port_scan > port_scan_interval:
@@ -1606,16 +1647,16 @@ def run_bridge_loop(
                     zero_all_context_sticks(contexts, console)
                 elif key == config.swap_hotkey:
                     prompt_swap_abxy_controller(contexts, config, console, hotkey)
-        sdl2.SDL_Delay(1)
+        sdl3.SDL_Delay(1)
 
 
 def cleanup(contexts: Dict[int, ControllerContext], uarts: List[PicoUART]) -> None:
     """Gracefully close controllers, UARTs, and SDL subsystems."""
     for ctx in contexts.values():
-        sdl2.SDL_GameControllerClose(ctx.controller)
+        sdl3.SDL_CloseGamepad(ctx.controller)
     for uart in uarts:
         uart.close()
-    sdl2.SDL_Quit()
+    sdl3.SDL_Quit()
 
 
 def main() -> None:

@@ -36,10 +36,10 @@ ACCEL_LSB_PER_G = 4096.0
 GYRO_LSB_PER_RAD_S = 818.5
 
 try:
-    import sdl2 as _sdl2  # type: ignore[import-not-found]
+    import sdl3 as _sdl3  # type: ignore[import-not-found]
 
-    _sensor_accel = getattr(_sdl2, "SDL_SENSOR_ACCEL", 1)
-    _sensor_gyro = getattr(_sdl2, "SDL_SENSOR_GYRO", 2)
+    _sensor_accel = getattr(_sdl3, "SDL_SENSOR_ACCEL", 1)
+    _sensor_gyro = getattr(_sdl3, "SDL_SENSOR_GYRO", 2)
 except ImportError:
     _sensor_accel = 1
     _sensor_gyro = 2
