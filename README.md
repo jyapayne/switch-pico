@@ -15,10 +15,8 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 5. Connect the Pico to the Switch (dock USB-A or USB-C OTG); the Switch should see it as a wired Pro Controller.
 
 ## Planned features
-- IMU support for motion controls (gyro/accelerometer passthrough for controllers that support it to the Switch) (WIP branch on `gyrov3`).
 
 ## Limitations
-- No motion controls/IMU passthrough yet (planned).
 - No NFC/amiibo/IR support.
 - Rumble is best-effort: it depends on the Switch sending rumble and SDL2 being able to drive haptics on your specific controller.
 - Requires a host computer running the bridge; the Pico is not a Bluetooth/USB host for controllers.
@@ -188,6 +186,9 @@ Options:
 - `--swap-abxy-guid GUID` (repeatable) to flip AB/XY for a specific physical controller (GUID is stable across runs).
 - `--swap-hotkey x` to pick the runtime hotkey that prompts you to toggle ABXY layout for a specific connected controller (default `x`; empty string disables).
 - `--sdl-mapping path/to/gamecontrollerdb.txt` to load extra SDL mappings (defaults to `switch_pico_bridge/controller_db/gamecontrollerdb.txt`).
+- `--debug-imu` to print raw gyroscope and accelerometer readings every ~200ms (useful for verifying sensor data and troubleshooting).
+- `--no-imu` to disable sensor reading entirely (useful for controllers without gyro, or if motion causes issues).
+- `--gyro-scale FLOAT` to adjust gyroscope sensitivity (default 1.0; reduce below 1.0 if camera rotates too fast; increase above 1.0 for more sensitivity).
 
 ### Runtime hotkeys
 - By default, pressing `z` in the terminal re-samples every connected controller's sticks and re-applies neutral offsets. Change/disable with `--zero-hotkey`.
@@ -227,6 +228,28 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 
 ### Linux tips
 - You may need udev permissions for `/dev/ttyUSB*`/`/dev/ttyACM*` (add user to `dialout`/`uucp` or use `udev` rules).
+
+## IMU / Motion Controls
+
+The bridge supports gyroscope and accelerometer passthrough from controllers that have motion sensors (e.g. the Nintendo Switch Pro Controller, DualSense). Motion data is forwarded to the Pico which injects it into the emulated Switch Pro Controller's HID reports.
+
+### Requirements
+- A controller with gyro/accelerometer support (SDL2 must be able to enable sensors on it).
+- The Switch will automatically use motion data once the controller is recognised as a Pro Controller.
+
+### Gyro bias calibration
+On startup, the bridge collects the first 200 gyro readings while the controller is stationary and averages them to compute a per-axis bias (zero-rate offset). Gyro output is zeroed during this ~1 second calibration window, then bias is subtracted from all subsequent readings. Keep the controller still when starting the bridge for best results. Use `--no-gyro-bias` to skip calibration and use raw values directly.
+
+### CLI flags
+- `--debug-imu`: Print raw sensor values (m/s² and rad/s) and converted Switch integer counts every ~200ms. Useful for verifying the sensor is detected and producing sensible data.
+- `--no-imu`: Disable IMU entirely. The bridge sends zero motion data to the Pico, which sends zero-filled IMU bytes to the Switch. Buttons and sticks are unaffected.
+- `--gyro-scale FLOAT` (default 1.0): Multiply all gyro values by this factor before sending. Reduce below 1.0 if the camera moves too fast; increase above 1.0 for more sensitivity.
+
+### Troubleshooting
+- **Gyro not detected**: Run with `--debug-imu`. If no IMU readings appear, SDL2 cannot see sensors on your controller (may not be supported or driver issue). On Linux, the `hid-nintendo` kernel driver routes Pro Controller IMU to a separate evdev device that SDL2 cannot read; use Windows or macOS for gyro passthrough.
+- **Wild camera swinging**: Start with `--gyro-scale 0.3` and increase gradually. Ensure the controller is still during the first second of startup (bias calibration).
+- **Verifying Pico output**: Use `python tools/read_pro_imu.py --vid 0x057E --pid 0x2009` to read raw IMU bytes directly from the Pico's USB HID output and confirm non-zero values appear.
+- **SDL2 accuracy**: SDL2 (version < 2.32.7) has a known inaccuracy bug with Switch Pro Controller gyro data. Updating the SDL2 shared library to 2.32.7 or later improves accuracy.
 
 ## References
 - GP2040-CE (controller firmware ecosystem): https://github.com/OpenStickCommunity/GP2040-CE
