@@ -61,11 +61,13 @@ static void on_rumble_from_switch(const uint8_t rumble[8]) {
 }
 
 // Consume UART bytes and forward complete frames to the Switch Pro driver.
-static void poll_uart_frames() {
-    static uint8_t buffer[8];
+static bool poll_uart_frames() {
+    static uint8_t buffer[64];
     static uint8_t index = 0;
+    static uint8_t expected_len = 0;
     static absolute_time_t last_byte_time = {0};
     static bool has_last_byte = false;
+    bool new_data = false;
 
     while (uart_is_readable(UART_ID)) {
         uint8_t byte = uart_getc(UART_ID);
@@ -73,6 +75,7 @@ static void poll_uart_frames() {
         uint64_t now = to_ms_since_boot(get_absolute_time());
         if (has_last_byte && (now - to_ms_since_boot(last_byte_time)) > 20) {
             index = 0; // stale data, restart frame
+            expected_len = 0;
         }
         last_byte_time = get_absolute_time();
         has_last_byte = true;
@@ -83,11 +86,26 @@ static void poll_uart_frames() {
             }
         }
 
-        buffer[index++] = byte;
         if (index >= sizeof(buffer)) {
+            index = 0;
+            expected_len = 0;
+        }
+
+        buffer[index++] = byte;
+        if (index == 3) {
+            expected_len = static_cast<uint8_t>(buffer[2] + 4u);
+            if (expected_len < 12 || expected_len > sizeof(buffer)) {
+                index = 0;
+                expected_len = 0;
+                continue;
+            }
+        }
+
+        if (expected_len > 0 && index >= expected_len) {
             SwitchInputState parsed{};
-            if (switch_pro_apply_uart_packet(buffer, sizeof(buffer), &parsed)) {
+            if (switch_pro_apply_uart_packet(buffer, expected_len, &parsed)) {
                 g_user_state = parsed;
+                new_data = true;
                 LOG_PRINTF("[UART] packet buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
                            (parsed.button_a   ? SWITCH_PRO_MASK_A   : 0) |
                            (parsed.button_b   ? SWITCH_PRO_MASK_B   : 0) |
@@ -104,14 +122,17 @@ static void poll_uart_frames() {
                            (parsed.button_l3  ? SWITCH_PRO_MASK_L3  : 0) |
                            (parsed.button_r3  ? SWITCH_PRO_MASK_R3  : 0),
                            parsed.dpad_up ? SWITCH_PRO_HAT_UP :
-                           parsed.dpad_down ? SWITCH_PRO_HAT_DOWN :
-                           parsed.dpad_left ? SWITCH_PRO_HAT_LEFT :
-                           parsed.dpad_right ? SWITCH_PRO_HAT_RIGHT : SWITCH_PRO_HAT_NOTHING,
-                           parsed.lx >> 8, parsed.ly >> 8, parsed.rx >> 8, parsed.ry >> 8);
+                            parsed.dpad_down ? SWITCH_PRO_HAT_DOWN :
+                            parsed.dpad_left ? SWITCH_PRO_HAT_LEFT :
+                            parsed.dpad_right ? SWITCH_PRO_HAT_RIGHT : SWITCH_PRO_HAT_NOTHING,
+                            parsed.lx >> 8, parsed.ly >> 8, parsed.rx >> 8, parsed.ry >> 8);
             }
             index = 0;
+            expected_len = 0;
         }
     }
+
+    return new_data;
 }
 
 static void log_usb_state() {
@@ -146,7 +167,8 @@ int main() {
 
     while (true) {
         tud_task();          // USB device tasks
-        poll_uart_frames();  // Pull controller state from UART1
+        bool new_data = poll_uart_frames();  // Pull controller state from UART1
+        (void)new_data;
         SwitchInputState state = g_user_state;
         switch_pro_set_input(state);
         switch_pro_task();   // Push state to the Switch host
