@@ -794,13 +794,18 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     if (switchReportID == REPORT_OUTPUT_00) {
         // No-op, just acknowledge to clear any stalls.
         return;
+    } else if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
+        // 0x10/0x21 output reports carry rumble (bytes 2-9) AND a subcommand
+        // at byte 10. The Switch sends IMU enable (0x40), SPI reads (0x10),
+        // vibration enable (0x48), player lights (0x30), etc. via these reports.
+        queued_report_id = report_id;
+        handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
     } else if (switchReportID == REPORT_FEATURE) {
         queued_report_id = report_id;
         handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
     } else if (switchReportID == REPORT_CONFIGURATION) {
         queued_report_id = report_id;
         handle_config_report(switchReportID, switchReportSubID, buffer, bufsize);
-    } else {
     }
 }
 
@@ -817,6 +822,9 @@ void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id, uint8_t con
     }
     if (switchReportID == REPORT_OUTPUT_00) {
         return;
+    } else if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
+        queued_report_id = report_id;
+        handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
     } else if (switchReportID == REPORT_FEATURE) {
         queued_report_id = report_id;
         handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
