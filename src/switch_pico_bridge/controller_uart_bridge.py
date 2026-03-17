@@ -1628,12 +1628,23 @@ def service_contexts(
                 if ctx.sensors_enabled and not config.no_imu:
                     count = min(len(ctx.imu_samples), IMU_SAMPLES_PER_REPORT)
                     if count > 0:
-                        ctx.report.imu_samples = ctx.imu_samples[:count]
-                        ctx.imu_samples = ctx.imu_samples[count:]
+                        # Take the NEWEST samples, discard stale ones.
+                        # Previously took from front (oldest) which caused
+                        # 145ms latency when FIFO was full at 29-32 samples.
+                        ctx.report.imu_samples = ctx.imu_samples[-count:]
+                        ctx.imu_samples.clear()
                     else:
                         ctx.report.imu_samples = []
                 else:
                     ctx.report.imu_samples = []
+                # Debug: log actual IMU values being sent via UART
+                if config.debug_imu and ctx.report.imu_samples:
+                    s = ctx.report.imu_samples[0]
+                    if abs(s.gyro_x) > 50 or abs(s.gyro_y) > 50 or abs(s.gyro_z) > 50:
+                        print(
+                            f"[UART_SEND] LARGE GYRO a=({s.accel_x},{s.accel_y},{s.accel_z}) "
+                            f"g=({s.gyro_x},{s.gyro_y},{s.gyro_z}) fifo_remaining={len(ctx.imu_samples)}"
+                        )
                 ctx.uart.send_report(ctx.report)
                 ctx.last_send = now
 

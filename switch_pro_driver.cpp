@@ -192,9 +192,26 @@ static std::map<uint32_t, const uint8_t*> spi_flash_data = {
 
 static inline uint16_t scale16To12(uint16_t pos) { return pos >> 4; }
 
+// Default "at rest" IMU sample: zero gyro, ~1G on accel Z (face-up).
+// Written to imuData at boot and whenever no fresh UART data is available,
+// so the Switch never sees all-zero IMU (which it interprets as free-fall).
+static const uint8_t DEFAULT_IMU_SAMPLE[12] = {
+    0x00, 0x00,  // accel_x = 0
+    0x00, 0x00,  // accel_y = 0
+    0x00, 0x10,  // accel_z = 0x1000 = 4096 = 1G
+    0x00, 0x00,  // gyro_x = 0
+    0x00, 0x00,  // gyro_y = 0
+    0x00, 0x00,  // gyro_z = 0
+};
+
 static void fill_imu_report_data(const SwitchInputState& state) {
     if (state.imu_sample_count == 0) {
-        memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
+        // No new IMU data — fill with default "at rest" sample.
+        // This prevents the Switch from seeing all-zero accel (free-fall)
+        // during startup or when the bridge hasn't sent IMU yet.
+        for (int i = 0; i < 3; ++i) {
+            memcpy(switch_report.imuData + i * 12, DEFAULT_IMU_SAMPLE, 12);
+        }
         return;
     }
     uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
@@ -634,6 +651,19 @@ void switch_pro_task() {
             uint16_t report_size = sizeof(switch_report);
             if (tud_hid_ready() && send_report(0, inputReport, report_size) == true ) {
                 memcpy(last_report, inputReport, report_size);
+                // Log IMU data being sent (throttled to ~4Hz to avoid flooding UART0)
+                static uint32_t last_imu_log = 0;
+                if (now - last_imu_log > 250) {
+                    last_imu_log = now;
+                    int16_t ax = (int16_t)(switch_report.imuData[0] | (switch_report.imuData[1] << 8));
+                    int16_t ay = (int16_t)(switch_report.imuData[2] | (switch_report.imuData[3] << 8));
+                    int16_t az = (int16_t)(switch_report.imuData[4] | (switch_report.imuData[5] << 8));
+                    int16_t gx = (int16_t)(switch_report.imuData[6] | (switch_report.imuData[7] << 8));
+                    int16_t gy = (int16_t)(switch_report.imuData[8] | (switch_report.imuData[9] << 8));
+                    int16_t gz = (int16_t)(switch_report.imuData[10] | (switch_report.imuData[11] << 8));
+                    LOG_PRINTF("[IMU_OUT] a=(%d,%d,%d) g=(%d,%d,%d) cnt=%d\n",
+                               ax, ay, az, gx, gy, gz, g_input_state.imu_sample_count);
+                }
                 g_input_state.imu_sample_count = 0;
                 report_sent = true;
             }
