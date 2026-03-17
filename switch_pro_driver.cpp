@@ -97,10 +97,18 @@ static const uint8_t factory_config_data[0xEFF] = {
 
     0xFF, 0xFF, 0xFF, 0xFF,
 
-    // config & calibration 1
-    0xE3, 0xFF, 0x39, 0xFF, 0xED, 0x01, 0x00, 0x40,
-    0x00, 0x40, 0x00, 0x40, 0x09, 0x00, 0xEA, 0xFF,
-    0xA1, 0xFF, 0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34,
+    // config & calibration 1 (6-axis IMU, SPI 0x6020-0x6037)
+    // Accel origin (0,0,0): bridge pre-corrects for bias, so Switch must not
+    // apply a second origin offset. Real controllers have hardware DC offsets
+    // here, but our emulated sensor sends bias-corrected values.
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // Accel sensitivity coeff: 0x4000 = 16384 → 4096 LSB/G (matches bridge)
+    0x00, 0x40, 0x00, 0x40, 0x00, 0x40,
+    // Gyro origin (0,0,0): bridge removes hardware bias before sending.
+    // Original values (9, -22, -95) caused phantom 6.7 dps yaw when still.
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // Gyro sensitivity coeff: 0x343B = 13371 → 818.5 LSB/rad_s (matches bridge)
+    0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34,
 
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 
@@ -135,7 +143,12 @@ static const uint8_t factory_config_data[0xEFF] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF,
 
-    0x50, 0xFD, 0x00, 0x00, 0xC6, 0x0F,
+    // Six-Axis horizontal offsets (SPI 0x6080): expected accel when held in
+    // gaming position. Must match the bridge's actual output for a still
+    // controller. Old values (-688,0,4038) were for a real Pro Controller's
+    // physical IMU; our bridge sends (~0,~0,~4096). The 388-count mismatch
+    // on X caused the Switch's sensor fusion to fight the gyro → camera swing.
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x10,  // (0, 0, 4096) = 1G on Z
     0x0F, 0x30, 0x61, 0xAE, 0x90, 0xD9, 0xD4, 0x14,
     0x54, 0x41, 0x15, 0x54, 0xC7, 0x79, 0x9C, 0x33,
     0x36, 0x63,
@@ -184,9 +197,26 @@ static std::map<uint32_t, const uint8_t*> spi_flash_data = {
 
 static inline uint16_t scale16To12(uint16_t pos) { return pos >> 4; }
 
+// Default "at rest" IMU sample: zero gyro, ~1G on accel Z (face-up).
+// Written to imuData at boot and whenever no fresh UART data is available,
+// so the Switch never sees all-zero IMU (which it interprets as free-fall).
+static const uint8_t DEFAULT_IMU_SAMPLE[12] = {
+    0x00, 0x00,  // accel_x = 0
+    0x00, 0x00,  // accel_y = 0
+    0x00, 0x10,  // accel_z = 0x1000 = 4096 = 1G
+    0x00, 0x00,  // gyro_x = 0
+    0x00, 0x00,  // gyro_y = 0
+    0x00, 0x00,  // gyro_z = 0
+};
+
 static void fill_imu_report_data(const SwitchInputState& state) {
     if (state.imu_sample_count == 0) {
-        memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
+        // No new IMU data — fill with default "at rest" sample.
+        // This prevents the Switch from seeing all-zero accel (free-fall)
+        // during startup or when the bridge hasn't sent IMU yet.
+        for (int i = 0; i < 3; ++i) {
+            memcpy(switch_report.imuData + i * 12, DEFAULT_IMU_SAMPLE, 12);
+        }
         return;
     }
     uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
@@ -323,6 +353,8 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
     uint8_t spiReadSize = 0;
     bool canSend = false;
     last_host_activity_ms = to_ms_since_boot(get_absolute_time());
+    LOG_PRINTF("[HID] handle_feature rid=0x%02x cmd=0x%02x imu_enabled=%d\n",
+               switchReportID, commandID, is_imu_enabled);
 
     report_buffer[0] = REPORT_OUTPUT_21;
     report_buffer[1] = last_report_counter;
@@ -624,6 +656,19 @@ void switch_pro_task() {
             uint16_t report_size = sizeof(switch_report);
             if (tud_hid_ready() && send_report(0, inputReport, report_size) == true ) {
                 memcpy(last_report, inputReport, report_size);
+                // Log IMU data being sent (throttled to ~4Hz to avoid flooding UART0)
+                static uint32_t last_imu_log = 0;
+                if (now - last_imu_log > 250) {
+                    last_imu_log = now;
+                    int16_t ax = (int16_t)(switch_report.imuData[0] | (switch_report.imuData[1] << 8));
+                    int16_t ay = (int16_t)(switch_report.imuData[2] | (switch_report.imuData[3] << 8));
+                    int16_t az = (int16_t)(switch_report.imuData[4] | (switch_report.imuData[5] << 8));
+                    int16_t gx = (int16_t)(switch_report.imuData[6] | (switch_report.imuData[7] << 8));
+                    int16_t gy = (int16_t)(switch_report.imuData[8] | (switch_report.imuData[9] << 8));
+                    int16_t gz = (int16_t)(switch_report.imuData[10] | (switch_report.imuData[11] << 8));
+                    LOG_PRINTF("[IMU_OUT] a=(%d,%d,%d) g=(%d,%d,%d) cnt=%d\n",
+                               ax, ay, az, gx, gy, gz, g_input_state.imu_sample_count);
+                }
                 g_input_state.imu_sample_count = 0;
                 report_sent = true;
             }
@@ -792,7 +837,6 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     } else if (switchReportID == REPORT_CONFIGURATION) {
         queued_report_id = report_id;
         handle_config_report(switchReportID, switchReportSubID, buffer, bufsize);
-    } else {
     }
 }
 

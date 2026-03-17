@@ -59,8 +59,12 @@ RUMBLE_MIN_ACTIVE = 0.40  # below this, rumble is treated as off/noise
 RUMBLE_SCALE = 1.0
 CONTROLLER_DB_URL_DEFAULT = "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
 SDL_TRUE = True
-SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE", 0x658)
-GYRO_BIAS_SAMPLES = 200
+SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(
+    sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE", 0x658
+)
+GYRO_BIAS_SAMPLES = 100  # samples to collect for bias (~0.5 s at 200 Hz)
+GYRO_BIAS_WARMUP_S = 1.5  # seconds to wait before starting calibration
+GYRO_BIAS_TIMEOUT_S = 10.0  # force-lock after this many seconds even if still moving
 IMU_BUFFER_SIZE = 32
 
 
@@ -249,12 +253,16 @@ class ControllerContext:
     sensors_supported: bool = False
     sensors_enabled: bool = False
     imu_samples: List[IMUSample] = field(default_factory=list)
-    last_accel: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Default: gravity on SDL Y axis (~+9.8 m/s²) — controller held horizontally.
+    # This prevents the first IMU sample from having zero accel before the first
+    # accel event arrives.
+    last_accel: Tuple[float, float, float] = (0.0, 9.80665, 0.0)
     gyro_bias_x: float = 0.0
     gyro_bias_y: float = 0.0
     gyro_bias_z: float = 0.0
     gyro_bias_samples: int = 0
     gyro_bias_locked: bool = False
+    gyro_bias_start_time: float = 0.0  # monotonic time when calibration began
     last_debug_imu_print: float = 0.0
 
 
@@ -322,7 +330,9 @@ def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> N
     accel_enabled = sdl3.SDL_SetGamepadSensorEnabled(
         ctx.controller, SENSOR_ACCEL, SDL_TRUE
     )
-    gyro_enabled = sdl3.SDL_SetGamepadSensorEnabled(ctx.controller, SENSOR_GYRO, SDL_TRUE)
+    gyro_enabled = sdl3.SDL_SetGamepadSensorEnabled(
+        ctx.controller, SENSOR_GYRO, SDL_TRUE
+    )
     ctx.sensors_enabled = accel_enabled and gyro_enabled
     if not ctx.sensors_enabled:
         console.print(
@@ -853,7 +863,9 @@ class PairingState:
     ignore_port_desc: List[str] = field(default_factory=list)
     include_port_desc: List[str] = field(default_factory=list)
     include_port_mfr: List[str] = field(default_factory=list)
-    display_index_alloc: DisplayIndexAllocator = field(default_factory=DisplayIndexAllocator)
+    display_index_alloc: DisplayIndexAllocator = field(
+        default_factory=DisplayIndexAllocator
+    )
 
 
 def load_button_maps(
@@ -944,7 +956,11 @@ def detect_controllers(
         if sdl3.SDL_IsGamepad(instance_id):
             name = sdl3.SDL_GetGamepadNameForID(instance_id)
             name_str = (
-                name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+                name.decode()
+                if isinstance(name, bytes)
+                else str(name)
+                if name
+                else "Unknown"
             )
             if include_controller_name and all(
                 substr not in name_str.lower() for substr in include_controller_name
@@ -953,14 +969,20 @@ def detect_controllers(
                     f"[yellow]Skipping controller ({name_str}) due to name filter[/yellow]"
                 )
                 continue
-            console.print(f"[cyan]Detected controller {display_counter}: ({name_str})[/cyan]")
+            console.print(
+                f"[cyan]Detected controller {display_counter}: ({name_str})[/cyan]"
+            )
             display_counter += 1
             controller_ids.append(instance_id)
             controller_names[instance_id] = name_str
         else:
             name = sdl3.SDL_GetJoystickNameForID(instance_id)
             name_str = (
-                name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+                name.decode()
+                if isinstance(name, bytes)
+                else str(name)
+                if name
+                else "Unknown"
             )
             if include_controller_name and all(
                 substr not in name_str.lower() for substr in include_controller_name
@@ -1003,10 +1025,19 @@ def list_controllers_with_guids(
             if is_gc
             else sdl3.SDL_GetJoystickNameForID(instance_id)
         )
-        name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+        name_str = (
+            name.decode()
+            if isinstance(name, bytes)
+            else str(name)
+            if name
+            else "Unknown"
+        )
         guid_str = guid_string_for_instance_id(instance_id)
         table.add_row(
-            str(instance_id), "GameController" if is_gc else "Joystick", name_str, guid_str
+            str(instance_id),
+            "GameController" if is_gc else "Joystick",
+            name_str,
+            guid_str,
         )
     sdl3.SDL_free(joystick_ids)
     console.print(table)
@@ -1098,7 +1129,9 @@ def assign_port_for_index(
     return port_choice
 
 
-def ports_in_use(pairing: PairingState, contexts: Dict[int, ControllerContext]) -> set[str]:
+def ports_in_use(
+    pairing: PairingState, contexts: Dict[int, ControllerContext]
+) -> set[str]:
     """Return a set of UART paths currently reserved or mapped."""
     used = set(pairing.mapping_by_index.values())
     used.update(ctx.port for ctx in contexts.values() if ctx.port)
@@ -1217,7 +1250,13 @@ def open_initial_contexts(
     for instance_id in controller_indices:
         if not sdl3.SDL_IsGamepad(instance_id):
             name = sdl3.SDL_GetJoystickNameForID(instance_id)
-            name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+            name_str = (
+                name.decode()
+                if isinstance(name, bytes)
+                else str(name)
+                if name
+                else "Unknown"
+            )
             console.print(
                 f"[yellow]ID {instance_id} is not a GameController ({name_str}). Trying raw open failed.[/yellow]"
             )
@@ -1326,22 +1365,55 @@ def handle_sensor_update(
     gx, gy, gz = float(data[0]), float(data[1]), float(data[2])
 
     if not ctx.gyro_bias_locked:
+        now = time.monotonic()
+
+        # Track when the first gyro event arrived so we can enforce the warmup.
+        if ctx.gyro_bias_start_time == 0.0:
+            ctx.gyro_bias_start_time = now
+            print(
+                f"[IMU idx={ctx.controller_index}] Gyro bias calibration started — "
+                f"hold controller still for {GYRO_BIAS_WARMUP_S:.0f}s..."
+            )
+
+        elapsed = now - ctx.gyro_bias_start_time
+
+        # Phase 1: warmup — discard all samples, just wait.
+        if elapsed < GYRO_BIAS_WARMUP_S:
+            return
+
+        # Phase 2: collect samples unconditionally.
+        # Timeout: after GYRO_BIAS_TIMEOUT_S total, force-lock with whatever we have.
         if ctx.gyro_bias_samples < GYRO_BIAS_SAMPLES:
             ctx.gyro_bias_x += gx
             ctx.gyro_bias_y += gy
             ctx.gyro_bias_z += gz
             ctx.gyro_bias_samples += 1
-        if ctx.gyro_bias_samples >= GYRO_BIAS_SAMPLES:
-            n = ctx.gyro_bias_samples
+
+        force_lock = elapsed > GYRO_BIAS_TIMEOUT_S and ctx.gyro_bias_samples > 10
+
+        if ctx.gyro_bias_samples >= GYRO_BIAS_SAMPLES or force_lock:
+            n = max(ctx.gyro_bias_samples, 1)
             ctx.gyro_bias_x /= n
             ctx.gyro_bias_y /= n
             ctx.gyro_bias_z /= n
             ctx.gyro_bias_locked = True
+            import math
 
-    if not ctx.gyro_bias_locked:
-        bx, by, bz = 0.0, 0.0, 0.0
-    else:
-        bx, by, bz = ctx.gyro_bias_x, ctx.gyro_bias_y, ctx.gyro_bias_z
+            mag = math.sqrt(
+                ctx.gyro_bias_x**2 + ctx.gyro_bias_y**2 + ctx.gyro_bias_z**2
+            )
+            quality = (
+                "OK" if mag < 0.05 else "WARN: controller was moving during calibration"
+            )
+            print(
+                f"[IMU idx={ctx.controller_index}] Bias locked{' (timeout)' if force_lock else ''}: "
+                f"({ctx.gyro_bias_x:.5f}, {ctx.gyro_bias_y:.5f}, {ctx.gyro_bias_z:.5f}) rad/s  "
+                f"magnitude={mag:.4f} rad/s = {mag * 180 / math.pi:.2f} deg/s  [{quality}]"
+            )
+        # Don't send IMU until bias is locked — raw unbiased values cause drift.
+        return
+
+    bx, by, bz = ctx.gyro_bias_x, ctx.gyro_bias_y, ctx.gyro_bias_z
 
     ux, uy, uz = gx, gy, gz
     ux -= bx
@@ -1428,7 +1500,13 @@ def handle_device_added(
         return
     if not sdl3.SDL_IsGamepad(sdl_id):
         name = sdl3.SDL_GetJoystickNameForID(sdl_id)
-        name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+        name_str = (
+            name.decode()
+            if isinstance(name, bytes)
+            else str(name)
+            if name
+            else "Unknown"
+        )
         console.print(
             f"[yellow]Device {sdl_id} is not a GameController ({name_str}).[/yellow]"
         )
@@ -1441,11 +1519,15 @@ def handle_device_added(
     try:
         controller, instance_id, guid = open_controller(sdl_id)
     except Exception as exc:
-        console.print(f"[red]Hotplug open failed for controller {display_idx}: {exc}[/red]")
+        console.print(
+            f"[red]Hotplug open failed for controller {display_idx}: {exc}[/red]"
+        )
         pairing.display_index_alloc.release(display_idx)
         return
     stable_id = guid
-    should_swap = display_idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
+    should_swap = (
+        display_idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
+    )
     uart = open_uart_or_warn(port, args.baud, console) if port else None
     if uart:
         uarts.append(uart)
@@ -1546,12 +1628,23 @@ def service_contexts(
                 if ctx.sensors_enabled and not config.no_imu:
                     count = min(len(ctx.imu_samples), IMU_SAMPLES_PER_REPORT)
                     if count > 0:
-                        ctx.report.imu_samples = ctx.imu_samples[:count]
-                        ctx.imu_samples = ctx.imu_samples[count:]
+                        # Take the NEWEST samples, discard stale ones.
+                        # Previously took from front (oldest) which caused
+                        # 145ms latency when FIFO was full at 29-32 samples.
+                        ctx.report.imu_samples = ctx.imu_samples[-count:]
+                        ctx.imu_samples.clear()
                     else:
                         ctx.report.imu_samples = []
                 else:
                     ctx.report.imu_samples = []
+                # Debug: log actual IMU values being sent via UART
+                if config.debug_imu and ctx.report.imu_samples:
+                    s = ctx.report.imu_samples[0]
+                    if abs(s.gyro_x) > 50 or abs(s.gyro_y) > 50 or abs(s.gyro_z) > 50:
+                        print(
+                            f"[UART_SEND] LARGE GYRO a=({s.accel_x},{s.accel_y},{s.accel_z}) "
+                            f"g=({s.gyro_x},{s.gyro_y},{s.gyro_z}) fifo_remaining={len(ctx.imu_samples)}"
+                        )
                 ctx.uart.send_report(ctx.report)
                 ctx.last_send = now
 
