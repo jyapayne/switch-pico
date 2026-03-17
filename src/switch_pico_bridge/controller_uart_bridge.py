@@ -1385,10 +1385,31 @@ def handle_sensor_update(
             )
 
 
+ABXY_SWAP_COMBO = frozenset({
+    sdl3.SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,
+    sdl3.SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
+    sdl3.SDL_GAMEPAD_BUTTON_BACK,
+    sdl3.SDL_GAMEPAD_BUTTON_START,
+})
+
+
+def _check_abxy_swap_combo(
+    ctx: ControllerContext,
+    config: BridgeConfig,
+    console: Console,
+) -> None:
+    """Toggle ABXY layout when LB+RB+SELECT+START are all held."""
+    if not all(ctx.button_state.get(b) for b in ABXY_SWAP_COMBO):
+        return
+    toggle_abxy_for_context(ctx, config, console)
+    sdl3.SDL_RumbleGamepad(ctx.controller, 0xAAAA, 0xAAAA, 200)
+
+
 def handle_button_event(
     event: sdl3.SDL_Event,
     config: BridgeConfig,
     contexts: Dict[int, ControllerContext],
+    console: Console,
 ) -> None:
     """Process button events into report/dpad state."""
     ctx = contexts.get(event.gbutton.which)
@@ -1411,6 +1432,8 @@ def handle_button_event(
     elif button in DPAD_BUTTONS:
         ctx.dpad[DPAD_BUTTONS[button]] = pressed
         ctx.report.hat = str_to_dpad(ctx.dpad)
+    if pressed and button in ABXY_SWAP_COMBO:
+        _check_abxy_swap_combo(ctx, config, console)
 
 
 def handle_device_added(
@@ -1622,7 +1645,7 @@ def run_bridge_loop(
                 sdl3.SDL_EVENT_GAMEPAD_BUTTON_DOWN,
                 sdl3.SDL_EVENT_GAMEPAD_BUTTON_UP,
             ):
-                handle_button_event(event, config, contexts)
+                handle_button_event(event, config, contexts, console)
             elif event.type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
                 handle_sensor_update(event, contexts, config)
             elif event.type == sdl3.SDL_EVENT_GAMEPAD_ADDED:
