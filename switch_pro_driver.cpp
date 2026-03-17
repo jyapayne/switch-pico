@@ -331,6 +331,8 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
     uint8_t spiReadSize = 0;
     bool canSend = false;
     last_host_activity_ms = to_ms_since_boot(get_absolute_time());
+    LOG_PRINTF("[HID] handle_feature rid=0x%02x cmd=0x%02x imu_enabled=%d\n",
+               switchReportID, commandID, is_imu_enabled);
 
     report_buffer[0] = REPORT_OUTPUT_21;
     report_buffer[1] = last_report_counter;
@@ -794,12 +796,6 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
     if (switchReportID == REPORT_OUTPUT_00) {
         // No-op, just acknowledge to clear any stalls.
         return;
-    } else if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
-        // 0x10/0x21 output reports carry rumble (bytes 2-9) AND a subcommand
-        // at byte 10. The Switch sends IMU enable (0x40), SPI reads (0x10),
-        // vibration enable (0x48), player lights (0x30), etc. via these reports.
-        queued_report_id = report_id;
-        handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
     } else if (switchReportID == REPORT_FEATURE) {
         queued_report_id = report_id;
         handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
@@ -822,9 +818,6 @@ void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id, uint8_t con
     }
     if (switchReportID == REPORT_OUTPUT_00) {
         return;
-    } else if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
-        queued_report_id = report_id;
-        handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
     } else if (switchReportID == REPORT_FEATURE) {
         queued_report_id = report_id;
         handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
