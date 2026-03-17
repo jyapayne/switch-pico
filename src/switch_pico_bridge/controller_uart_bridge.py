@@ -819,7 +819,7 @@ class BridgeConfig:
     swap_abxy_ids: set[str]
     swap_abxy_global: bool
     debug_imu: bool = False
-    no_imu: bool = False
+    no_imu: bool = True
     gyro_scale: float = 1.0
 
 
