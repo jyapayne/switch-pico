@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.9"
 resolution-markers = [
     "python_full_version >= '3.10'",
@@ -468,7 +468,7 @@ resolution-markers = [
     "python_full_version < '3.10'",
 ]
 dependencies = [
-    { name = "mdurl", marker = "python_full_version < '3.10'" },
+    { name = "mdurl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/38/71/3b932df36c1a044d397a1f92d1cf91ee0a503d91e470cbd670aa66b07ed0/markdown-it-py-3.0.0.tar.gz", hash = "sha256:e3f60a94fa066dc52ec76661e37c851cb232d92f9886b15cb560aaada2df8feb", size = 74596, upload-time = "2023-06-03T06:41:14.443Z" }
 wheels = [
@@ -483,7 +483,7 @@ resolution-markers = [
     "python_full_version >= '3.10'",
 ]
 dependencies = [
-    { name = "mdurl", marker = "python_full_version >= '3.10'" },
+    { name = "mdurl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5b/f5/4ec618ed16cc4f8fb3b701563655a69816155e79e24a17b651541804721d/markdown_it_py-4.0.0.tar.gz", hash = "sha256:cb0a2b4aa34f932c007117b194e945bd74e0ec24133ceb5bac59009cda1cb9f3", size = 73070, upload-time = "2025-08-11T12:57:52.854Z" }
 wheels = [
@@ -804,16 +804,16 @@ wheels = [
 
 [[package]]
 name = "pysdl3"
-version = "0.9.11b0"
+version = "0.9.11b1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "packaging" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/de/2a/86e2b1cc7ac5a186ac3bad262cfbe55313268b6a8f7a3e61a4212fa4af09/pysdl3-0.9.11b0.tar.gz", hash = "sha256:e87dce397221c4943763bb45ec8725deb07b2bf5636d5da875e9d0ae34504068", size = 1421769, upload-time = "2026-03-15T19:28:04.222Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/71/1de90f3baf555003b97e8c09db2f40376aa44105a2f2f98e239260cd07b4/pysdl3-0.9.11b1.tar.gz", hash = "sha256:1608b1e979fd6693b321af38e1d70a8a1df8141753096ade3477ff2b437c6ed0", size = 1421849, upload-time = "2026-05-06T23:50:21.42Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5b/ff/58a5b5a5bbf1fb822359c8fcf1a307d9dadc078d988cd6e770f4381081bf/pysdl3-0.9.11b0-py3-none-any.whl", hash = "sha256:98bd71dd4e1bcdaa5e83da200a208439048690da627b2d19163f5e222518cb24", size = 99667, upload-time = "2026-03-15T19:28:02.81Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/5f/290b001a4f46a3811caf103bd98fb23bae0c700ab231fde8e1d6bfe2ecdf/pysdl3-0.9.11b1-py3-none-any.whl", hash = "sha256:2dd0bfe859ae93564b38c97f718d1310dbb4ea898fe85baea499f03012b1a152", size = 99721, upload-time = "2026-05-06T23:50:19.819Z" },
 ]
 
 [[package]]
@@ -897,9 +897,9 @@ resolution-markers = [
     "python_full_version < '3.10'",
 ]
 dependencies = [
-    { name = "idna", marker = "python_full_version < '3.10'" },
-    { name = "multidict", marker = "python_full_version < '3.10'" },
-    { name = "propcache", marker = "python_full_version < '3.10'" },
+    { name = "idna" },
+    { name = "multidict" },
+    { name = "propcache" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/57/63/0c6ebca57330cd313f6102b16dd57ffaf3ec4c83403dcb45dbd15c6f3ea1/yarl-1.22.0.tar.gz", hash = "sha256:bebf8557577d4401ba8bd9ff33906f1376c877aa78d1fe216ad01b4d6745af71", size = 187169, upload-time = "2025-10-06T14:12:55.963Z" }
 wheels = [
@@ -1042,9 +1042,9 @@ resolution-markers = [
     "python_full_version >= '3.10'",
 ]
 dependencies = [
-    { name = "idna", marker = "python_full_version >= '3.10'" },
-    { name = "multidict", marker = "python_full_version >= '3.10'" },
-    { name = "propcache", marker = "python_full_version >= '3.10'" },
+    { name = "idna" },
+    { name = "multidict" },
+    { name = "propcache" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/23/6e/beb1beec874a72f23815c1434518bfc4ed2175065173fb138c3705f658d4/yarl-1.23.0.tar.gz", hash = "sha256:53b1ea6ca88ebd4420379c330aea57e258408dd0df9af0992e5de2078dc9f5d5", size = 194676, upload-time = "2026-03-01T22:07:53.373Z" }
 wheels = [
