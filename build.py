@@ -14,6 +14,7 @@ CONFIG_FILE = SCRIPT_DIR / "controller_color_config.h"
 BUILD_DIR = SCRIPT_DIR / "build"
 
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
+UF2_PATH = Path(os.environ.get("UF2_PATH", BUILD_DIR / "switch-pico.uf2")).expanduser()
 
 MACROS = (
     "SWITCH_COLOR_LEFT_GRIP_R",
@@ -119,6 +120,15 @@ def build():
         ]
     )
     run_cmd(["cmake", "--build", str(BUILD_DIR)])
+
+    missing_artifacts = [path for path in (ELF_PATH, UF2_PATH) if not path.is_file()]
+    if missing_artifacts:
+        missing = ", ".join(str(path) for path in missing_artifacts)
+        sys.stderr.write(f"Error: Build did not produce required artifact(s): {missing}\n")
+        sys.exit(1)
+
+    print(f"Built ELF: {ELF_PATH}")
+    print(f"Built UF2: {UF2_PATH}")
 
 def flash():
     picotool = resolve_picotool()

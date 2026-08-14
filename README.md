@@ -103,19 +103,62 @@ Filters you can use:
 ## Building and flashing firmware
 Prereqs: Pico SDK + CMake toolchain set up.
 
-### One-shot build + flash (picotool)
+### Using `build.py`
+
+`build.py` configures CMake, builds the firmware, checks that both output formats
+were created, and flashes the ELF with `picotool`.
+
+Before running it:
+
+1. Install the Pico SDK, CMake toolchain, and `picotool`.
+2. Connect the Pico in BOOTSEL mode.
+3. From the repository root, run:
+
 ```sh
 python3 build.py
 ```
-- Requires `picotool` on your `PATH` (or set `PICOTOOL_PATH=/path/to/picotool`) and a connected Pico in BOOTSEL mode to automatically flash.
-- Set `ELF_PATH` to override the default `build/switch-pico.elf`.
+
+The generated files are:
+
+- `build/switch-pico.elf`, which `build.py` passes to `picotool`.
+- `build/switch-pico.uf2`, which can also be copied to the Pico manually.
+
+To customize the controller grip color while building, pass one of these mutually
+exclusive options:
+
+```sh
+# Use a random color for both grips
+python3 build.py --random-grip-color
+
+# Use a specific six-digit RGB color for both grips
+python3 build.py --grip-color FF00AA
+```
+
+Both options update `controller_color_config.h` before building. With no color
+option, that file is left unchanged. Run `python3 build.py --help` to see the
+available command-line options.
+
+If the tools or artifacts are in non-default locations, use these environment
+variables:
+
+```sh
+PICOTOOL_PATH=/path/to/picotool \
+ELF_PATH=/path/to/switch-pico.elf \
+UF2_PATH=/path/to/switch-pico.uf2 \
+python3 build.py
+```
+
+`PICOTOOL_PATH` selects the flashing tool, `ELF_PATH` selects the ELF that is
+checked and flashed, and `UF2_PATH` selects the UF2 that is checked after the
+build. Their defaults are `picotool` from `PATH`, `build/switch-pico.elf`, and
+`build/switch-pico.uf2`, respectively.
 
 ### Manual build
 ```sh
 cmake -S . -B build -DSWITCH_PICO_LOG=OFF
 cmake --build build -j
 ```
-This produces a `.uf2` you can flash (typically `build/switch-pico.uf2`).
+This produces both `build/switch-pico.elf` and a flashable `build/switch-pico.uf2`.
 
 ### Manual UF2 flashing (BOOTSEL, no tools)
 If you already have a built (or use the pre-built one in `firmware/`) `.uf2`, you can flash it without rebuilding:
@@ -130,11 +173,6 @@ Tip: if you don’t see `RPI-RP2`, try a different USB cable (some are charge-on
 Flash alternatives: bootsel + drag-drop or `picotool load`.
 Flags:
 - `SWITCH_PICO_LOG`: enable/disable UART logging on the Pico.
-
-### Changing controller colours
-`build.py` can optionally update the **grip** colours in `controller_color_config.h` before building/flashing (default leaves the file unchanged):
-- Random grip colours: `python3 build.py --random-grip-color`
-- Set grip colours: `python3 build.py --grip-color FF00AA`
 
 ## Python bridge (recommended)
 Works on macOS, Windows, Linux. Uses SDL2 + pyserial.
