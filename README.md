@@ -106,7 +106,8 @@ Prereqs: Pico SDK + CMake toolchain set up.
 ### Using `build.py`
 
 `build.py` configures CMake, builds the firmware, checks that both output formats
-were created, and flashes the ELF with `picotool`.
+were created, copies the release artifacts into `firmware/`, and flashes the ELF
+with `picotool`.
 
 Before running it:
 
@@ -122,6 +123,8 @@ The generated files are:
 
 - `build/switch-pico.elf`, which `build.py` passes to `picotool`.
 - `build/switch-pico.uf2`, which can also be copied to the Pico manually.
+- `firmware/switch-pico.elf` and `firmware/switch-pico.uf2`, refreshed from the
+  corresponding `build/` artifacts after every successful build.
 
 To customize the controller grip color while building, pass one of these mutually
 exclusive options:

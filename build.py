@@ -12,6 +12,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "controller_color_config.h"
 BUILD_DIR = SCRIPT_DIR / "build"
+FIRMWARE_DIR = SCRIPT_DIR / "firmware"
+FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico.elf"
+FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico.uf2"
 
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
 UF2_PATH = Path(os.environ.get("UF2_PATH", BUILD_DIR / "switch-pico.uf2")).expanduser()
@@ -126,9 +129,14 @@ def build():
         missing = ", ".join(str(path) for path in missing_artifacts)
         sys.stderr.write(f"Error: Build did not produce required artifact(s): {missing}\n")
         sys.exit(1)
+    FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ELF_PATH, FIRMWARE_ELF_PATH)
+    shutil.copy2(UF2_PATH, FIRMWARE_UF2_PATH)
 
     print(f"Built ELF: {ELF_PATH}")
     print(f"Built UF2: {UF2_PATH}")
+    print(f"Copied ELF: {FIRMWARE_ELF_PATH}")
+    print(f"Copied UF2: {FIRMWARE_UF2_PATH}")
 
 def flash():
     picotool = resolve_picotool()
