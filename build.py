@@ -12,9 +12,12 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "controller_color_config.h"
 BUILD_DIR = SCRIPT_DIR / "build"
+AIO_BUILD_DIR = SCRIPT_DIR / "build-aio"
 FIRMWARE_DIR = SCRIPT_DIR / "firmware"
 FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico.elf"
 FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico.uf2"
+AIO_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-aio.elf"
+AIO_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-aio.uf2"
 
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
 UF2_PATH = Path(os.environ.get("UF2_PATH", BUILD_DIR / "switch-pico.uf2")).expanduser()
@@ -33,6 +36,11 @@ def parse_args():
         description="Build and flash the project, optionally setting grip colors.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Default behavior leaves controller_color_config.h unchanged.",
+    )
+    parser.add_argument(
+        "--aio",
+        action="store_true",
+        help="Build and flash the Pico 2 W Bluepad32 all-in-one firmware.",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -111,41 +119,68 @@ def resolve_picotool():
     sys.stderr.write("Error: picotool not found. Put it on your PATH or set PICOTOOL_PATH.\n")
     sys.exit(1)
 
-def build():
+def build(
+    aio,
+    build_dir,
+    elf_path,
+    uf2_path,
+    firmware_elf_path,
+    firmware_uf2_path,
+):
+    if aio:
+        run_cmd([sys.executable, str(SCRIPT_DIR / "tools" / "prepare_bluepad32.py")])
+        definitions = [
+            "-DSWITCH_PICO_LOG=OFF",
+            "-DPICO_BOARD=pico2_w",
+            "-DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32",
+        ]
+    else:
+        definitions = [
+            "-DSWITCH_PICO_LOG=OFF",
+            "-DPICO_BOARD=pico",
+            "-DSWITCH_PICO_INPUT_BACKEND=UART",
+        ]
+
     run_cmd(
         [
             "cmake",
             "-S",
             str(SCRIPT_DIR),
             "-B",
-            str(BUILD_DIR),
-            "-DSWITCH_PICO_LOG=OFF",
+            str(build_dir),
+            *definitions,
         ]
     )
-    run_cmd(["cmake", "--build", str(BUILD_DIR)])
+    run_cmd(["cmake", "--build", str(build_dir)])
 
-    missing_artifacts = [path for path in (ELF_PATH, UF2_PATH) if not path.is_file()]
+    missing_artifacts = [
+        path for path in (elf_path, uf2_path) if not path.is_file()
+    ]
     if missing_artifacts:
         missing = ", ".join(str(path) for path in missing_artifacts)
         sys.stderr.write(f"Error: Build did not produce required artifact(s): {missing}\n")
         sys.exit(1)
     FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ELF_PATH, FIRMWARE_ELF_PATH)
-    shutil.copy2(UF2_PATH, FIRMWARE_UF2_PATH)
+    shutil.copy2(elf_path, firmware_elf_path)
+    shutil.copy2(uf2_path, firmware_uf2_path)
 
-    print(f"Built ELF: {ELF_PATH}")
-    print(f"Built UF2: {UF2_PATH}")
-    print(f"Copied ELF: {FIRMWARE_ELF_PATH}")
-    print(f"Copied UF2: {FIRMWARE_UF2_PATH}")
+    print(f"Built ELF: {elf_path}")
+    print(f"Built UF2: {uf2_path}")
+    print(f"Copied ELF: {firmware_elf_path}")
+    print(f"Copied UF2: {firmware_uf2_path}")
 
-def flash():
+
+def flash(elf_path, allow_elf_override):
     picotool = resolve_picotool()
-    if not ELF_PATH.exists():
-        sys.stderr.write(
-            f"Error: Cannot find ELF at {ELF_PATH}. Set ELF_PATH to override.\n"
-        )
+    if not elf_path.exists():
+        if allow_elf_override:
+            sys.stderr.write(
+                f"Error: Cannot find ELF at {elf_path}. Set ELF_PATH to override.\n"
+            )
+        else:
+            sys.stderr.write(f"Error: Cannot find ELF at {elf_path}.\n")
         sys.exit(1)
-    run_cmd([str(picotool), "load", str(ELF_PATH), "-fx"])
+    run_cmd([str(picotool), "load", str(elf_path), "-fx"])
 
 def main():
     args = parse_args()
@@ -164,8 +199,28 @@ def main():
         update_grip_colors(color)
         print(f"Grip color set to #{color} in {CONFIG_FILE.name}")
 
-    build()
-    flash()
+    if args.aio:
+        build_dir = AIO_BUILD_DIR
+        elf_path = AIO_BUILD_DIR / "switch-pico.elf"
+        uf2_path = AIO_BUILD_DIR / "switch-pico.uf2"
+        firmware_elf_path = AIO_FIRMWARE_ELF_PATH
+        firmware_uf2_path = AIO_FIRMWARE_UF2_PATH
+    else:
+        build_dir = BUILD_DIR
+        elf_path = ELF_PATH
+        uf2_path = UF2_PATH
+        firmware_elf_path = FIRMWARE_ELF_PATH
+        firmware_uf2_path = FIRMWARE_UF2_PATH
+
+    build(
+        args.aio,
+        build_dir,
+        elf_path,
+        uf2_path,
+        firmware_elf_path,
+        firmware_uf2_path,
+    )
+    flash(elf_path, allow_elf_override=not args.aio)
 
 if __name__ == "__main__":
     main()

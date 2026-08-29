@@ -55,8 +55,9 @@ void switch_pro_init();
 // Update the desired controller state for the next USB report.
 void switch_pro_set_input(const SwitchInputState& state);
 
-// Drive the Switch Pro USB state machine; call this frequently in the main loop.
-void switch_pro_task();
+// Drive the Switch Pro USB state machine; returns true only when a regular
+// 0x30 input report was successfully queued.
+bool switch_pro_task();
 
 // Convert a packed UART message into controller state (returns true if parsed).
 // If out_state is null the parsed state is written directly to the driver.

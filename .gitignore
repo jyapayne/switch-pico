@@ -2,6 +2,7 @@
 Switch-Fightstick
 GP2040-CE
 build
+build-aio
 debug
 .pycache
 *.egg-info

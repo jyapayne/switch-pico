@@ -1,10 +1,14 @@
 #include <stdio.h>
 #include <string.h>
 #include "bsp/board.h"
-#include "hardware/uart.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
 #include "switch_pro_driver.h"
+#ifndef SWITCH_PICO_BLUEPAD32
+#include "hardware/uart.h"
+#else
+#include "bluepad32_input_backend.h"
+#endif
 
 #ifdef SWITCH_PICO_LOG
 #define LOG_PRINTF(...) printf(__VA_ARGS__)
@@ -12,6 +16,7 @@
 #define LOG_PRINTF(...) ((void)0)
 #endif
 
+#ifndef SWITCH_PICO_BLUEPAD32
 // UART1 is reserved for external input frames from the host PC.
 #define UART_ID uart1
 #define BAUD_RATE 921600
@@ -19,6 +24,7 @@
 #define UART_RX_PIN 5
 #define UART_RUMBLE_HEADER 0xBB
 #define UART_RUMBLE_RUMBLE_TYPE 0x01
+#endif
 
 static bool g_last_mounted = false;
 static bool g_last_ready = false;
@@ -26,12 +32,14 @@ static bool g_last_ready = false;
 // Track the latest state provided by UART or the autopilot.
 static SwitchInputState g_user_state;
 
+#ifndef SWITCH_PICO_BLUEPAD32
 static void init_uart_input() {
     uart_init(UART_ID, BAUD_RATE);
     gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
     uart_set_format(UART_ID, 8, 1, UART_PARITY_NONE);
 }
+#endif
 
 static SwitchInputState neutral_input() {
     SwitchInputState state{};
@@ -42,6 +50,7 @@ static SwitchInputState neutral_input() {
     return state;
 }
 
+#ifndef SWITCH_PICO_BLUEPAD32
 static void send_rumble_uart_frame(const uint8_t rumble[8]) {
     uint8_t frame[11];
     frame[0] = UART_RUMBLE_HEADER;
@@ -55,11 +64,17 @@ static void send_rumble_uart_frame(const uint8_t rumble[8]) {
     frame[10] = checksum;
     uart_write_blocking(UART_ID, frame, sizeof(frame));
 }
+#endif
 
 static void on_rumble_from_switch(const uint8_t rumble[8]) {
+#ifdef SWITCH_PICO_BLUEPAD32
+    bluepad32_input_backend_queue_rumble(rumble);
+#else
     send_rumble_uart_frame(rumble);
+#endif
 }
 
+#ifndef SWITCH_PICO_BLUEPAD32
 // Consume UART bytes and forward complete frames to the Switch Pro driver.
 static bool poll_uart_frames() {
     static uint8_t buffer[64];
@@ -134,6 +149,7 @@ static bool poll_uart_frames() {
 
     return new_data;
 }
+#endif
 
 static void log_usb_state() {
     bool mounted = tud_mounted();
@@ -153,7 +169,11 @@ int main() {
     board_init();
     stdio_init_all();
 
+#ifdef SWITCH_PICO_BLUEPAD32
+    bluepad32_input_backend_init();
+#else
     init_uart_input();
+#endif
 
     tusb_init();
     switch_pro_init();
@@ -161,17 +181,32 @@ int main() {
     g_user_state = neutral_input();
     switch_pro_set_input(g_user_state);
 
+#ifdef SWITCH_PICO_BLUEPAD32
+    bluepad32_input_backend_start();
+    LOG_PRINTF("[BOOT] switch-pico starting (Bluepad32 wireless @ 115200)\n");
+#else
     LOG_PRINTF("[BOOT] switch-pico starting (UART0 log @ 115200)\n");
     LOG_PRINTF("[INFO] UART1 pins TX=%d RX=%d baud=%d\n",
            UART_TX_PIN, UART_RX_PIN, BAUD_RATE);
+#endif
 
     while (true) {
         tud_task();          // USB device tasks
+#ifdef SWITCH_PICO_BLUEPAD32
+        bluepad32_input_backend_snapshot(&g_user_state);
+#else
         bool new_data = poll_uart_frames();  // Pull controller state from UART1
         (void)new_data;
+#endif
         SwitchInputState state = g_user_state;
         switch_pro_set_input(state);
-        switch_pro_task();   // Push state to the Switch host
+#ifdef SWITCH_PICO_BLUEPAD32
+        if (switch_pro_task()) {
+            bluepad32_input_backend_report_sent();
+        }
+#else
+        (void)switch_pro_task();
+#endif
         log_usb_state();
     }
 }

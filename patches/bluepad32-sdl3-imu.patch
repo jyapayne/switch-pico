@@ -1,0 +1,154 @@
+diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds4.c b/src/components/bluepad32/parser/uni_hid_parser_ds4.c
+index ea063b8..7670caf 100644
+--- a/src/components/bluepad32/parser/uni_hid_parser_ds4.c
++++ b/src/components/bluepad32/parser/uni_hid_parser_ds4.c
+@@ -297,17 +297,17 @@ void uni_hid_parser_ds4_parse_feature_report(uni_hid_device_t* d, const uint8_t*
+             // Set gyroscope calibration and normalization parameters.
+             // Data values will be normalized to 1/DS_GYRO_RES_PER_DEG_S degree/s.
+             speed_2x = r->gyro_speed_plus + r->gyro_speed_minus;
+-            ins->gyro_calib_data[0].bias = 0;
++            ins->gyro_calib_data[0].bias = r->gyro_pitch_bias;
+             ins->gyro_calib_data[0].sens_numer = speed_2x * DS4_GYRO_RES_PER_DEG_S;
+             ins->gyro_calib_data[0].sens_denom =
+                 abs(r->gyro_pitch_plus - r->gyro_pitch_bias) + abs(r->gyro_pitch_minus + r->gyro_pitch_bias);
+ 
+-            ins->gyro_calib_data[1].bias = 0;
++            ins->gyro_calib_data[1].bias = r->gyro_yaw_bias;
+             ins->gyro_calib_data[1].sens_numer = speed_2x * DS4_GYRO_RES_PER_DEG_S;
+             ins->gyro_calib_data[1].sens_denom =
+                 abs(r->gyro_yaw_plus - r->gyro_yaw_bias) + abs(r->gyro_yaw_minus - r->gyro_yaw_bias);
+ 
+-            ins->gyro_calib_data[2].bias = 0;
++            ins->gyro_calib_data[2].bias = r->gyro_roll_bias;
+             ins->gyro_calib_data[2].sens_numer = speed_2x * DS4_GYRO_RES_PER_DEG_S;
+             ins->gyro_calib_data[2].sens_denom =
+                 abs(r->gyro_roll_plus - r->gyro_roll_bias) + abs(r->gyro_roll_minus - r->gyro_roll_bias);
+@@ -476,7 +476,7 @@ static void ds4_parse_input_report_11(uni_hid_device_t* d, const ds4_input_repor
+ 
+     // Gyro
+     for (size_t i = 0; i < ARRAY_SIZE(r->gyro); i++) {
+-        int32_t raw_data = (int16_t)r->gyro[i];
++        int32_t raw_data = (int16_t)r->gyro[i] - ins->gyro_calib_data[i].bias;
+         int32_t calib_data =
+             mult_frac(ins->gyro_calib_data[i].sens_numer, raw_data, ins->gyro_calib_data[i].sens_denom);
+         ctl->gamepad.gyro[i] = calib_data;
+@@ -484,7 +484,7 @@ static void ds4_parse_input_report_11(uni_hid_device_t* d, const ds4_input_repor
+ 
+     // Accel
+     for (size_t i = 0; i < ARRAY_SIZE(r->accel); i++) {
+-        int32_t raw_data = (int16_t)r->accel[i];
++        int32_t raw_data = (int16_t)r->accel[i] - ins->accel_calib_data[i].bias;
+         int32_t calib_data =
+             mult_frac(ins->accel_calib_data[i].sens_numer, raw_data, ins->accel_calib_data[i].sens_denom);
+         ctl->gamepad.accel[i] = calib_data;
+diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds5.c b/src/components/bluepad32/parser/uni_hid_parser_ds5.c
+index a22ef26..3d5ecef 100644
+--- a/src/components/bluepad32/parser/uni_hid_parser_ds5.c
++++ b/src/components/bluepad32/parser/uni_hid_parser_ds5.c
+@@ -487,17 +487,17 @@ void uni_hid_parser_ds5_parse_feature_report(uni_hid_device_t* d, const uint8_t*
+             // Set gyroscope calibration and normalization parameters.
+             // Data values will be normalized to 1/DS_GYRO_RES_PER_DEG_S degree/s.
+             speed_2x = r->gyro_speed_plus + r->gyro_speed_minus;
+-            ins->gyro_calib_data[0].bias = 0;
++            ins->gyro_calib_data[0].bias = r->gyro_pitch_bias;
+             ins->gyro_calib_data[0].sens_numer = speed_2x * DS5_GYRO_RES_PER_DEG_S;
+             ins->gyro_calib_data[0].sens_denom =
+                 abs(r->gyro_pitch_plus - r->gyro_pitch_bias) + abs(r->gyro_pitch_minus + r->gyro_pitch_bias);
+ 
+-            ins->gyro_calib_data[1].bias = 0;
++            ins->gyro_calib_data[1].bias = r->gyro_yaw_bias;
+             ins->gyro_calib_data[1].sens_numer = speed_2x * DS5_GYRO_RES_PER_DEG_S;
+             ins->gyro_calib_data[1].sens_denom =
+                 abs(r->gyro_yaw_plus - r->gyro_yaw_bias) + abs(r->gyro_yaw_minus - r->gyro_yaw_bias);
+ 
+-            ins->gyro_calib_data[2].bias = 0;
++            ins->gyro_calib_data[2].bias = r->gyro_roll_bias;
+             ins->gyro_calib_data[2].sens_numer = speed_2x * DS5_GYRO_RES_PER_DEG_S;
+             ins->gyro_calib_data[2].sens_denom =
+                 abs(r->gyro_roll_plus - r->gyro_roll_bias) + abs(r->gyro_roll_minus - r->gyro_roll_bias);
+@@ -622,7 +622,7 @@ void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t* d, const uint8_t* r
+ 
+     // Gyro
+     for (size_t i = 0; i < ARRAY_SIZE(r->gyro); i++) {
+-        int32_t raw_data = (int16_t)r->gyro[i];
++        int32_t raw_data = (int16_t)r->gyro[i] - ins->gyro_calib_data[i].bias;
+         int32_t calib_data =
+             mult_frac(ins->gyro_calib_data[i].sens_numer, raw_data, ins->gyro_calib_data[i].sens_denom);
+         ctl->gamepad.gyro[i] = calib_data;
+@@ -630,7 +630,7 @@ void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t* d, const uint8_t* r
+ 
+     // Accel
+     for (size_t i = 0; i < ARRAY_SIZE(r->accel); i++) {
+-        int32_t raw_data = (int16_t)r->accel[i];
++        int32_t raw_data = (int16_t)r->accel[i] - ins->accel_calib_data[i].bias;
+         int32_t calib_data =
+             mult_frac(ins->accel_calib_data[i].sens_numer, raw_data, ins->accel_calib_data[i].sens_denom);
+         ctl->gamepad.accel[i] = calib_data;
+diff --git a/src/components/bluepad32/parser/uni_hid_parser_switch.c b/src/components/bluepad32/parser/uni_hid_parser_switch.c
+index 599fc35..c72f056 100644
+--- a/src/components/bluepad32/parser/uni_hid_parser_switch.c
++++ b/src/components/bluepad32/parser/uni_hid_parser_switch.c
+@@ -51,7 +51,8 @@ static const int16_t DEFAULT_ACCEL_OFFSET = 0;
+ static const int16_t DEFAULT_ACCEL_SCALE = 16384;
+ static const int16_t DEFAULT_GYRO_OFFSET = 0;
+ static const int16_t DEFAULT_GYRO_SCALE = 13371;
+-#define SWITCH_IMU_PREC_RANGE_SCALE 1000
++#define SWITCH_IMU_GYRO_RES_PER_DEG_S 1024
++#define SWITCH_IMU_ACCEL_RES_PER_G 8192
+ 
+ #define SWITCH_FACTORY_IMU_CAL_DATA_SIZE 24
+ static const uint16_t SWITCH_FACTORY_IMU_CAL_DATA_ADDR = 0x6020;
+@@ -823,19 +824,26 @@ static void parse_imu(uni_hid_device_t* d, const struct switch_imu_data_s* r) {
+     switch_instance_t* ins = get_switch_instance(d);
+     uni_controller_t* ctl = &d->controller;
+ 
+-    int accel[3];
+-    int gyro[3];
++    int32_t accel[3];
++    int32_t gyro[3];
+ 
+     for (int i = 0; i < 3; i++) {
+-        if (ins->imu_cal_accel_divisor[i] == 0)
+-            accel[i] = r->accel[i];
+-        else
+-            accel[i] = (r->accel[i] * ins->cal_accel.scale[i]) / ins->imu_cal_accel_divisor[i];
+-        gyro[i] = mult_frac((SWITCH_IMU_PREC_RANGE_SCALE * (r->gyro[i] - ins->cal_gyro.offset[i])),
+-                            ins->cal_gyro.scale[i], ins->imu_cal_gyro_divisor[i]);
++        if (ins->imu_cal_accel_divisor[i] == 0) {
++            accel[i] = r->accel[i] * 2;
++        } else {
++            accel[i] = mult_frac(r->accel[i], 4 * SWITCH_IMU_ACCEL_RES_PER_G, ins->imu_cal_accel_divisor[i]);
++        }
++
++        if (ins->imu_cal_gyro_divisor[i] == 0) {
++            gyro[i] = mult_frac(r->gyro[i], 936 * SWITCH_IMU_GYRO_RES_PER_DEG_S, DEFAULT_GYRO_SCALE);
++        } else {
++            gyro[i] = mult_frac(r->gyro[i] - ins->cal_gyro.offset[i],
++                                936 * SWITCH_IMU_GYRO_RES_PER_DEG_S,
++                                ins->imu_cal_gyro_divisor[i]);
++        }
+     }
+ 
+-    // Right joycon has Y and Z axes negated.
++    // Right Joy-Con has native Y and Z axes negated.
+     if (ins->controller_type == SWITCH_CONTROLLER_TYPE_JCR) {
+         accel[1] = -accel[1];
+         accel[2] = -accel[2];
+@@ -843,10 +851,13 @@ static void parse_imu(uni_hid_device_t* d, const struct switch_imu_data_s* r) {
+         gyro[2] = -gyro[2];
+     }
+ 
+-    for (int i = 0; i < 3; i++) {
+-        ctl->gamepad.accel[i] = accel[i];
+-        ctl->gamepad.gyro[i] = gyro[i];
+-    }
++    // Match SDL3's PlayStation-oriented sensor coordinate convention.
++    ctl->gamepad.accel[0] = -accel[1];
++    ctl->gamepad.accel[1] = accel[2];
++    ctl->gamepad.accel[2] = -accel[0];
++    ctl->gamepad.gyro[0] = -gyro[1];
++    ctl->gamepad.gyro[1] = gyro[2];
++    ctl->gamepad.gyro[2] = -gyro[0];
+ }
+ 
+ // Process 0x30 input report: SWITCH_INPUT_IMU_DATA

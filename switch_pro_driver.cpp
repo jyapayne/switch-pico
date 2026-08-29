@@ -753,9 +753,10 @@ void switch_pro_set_input(const SwitchInputState& state) {
     g_input_state = state;
 }
 
-void switch_pro_task() {
+bool switch_pro_task() {
     uint32_t now = to_ms_since_boot(get_absolute_time());
     report_sent = false;
+    bool regular_report_sent = false;
 
     update_switch_report_from_state();
 
@@ -784,6 +785,7 @@ void switch_pro_task() {
                 memcpy(last_report, inputReport, report_size);
                 g_input_state.imu_sample_count = 0;
                 report_sent = true;
+                regular_report_sent = true;
             }
 
             last_report_timer = now;
@@ -799,6 +801,7 @@ void switch_pro_task() {
             last_report_timer = now;
         }
     }
+    return regular_report_sent;
 }
 
 bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchInputState* out_state) {
