@@ -288,6 +288,54 @@ On startup, the bridge collects the first 200 gyro readings while the controller
 - **Wild camera swinging**: Rebuild and flash the current Pico firmware. Older builds acknowledged quaternion IMU mode 2 but emitted raw mode-1 bytes, which Zelda interpreted as random quaternion data. Keep the controller still during startup, then use `--gyro-scale` only for deliberate sensitivity adjustment.
 - **Verifying Pico output**: Use `uv run python tools/read_pro_imu.py --vid 0x057E --pid 0x2009` to read raw IMU bytes directly from the Pico's USB HID output. A stationary controller should show gyro values near zero and three non-empty, non-duplicated samples per report.
 
+### Implementation notes for maintainers
+
+#### The failure
+
+Nintendo subcommand `0x40` is a mode selector, not a Boolean enable:
+
+| Value | Meaning | Required bytes 13-48 in report `0x30` |
+|---|---|---|
+| `0` | IMU off | Zero-filled |
+| `1` | Raw IMU | Three 12-byte accelerometer/gyro samples |
+| `2` | Quaternion | Nintendo's packed 36-byte mode-2 structure |
+
+The previous firmware stored the argument in `bool is_imu_enabled`. A mode-2 request therefore enabled the raw mode-1 packer. Zelda then decoded raw sensor bytes as mode bits, compressed quaternion components, deltas, and timestamps, producing apparently random camera rotation. The fake also advertised firmware `4.91`, while the genuine wired Pro Controller used during diagnosis reported `3.48`.
+
+Keep `SwitchImuMode` as a three-state value. Never acknowledge mode 2 and then emit mode-1 bytes.
+
+#### Mode-1 implementation
+
+- Emit one `0x30` report every 15 ms.
+- Advance the report timer by 3: one timer tick for each nominal 5 ms IMU sample.
+- Pack three chronological samples as signed little-endian `accel X/Y/Z`, then `gyro X/Y/Z`.
+- The host bridge must retain and republish its latest three-sample window. Do not drain it at the faster UART rate; that previously produced empty and duplicated USB reports.
+- With the advertised factory calibration, 1g is approximately 4096 counts and 1 rad/s is approximately 818.5 gyro counts.
+
+#### Mode-2 implementation
+
+`switch_pro_driver.cpp` implements this in `integrate_motion_sample()` and `fill_quaternion_imu_report_data()`:
+
+1. Reset quaternion state to `(0, 0, 0, 1)` when transitioning into mode 2.
+2. Integrate each report's three gyro samples at 5 ms per sample. The Nintendo quaternion axes use sensor `Y, X, Z`, not `X, Y, Z`.
+3. Build a delta quaternion from the angular rotation vector, multiply it into the current orientation, and normalize after every sample.
+4. Select the largest absolute quaternion component. Its index and sign represent the omitted component; encode the other three signed components at 21-bit precision.
+5. Pack accelerometer data in `Y, X, Z` order, set the mode field to `2`, write the 11-bit millisecond timestamp, and set the timestamp/sample count to `3`.
+6. Integrate and repack only when transmitting the next 15 ms USB report. Calling the integrator from the unrestricted main loop over-integrates the same UART samples.
+
+The mode-2 wire format is bit-packed and fields cross byte boundaries. Use `write_bits_le()` rather than C/C++ bitfields so layout does not depend on compiler bitfield rules.
+
+#### Regression and hardware verification
+
+After changing any IMU conversion, calibration, timing, or report packing:
+
+1. Run `uv run --with pytest pytest -q`.
+2. Build with `cmake --build build -j`.
+3. Capture at least 200 raw `0x30` reports. Stationary gyro should remain near zero; there should be no empty windows, duplicated three-sample windows, or timer-step errors.
+4. Send subcommand `0x40` with value `2`. Every resulting report must have mode bits `2` and timestamp count `3`.
+5. Inject a known single-axis gyro rate and decode the packed quaternion. The corresponding component must change smoothly with the expected sign.
+6. Perform the decisive end-to-end check: genuine Pro Controller → SDL3 bridge → UART → emulated Pico → Zelda. This path was confirmed correct after the mode-2 fix.
+
 ## References
 - GP2040-CE (controller firmware ecosystem): https://github.com/OpenStickCommunity/GP2040-CE
 - nxbt (Switch controller research/tools): https://github.com/Brikwerk/nxbt
