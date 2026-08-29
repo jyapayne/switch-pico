@@ -61,7 +61,6 @@ CONTROLLER_DB_URL_DEFAULT = "https://raw.githubusercontent.com/mdqinc/SDL_GameCo
 SDL_TRUE = True
 SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE", 0x658)
 GYRO_BIAS_SAMPLES = 200
-IMU_BUFFER_SIZE = 32
 
 
 def parse_mapping(value: str) -> Tuple[int, str]:
@@ -1368,8 +1367,8 @@ def handle_sensor_update(
     )
 
     ctx.imu_samples.append(sample)
-    if len(ctx.imu_samples) > IMU_BUFFER_SIZE:
-        ctx.imu_samples = ctx.imu_samples[-IMU_BUFFER_SIZE:]
+    if len(ctx.imu_samples) > IMU_SAMPLES_PER_REPORT:
+        del ctx.imu_samples[:-IMU_SAMPLES_PER_REPORT]
 
     if config.debug_imu:
         now = time.monotonic()
@@ -1567,12 +1566,9 @@ def service_contexts(
         try:
             if now - ctx.last_send >= config.interval:
                 if ctx.sensors_enabled and not config.no_imu:
-                    count = min(len(ctx.imu_samples), IMU_SAMPLES_PER_REPORT)
-                    if count > 0:
-                        ctx.report.imu_samples = ctx.imu_samples[:count]
-                        ctx.imu_samples = ctx.imu_samples[count:]
-                    else:
-                        ctx.report.imu_samples = []
+                    # Keep publishing the latest complete sensor window. Draining
+                    # this at the faster UART rate leaves most USB reports empty.
+                    ctx.report.imu_samples = ctx.imu_samples
                 else:
                     ctx.report.imu_samples = []
                 ctx.uart.send_report(ctx.report)

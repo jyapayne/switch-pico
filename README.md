@@ -269,14 +269,14 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 
 ## IMU / Motion Controls
 
-The bridge supports gyroscope and accelerometer passthrough from controllers that have motion sensors (e.g. the Nintendo Switch Pro Controller, DualSense). Motion data is forwarded to the Pico which injects it into the emulated Switch Pro Controller's HID reports.
+The bridge supports gyroscope and accelerometer passthrough from controllers that have motion sensors (e.g. the Nintendo Switch Pro Controller and DualSense). Motion data is forwarded to the Pico as a rolling three-sample window; the Pico emits standard 0x30 reports at 15 ms intervals and supports both raw IMU mode 1 and packed quaternion mode 2.
 
 ### Requirements
-- A controller with gyro/accelerometer support (SDL2 must be able to enable sensors on it).
+- A controller with gyro/accelerometer support that SDL3 can enable.
 - The Switch will automatically use motion data once the controller is recognised as a Pro Controller.
 
 ### Gyro bias calibration
-On startup, the bridge collects the first 200 gyro readings while the controller is stationary and averages them to compute a per-axis bias (zero-rate offset). Gyro output is zeroed during this ~1 second calibration window, then bias is subtracted from all subsequent readings. Keep the controller still when starting the bridge for best results. Use `--no-gyro-bias` to skip calibration and use raw values directly.
+On startup, the bridge collects the first 200 gyro readings while the controller is stationary and averages them to compute a per-axis bias (zero-rate offset). The bias is subtracted from subsequent readings. Keep the controller still during startup for best results.
 
 ### CLI flags
 - `--debug-imu`: Print raw sensor values (m/s² and rad/s) and converted Switch integer counts every ~200ms. Useful for verifying the sensor is detected and producing sensible data.
@@ -284,10 +284,9 @@ On startup, the bridge collects the first 200 gyro readings while the controller
 - `--gyro-scale FLOAT` (default 1.0): Multiply all gyro values by this factor before sending. Reduce below 1.0 if the camera moves too fast; increase above 1.0 for more sensitivity.
 
 ### Troubleshooting
-- **Gyro not detected**: Run with `--debug-imu`. If no IMU readings appear, SDL2 cannot see sensors on your controller (may not be supported or driver issue). On Linux, the `hid-nintendo` kernel driver routes Pro Controller IMU to a separate evdev device that SDL2 cannot read; use Windows or macOS for gyro passthrough.
-- **Wild camera swinging**: Start with `--gyro-scale 0.3` and increase gradually. Ensure the controller is still during the first second of startup (bias calibration).
-- **Verifying Pico output**: Use `python tools/read_pro_imu.py --vid 0x057E --pid 0x2009` to read raw IMU bytes directly from the Pico's USB HID output and confirm non-zero values appear.
-- **SDL2 accuracy**: SDL2 (version < 2.32.7) has a known inaccuracy bug with Switch Pro Controller gyro data. Updating the SDL2 shared library to 2.32.7 or later improves accuracy.
+- **Gyro not detected**: Run with `--debug-imu`. If no IMU readings appear, SDL3 cannot see sensors on the controller. On Linux, the `hid-nintendo` kernel driver may expose Nintendo controller motion differently; DualSense motion is supported by SDL3's PlayStation HID driver.
+- **Wild camera swinging**: Rebuild and flash the current Pico firmware. Older builds acknowledged quaternion IMU mode 2 but emitted raw mode-1 bytes, which Zelda interpreted as random quaternion data. Keep the controller still during startup, then use `--gyro-scale` only for deliberate sensitivity adjustment.
+- **Verifying Pico output**: Use `uv run python tools/read_pro_imu.py --vid 0x057E --pid 0x2009` to read raw IMU bytes directly from the Pico's USB HID output. A stationary controller should show gyro values near zero and three non-empty, non-duplicated samples per report.
 
 ## References
 - GP2040-CE (controller firmware ecosystem): https://github.com/OpenStickCommunity/GP2040-CE

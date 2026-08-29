@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "switch-pico-bridge"
 version = "0.1.0"
-description = "SDL2-to-UART host bridge and helpers for the switch-pico firmware."
+description = "SDL3-to-UART host bridge and helpers for the switch-pico firmware."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Switch Pico Maintainers" }]
@@ -13,6 +13,7 @@ dependencies = [
     "pyserial",
     "PySDL3",
     "rich",
+    "hidapi",
 ]
 
 [project.scripts]

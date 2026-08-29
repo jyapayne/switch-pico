@@ -1,6 +1,7 @@
 #include "switch_pro_driver.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <stdio.h>
@@ -16,6 +17,10 @@
 
 // force a report to be sent every X ms
 #define SWITCH_PRO_KEEPALIVE_TIMER 5
+// Real Pro Controller cadence: 3 IMU frames per report, 5ms/frame => 15ms/report
+// (~66.7Hz). Emitting the 3-frame 0x30 faster makes the console over-integrate
+// gyro (3 frames assumed 5ms apart delivered too often) => wild camera swing.
+#define SWITCH_PRO_IMU_REPORT_TIMER 15
 
 static SwitchInputState g_input_state{
     false, false, false, false,
@@ -41,7 +46,13 @@ static uint8_t handshake_counter = 0;
 static SwitchDeviceInfo device_info{};
 static uint8_t player_id = 0;
 static uint8_t input_mode = 0x30;
-static bool is_imu_enabled = false;
+enum class SwitchImuMode : uint8_t {
+    Off = 0,
+    Raw = 1,
+    Quaternion = 2,
+};
+
+static SwitchImuMode imu_mode = SwitchImuMode::Off;
 static bool is_vibration_enabled = false;
 
 // Optional compile-time colour override (body/buttons/grips).
@@ -98,9 +109,11 @@ static const uint8_t factory_config_data[0xEFF] = {
     0xFF, 0xFF, 0xFF, 0xFF,
 
     // config & calibration 1
-    0xE3, 0xFF, 0x39, 0xFF, 0xED, 0x01, 0x00, 0x40,
-    0x00, 0x40, 0x00, 0x40, 0x09, 0x00, 0xEA, 0xFF,
-    0xA1, 0xFF, 0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34,
+    // IMU calibration @ 0x6020: zero offsets, 4096 LSB/g, and
+    // 818.5 LSB/(rad/s), matching the bridge's raw-value conversion.
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+    0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34,
 
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 
@@ -184,29 +197,161 @@ static std::map<uint32_t, const uint8_t*> spi_flash_data = {
 
 static inline uint16_t scale16To12(uint16_t pos) { return pos >> 4; }
 
-static void fill_imu_report_data(const SwitchInputState& state) {
+struct MotionQuaternion {
+    float x;
+    float y;
+    float z;
+    float w;
+    int16_t accel_x;
+    int16_t accel_y;
+    int16_t accel_z;
+};
+
+static MotionQuaternion motion_quaternion{0.0f, 0.0f, 0.0f, 1.0f, 0, 0, 0};
+
+static void reset_motion_quaternion() {
+    motion_quaternion = {0.0f, 0.0f, 0.0f, 1.0f, 0, 0, 0};
+}
+
+static void write_int16_le(uint8_t* dst, int16_t value) {
+    dst[0] = static_cast<uint8_t>(value & 0xFF);
+    dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+}
+
+static void write_bits_le(uint8_t* dst, uint16_t bit_offset, uint32_t value, uint8_t width) {
+    for (uint8_t bit = 0; bit < width; ++bit) {
+        if ((value & (1u << bit)) != 0) {
+            uint16_t output_bit = static_cast<uint16_t>(bit_offset + bit);
+            dst[output_bit >> 3] |= static_cast<uint8_t>(1u << (output_bit & 7u));
+        }
+    }
+}
+
+static void integrate_motion_sample(const SwitchImuSample& sample) {
+    constexpr float sample_dt = 0.005f;
+    constexpr float gyro_rad_per_lsb = 1.0f / 818.5f;
+
+    // Nintendo mode 2 uses Y, X, Z sensor order for quaternion axes.
+    float angle_x = static_cast<float>(sample.gyro_y) * gyro_rad_per_lsb * sample_dt;
+    float angle_y = static_cast<float>(sample.gyro_x) * gyro_rad_per_lsb * sample_dt;
+    float angle_z = static_cast<float>(sample.gyro_z) * gyro_rad_per_lsb * sample_dt;
+    float norm = sqrtf(angle_x * angle_x + angle_y * angle_y + angle_z * angle_z);
+    float half = 0.5f * norm;
+    float vector_scale = norm > 1e-12f ? sinf(half) / norm : 0.5f;
+    float scalar = norm > 1e-12f ? cosf(half) : 1.0f;
+
+    float dx = angle_x * vector_scale;
+    float dy = angle_y * vector_scale;
+    float dz = angle_z * vector_scale;
+    float dw = scalar;
+
+    float x = motion_quaternion.w * dx + motion_quaternion.x * dw
+            + motion_quaternion.y * dz - motion_quaternion.z * dy;
+    float y = motion_quaternion.w * dy - motion_quaternion.x * dz
+            + motion_quaternion.y * dw + motion_quaternion.z * dx;
+    float z = motion_quaternion.w * dz + motion_quaternion.x * dy
+            - motion_quaternion.y * dx + motion_quaternion.z * dw;
+    float w = motion_quaternion.w * dw - motion_quaternion.x * dx
+            - motion_quaternion.y * dy - motion_quaternion.z * dz;
+    float magnitude = sqrtf(x * x + y * y + z * z + w * w);
+    if (magnitude > 1e-12f) {
+        float inverse = 1.0f / magnitude;
+        motion_quaternion.x = x * inverse;
+        motion_quaternion.y = y * inverse;
+        motion_quaternion.z = z * inverse;
+        motion_quaternion.w = w * inverse;
+    } else {
+        reset_motion_quaternion();
+    }
+
+    motion_quaternion.accel_x = sample.accel_x;
+    motion_quaternion.accel_y = sample.accel_y;
+    motion_quaternion.accel_z = sample.accel_z;
+}
+
+static void fill_raw_imu_report_data(const SwitchInputState& state) {
     if (state.imu_sample_count == 0) {
         memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
         return;
     }
     uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
-    // If fewer than 3 samples, duplicate the last one to fill all 3 slots
     uint8_t* dst = switch_report.imuData;
     for (uint8_t i = 0; i < 3; ++i) {
-        const SwitchImuSample& s = (i < sample_count) ? state.imu_samples[i] : state.imu_samples[sample_count - 1];
-        dst[0]  = static_cast<uint8_t>(s.accel_x & 0xFF);
-        dst[1]  = static_cast<uint8_t>((s.accel_x >> 8) & 0xFF);
-        dst[2]  = static_cast<uint8_t>(s.accel_y & 0xFF);
-        dst[3]  = static_cast<uint8_t>((s.accel_y >> 8) & 0xFF);
-        dst[4]  = static_cast<uint8_t>(s.accel_z & 0xFF);
-        dst[5]  = static_cast<uint8_t>((s.accel_z >> 8) & 0xFF);
-        dst[6]  = static_cast<uint8_t>(s.gyro_x & 0xFF);
-        dst[7]  = static_cast<uint8_t>((s.gyro_x >> 8) & 0xFF);
-        dst[8]  = static_cast<uint8_t>(s.gyro_y & 0xFF);
-        dst[9]  = static_cast<uint8_t>((s.gyro_y >> 8) & 0xFF);
-        dst[10] = static_cast<uint8_t>(s.gyro_z & 0xFF);
-        dst[11] = static_cast<uint8_t>((s.gyro_z >> 8) & 0xFF);
+        const SwitchImuSample& sample =
+            (i < sample_count) ? state.imu_samples[i] : state.imu_samples[sample_count - 1];
+        write_int16_le(dst + 0, sample.accel_x);
+        write_int16_le(dst + 2, sample.accel_y);
+        write_int16_le(dst + 4, sample.accel_z);
+        write_int16_le(dst + 6, sample.gyro_x);
+        write_int16_le(dst + 8, sample.gyro_y);
+        write_int16_le(dst + 10, sample.gyro_z);
         dst += 12;
+    }
+}
+
+static void fill_quaternion_imu_report_data(const SwitchInputState& state, uint32_t now_ms) {
+    if (state.imu_sample_count > 0) {
+        uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
+        for (uint8_t i = 0; i < 3; ++i) {
+            const SwitchImuSample& sample =
+                (i < sample_count) ? state.imu_samples[i] : state.imu_samples[sample_count - 1];
+            integrate_motion_sample(sample);
+        }
+    }
+
+    uint8_t* dst = switch_report.imuData;
+    memset(dst, 0x00, sizeof(switch_report.imuData));
+
+    // Mode 2 accelerometer vectors are encoded in Y, X, Z order.
+    write_int16_le(dst + 0, motion_quaternion.accel_y);
+    write_int16_le(dst + 2, motion_quaternion.accel_x);
+    write_int16_le(dst + 4, motion_quaternion.accel_z);
+
+    float quaternion[4] = {
+        motion_quaternion.x,
+        motion_quaternion.y,
+        motion_quaternion.z,
+        motion_quaternion.w,
+    };
+    uint8_t max_index = 0;
+    for (uint8_t i = 1; i < 4; ++i) {
+        if (fabsf(quaternion[i]) > fabsf(quaternion[max_index])) {
+            max_index = i;
+        }
+    }
+
+    uint32_t packed_component[3]{};
+    float sign = quaternion[max_index] < 0.0f ? -1.0f : 1.0f;
+    for (uint8_t i = 0; i < 3; ++i) {
+        int32_t component = static_cast<int32_t>(
+            quaternion[(max_index + i + 1) & 3] * 1073741824.0f * sign);
+        packed_component[i] = static_cast<uint32_t>(component >> 10) & 0x1FFFFFu;
+    }
+
+    write_bits_le(dst, 48, 2, 2);
+    write_bits_le(dst, 50, max_index, 2);
+    write_bits_le(dst, 52, packed_component[0], 21);
+    write_bits_le(dst, 73, packed_component[1], 21);
+    write_bits_le(dst, 94, packed_component[2] & 0x3u, 2);
+    write_bits_le(dst, 144, packed_component[2] >> 2, 19);
+
+    uint16_t timestamp = static_cast<uint16_t>(now_ms & 0x7FFu);
+    write_bits_le(dst, 271, timestamp, 11);
+    write_bits_le(dst, 282, 3, 6);
+}
+
+static void fill_imu_report_data(const SwitchInputState& state, uint32_t now_ms) {
+    switch (imu_mode) {
+        case SwitchImuMode::Raw:
+            fill_raw_imu_report_data(state);
+            break;
+        case SwitchImuMode::Quaternion:
+            fill_quaternion_imu_report_data(state, now_ms);
+            break;
+        case SwitchImuMode::Off:
+        default:
+            memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
+            break;
     }
 }
 
@@ -425,14 +570,24 @@ static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSu
             canSend = true;
             LOG_PRINTF("[HID] FEATURE SET_HOME_LIGHT\n");
             break;
-        case TOGGLE_IMU:
-            is_imu_enabled = reportData[11];
+        case TOGGLE_IMU: {
+            SwitchImuMode requested_mode = SwitchImuMode::Off;
+            if (reportData[11] == static_cast<uint8_t>(SwitchImuMode::Raw)) {
+                requested_mode = SwitchImuMode::Raw;
+            } else if (reportData[11] == static_cast<uint8_t>(SwitchImuMode::Quaternion)) {
+                requested_mode = SwitchImuMode::Quaternion;
+            }
+            if (requested_mode == SwitchImuMode::Quaternion && imu_mode != requested_mode) {
+                reset_motion_quaternion();
+            }
+            imu_mode = requested_mode;
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
             report_buffer[15] = 0x00;
             canSend = true;
-            LOG_PRINTF("[HID] FEATURE TOGGLE_IMU %u\n", is_imu_enabled);
+            LOG_PRINTF("[HID] FEATURE TOGGLE_IMU %u\n", static_cast<unsigned>(imu_mode));
             break;
+        }
         case IMU_SENSITIVITY:
             report_buffer[13] = 0x80;
             report_buffer[14] = commandID;
@@ -512,11 +667,12 @@ static void update_switch_report_from_state() {
     switch_report.inputs.rightStick.setX(std::min(std::max(scaleRightStickX,rightMinX), rightMaxX));
     switch_report.inputs.rightStick.setY(-std::min(std::max(scaleRightStickY,rightMinY), rightMaxY));
 
-    fill_imu_report_data(g_input_state);
     switch_report.rumbleReport = 0x09;
 }
 
 void switch_pro_init() {
+    imu_mode = SwitchImuMode::Off;
+    reset_motion_quaternion();
     player_id = 0;
     last_report_counter = 0;
     handshake_counter = 0;
@@ -531,8 +687,8 @@ void switch_pro_init() {
     last_report_timer = 0;
 
     device_info = {
-        .majorVersion = 0x04,
-        .minorVersion = 0x91,
+        .majorVersion = 0x03,
+        .minorVersion = 0x48,
         .controllerType = SWITCH_TYPE_PRO_CONTROLLER,
         .unknown00 = 0x02,
         .macAddress = {0x7c, 0xbb, 0x8a, static_cast<uint8_t>(get_rand_32() % 0xff), static_cast<uint8_t>(get_rand_32() % 0xff), static_cast<uint8_t>(get_rand_32() % 0xff)},
@@ -545,8 +701,8 @@ void switch_pro_init() {
         .timestamp = 0,
 
         .inputs {
-            .connectionInfo = 0x08, // wired connection
-            .batteryLevel = 0x0F,   // full battery
+            .connectionInfo = 0x01, // Pro Controller powered by the console
+            .batteryLevel = 0x08,   // full battery
 
             .buttonY = 0,
             .buttonX = 0,
@@ -618,8 +774,10 @@ void switch_pro_task() {
     }
 
     if (is_ready && !report_sent) {
-        if ((now - last_report_timer) > SWITCH_PRO_KEEPALIVE_TIMER) {
-            switch_report.timestamp = last_report_counter;
+        if ((now - last_report_timer) >= SWITCH_PRO_IMU_REPORT_TIMER) {
+            // One timer tick per 5ms IMU frame; three frames per report.
+            fill_imu_report_data(g_input_state, now);
+            switch_report.timestamp += 3;
             void * inputReport = &switch_report;
             uint16_t report_size = sizeof(switch_report);
             if (tud_hid_ready() && send_report(0, inputReport, report_size) == true ) {
