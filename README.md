@@ -4,7 +4,7 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 
 ## What you get
 - **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a wired Switch Pro. Takes controller reports over UART1 and passes rumble from the Switch back over UART.
-- **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL2 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
+- **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL3 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
 
 ## Quick start
@@ -18,7 +18,7 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 
 ## Limitations
 - No NFC/amiibo/IR support.
-- Rumble is best-effort: it depends on the Switch sending rumble and SDL2 being able to drive haptics on your specific controller.
+- Rumble is best-effort: it depends on the Switch sending rumble and SDL3 being able to drive haptics on your specific controller.
 - Requires a host computer running the bridge; the Pico is not a Bluetooth/USB host for controllers.
 
 ## Uses
@@ -29,7 +29,7 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 ### Remote couch co-op setup (example)
 1. Connect the Switch to a low-latency capture device on the host PC; view it in OBS (or your preferred viewer).
 2. Run `controller-uart-bridge` on the host PC and connect the Pico to the Switch for input.
-3. Have friends connect to the host PC using Parsec; they use their controllers on their end, which Parsec forwards to the host (SDL2 sees them).
+3. Have friends connect to the host PC using Parsec; they use their controllers on their end, which Parsec forwards to the host (SDL3 sees them).
 4. Optional audio routing: Voicemeeter Potato + a virtual audio cable can help manage capture/voice/game audio mixing:
    - Voicemeeter Potato: https://vb-audio.com/Voicemeeter/potato.htm
    - VB-CABLE: https://vb-audio.com/Cable/index.htm
@@ -37,14 +37,14 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 ## End-to-end data flow (input + rumble)
 ```
 INPUT (buttons/sticks)
-[Any controller] -> [Host OS HID] -> [SDL2 GameController] -> [controller-uart-bridge]
+[Any controller] -> [Host OS HID] -> [SDL3 Gamepad] -> [controller-uart-bridge]
                  -> [USB↔UART adapter + UART serial] -> [Pico firmware] -> [USB (Switch Pro)]
                  -> [Nintendo Switch]
 
 RUMBLE (force feedback)
 [Nintendo Switch] -> [USB rumble output report] -> [Pico firmware]
                  -> [UART serial + USB↔UART adapter] -> [controller-uart-bridge]
-                 -> [SDL2 haptics] -> [Any controller motors]
+                 -> [SDL3 haptics] -> [Any controller motors]
 ```
 
 ## Hardware wiring (Pico)
@@ -178,7 +178,7 @@ Flags:
 - `SWITCH_PICO_LOG`: enable/disable UART logging on the Pico.
 
 ## Python bridge (recommended)
-Works on macOS, Windows, Linux. Uses SDL2 + pyserial.
+Works on macOS, Windows, Linux. Uses SDL3 + pyserial.
 
 ### Install dependencies (pyproject-enabled)
 The repository now includes a `pyproject.toml`, so you can install the bridge and helper scripts as an editable package:
@@ -198,7 +198,7 @@ source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -e .
 ```
 
-- SDL2 runtime: install via your OS package manager (macOS: `brew install sdl2`; Windows: place `SDL2.dll` on PATH or next to the script; Linux: `sudo apt install libsdl2-2.0-0` or equivalent).
+- SDL3 runtime: install via your OS package manager (macOS: `brew install sdl3`; Windows: place `SDL3.dll` on PATH or next to the script; Linux: install `libsdl3-0` or your distribution's equivalent).
 
 ### Run
 ```sh
@@ -265,7 +265,7 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 
 ### Windows tips
 - Use `COMx` for ports (e.g., `COM5`). Auto‑detect lists COM ports.
-- Ensure SDL2.dll is on PATH or alongside the script.
+- Ensure SDL3.dll is on PATH or alongside the script.
 
 ### Linux tips
 - You may need udev permissions for `/dev/ttyUSB*`/`/dev/ttyACM*` (add user to `dialout`/`uucp` or use `udev` rules).
