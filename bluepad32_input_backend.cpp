@@ -60,7 +60,7 @@ void publish_state(const SwitchInputState& state, bool controller_active) {
     critical_section_exit(&g_state_lock);
 }
 
-int32_t clamp_axis(int32_t value) {
+constexpr int32_t clamp_axis(int32_t value) {
     if (value < kAxisMinimum) {
         return kAxisMinimum;
     }
@@ -70,7 +70,7 @@ int32_t clamp_axis(int32_t value) {
     return value;
 }
 
-uint16_t scale_stick(int32_t value) {
+constexpr uint16_t scale_stick(int32_t value) {
     value = clamp_axis(value);
     if (value <= 0) {
         return static_cast<uint16_t>(
@@ -80,7 +80,7 @@ uint16_t scale_stick(int32_t value) {
         kStickMidpoint + (static_cast<int64_t>(value) * (UINT16_MAX - kStickMidpoint)) / kAxisMaximum);
 }
 
-int16_t clamp_int16(int64_t value) {
+constexpr int16_t clamp_int16(int64_t value) {
     if (value < INT16_MIN) {
         return INT16_MIN;
     }
@@ -90,22 +90,30 @@ int16_t clamp_int16(int64_t value) {
     return static_cast<int16_t>(value);
 }
 
-int64_t divide_round_nearest(int64_t numerator, int64_t denominator) {
+constexpr int64_t divide_round_nearest(int64_t numerator, int64_t denominator) {
     if (numerator >= 0) {
         return (numerator + denominator / 2) / denominator;
     }
     return -((-numerator + denominator / 2) / denominator);
 }
 
-int16_t convert_accel(int64_t q13_value) {
+constexpr int16_t convert_accel(int64_t q13_value) {
     return clamp_int16(q13_value / 2);
 }
 
-int16_t convert_gyro(int64_t q10_value) {
+constexpr int16_t convert_gyro(int64_t q10_value) {
     constexpr int64_t kNumeratorScale = 13371;
     constexpr int64_t kDenominator = 1024 * 936;
     return clamp_int16(divide_round_nearest(q10_value * kNumeratorScale, kDenominator));
 }
+
+static_assert(scale_stick(-512) == 0);
+static_assert(scale_stick(0) == 32768);
+static_assert(scale_stick(511) == UINT16_MAX);
+static_assert(convert_accel(8192) == 4096);
+static_assert(convert_accel(-8192) == -4096);
+static_assert(convert_gyro(1024) == 14);
+static_assert(convert_gyro(-1024) == -14);
 
 bool has_motion(const uni_gamepad_t& gamepad) {
     for (size_t i = 0; i < 3; ++i) {

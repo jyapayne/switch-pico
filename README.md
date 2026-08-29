@@ -1,11 +1,12 @@
 # Switch Pico Controller Bridge
 
-Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a host bridge that forwards real gamepad input over UART (with rumble round-trip).
+Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB. Input can come from the SDL3-to-UART computer bridge or, on Pico 2 W, directly from a Bluetooth controller through Bluepad32.
 
 ## What you get
-- **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a wired Switch Pro. Takes controller reports over UART1 and passes rumble from the Switch back over UART.
+- **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a wired Switch Pro, accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL3 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
+- **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts one Bluetooth controller and sends its controls, calibrated motion, and rumble through the same Switch Pro USB device without a computer.
 
 ## Quick start
 1. Flash the Pico with `firmware/switch-pico.uf2` (or build your own) using BOOTSEL drag-and-drop (see “Manual UF2 flashing” below).
@@ -14,12 +15,66 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB and a 
 4. Install the Python bridge (see “Python bridge”) and run `controller-uart-bridge --interactive`.
 5. Connect the Pico to the Switch (dock USB-A or USB-C OTG); the Switch should see it as a wired Pro Controller.
 
+## Pico 2 W all-in-one Bluetooth option
+
+The AIO build runs TinyUSB and Switch report generation on Core 0 while Bluepad32, BTstack, and the CYW43439 radio run on Core 1. A fixed state snapshot and bounded rumble queue are the only cross-core interfaces.
+
+### Build and flash
+
+Initialize the pinned Bluepad32 dependency once:
+
+```sh
+git submodule update --init external/bluepad32
+```
+
+Build and flash a Pico 2 W in BOOTSEL mode:
+
+```sh
+python3 build.py --aio
+```
+
+This uses an isolated `build-aio/` CMake cache and publishes:
+
+- `firmware/switch-pico-aio.elf`
+- `firmware/switch-pico-aio.uf2`
+
+The default `python3 build.py` command and `firmware/switch-pico.*` artifacts remain the UART/Pico build. The AIO build requires `PICO_BOARD=pico2_w`; it is not interchangeable with the original non-wireless Pico firmware.
+
+Both `build.py --aio` and direct AIO CMake configuration apply `patches/bluepad32-sdl3-imu.patch` idempotently before compiling Bluepad32. The patch makes supported motion controllers use SDL3-equivalent axes and fixed-point units before conversion to Nintendo samples. It intentionally leaves the dependency worktree dirty; the committed submodule revision remains Bluepad32 4.2.0.
+
+### Pair a controller
+
+1. Flash and connect the Pico 2 W to the Switch.
+2. Enable `System Settings → Controllers and Sensors → Pro Controller Wired Communication`.
+3. Put one controller into Bluetooth pairing mode:
+   - DualSense: hold Create + PS.
+   - DualShock 4: hold Share + PS.
+   - Switch Pro: press its sync button.
+   - Xbox Bluetooth controller: hold its pair button.
+   - 8BitDo: use a Bluetooth mode supported by Bluepad32; use Switch/S mode when motion is required.
+4. Wait for the controller to connect. Pairing keys persist across Pico reboots.
+
+Only one wireless controller owns the emulated Pro Controller. Turn off or disconnect it before pairing another; scanning resumes automatically after disconnect. A disconnect immediately publishes neutral buttons, sticks, and motion.
+
+### Controller capabilities
+
+| Controller | Buttons/sticks | Rumble | Motion |
+|---|---:|---:|---:|
+| DualSense / DualShock 4 | Yes | Yes | Yes |
+| Switch Pro | Yes | Yes | Yes |
+| 8BitDo in Switch-compatible Bluetooth mode | Yes | Model-dependent | Yes when the mode exposes IMU |
+| Xbox Bluetooth controller | Yes | Yes | No hardware IMU |
+
+Motion is normalized to 1024 units per degree/second and 8192 units per g in SDL3 axes, then converted to Nintendo axes and raw counts. The latest normalized sample is duplicated across the report's three nominal 5 ms slots; it remains pending until a regular `0x30` USB report successfully consumes it.
+
+Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry Pi's BTstack license.
+
 ## Planned features
 
 ## Limitations
 - No NFC/amiibo/IR support.
-- Rumble is best-effort: it depends on the Switch sending rumble and SDL3 being able to drive haptics on your specific controller.
-- Requires a host computer running the bridge; the Pico is not a Bluetooth/USB host for controllers.
+- Rumble is best-effort: the UART build depends on SDL3 haptics; the AIO build depends on the connected controller's Bluepad32 rumble implementation.
+- The UART firmware requires a host computer running the bridge. The Pico 2 W AIO firmware does not; it hosts controllers over Bluetooth, not USB.
 
 ## Uses
 - **Remote couch co-op**: friends connect via Parsec while the host streams the Switch via a low-latency capture device (e.g., Magewell Pro Capture) and runs the bridge (see setup below).
