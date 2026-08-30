@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <string.h>
 #include "bsp/board.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
@@ -23,7 +22,7 @@
 #define UART_TX_PIN 4
 #define UART_RX_PIN 5
 #define UART_RUMBLE_HEADER 0xBB
-#define UART_RUMBLE_RUMBLE_TYPE 0x01
+#define UART_RUMBLE_TYPE 0x02
 #endif
 
 static bool g_last_mounted = false;
@@ -51,22 +50,23 @@ static SwitchInputState neutral_input() {
 }
 
 #ifndef SWITCH_PICO_BLUEPAD32
-static void send_rumble_uart_frame(const uint8_t rumble[8]) {
-    uint8_t frame[11];
-    frame[0] = UART_RUMBLE_HEADER;
-    frame[1] = UART_RUMBLE_RUMBLE_TYPE;
-    memcpy(&frame[2], rumble, 8);
+static void send_rumble_uart_frame(const SwitchRumbleOutput& rumble) {
+    uint8_t frame[5] = {
+        UART_RUMBLE_HEADER,
+        UART_RUMBLE_TYPE,
+        rumble.low_frequency_magnitude,
+        rumble.high_frequency_magnitude,
+        0,
+    };
 
-    uint8_t checksum = 0;
-    for (int i = 0; i < 10; ++i) {
-        checksum = static_cast<uint8_t>(checksum + frame[i]);
+    for (uint8_t i = 0; i < 4; ++i) {
+        frame[4] = static_cast<uint8_t>(frame[4] + frame[i]);
     }
-    frame[10] = checksum;
     uart_write_blocking(UART_ID, frame, sizeof(frame));
 }
 #endif
 
-static void on_rumble_from_switch(const uint8_t rumble[8]) {
+static void on_rumble_from_switch(const SwitchRumbleOutput& rumble) {
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_queue_rumble(rumble);
 #else

@@ -87,6 +87,7 @@ static uint16_t rightMinX, rightMinY;
 static uint16_t rightCenX, rightCenY;
 static uint16_t rightMaxX, rightMaxY;
 static SwitchRumbleCallback rumble_callback = nullptr;
+static SwitchHapticsDecoder rumble_decoder;
 
 static const uint8_t factory_config_data[0xEFF] = {
     // serial number
@@ -402,14 +403,16 @@ static void read_spi_flash(uint8_t* dest, uint32_t address, uint8_t size) {
     }
 }
 
-static void forward_rumble_to_host(const uint8_t* report, uint16_t length) {
-    // Output reports 0x10/0x21 include 8 rumble bytes starting at offset 2.
-    if (!rumble_callback || length < 10) {
+static void forward_decoded_rumble(const uint8_t* report, uint16_t length) {
+    // Output reports 0x10/0x01 include 8 rumble bytes starting at offset 2.
+    if (length < 10) {
         return;
     }
-    uint8_t rumble[8];
-    memcpy(rumble, report + 2, sizeof(rumble));
-    rumble_callback(rumble);
+
+    SwitchRumbleOutput rumble = rumble_decoder.decode(report + 2);
+    if (rumble_callback) {
+        rumble_callback(rumble);
+    }
 }
 
 static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSubID, const uint8_t *reportData, uint16_t reportLength) {
@@ -672,6 +675,7 @@ static void update_switch_report_from_state() {
 
 void switch_pro_init() {
     imu_mode = SwitchImuMode::Off;
+    rumble_decoder.reset();
     reset_motion_quaternion();
     player_id = 0;
     last_report_counter = 0;
@@ -931,52 +935,55 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_t
     return report_size;
 }
 
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize) {
-    (void)instance;
-    if (report_type != HID_REPORT_TYPE_OUTPUT) return;
+static void process_output_report(uint8_t callback_report_id,
+                                  const uint8_t* payload,
+                                  uint16_t payload_size) {
+    uint8_t normalized[SWITCH_PRO_ENDPOINT_SIZE]{};
+    size_t normalized_size = normalize_switch_output_report(
+        callback_report_id, payload, payload_size, normalized);
+    if (normalized_size < 2) {
+        return;
+    }
 
-    memset(report_buffer, 0x00, bufsize);
+    memset(report_buffer, 0x00, sizeof(report_buffer));
+    uint8_t switchReportID = normalized[0];
+    uint8_t switchReportSubID = normalized[1];
+    LOG_PRINTF("[HID] output id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
+               callback_report_id, switchReportID, switchReportSubID,
+               static_cast<unsigned>(normalized_size));
 
-    uint8_t switchReportID = buffer[0];
-    uint8_t switchReportSubID = buffer[1];
-    LOG_PRINTF("[HID] set_report type=%d id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
-               report_type, report_id, switchReportID, switchReportSubID, bufsize);
-    if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
-        forward_rumble_to_host(buffer, bufsize);
+    if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_FEATURE) {
+        forward_decoded_rumble(normalized, static_cast<uint16_t>(normalized_size));
     }
     if (switchReportID == REPORT_OUTPUT_00) {
-        // No-op, just acknowledge to clear any stalls.
         return;
-    } else if (switchReportID == REPORT_FEATURE) {
-        queued_report_id = report_id;
-        handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
+    }
+
+    if (switchReportID == REPORT_FEATURE) {
+        queued_report_id = 0;
+        handle_feature_report(switchReportID, switchReportSubID, normalized,
+                              static_cast<uint16_t>(normalized_size));
     } else if (switchReportID == REPORT_CONFIGURATION) {
-        queued_report_id = report_id;
-        handle_config_report(switchReportID, switchReportSubID, buffer, bufsize);
-    } else {
+        queued_report_id = 0;
+        handle_config_report(switchReportID, switchReportSubID, normalized,
+                             static_cast<uint16_t>(normalized_size));
     }
 }
 
-void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id, uint8_t const* buffer, uint16_t bufsize) {
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
+                           hid_report_type_t report_type,
+                           const uint8_t* buffer, uint16_t bufsize) {
     (void)instance;
-    // Host sent data on interrupt OUT; mirror the control path handling.
-    memset(report_buffer, 0x00, bufsize);
-    uint8_t switchReportID = buffer[0];
-    uint8_t switchReportSubID = buffer[1];
-    LOG_PRINTF("[HID] report_received id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
-               report_id, switchReportID, switchReportSubID, bufsize);
-    if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_OUTPUT_21) {
-        forward_rumble_to_host(buffer, bufsize);
-    }
-    if (switchReportID == REPORT_OUTPUT_00) {
+    if (report_type != HID_REPORT_TYPE_OUTPUT) {
         return;
-    } else if (switchReportID == REPORT_FEATURE) {
-        queued_report_id = report_id;
-        handle_feature_report(switchReportID, switchReportSubID, buffer, bufsize);
-    } else if (switchReportID == REPORT_CONFIGURATION) {
-        queued_report_id = report_id;
-        handle_config_report(switchReportID, switchReportSubID, buffer, bufsize);
     }
+    process_output_report(report_id, buffer, bufsize);
+}
+
+void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id,
+                                const uint8_t* buffer, uint16_t bufsize) {
+    (void)instance;
+    process_output_report(report_id, buffer, bufsize);
 }
 
 uint8_t const * tud_hid_descriptor_report_cb(uint8_t itf) {

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Bridge multiple SDL2 controllers to switch-pico over UART and mirror rumble back.
+Bridge multiple SDL3 controllers to switch-pico over UART and mirror rumble back.
 
 The framing matches ``switch-pico.cpp``:
-  - Host -> Pico : 0xAA, buttons (LE16), hat, lx, ly, rx, ry
-  - Pico -> Host : 0xBB, 0x01, 8 rumble bytes, checksum (sum of first 10 bytes)
+  - Host -> Pico : UART v2 controller report
+  - Pico -> Host : 0xBB, 0x02, low-frequency magnitude,
+                   high-frequency magnitude, checksum
 
 Features inspired by ``host/controller_bridge.py``:
   - Multiple controllers paired to multiple UART ports
   - Rich-powered interactive pairing UI
   - Adjustable send frequency, deadzone, and trigger thresholds
-  - Rumble feedback delivered to SDL2 controllers
+  - Rumble feedback delivered to SDL3 controllers
 """
 
 from __future__ import annotations
@@ -48,15 +49,12 @@ from .switch_pico_uart import (
     SwitchReport,
     axis_to_stick,
     str_to_dpad,
-    decode_rumble,
     discover_serial_ports,
     trigger_to_button,
 )
 
 RUMBLE_IDLE_TIMEOUT = 0.25  # seconds without packets before forcing rumble off
-RUMBLE_STUCK_TIMEOUT = 0.60  # continuous same-energy rumble will be stopped after this
-RUMBLE_MIN_ACTIVE = 0.40  # below this, rumble is treated as off/noise
-RUMBLE_SCALE = 1.0
+RUMBLE_DURATION_MS = 50
 CONTROLLER_DB_URL_DEFAULT = "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
 SDL_TRUE = True
 SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE", 0x658)
@@ -199,21 +197,16 @@ def interactive_pairing(
     return mappings
 
 
-def apply_rumble(controller: sdl3.SDL_Gamepad, payload: bytes) -> float:
-    """Apply rumble payload to SDL controller and return max normalized energy."""
-    left_norm, right_norm = decode_rumble(payload)
-    max_norm = max(left_norm, right_norm)
-    # Treat small rumble as "off" to avoid idle buzz.
-    if max_norm < RUMBLE_MIN_ACTIVE:
-        sdl3.SDL_RumbleGamepad(controller, 0, 0, 0)
-        return 0.0
-    # Attenuate to feel closer to a real controller; cap at ~25% strength.
-    scale = RUMBLE_SCALE
-    low = int(min(1.0, left_norm * scale) * 0xFFFF)  # SDL: low_frequency_rumble
-    high = int(min(1.0, right_norm * scale) * 0xFFFF)  # SDL: high_frequency_rumble
-    duration = 10
-    sdl3.SDL_RumbleGamepad(controller, low, high, duration)
-    return max_norm
+def apply_rumble(
+    controller: sdl3.SDL_Gamepad,
+    low_frequency: float,
+    high_frequency: float,
+) -> bool:
+    """Apply normalized low/high rumble magnitudes to an SDL controller."""
+    low = int(max(0.0, min(1.0, low_frequency)) * 0xFFFF)
+    high = int(max(0.0, min(1.0, high_frequency)) * 0xFFFF)
+    sdl3.SDL_RumbleGamepad(controller, low, high, RUMBLE_DURATION_MS)
+    return low != 0 or high != 0
 
 
 @dataclass
@@ -239,9 +232,7 @@ class ControllerContext:
     )
     last_send: float = 0.0
     last_reopen_attempt: float = 0.0
-    last_rumble: float = 0.0
-    last_rumble_change: float = 0.0
-    last_rumble_energy: float = 0.0
+    last_rumble_at: float = 0.0
     rumble_active: bool = False
     axis_offsets: Dict[int, int] = field(default_factory=dict)
     swap_abxy: bool = False
@@ -1134,7 +1125,6 @@ def handle_removed_port(
         ctx.uart = None
         ctx.port = None
         ctx.rumble_active = False
-        ctx.last_rumble_energy = 0.0
         ctx.last_reopen_attempt = time.monotonic()
         console.print(
             f"[yellow]UART {path} removed; controller {ctx.controller_index} waiting for reassignment[/yellow]"
@@ -1574,32 +1564,25 @@ def service_contexts(
                 ctx.uart.send_report(ctx.report)
                 ctx.last_send = now
 
-            last_payload = None
+            latest_rumble = None
             while True:
-                p = ctx.uart.read_rumble_payload()
-                if not p:
+                rumble = ctx.uart.read_rumble()
+                if rumble is None:
                     break
-                last_payload = p
+                latest_rumble = rumble
 
-            if last_payload is not None:
-                # Apply only the freshest rumble payload seen during this tick.
-                energy = apply_rumble(ctx.controller, last_payload)
-                ctx.rumble_active = energy >= RUMBLE_MIN_ACTIVE
-                if ctx.rumble_active and energy != ctx.last_rumble_energy:
-                    ctx.last_rumble_change = now
-                ctx.last_rumble_energy = energy
-                ctx.last_rumble = now
-            elif ctx.rumble_active and (now - ctx.last_rumble) > RUMBLE_IDLE_TIMEOUT:
-                sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
-                ctx.rumble_active = False
-                ctx.last_rumble_energy = 0.0
+            if latest_rumble is not None:
+                # Apply only the freshest rumble command seen during this tick.
+                ctx.rumble_active = apply_rumble(
+                    ctx.controller, latest_rumble[0], latest_rumble[1]
+                )
+                ctx.last_rumble_at = now
             elif (
                 ctx.rumble_active
-                and (now - ctx.last_rumble_change) > RUMBLE_STUCK_TIMEOUT
+                and (now - ctx.last_rumble_at) > RUMBLE_IDLE_TIMEOUT
             ):
                 sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
                 ctx.rumble_active = False
-                ctx.last_rumble_energy = 0.0
         except SerialException as exc:
             console.print(f"[yellow]UART {ctx.port} disconnected: {exc}[/yellow]")
             try:
@@ -1609,7 +1592,6 @@ def service_contexts(
             sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
             ctx.uart = None
             ctx.rumble_active = False
-            ctx.last_rumble_energy = 0.0
             ctx.last_reopen_attempt = now
         except Exception as exc:
             console.print(f"[red]UART error on {ctx.port}: {exc}[/red]")

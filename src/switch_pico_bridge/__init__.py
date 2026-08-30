@@ -10,7 +10,6 @@ from .switch_pico_uart import (  # noqa: F401
     SwitchDpad,
     SwitchUARTClient,
     axis_to_stick,
-    decode_rumble,
     discover_serial_ports,
     first_serial_port,
     str_to_dpad,
@@ -24,7 +23,6 @@ __all__ = [
     "discover_serial_ports",
     "first_serial_port",
     "axis_to_stick",
-    "decode_rumble",
     "str_to_dpad",
     "trigger_to_button",
 ]

@@ -102,6 +102,18 @@ RUMBLE (force feedback)
                  -> [SDL3 haptics] -> [Any controller motors]
 ```
 
+### HD rumble translation
+
+Nintendo sends two stateful four-byte HD-rumble actuator words. Each word can carry full or relative high/low frequency and amplitude commands with up to three subsamples; amplitude uses a logarithmic curve. The Pico decodes both words once in `SwitchHapticsDecoder`, retains actuator state across packets, and reduces the result to conventional low/strong and high/weak motor magnitudes. SDL3 and Bluepad32 cannot reproduce the original linear-actuator frequencies or left/right spatial effects, but they receive the correct nonlinear band amplitudes.
+
+The UART return frame carries the decoded result rather than raw HD-rumble bytes:
+
+```text
+0xBB, 0x02, low-frequency magnitude, high-frequency magnitude, checksum
+```
+
+The checksum is the sum of the first four bytes modulo 256. Firmware and Python bridge versions from before this change are not rumble-protocol compatible; controller input framing remains unchanged.
+
 ## Hardware wiring (Pico)
 - UART1 pins (fixed in firmware):
   - **TX**: GPIO4 (Pico pin 6) → RX of your USB-serial adapter.

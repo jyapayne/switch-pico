@@ -2,7 +2,6 @@
 
 #include <limits.h>
 #include <stddef.h>
-#include <string.h>
 
 #include <btstack_run_loop.h>
 #include <pico/critical_section.h>
@@ -22,10 +21,6 @@ constexpr int32_t kTriggerThreshold = (kTriggerMaximum * 35) / 100;
 constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint kRumbleQueueDepth = 8;
-
-struct RumblePacket {
-    uint8_t bytes[8];
-};
 
 critical_section_t g_state_lock;
 queue_t g_rumble_queue;
@@ -172,28 +167,9 @@ SwitchInputState map_gamepad(const uni_gamepad_t& gamepad) {
     return state;
 }
 
-void decode_rumble(const uint8_t bytes[8], uint8_t* left_magnitude, uint8_t* right_magnitude) {
-    static constexpr uint8_t kNeutralPacket[8] = {0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40};
-    if (memcmp(bytes, kNeutralPacket, sizeof(kNeutralPacket)) == 0) {
-        *left_magnitude = 0;
-        *right_magnitude = 0;
-        return;
-    }
-
-    uint16_t right_raw = static_cast<uint16_t>(((bytes[1] & 0x03) << 8) | bytes[0]);
-    uint16_t left_raw = static_cast<uint16_t>(((bytes[5] & 0x03) << 8) | bytes[4]);
-    if (left_raw < 8 && right_raw < 8) {
-        left_raw = 0;
-        right_raw = 0;
-    }
-
-    *left_magnitude = static_cast<uint8_t>((left_raw * UINT8_MAX + 511) / 1023);
-    *right_magnitude = static_cast<uint8_t>((right_raw * UINT8_MAX + 511) / 1023);
-}
-
 void process_rumble_timer(btstack_timer_source_t* timer) {
-    RumblePacket packet{};
-    RumblePacket latest{};
+    SwitchRumbleOutput packet{};
+    SwitchRumbleOutput latest{};
     bool have_packet = false;
     while (queue_try_remove(&g_rumble_queue, &packet)) {
         latest = packet;
@@ -202,13 +178,9 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 
     if (have_packet && g_active_device != nullptr &&
         g_active_device->report_parser.play_dual_rumble != nullptr) {
-        uint8_t left_magnitude = 0;
-        uint8_t right_magnitude = 0;
-        decode_rumble(latest.bytes, &left_magnitude, &right_magnitude);
-        // Bluepad orders the weak (high-frequency) motor before the strong
-        // (low-frequency) motor; the project decoder names those right/left.
         g_active_device->report_parser.play_dual_rumble(
-            g_active_device, 0, kRumbleDurationMs, right_magnitude, left_magnitude);
+            g_active_device, 0, kRumbleDurationMs,
+            latest.high_frequency_magnitude, latest.low_frequency_magnitude);
     }
 
     btstack_run_loop_set_timer(timer, kRumblePollIntervalMs);
@@ -337,7 +309,7 @@ void bluepad32_input_backend_init() {
     }
 
     critical_section_init(&g_state_lock);
-    queue_init(&g_rumble_queue, sizeof(RumblePacket), kRumbleQueueDepth);
+    queue_init(&g_rumble_queue, sizeof(SwitchRumbleOutput), kRumbleQueueDepth);
     g_shared_state = make_neutral_state();
     g_shared_controller_active = false;
     g_shared_generation = 0;
@@ -387,16 +359,14 @@ void bluepad32_input_backend_report_sent() {
     g_consumed_generation = g_last_snapshot_generation;
 }
 
-void bluepad32_input_backend_queue_rumble(const uint8_t rumble[8]) {
-    if (!g_initialized || rumble == nullptr) {
+void bluepad32_input_backend_queue_rumble(const SwitchRumbleOutput& rumble) {
+    if (!g_initialized) {
         return;
     }
 
-    RumblePacket packet{};
-    memcpy(packet.bytes, rumble, sizeof(packet.bytes));
-    if (!queue_try_add(&g_rumble_queue, &packet)) {
-        RumblePacket discarded{};
+    if (!queue_try_add(&g_rumble_queue, &rumble)) {
+        SwitchRumbleOutput discarded{};
         (void)queue_try_remove(&g_rumble_queue, &discarded);
-        (void)queue_try_add(&g_rumble_queue, &packet);
+        (void)queue_try_add(&g_rumble_queue, &rumble);
     }
 }

@@ -31,7 +31,7 @@ class RecordingUART:
     def send_report(self, report: SwitchReport) -> None:
         self.sent_imu.append(tuple(report.imu_samples))
 
-    def read_rumble_payload(self) -> bytes | None:
+    def read_rumble(self) -> tuple[float, float] | None:
         return None
 
 

@@ -2,12 +2,13 @@
 """
 Lightweight helpers for talking to the switch-pico firmware over UART.
 
-This module exposes the raw report structure plus a small convenience wrapper
+This module exposes the report structure plus a small convenience wrapper
 so other scripts can do things like "press a button" or "move a stick" without
 depending on SDL. It mirrors the framing in ``switch-pico.cpp``:
 
-  Host -> Pico : 0xAA, buttons (LE16), hat, lx, ly, rx, ry
-  Pico -> Host : 0xBB, 0x01, 8 rumble bytes, checksum (sum of first 10 bytes)
+  Host -> Pico : UART v2 controller report
+  Pico -> Host : 0xBB, 0x02, low-frequency magnitude, high-frequency magnitude,
+                 checksum (sum of the first 4 bytes)
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from serial.tools import list_ports, list_ports_common
 UART_HEADER = 0xAA
 UART_PROTOCOL_VERSION = 0x02
 RUMBLE_HEADER = 0xBB
-RUMBLE_TYPE_RUMBLE = 0x01
+RUMBLE_TYPE_DECODED = 0x02
 UART_BAUD = 921600
 IMU_SAMPLES_PER_REPORT = 3
 
@@ -300,15 +301,16 @@ class PicoUART:
         """Send a controller report to the Pico."""
         self.serial.write(report.to_bytes())
 
-    def read_rumble_payload(self) -> Optional[bytes]:
+    def read_rumble(self) -> Optional[Tuple[float, float]]:
         """
-        Drain available UART bytes into an internal buffer, then extract one rumble frame.
+        Extract one decoded rumble frame as normalized low/high magnitudes.
 
         Frame format:
           0: 0xBB (RUMBLE_HEADER)
-          1: type (0x01 for rumble)
-          2-9: 8-byte rumble payload
-          10: checksum (sum of first 10 bytes) & 0xFF
+          1: type (0x02 for decoded rumble)
+          2: low-frequency magnitude (0-255)
+          3: high-frequency magnitude (0-255)
+          4: checksum (sum of first 4 bytes) & 0xFF
         """
         waiting = self.serial.in_waiting
         if waiting:
@@ -323,39 +325,24 @@ class PicoUART:
                 self._buffer.clear()
                 return None
 
-            if len(self._buffer) - start < 11:
+            if len(self._buffer) - start < 5:
                 if start > 0:
                     del self._buffer[:start]
                 return None
 
-            frame = self._buffer[start : start + 11]
-            checksum = compute_checksum(bytes(frame[:10]))
+            frame = self._buffer[start : start + 5]
+            checksum = compute_checksum(bytes(frame[:4]))
 
-            if frame[1] == RUMBLE_TYPE_RUMBLE and checksum == frame[10]:
-                payload = bytes(frame[2:10])
-                del self._buffer[: start + 11]
-                return payload
+            if frame[1] == RUMBLE_TYPE_DECODED and checksum == frame[4]:
+                rumble = (frame[2] / 255.0, frame[3] / 255.0)
+                del self._buffer[: start + 5]
+                return rumble
 
             del self._buffer[: start + 1]
 
     def close(self) -> None:
         """Close the UART connection."""
         self.serial.close()
-
-
-def decode_rumble(payload: bytes) -> Tuple[float, float]:
-    """Return normalized rumble amplitudes (0.0-1.0) for left/right."""
-    if len(payload) < 8:
-        return 0.0, 0.0
-    if payload == b"\x00\x01\x40\x40\x00\x01\x40\x40":
-        return 0.0, 0.0
-    right_raw = ((payload[1] & 0x03) << 8) | payload[0]
-    left_raw = ((payload[5] & 0x03) << 8) | payload[4]
-    if left_raw < 8 and right_raw < 8:
-        return 0.0, 0.0
-    left = min(max(left_raw / 1023.0, 0.0), 1.0)
-    right = min(max(right_raw / 1023.0, 0.0), 1.0)
-    return left, right
 
 
 @dataclass
@@ -537,13 +524,10 @@ class SwitchUARTClient:
 
     def poll_rumble(self) -> Optional[Tuple[float, float]]:
         """
-        Poll for the latest rumble payload and return normalized amplitudes.
+        Poll for decoded low/high rumble magnitudes normalized to 0.0-1.0.
         Returns None if no rumble frame was available.
         """
-        payload = self.uart.read_rumble_payload()
-        if payload:
-            return decode_rumble(payload)
-        return None
+        return self.uart.read_rumble()
 
     def close(self) -> None:
         if self._auto_thread:

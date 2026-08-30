@@ -87,6 +87,7 @@ endif()
 add_executable(switch-pico
         switch-pico.cpp
         switch_pro_driver.cpp
+        switch_haptics.cpp
 )
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE bluepad32_input_backend.cpp)

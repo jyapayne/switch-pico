@@ -6,13 +6,46 @@ from switch_pico_bridge.switch_pico_uart import (
     SwitchReport,
     IMUSample,
     SwitchDpad,
+    PicoUART,
     UART_HEADER,
     UART_PROTOCOL_VERSION,
+    RUMBLE_HEADER,
+    RUMBLE_TYPE_DECODED,
     ACCEL_LSB_PER_G,
     GYRO_LSB_PER_RAD_S,
     MS2_PER_G,
     compute_checksum,
 )
+
+
+class BufferedSerial:
+    def __init__(self, data: bytes = b""):
+        self._data = bytearray(data)
+
+    @property
+    def in_waiting(self) -> int:
+        return len(self._data)
+
+    def read(self, size: int) -> bytes:
+        data = bytes(self._data[:size])
+        del self._data[:size]
+        return data
+
+    def feed(self, data: bytes) -> None:
+        self._data.extend(data)
+
+
+def make_rumble_frame(low: int, high: int) -> bytes:
+    frame = bytes([RUMBLE_HEADER, RUMBLE_TYPE_DECODED, low, high])
+    return frame + bytes([compute_checksum(frame)])
+
+
+def make_uart(data: bytes = b"") -> tuple[PicoUART, BufferedSerial]:
+    uart = object.__new__(PicoUART)
+    serial_port = BufferedSerial(data)
+    uart.serial = serial_port
+    uart._buffer = bytearray()
+    return uart, serial_port
 
 
 def test_v2_frame_with_imu_samples():
@@ -118,3 +151,34 @@ def test_max_imu_samples_capped():
     assert len(data) == 48  # 3 samples, not 5
     assert data[10] == 3
     assert data[2] == 44  # payload_len for 3 samples
+
+
+def test_decoded_rumble_frame_survives_fragmented_input():
+    frame = make_rumble_frame(64, 192)
+    uart, serial_port = make_uart(frame[:3])
+
+    assert uart.read_rumble() is None
+
+    serial_port.feed(frame[3:])
+    assert uart.read_rumble() == pytest.approx((64 / 255.0, 192 / 255.0))
+
+
+def test_decoded_rumble_frame_resynchronizes_after_garbage():
+    uart, _ = make_uart(b"\x00\xffnot-a-frame" + make_rumble_frame(12, 34))
+
+    assert uart.read_rumble() == pytest.approx((12 / 255.0, 34 / 255.0))
+
+
+def test_decoded_rumble_frame_rejects_bad_checksum():
+    corrupted = bytearray(make_rumble_frame(25, 50))
+    corrupted[-1] ^= 0x01
+    uart, _ = make_uart(bytes(corrupted) + make_rumble_frame(75, 100))
+
+    assert uart.read_rumble() == pytest.approx((75 / 255.0, 100 / 255.0))
+
+
+def test_decoded_rumble_zero_and_full_magnitudes():
+    uart, _ = make_uart(make_rumble_frame(0, 0) + make_rumble_frame(255, 255))
+
+    assert uart.read_rumble() == (0.0, 0.0)
+    assert uart.read_rumble() == (1.0, 1.0)
