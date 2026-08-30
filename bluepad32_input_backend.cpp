@@ -21,7 +21,6 @@ constexpr int32_t kTriggerThreshold = (kTriggerMaximum * 35) / 100;
 constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint kRumbleQueueDepth = 8;
-constexpr uint8_t kRumbleActivityLedTicks = 20;
 
 enum class ConnectionStatus {
     Initializing,
@@ -48,7 +47,6 @@ btstack_timer_source_t g_rumble_timer{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
 uint16_t g_status_led_tick = 0;
 bool g_status_led_on = false;
-uint8_t g_rumble_activity_led_ticks = 0;
 
 SwitchInputState make_neutral_state() {
     SwitchInputState state{};
@@ -187,12 +185,7 @@ void update_status_led() {
             led_on = true;
             break;
         case ConnectionStatus::Ready:
-            if (g_rumble_activity_led_ticks > 0) {
-                --g_rumble_activity_led_ticks;
-                led_on = false;
-            } else {
-                led_on = true;
-            }
+            led_on = true;
             break;
         case ConnectionStatus::Scanning:
             led_on = (g_status_led_tick % 200) < 100;
@@ -214,11 +207,6 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     while (queue_try_remove(&g_rumble_queue, &packet)) {
         latest = packet;
         have_packet = true;
-    }
-    if (have_packet &&
-        (latest.low_frequency_magnitude != 0 ||
-         latest.high_frequency_magnitude != 0)) {
-        g_rumble_activity_led_ticks = kRumbleActivityLedTicks;
     }
 
     if (have_packet && g_active_device != nullptr &&
