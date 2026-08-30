@@ -21,6 +21,14 @@ constexpr int32_t kTriggerThreshold = (kTriggerMaximum * 35) / 100;
 constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint kRumbleQueueDepth = 8;
+constexpr uint8_t kRumbleActivityLedTicks = 20;
+
+enum class ConnectionStatus {
+    Initializing,
+    Scanning,
+    Connecting,
+    Ready,
+};
 
 critical_section_t g_state_lock;
 queue_t g_rumble_queue;
@@ -37,6 +45,10 @@ bool g_started = false;
 // This pointer and the timer are only read or written by Core 1 / BTstack.
 uni_hid_device_t* g_active_device = nullptr;
 btstack_timer_source_t g_rumble_timer{};
+ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
+uint16_t g_status_led_tick = 0;
+bool g_status_led_on = false;
+uint8_t g_rumble_activity_led_ticks = 0;
 
 SwitchInputState make_neutral_state() {
     SwitchInputState state{};
@@ -167,6 +179,34 @@ SwitchInputState map_gamepad(const uni_gamepad_t& gamepad) {
     return state;
 }
 
+void update_status_led() {
+    ++g_status_led_tick;
+    bool led_on = false;
+    switch (g_connection_status) {
+        case ConnectionStatus::Initializing:
+            led_on = true;
+            break;
+        case ConnectionStatus::Ready:
+            if (g_rumble_activity_led_ticks > 0) {
+                --g_rumble_activity_led_ticks;
+                led_on = false;
+            } else {
+                led_on = true;
+            }
+            break;
+        case ConnectionStatus::Scanning:
+            led_on = (g_status_led_tick % 200) < 100;
+            break;
+        case ConnectionStatus::Connecting:
+            led_on = (g_status_led_tick % 40) < 20;
+            break;
+    }
+    if (led_on != g_status_led_on) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_on);
+        g_status_led_on = led_on;
+    }
+}
+
 void process_rumble_timer(btstack_timer_source_t* timer) {
     SwitchRumbleOutput packet{};
     SwitchRumbleOutput latest{};
@@ -175,6 +215,11 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         latest = packet;
         have_packet = true;
     }
+    if (have_packet &&
+        (latest.low_frequency_magnitude != 0 ||
+         latest.high_frequency_magnitude != 0)) {
+        g_rumble_activity_led_ticks = kRumbleActivityLedTicks;
+    }
 
     if (have_packet && g_active_device != nullptr &&
         g_active_device->report_parser.play_dual_rumble != nullptr) {
@@ -182,6 +227,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             g_active_device, 0, kRumbleDurationMs,
             latest.high_frequency_magnitude, latest.low_frequency_magnitude);
     }
+    update_status_led();
 
     btstack_run_loop_set_timer(timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(timer);
@@ -196,6 +242,8 @@ void platform_on_init_complete() {
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(&g_rumble_timer);
+    g_connection_status = ConnectionStatus::Scanning;
+    g_status_led_tick = 0;
 
     uni_bt_allow_incoming_connections(true);
     uni_bt_start_scanning_and_autoconnect_unsafe();
@@ -211,6 +259,8 @@ uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name, uint
 
 void platform_on_device_connected(uni_hid_device_t* device) {
     (void)device;
+    g_connection_status = ConnectionStatus::Connecting;
+    g_status_led_tick = 0;
 }
 
 void resume_connections() {
@@ -222,9 +272,13 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
     if (device == g_active_device) {
         g_active_device = nullptr;
         publish_state(make_neutral_state(), false);
+        g_connection_status = ConnectionStatus::Scanning;
+        g_status_led_tick = 0;
         resume_connections();
     } else if (g_active_device == nullptr) {
         resume_connections();
+        g_connection_status = ConnectionStatus::Scanning;
+        g_status_led_tick = 0;
     }
 }
 
@@ -237,6 +291,8 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     }
 
     g_active_device = device;
+    g_connection_status = ConnectionStatus::Ready;
+    g_status_led_tick = 0;
     publish_state(make_neutral_state(), true);
     uni_bt_stop_scanning_unsafe();
     uni_bt_allow_incoming_connections(false);
@@ -286,6 +342,8 @@ uni_platform* get_platform() {
             tight_loop_contents();
         }
     }
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
+    g_status_led_on = true;
 
     uni_platform_set_custom(get_platform());
     if (uni_init(0, nullptr) != 0) {

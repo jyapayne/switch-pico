@@ -54,6 +54,9 @@ Both `build.py --aio` and direct AIO CMake configuration apply `patches/bluepad3
    - 8BitDo: use a Bluetooth mode supported by Bluepad32; use Switch/S mode when motion is required.
 4. Wait for the controller to connect. Pairing keys persist across Pico reboots.
 
+The Pico 2 W onboard LED reports Bluetooth state: a slow 0.5-second blink means scanning, a fast 0.1-second blink means a controller connected but is not ready, and solid means the controller is ready. A solid LED immediately after boot that never starts blinking indicates Bluepad32 initialization did not complete.
+While a controller is ready, a brief dark pulse indicates that a nonzero decoded rumble packet reached the wireless backend.
+
 Only one wireless controller owns the emulated Pro Controller. Turn off or disconnect it before pairing another; scanning resumes automatically after disconnect. A disconnect immediately publishes neutral buttons, sticks, and motion.
 
 ### Controller capabilities
