@@ -11,9 +11,6 @@
 #include "switch_haptics.h"
 #include "switch_pro_descriptors.h"
 
-#ifndef SWITCH_PICO_HID_INSTANCE_COUNT
-#define SWITCH_PICO_HID_INSTANCE_COUNT 1
-#endif
 
 typedef struct {
     int16_t accel_x;

@@ -2,11 +2,14 @@
 
 #include <stdint.h>
 
-#include "switch_pro_driver.h"
 #include "switch_haptics.h"
+#include "switch_pro_driver.h"
+
+constexpr uint8_t BLUEPAD32_INPUT_BACKEND_SLOT_COUNT = 2;
 
 void bluepad32_input_backend_init();
 void bluepad32_input_backend_start();
-bool bluepad32_input_backend_snapshot(SwitchInputState* out);
-void bluepad32_input_backend_report_sent();
-void bluepad32_input_backend_queue_rumble(const SwitchRumbleOutput& rumble);
+bool bluepad32_input_backend_snapshot(uint8_t slot, SwitchInputState* out);
+void bluepad32_input_backend_report_sent(uint8_t slot);
+void bluepad32_input_backend_queue_rumble(uint8_t slot,
+                                          const SwitchRumbleOutput& rumble);

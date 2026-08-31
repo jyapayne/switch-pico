@@ -8,7 +8,6 @@
 #include <pico/cyw43_arch.h>
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
-#include <pico/util/queue.h>
 #include <uni.h>
 
 namespace {
@@ -20,7 +19,10 @@ constexpr int32_t kTriggerMaximum = 1023;
 constexpr int32_t kTriggerThreshold = (kTriggerMaximum * 35) / 100;
 constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
-constexpr uint kRumbleQueueDepth = 8;
+constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
+
+static_assert(kSlotCount == 2);
+static_assert(SWITCH_PICO_HID_INSTANCE_COUNT == kSlotCount);
 
 enum class ConnectionStatus {
     Initializing,
@@ -29,20 +31,32 @@ enum class ConnectionStatus {
     Ready,
 };
 
-critical_section_t g_state_lock;
-queue_t g_rumble_queue;
-SwitchInputState g_shared_state;
-bool g_shared_controller_active = false;
-uint32_t g_shared_generation = 0;
+struct RumbleEnvelope {
+    uint8_t slot;
+    uint32_t connection_generation;
+    SwitchRumbleOutput rumble;
+};
 
-// These generations are only read or written by Core 0.
-uint32_t g_consumed_generation = 0;
-uint32_t g_last_snapshot_generation = 0;
+struct BackendSlot {
+    SwitchInputState state;
+    uni_hid_device_t* device;
+    uint32_t state_generation;
+    uint32_t connection_generation;
+    bool active;
+    bool rumble_pending;
+    RumbleEnvelope pending_rumble;
+};
+
+critical_section_t g_state_lock;
+BackendSlot g_slots[kSlotCount];
+
+// These acknowledgement generations are only read or written by Core 0.
+uint32_t g_consumed_generation[kSlotCount]{};
+uint32_t g_last_snapshot_generation[kSlotCount]{};
 bool g_initialized = false;
 bool g_started = false;
 
-// This pointer and the timer are only read or written by Core 1 / BTstack.
-uni_hid_device_t* g_active_device = nullptr;
+// The timer and connection status are only read or written by Core 1 / BTstack.
 btstack_timer_source_t g_rumble_timer{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
 uint16_t g_status_led_tick = 0;
@@ -57,11 +71,49 @@ SwitchInputState make_neutral_state() {
     return state;
 }
 
-void publish_state(const SwitchInputState& state, bool controller_active) {
+bool valid_slot(uint8_t slot) {
+    return slot < kSlotCount;
+}
+
+int slot_for_device(const uni_hid_device_t* device) {
+    if (device == nullptr) {
+        return -1;
+    }
+    const int slot = uni_hid_device_get_idx_for_instance(device);
+    return slot >= 0 && slot < kSlotCount ? slot : -1;
+}
+
+bool all_slots_ready() {
     critical_section_enter_blocking(&g_state_lock);
-    g_shared_state = state;
-    g_shared_controller_active = controller_active;
-    ++g_shared_generation;
+    bool ready = true;
+    for (const BackendSlot& slot : g_slots) {
+        ready = ready && slot.active && slot.device != nullptr;
+    }
+    critical_section_exit(&g_state_lock);
+    return ready;
+}
+
+void publish_device_state(uint8_t slot, uni_hid_device_t* device,
+                          const SwitchInputState& state) {
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& target = g_slots[slot];
+    if (target.active && target.device == device) {
+        target.state = state;
+        ++target.state_generation;
+    }
+    critical_section_exit(&g_state_lock);
+}
+
+void publish_all_neutral() {
+    critical_section_enter_blocking(&g_state_lock);
+    for (BackendSlot& slot : g_slots) {
+        slot.state = make_neutral_state();
+        slot.device = nullptr;
+        slot.active = false;
+        slot.rumble_pending = false;
+        ++slot.state_generation;
+        ++slot.connection_generation;
+    }
     critical_section_exit(&g_state_lock);
 }
 
@@ -182,8 +234,6 @@ void update_status_led() {
     bool led_on = false;
     switch (g_connection_status) {
         case ConnectionStatus::Initializing:
-            led_on = true;
-            break;
         case ConnectionStatus::Ready:
             led_on = true;
             break;
@@ -201,24 +251,41 @@ void update_status_led() {
 }
 
 void process_rumble_timer(btstack_timer_source_t* timer) {
-    SwitchRumbleOutput packet{};
-    SwitchRumbleOutput latest{};
-    bool have_packet = false;
-    while (queue_try_remove(&g_rumble_queue, &packet)) {
-        latest = packet;
-        have_packet = true;
+    for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
+        RumbleEnvelope envelope{};
+        uni_hid_device_t* device = nullptr;
+        bool dispatch = false;
+
+        critical_section_enter_blocking(&g_state_lock);
+        BackendSlot& slot = g_slots[slot_index];
+        if (slot.rumble_pending) {
+            envelope = slot.pending_rumble;
+            slot.rumble_pending = false;
+            dispatch = envelope.slot == slot_index && slot.active &&
+                       slot.device != nullptr &&
+                       envelope.connection_generation == slot.connection_generation;
+            if (dispatch) {
+                device = slot.device;
+            }
+        }
+        critical_section_exit(&g_state_lock);
+
+        if (dispatch && device->report_parser.play_dual_rumble != nullptr) {
+            device->report_parser.play_dual_rumble(
+                device, 0, kRumbleDurationMs,
+                envelope.rumble.high_frequency_magnitude,
+                envelope.rumble.low_frequency_magnitude);
+        }
     }
 
-    if (have_packet && g_active_device != nullptr &&
-        g_active_device->report_parser.play_dual_rumble != nullptr) {
-        g_active_device->report_parser.play_dual_rumble(
-            g_active_device, 0, kRumbleDurationMs,
-            latest.high_frequency_magnitude, latest.low_frequency_magnitude);
-    }
     update_status_led();
-
     btstack_run_loop_set_timer(timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(timer);
+}
+
+void resume_connections() {
+    uni_bt_allow_incoming_connections(true);
+    uni_bt_start_scanning_and_autoconnect_unsafe();
 }
 
 void platform_init(int argc, const char** argv) {
@@ -232,9 +299,7 @@ void platform_on_init_complete() {
     btstack_run_loop_add_timer(&g_rumble_timer);
     g_connection_status = ConnectionStatus::Scanning;
     g_status_led_tick = 0;
-
-    uni_bt_allow_incoming_connections(true);
-    uni_bt_start_scanning_and_autoconnect_unsafe();
+    resume_connections();
 }
 
 uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name, uint16_t cod, uint8_t rssi) {
@@ -242,56 +307,91 @@ uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name, uint
     (void)name;
     (void)cod;
     (void)rssi;
-    return g_active_device == nullptr ? UNI_ERROR_SUCCESS : UNI_ERROR_IGNORE_DEVICE;
+    return all_slots_ready() ? UNI_ERROR_IGNORE_DEVICE : UNI_ERROR_SUCCESS;
 }
 
 void platform_on_device_connected(uni_hid_device_t* device) {
     (void)device;
-    g_connection_status = ConnectionStatus::Connecting;
-    g_status_led_tick = 0;
-}
-
-void resume_connections() {
-    uni_bt_allow_incoming_connections(true);
-    uni_bt_start_scanning_and_autoconnect_unsafe();
+    if (!all_slots_ready()) {
+        g_connection_status = ConnectionStatus::Connecting;
+        g_status_led_tick = 0;
+    }
 }
 
 void platform_on_device_disconnected(uni_hid_device_t* device) {
-    if (device == g_active_device) {
-        g_active_device = nullptr;
-        publish_state(make_neutral_state(), false);
+    const int slot_index = slot_for_device(device);
+    if (slot_index < 0) {
+        return;
+    }
+
+    bool disconnected_active_slot = false;
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (slot.active && slot.device == device) {
+        slot.state = make_neutral_state();
+        slot.device = nullptr;
+        slot.active = false;
+        slot.rumble_pending = false;
+        ++slot.state_generation;
+        ++slot.connection_generation;
+        disconnected_active_slot = true;
+    }
+    critical_section_exit(&g_state_lock);
+
+    if (disconnected_active_slot) {
         g_connection_status = ConnectionStatus::Scanning;
         g_status_led_tick = 0;
         resume_connections();
-    } else if (g_active_device == nullptr) {
-        resume_connections();
-        g_connection_status = ConnectionStatus::Scanning;
-        g_status_led_tick = 0;
     }
 }
 
 uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
-    if (!uni_hid_device_is_gamepad(device)) {
+    if (device == nullptr || !uni_hid_device_is_gamepad(device)) {
         return UNI_ERROR_INVALID_CONTROLLER;
     }
-    if (g_active_device != nullptr && g_active_device != device) {
+
+    const int slot_index = slot_for_device(device);
+    if (slot_index < 0) {
         return UNI_ERROR_NO_SLOTS;
     }
 
-    g_active_device = device;
-    g_connection_status = ConnectionStatus::Ready;
+    bool occupied_mismatch = false;
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    occupied_mismatch = slot.active && slot.device != device;
+    if (!occupied_mismatch && !slot.active) {
+        slot.state = make_neutral_state();
+        slot.device = device;
+        slot.active = true;
+        slot.rumble_pending = false;
+        ++slot.state_generation;
+    }
+    critical_section_exit(&g_state_lock);
+
+    if (occupied_mismatch) {
+        return UNI_ERROR_NO_SLOTS;
+    }
+
     g_status_led_tick = 0;
-    publish_state(make_neutral_state(), true);
-    uni_bt_stop_scanning_unsafe();
-    uni_bt_allow_incoming_connections(false);
+    if (all_slots_ready()) {
+        g_connection_status = ConnectionStatus::Ready;
+        uni_bt_stop_scanning_unsafe();
+        uni_bt_allow_incoming_connections(false);
+    } else {
+        g_connection_status = ConnectionStatus::Scanning;
+        resume_connections();
+    }
     return UNI_ERROR_SUCCESS;
 }
 
 void platform_on_controller_data(uni_hid_device_t* device, uni_controller_t* controller) {
-    if (device != g_active_device || controller == nullptr || controller->klass != UNI_CONTROLLER_CLASS_GAMEPAD) {
+    const int slot_index = slot_for_device(device);
+    if (slot_index < 0 || controller == nullptr ||
+        controller->klass != UNI_CONTROLLER_CLASS_GAMEPAD) {
         return;
     }
-    publish_state(map_gamepad(controller->gamepad), true);
+    publish_device_state(static_cast<uint8_t>(slot_index), device,
+                         map_gamepad(controller->gamepad));
 }
 
 const uni_property_t* platform_get_property(uni_property_idx_t index) {
@@ -325,7 +425,7 @@ uni_platform* get_platform() {
 
 [[noreturn]] void core1_main() {
     if (cyw43_arch_init() != 0) {
-        publish_state(make_neutral_state(), false);
+        publish_all_neutral();
         while (true) {
             tight_loop_contents();
         }
@@ -335,7 +435,7 @@ uni_platform* get_platform() {
 
     uni_platform_set_custom(get_platform());
     if (uni_init(0, nullptr) != 0) {
-        publish_state(make_neutral_state(), false);
+        publish_all_neutral();
         while (true) {
             tight_loop_contents();
         }
@@ -355,12 +455,14 @@ void bluepad32_input_backend_init() {
     }
 
     critical_section_init(&g_state_lock);
-    queue_init(&g_rumble_queue, sizeof(SwitchRumbleOutput), kRumbleQueueDepth);
-    g_shared_state = make_neutral_state();
-    g_shared_controller_active = false;
-    g_shared_generation = 0;
-    g_consumed_generation = 0;
-    g_last_snapshot_generation = 0;
+    for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
+        BackendSlot& slot = g_slots[slot_index];
+        slot = {};
+        slot.state = make_neutral_state();
+        slot.pending_rumble.slot = slot_index;
+        g_consumed_generation[slot_index] = 0;
+        g_last_snapshot_generation[slot_index] = 0;
+    }
     g_initialized = true;
 }
 
@@ -376,8 +478,8 @@ void bluepad32_input_backend_start() {
     multicore_launch_core1(core1_main);
 }
 
-bool bluepad32_input_backend_snapshot(SwitchInputState* out) {
-    if (out == nullptr) {
+bool bluepad32_input_backend_snapshot(uint8_t slot_index, SwitchInputState* out) {
+    if (out == nullptr || !valid_slot(slot_index)) {
         return false;
     }
     if (!g_initialized) {
@@ -386,33 +488,36 @@ bool bluepad32_input_backend_snapshot(SwitchInputState* out) {
     }
 
     critical_section_enter_blocking(&g_state_lock);
-    *out = g_shared_state;
-    const bool controller_active = g_shared_controller_active;
-    const uint32_t generation = g_shared_generation;
+    *out = g_slots[slot_index].state;
+    const bool controller_active = g_slots[slot_index].active;
+    const uint32_t generation = g_slots[slot_index].state_generation;
     critical_section_exit(&g_state_lock);
 
-    if (generation == g_consumed_generation) {
+    if (generation == g_consumed_generation[slot_index]) {
         out->imu_sample_count = 0;
     }
-    g_last_snapshot_generation = generation;
+    g_last_snapshot_generation[slot_index] = generation;
     return controller_active;
 }
 
-void bluepad32_input_backend_report_sent() {
-    if (!g_initialized) {
+void bluepad32_input_backend_report_sent(uint8_t slot_index) {
+    if (!g_initialized || !valid_slot(slot_index)) {
         return;
     }
-    g_consumed_generation = g_last_snapshot_generation;
+    g_consumed_generation[slot_index] = g_last_snapshot_generation[slot_index];
 }
 
-void bluepad32_input_backend_queue_rumble(const SwitchRumbleOutput& rumble) {
-    if (!g_initialized) {
+void bluepad32_input_backend_queue_rumble(uint8_t slot_index,
+                                          const SwitchRumbleOutput& rumble) {
+    if (!g_initialized || !valid_slot(slot_index)) {
         return;
     }
 
-    if (!queue_try_add(&g_rumble_queue, &rumble)) {
-        SwitchRumbleOutput discarded{};
-        (void)queue_try_remove(&g_rumble_queue, &discarded);
-        (void)queue_try_add(&g_rumble_queue, &rumble);
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (slot.active && slot.device != nullptr) {
+        slot.pending_rumble = {slot_index, slot.connection_generation, rumble};
+        slot.rumble_pending = true;
     }
+    critical_section_exit(&g_state_lock);
 }

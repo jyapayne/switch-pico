@@ -1,8 +1,8 @@
 #pragma once
 
-// Bluepad32's Pico W example configuration, limited to one live controller.
-#define CONFIG_BLUEPAD32_MAX_DEVICES 1
-#define CONFIG_BLUEPAD32_MAX_ALLOWLIST 1
+// The AIO firmware exposes one fixed Bluepad32 device slot per USB interface.
+#define CONFIG_BLUEPAD32_MAX_DEVICES 2
+#define CONFIG_BLUEPAD32_MAX_ALLOWLIST 2
 #define CONFIG_BLUEPAD32_GAP_SECURITY 1
 #define CONFIG_BLUEPAD32_ENABLE_BLE_BY_DEFAULT 1
 

@@ -91,7 +91,14 @@ add_executable(switch-pico
 )
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE bluepad32_input_backend.cpp)
-    target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_BLUEPAD32=1)
+    target_compile_definitions(switch-pico PRIVATE
+            SWITCH_PICO_BLUEPAD32=1
+            SWITCH_PICO_HID_INSTANCE_COUNT=2
+    )
+else()
+    target_compile_definitions(switch-pico PRIVATE
+            SWITCH_PICO_HID_INSTANCE_COUNT=1
+    )
 endif()
 
 pico_set_program_name(switch-pico "switch-pico")

@@ -1,11 +1,19 @@
-// TinyUSB configuration tailored for a single Switch Pro style HID interface.
-// Data is derived from TinyUSB examples and tuned for a 64-byte HID endpoint.
+// TinyUSB configuration for one or two Switch Pro style HID interfaces.
+// Each interface uses independent 64-byte interrupt IN and OUT endpoints.
 #ifndef _TUSB_CONFIG_H_
 #define _TUSB_CONFIG_H_
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+#ifndef SWITCH_PICO_HID_INSTANCE_COUNT
+#define SWITCH_PICO_HID_INSTANCE_COUNT 1
+#endif
+
+#if SWITCH_PICO_HID_INSTANCE_COUNT != 1 && SWITCH_PICO_HID_INSTANCE_COUNT != 2
+#error "SWITCH_PICO_HID_INSTANCE_COUNT must be 1 or 2"
+#endif
+
 
 #define CFG_TUSB_RHPORT0_MODE (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 #ifndef CFG_TUSB_OS
@@ -23,7 +31,7 @@ extern "C" {
 #define CFG_TUD_ENDPOINT0_SIZE 64
 
 // Device class configuration
-#define CFG_TUD_HID 1
+#define CFG_TUD_HID SWITCH_PICO_HID_INSTANCE_COUNT
 #define CFG_TUD_CDC 0
 #define CFG_TUD_MSC 0
 #define CFG_TUD_MIDI 0
