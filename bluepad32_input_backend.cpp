@@ -21,7 +21,7 @@ constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
 
-static_assert(kSlotCount == 2);
+static_assert(kSlotCount == 4);
 static_assert(SWITCH_PICO_HID_INSTANCE_COUNT == kSlotCount);
 
 enum class ConnectionStatus {

@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-def test_switch_pro_driver_two_contexts_native(tmp_path: Path) -> None:
+def test_switch_pro_driver_four_contexts_native(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
@@ -19,7 +19,7 @@ def test_switch_pro_driver_two_contexts_native(tmp_path: Path) -> None:
             "-Wextra",
             "-Werror",
             "-pedantic",
-            "-DSWITCH_PICO_HID_INSTANCE_COUNT=2",
+            "-DSWITCH_PICO_HID_INSTANCE_COUNT=4",
             f"-I{root / 'tests' / 'native_stubs'}",
             f"-I{root}",
             str(root / "switch_pro_driver.cpp"),

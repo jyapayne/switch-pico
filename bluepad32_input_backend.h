@@ -5,7 +5,7 @@
 #include "switch_haptics.h"
 #include "switch_pro_driver.h"
 
-constexpr uint8_t BLUEPAD32_INPUT_BACKEND_SLOT_COUNT = 2;
+constexpr uint8_t BLUEPAD32_INPUT_BACKEND_SLOT_COUNT = 4;
 
 void bluepad32_input_backend_init();
 void bluepad32_input_backend_start();

@@ -12,8 +12,8 @@
 #define SWITCH_PICO_HID_INSTANCE_COUNT 1
 #endif
 
-#if SWITCH_PICO_HID_INSTANCE_COUNT != 1 && SWITCH_PICO_HID_INSTANCE_COUNT != 2
-#error "SWITCH_PICO_HID_INSTANCE_COUNT must be 1 or 2"
+#if SWITCH_PICO_HID_INSTANCE_COUNT < 1 || SWITCH_PICO_HID_INSTANCE_COUNT > 4
+#error "SWITCH_PICO_HID_INSTANCE_COUNT must be between 1 and 4"
 #endif
 
 
@@ -380,9 +380,15 @@ static const uint8_t switch_pro_configuration_descriptor[] =
 #if SWITCH_PICO_HID_INSTANCE_COUNT == 1
     0x29, 0x00,  // wTotalLength 41
     0x01,        // bNumInterfaces 1
-#else
+#elif SWITCH_PICO_HID_INSTANCE_COUNT == 2
     0x49, 0x00,  // wTotalLength 73
     0x02,        // bNumInterfaces 2
+#elif SWITCH_PICO_HID_INSTANCE_COUNT == 3
+    0x69, 0x00,  // wTotalLength 105
+    0x03,        // bNumInterfaces 3
+#else
+    0x89, 0x00,  // wTotalLength 137
+    0x04,        // bNumInterfaces 4
 #endif
     0x01,        // bConfigurationValue
     0x00,        // iConfiguration (String Index)
@@ -421,7 +427,7 @@ static const uint8_t switch_pro_configuration_descriptor[] =
     0x40, 0x00,  // wMaxPacketSize 64
     0x08,        // bInterval 8 (unit depends on device speed)
 
-#if SWITCH_PICO_HID_INSTANCE_COUNT == 2
+#if SWITCH_PICO_HID_INSTANCE_COUNT >= 2
     0x09,        // bLength
     0x04,        // bDescriptorType (Interface)
     0x01,        // bInterfaceNumber 1
@@ -450,6 +456,74 @@ static const uint8_t switch_pro_configuration_descriptor[] =
     0x07,        // bLength
     0x05,        // bDescriptorType (Endpoint)
     0x02,        // bEndpointAddress (OUT/H2D)
+    0x03,        // bmAttributes (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize 64
+    0x08,        // bInterval 8 (unit depends on device speed)
+#endif
+
+#if SWITCH_PICO_HID_INSTANCE_COUNT >= 3
+    0x09,        // bLength
+    0x04,        // bDescriptorType (Interface)
+    0x02,        // bInterfaceNumber 2
+    0x00,        // bAlternateSetting
+    0x02,        // bNumEndpoints 2
+    0x03,        // bInterfaceClass
+    0x00,        // bInterfaceSubClass
+    0x00,        // bInterfaceProtocol
+    0x00,        // iInterface (String Index)
+
+    0x09,        // bLength
+    0x21,        // bDescriptorType (HID)
+    0x11, 0x01,  // bcdHID 1.11
+    0x00,        // bCountryCode
+    0x01,        // bNumDescriptors
+    0x22,        // bDescriptorType[0] (HID)
+    0xCB, 0x00,  // wDescriptorLength[0] 203
+
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x83,        // bEndpointAddress (IN/D2H)
+    0x03,        // bmAttributes (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize 64
+    0x08,        // bInterval 8 (unit depends on device speed)
+
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x03,        // bEndpointAddress (OUT/H2D)
+    0x03,        // bmAttributes (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize 64
+    0x08,        // bInterval 8 (unit depends on device speed)
+#endif
+
+#if SWITCH_PICO_HID_INSTANCE_COUNT >= 4
+    0x09,        // bLength
+    0x04,        // bDescriptorType (Interface)
+    0x03,        // bInterfaceNumber 3
+    0x00,        // bAlternateSetting
+    0x02,        // bNumEndpoints 2
+    0x03,        // bInterfaceClass
+    0x00,        // bInterfaceSubClass
+    0x00,        // bInterfaceProtocol
+    0x00,        // iInterface (String Index)
+
+    0x09,        // bLength
+    0x21,        // bDescriptorType (HID)
+    0x11, 0x01,  // bcdHID 1.11
+    0x00,        // bCountryCode
+    0x01,        // bNumDescriptors
+    0x22,        // bDescriptorType[0] (HID)
+    0xCB, 0x00,  // wDescriptorLength[0] 203
+
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x84,        // bEndpointAddress (IN/D2H)
+    0x03,        // bmAttributes (Interrupt)
+    0x40, 0x00,  // wMaxPacketSize 64
+    0x08,        // bInterval 8 (unit depends on device speed)
+
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x04,        // bEndpointAddress (OUT/H2D)
     0x03,        // bmAttributes (Interrupt)
     0x40, 0x00,  // wMaxPacketSize 64
     0x08,        // bInterval 8 (unit depends on device speed)

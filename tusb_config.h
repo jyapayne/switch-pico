@@ -1,4 +1,4 @@
-// TinyUSB configuration for one or two Switch Pro style HID interfaces.
+// TinyUSB configuration for one to four Switch Pro style HID interfaces.
 // Each interface uses independent 64-byte interrupt IN and OUT endpoints.
 #ifndef _TUSB_CONFIG_H_
 #define _TUSB_CONFIG_H_
@@ -10,8 +10,8 @@ extern "C" {
 #define SWITCH_PICO_HID_INSTANCE_COUNT 1
 #endif
 
-#if SWITCH_PICO_HID_INSTANCE_COUNT != 1 && SWITCH_PICO_HID_INSTANCE_COUNT != 2
-#error "SWITCH_PICO_HID_INSTANCE_COUNT must be 1 or 2"
+#if SWITCH_PICO_HID_INSTANCE_COUNT < 1 || SWITCH_PICO_HID_INSTANCE_COUNT > 4
+#error "SWITCH_PICO_HID_INSTANCE_COUNT must be between 1 and 4"
 #endif
 
 

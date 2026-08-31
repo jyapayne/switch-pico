@@ -54,26 +54,28 @@ def test_default_descriptor_contract_is_single_hid(tmp_path: Path) -> None:
     subprocess.run([str(executable)], check=True, cwd=root)
 
 
-def test_explicit_single_descriptor_contract(tmp_path: Path) -> None:
+def test_supported_descriptor_contracts(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
-    executable = tmp_path / "switch_pro_descriptors_single_test"
-    result = compile_descriptor_test(root, host_compiler(), executable, 1, 1)
-    assert result.returncode == 0, result.stderr
-    subprocess.run([str(executable)], check=True, cwd=root)
-
-
-def test_dual_descriptor_contract(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parents[1]
-    executable = tmp_path / "switch_pro_descriptors_dual_test"
-    result = compile_descriptor_test(root, host_compiler(), executable, 2, 2)
-    assert result.returncode == 0, result.stderr
-    subprocess.run([str(executable)], check=True, cwd=root)
+    compiler = host_compiler()
+    for instance_count in range(1, 5):
+        executable = (
+            tmp_path / f"switch_pro_descriptors_{instance_count}_test"
+        )
+        result = compile_descriptor_test(
+            root,
+            compiler,
+            executable,
+            instance_count,
+            instance_count,
+        )
+        assert result.returncode == 0, result.stderr
+        subprocess.run([str(executable)], check=True, cwd=root)
 
 
 def test_unsupported_hid_instance_counts_fail_to_compile(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = host_compiler()
-    for unsupported_count in (0, 3):
+    for unsupported_count in (0, 5):
         executable = tmp_path / f"switch_pro_descriptors_invalid_{unsupported_count}"
         result = compile_descriptor_test(
             root,

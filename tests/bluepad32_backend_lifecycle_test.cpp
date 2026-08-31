@@ -97,10 +97,16 @@ void tick_backend_timer(int ticks) {
     }
 }
 
-void test_ready_order(int first_slot) {
+void test_ready_order(bool reverse) {
     start_backend();
-    uni_hid_device_t devices[2] = {device(0), device(1)};
-    const int second_slot = 1 - first_slot;
+    uni_hid_device_t devices[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+    uni_hid_device_t replacements[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+    const int forward[kSlotCount] = {0, 1, 2, 3};
+    const int backward[kSlotCount] = {3, 2, 1, 0};
+    const int* order = reverse ? backward : forward;
+
     tick_backend_timer(99);
     require(observed_status_led_on,
             "scanning LED must stay on for the first slow-blink half-cycle");
@@ -108,7 +114,7 @@ void test_ready_order(int first_slot) {
     require(!observed_status_led_on,
             "scanning LED must turn off at the slow-blink half-cycle");
 
-    platform_on_device_connected(&devices[first_slot]);
+    platform_on_device_connected(&devices[order[0]]);
     tick_backend_timer(19);
     require(observed_status_led_on,
             "connecting LED must stay on for the first fast-blink half-cycle");
@@ -119,53 +125,83 @@ void test_ready_order(int first_slot) {
     require(observed_status_led_on,
             "connecting LED must turn on for the next fast-blink cycle");
 
-    require(platform_on_device_ready(&devices[first_slot]) ==
-                UNI_ERROR_SUCCESS,
-            "first ready device must bind to its Bluepad index");
-    require(scan_stops == 0,
-            "scanning must continue while one slot remains free");
-    require(incoming_connections,
-            "incoming connections must remain enabled with one ready slot");
-    tick_backend_timer(99);
-    require(observed_status_led_on,
-            "one ready slot must leave the LED in the slow scanning cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "one open slot must produce the scanning LED off transition");
+    for (int position = 0; position < kSlotCount; ++position) {
+        const int slot = order[position];
+        require(platform_on_device_ready(&devices[slot]) == UNI_ERROR_SUCCESS,
+                "ready device must bind to its Bluepad index");
 
-    SwitchInputState first{};
-    SwitchInputState second{};
-    require(bluepad32_input_backend_snapshot(first_slot, &first),
-            "first ready slot must be active");
-    require(!bluepad32_input_backend_snapshot(second_slot, &second),
-            "other slot must remain independently inactive");
+        for (int candidate = 0; candidate < kSlotCount; ++candidate) {
+            SwitchInputState snapshot{};
+            bool expected_active = false;
+            for (int ready = 0; ready <= position; ++ready) {
+                expected_active = expected_active || order[ready] == candidate;
+            }
+            require(bluepad32_input_backend_snapshot(candidate, &snapshot) ==
+                        expected_active,
+                    "only ready indexed slots may become active");
+        }
 
-    require(platform_on_device_ready(&devices[second_slot]) ==
-                UNI_ERROR_SUCCESS,
-            "second ready device must bind to its Bluepad index");
+        if (position + 1 < kSlotCount) {
+            require(scan_stops == 0,
+                    "scanning must continue while any slot remains free");
+            require(incoming_connections,
+                    "incoming connections must remain enabled before all slots are ready");
+            if (position == 0) {
+                tick_backend_timer(99);
+                require(observed_status_led_on,
+                        "a partially full backend must use the scanning LED on half-cycle");
+                tick_backend_timer(1);
+                require(!observed_status_led_on,
+                        "a partially full backend must use the scanning LED off half-cycle");
+            }
+        }
+    }
+
     require(scan_stops == 1,
-            "scanning must stop exactly when both slots are ready");
+            "scanning must stop exactly when all four slots are ready");
     require(!incoming_connections,
-            "incoming connections must be disabled only when full");
+            "incoming connections must be disabled only when all slots are full");
     tick_backend_timer(1);
     require(observed_status_led_on,
-            "both ready slots must turn the status LED on");
+            "four ready slots must turn the status LED on");
     const int ready_led_writes = observed_status_led_writes;
     tick_backend_timer(200);
     require(observed_status_led_on &&
                 observed_status_led_writes == ready_led_writes,
-            "both ready slots must keep the status LED solid");
+            "four ready slots must keep the status LED solid");
+
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        const int starts_before_disconnect = scan_starts;
+        platform_on_device_disconnected(&devices[slot]);
+        require(scan_starts == starts_before_disconnect + 1 &&
+                    scanning_enabled && incoming_connections,
+                "disconnecting any slot must resume connection policy");
+
+        for (int candidate = 0; candidate < kSlotCount; ++candidate) {
+            SwitchInputState snapshot{};
+            require(bluepad32_input_backend_snapshot(candidate, &snapshot) ==
+                        (candidate != slot),
+                    "disconnect must preserve every surviving slot");
+        }
+
+        require(platform_on_device_ready(&replacements[slot]) ==
+                    UNI_ERROR_SUCCESS,
+                "replacement must bind to each freed indexed slot");
+        require(!scanning_enabled && !incoming_connections,
+                "restoring four ready slots must stop connection policy");
+        devices[slot] = replacements[slot];
+    }
 
     bd_addr_t address{};
     require(platform_on_device_discovered(address, "extra", 0, 0) ==
                 UNI_ERROR_IGNORE_DEVICE,
-            "discovery must reject devices while both slots are occupied");
+            "discovery must reject devices while all four slots are occupied");
 }
 
 void test_rejections() {
     start_backend();
     uni_hid_device_t non_gamepad = device(0, false);
-    uni_hid_device_t out_of_range = device(2);
+    uni_hid_device_t out_of_range = device(4);
     uni_hid_device_t slot_zero = device(0);
     uni_hid_device_t collision = device(0);
 
@@ -173,21 +209,39 @@ void test_rejections() {
                 UNI_ERROR_INVALID_CONTROLLER,
             "non-gamepad must be rejected");
     require(platform_on_device_ready(&out_of_range) == UNI_ERROR_NO_SLOTS,
-            "out-of-range Bluepad index must be rejected");
+            "Bluepad index 4 must be rejected");
     require(platform_on_device_ready(&slot_zero) == UNI_ERROR_SUCCESS,
             "valid device must occupy its indexed slot");
     require(platform_on_device_ready(&collision) == UNI_ERROR_NO_SLOTS,
             "different device cannot replace an occupied slot");
 
-    uni_controller_t data{};
-    data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
-    data.gamepad.buttons = BUTTON_B;
-    platform_on_controller_data(&collision, &data);
+    uni_controller_t collision_data{};
+    collision_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    collision_data.gamepad.buttons = BUTTON_B;
+    platform_on_controller_data(&collision, &collision_data);
     SwitchInputState snapshot{};
     require(bluepad32_input_backend_snapshot(0, &snapshot),
             "occupied slot must stay active");
     require(!snapshot.button_a,
             "mismatched device input must not enter the occupied slot");
+
+    uni_controller_t slot_zero_data{};
+    slot_zero_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    slot_zero_data.gamepad.accel[0] = 8192;
+    platform_on_controller_data(&slot_zero, &slot_zero_data);
+    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+                snapshot.imu_sample_count == 3,
+            "valid slot input must remain observable");
+    require(!bluepad32_input_backend_snapshot(4, &snapshot),
+            "public snapshot must reject slot 4");
+    bluepad32_input_backend_report_sent(4);
+    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+                snapshot.imu_sample_count == 3,
+            "slot 4 acknowledgement must not consume slot 0 IMU");
+    bluepad32_input_backend_queue_rumble(4, SwitchRumbleOutput{1, 2});
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_zero.rumble_calls == 0,
+            "slot 4 rumble must not reach a valid controller");
 }
 
 void test_independent_lifecycle() {
@@ -222,13 +276,14 @@ void test_independent_lifecycle() {
     require(!observed_status_led_on,
             "pre-ready disconnect must restore the slow LED off half-cycle");
 
-    uni_hid_device_t first = device(0);
-    uni_hid_device_t survivor = device(1);
-    platform_on_device_connected(&first);
-    platform_on_device_connected(&survivor);
-    require(g_slots[0].device == &first && !g_slots[0].active &&
-                g_slots[1].device == &survivor && !g_slots[1].active,
-            "concurrent pending devices must retain independent identities");
+    uni_hid_device_t devices[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        platform_on_device_connected(&devices[slot]);
+        require(g_slots[slot].device == &devices[slot] &&
+                    !g_slots[slot].active,
+                "each pending device must retain its indexed identity");
+    }
     tick_backend_timer(19);
     require(observed_status_led_on,
             "concurrent pending devices must use the fast LED on half-cycle");
@@ -239,182 +294,246 @@ void test_independent_lifecycle() {
     const uint32_t first_pending_generation =
         g_slots[0].connection_generation;
     const int starts_before_first_pending_disconnect = scan_starts;
-    platform_on_device_disconnected(&first);
-    require(g_slots[0].device == nullptr && !g_slots[0].active &&
-                g_slots[1].device == &survivor && !g_slots[1].active,
-            "pre-ready disconnect must preserve the other pending identity");
+    platform_on_device_disconnected(&devices[0]);
+    require(g_slots[0].device == nullptr && !g_slots[0].active,
+            "pre-ready disconnect must clear only its own pending identity");
+    for (int slot = 1; slot < kSlotCount; ++slot) {
+        require(g_slots[slot].device == &devices[slot] &&
+                    !g_slots[slot].active,
+                "pre-ready disconnect must preserve all pending survivors");
+    }
     require(g_slots[0].connection_generation ==
                 first_pending_generation + 1,
-            "pending disconnect beside a peer must invalidate its generation");
+            "pending disconnect beside peers must invalidate its generation");
     require(g_connection_status == ConnectionStatus::Connecting &&
                 scanning_enabled && incoming_connections &&
                 scan_starts == starts_before_first_pending_disconnect + 1,
-            "open slot must scan while another slot remains connecting");
+            "open slot must scan while other slots remain connecting");
     tick_backend_timer(19);
     require(observed_status_led_on,
-            "surviving pending device must retain the fast LED on half-cycle");
+            "surviving pending devices must retain the fast LED on half-cycle");
     tick_backend_timer(1);
     require(!observed_status_led_on,
-            "surviving pending device must retain the fast LED off half-cycle");
+            "surviving pending devices must retain the fast LED off half-cycle");
 
-    require(platform_on_device_ready(&survivor) == UNI_ERROR_SUCCESS,
-            "surviving pending device must still become ready");
-    platform_on_device_connected(&first);
-    require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS,
-            "reconnected slot 0 device must complete the pair");
+    for (int slot = 1; slot < kSlotCount; ++slot) {
+        require(platform_on_device_ready(&devices[slot]) == UNI_ERROR_SUCCESS,
+                "each surviving pending device must still become ready");
+    }
+    platform_on_device_connected(&devices[0]);
+    require(platform_on_device_ready(&devices[0]) == UNI_ERROR_SUCCESS,
+            "reconnected slot 0 device must complete all four slots");
+    require(g_connection_status == ConnectionStatus::Ready &&
+                !scanning_enabled && !incoming_connections,
+            "four ready lifecycle devices must stop connection policy");
 
-    uni_controller_t data0{};
-    data0.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
-    data0.gamepad.buttons = BUTTON_B;
-    data0.gamepad.accel[0] = 8192;
-    uni_controller_t data1{};
-    data1.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
-    data1.gamepad.buttons = BUTTON_A;
-    data1.gamepad.gyro[1] = 1024;
-    platform_on_controller_data(&first, &data0);
-    platform_on_controller_data(&survivor, &data1);
+    const uint32_t buttons[kSlotCount] = {
+        BUTTON_B, BUTTON_A, BUTTON_X, BUTTON_Y};
+    uni_controller_t data[kSlotCount]{};
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        data[slot].klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+        data[slot].gamepad.buttons = buttons[slot];
+        data[slot].gamepad.accel[slot % 3] = 8192 + slot;
+        data[slot].gamepad.gyro[(slot + 1) % 3] = 1024 + slot;
+        platform_on_controller_data(&devices[slot], &data[slot]);
+    }
 
-    SwitchInputState state0{};
-    SwitchInputState state1{};
-    require(bluepad32_input_backend_snapshot(0, &state0) && state0.button_a &&
-                state0.imu_sample_count == 3,
-            "slot 0 input and IMU must map only to slot 0");
-    require(bluepad32_input_backend_snapshot(1, &state1) && state1.button_b &&
-                state1.imu_sample_count == 3,
-            "slot 1 input and IMU must map only to slot 1");
+    SwitchInputState states[kSlotCount]{};
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+                    states[slot].imu_sample_count == 3,
+                "every slot must expose independent input and IMU");
+    }
+    require(states[0].button_a && !states[0].button_b &&
+                !states[0].button_y && !states[0].button_x,
+            "slot 0 must contain only slot 0 input");
+    require(states[1].button_b && !states[1].button_a &&
+                !states[1].button_y && !states[1].button_x,
+            "slot 1 must contain only slot 1 input");
+    require(states[2].button_y && !states[2].button_a &&
+                !states[2].button_b && !states[2].button_x,
+            "slot 2 must contain only slot 2 input");
+    require(states[3].button_x && !states[3].button_a &&
+                !states[3].button_b && !states[3].button_y,
+            "slot 3 must contain only slot 3 input");
 
-    bluepad32_input_backend_report_sent(0);
-    require(bluepad32_input_backend_snapshot(0, &state0) &&
-                state0.imu_sample_count == 0,
-            "slot 0 report acknowledgement must consume only slot 0 IMU");
-    require(bluepad32_input_backend_snapshot(1, &state1) &&
-                state1.imu_sample_count == 3,
-            "slot 0 acknowledgement must not consume slot 1 IMU");
+    bluepad32_input_backend_report_sent(3);
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+                    states[slot].imu_sample_count == (slot == 3 ? 0 : 3),
+                "slot 3 acknowledgement must not consume slots 0-2 IMU");
+    }
+    for (int slot = 0; slot < 3; ++slot) {
+        bluepad32_input_backend_report_sent(slot);
+        require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+                    states[slot].imu_sample_count == 0,
+                "each slot acknowledgement must consume only its own IMU");
+    }
 
-    const SwitchRumbleOutput rumble0{11, 22};
-    const SwitchRumbleOutput rumble1{33, 44};
-    bluepad32_input_backend_queue_rumble(0, rumble0);
-    bluepad32_input_backend_queue_rumble(1, rumble1);
+    const SwitchRumbleOutput initial_rumble[kSlotCount] = {
+        {11, 21}, {12, 22}, {13, 23}, {14, 24}};
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        bluepad32_input_backend_queue_rumble(slot, initial_rumble[slot]);
+    }
     process_rumble_timer(&g_rumble_timer);
-    require(first.rumble_calls == 1 && first.last_low == 11 &&
-                first.last_high == 22,
-            "slot 0 rumble must reach only controller 0");
-    require(survivor.rumble_calls == 1 && survivor.last_low == 33 &&
-                survivor.last_high == 44,
-            "slot 1 rumble must reach only controller 1");
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        require(devices[slot].rumble_calls == 1 &&
+                    devices[slot].last_low == 11 + slot &&
+                    devices[slot].last_high == 21 + slot,
+                "each slot rumble must reach only its indexed controller");
+    }
 
-    bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{55, 66});
+    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{55, 66});
     const uint32_t disconnected_generation =
-        g_slots[0].connection_generation;
-    const int starts_before_disconnect = scan_starts;
-    platform_on_device_disconnected(&first);
-    require(scan_starts == starts_before_disconnect + 1 &&
-                incoming_connections,
-            "disconnect must resume scanning and incoming connections");
-    require(!bluepad32_input_backend_snapshot(0, &state0) &&
-                !state0.button_a && state0.lx == 32768,
-            "disconnect must neutralize only its own slot");
-    require(bluepad32_input_backend_snapshot(1, &state1) && state1.button_b,
-            "disconnect must preserve survivor state and activity");
-
-    uni_hid_device_t replacement = device(0);
-    require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS,
-            "replacement must bind to the freed indexed slot");
-    process_rumble_timer(&g_rumble_timer);
-    require(replacement.rumble_calls == 0,
-            "replacement must not receive disconnected device rumble");
-
-    g_slots[0].pending_rumble = {
-        0, disconnected_generation, SwitchRumbleOutput{77, 88}};
-    g_slots[0].rumble_pending = true;
-    process_rumble_timer(&g_rumble_timer);
-    require(replacement.rumble_calls == 0,
-            "stale connection generation must be rejected at dispatch");
-
-    uni_controller_t replacement_data{};
-    replacement_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
-    replacement_data.gamepad.buttons = BUTTON_Y;
-    platform_on_controller_data(&replacement, &replacement_data);
-    require(bluepad32_input_backend_snapshot(0, &state0) && state0.button_x,
-            "replacement input must populate only the freed slot");
-    require(bluepad32_input_backend_snapshot(1, &state1) && state1.button_b,
-            "replacement must not disturb survivor input");
-
-    bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{90, 91});
-    bluepad32_input_backend_queue_rumble(1, SwitchRumbleOutput{92, 93});
-    process_rumble_timer(&g_rumble_timer);
-    require(replacement.rumble_calls == 1 && replacement.last_low == 90 &&
-                replacement.last_high == 91,
-            "replacement must receive only new-generation slot 0 rumble");
-    require(survivor.rumble_calls == 2 && survivor.last_low == 92 &&
-                survivor.last_high == 93,
-            "survivor rumble must continue after peer replacement");
-
-    const int starts_before_slot_one_disconnect = scan_starts;
-    platform_on_device_disconnected(&survivor);
-    require(scan_starts == starts_before_slot_one_disconnect + 1 &&
-                incoming_connections,
-            "slot 1 disconnect must resume scanning for its open slot");
-    require(bluepad32_input_backend_snapshot(0, &state0) && state0.button_x,
-            "slot 1 disconnect must preserve slot 0 state and activity");
-    require(!bluepad32_input_backend_snapshot(1, &state1) &&
-                !state1.button_b && state1.lx == 32768,
-            "slot 1 disconnect must neutralize only slot 1");
-
-    uni_controller_t continuing_slot_zero_data{};
-    continuing_slot_zero_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
-    continuing_slot_zero_data.gamepad.buttons = BUTTON_B;
-    platform_on_controller_data(&replacement, &continuing_slot_zero_data);
-    require(bluepad32_input_backend_snapshot(0, &state0) && state0.button_a,
-            "slot 0 input must continue while slot 1 is disconnected");
-
-    const int slot_zero_calls_while_scanning = replacement.rumble_calls;
+        g_slots[3].connection_generation;
+    const int starts_before_slot_three_disconnect = scan_starts;
+    platform_on_device_disconnected(&devices[3]);
+    require(scan_starts == starts_before_slot_three_disconnect + 1 &&
+                scanning_enabled && incoming_connections,
+            "slot 3 disconnect must resume scanning and incoming connections");
+    require(!bluepad32_input_backend_snapshot(3, &states[3]) &&
+                !states[3].button_x && states[3].lx == 32768,
+            "slot 3 disconnect must neutralize only slot 3");
+    require(bluepad32_input_backend_snapshot(0, &states[0]) &&
+                states[0].button_a &&
+                bluepad32_input_backend_snapshot(1, &states[1]) &&
+                states[1].button_b &&
+                bluepad32_input_backend_snapshot(2, &states[2]) &&
+                states[2].button_y,
+            "slot 3 disconnect must preserve slots 0-2");
+    platform_on_controller_data(&devices[0], &data[0]);
+    require(bluepad32_input_backend_snapshot(0, &states[0]) &&
+                states[0].button_a,
+            "slot 0 input must continue while slot 3 is disconnected");
+    const int slot_zero_calls_while_scanning = devices[0].rumble_calls;
     bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{115, 116});
     tick_backend_timer(99);
-    require(replacement.rumble_calls == slot_zero_calls_while_scanning + 1 &&
-                replacement.last_low == 115 && replacement.last_high == 116,
-            "slot 0 rumble must continue while slot 1 is disconnected");
+    require(devices[0].rumble_calls == slot_zero_calls_while_scanning + 1 &&
+                devices[0].last_low == 115 &&
+                devices[0].last_high == 116,
+            "slot 0 rumble must continue while slot 3 is disconnected");
     require(observed_status_led_on,
             "disconnect scanning must use the slow LED on half-cycle");
     tick_backend_timer(1);
     require(!observed_status_led_on,
             "disconnect scanning must reach the slow LED off half-cycle");
 
-    uni_hid_device_t first_slot_one_replacement = device(1);
-    require(platform_on_device_ready(&first_slot_one_replacement) ==
+    uni_hid_device_t slot_three_replacement = device(3);
+    require(platform_on_device_ready(&slot_three_replacement) ==
                 UNI_ERROR_SUCCESS,
-            "slot 1 replacement must bind without disturbing slot 0");
-    tick_backend_timer(1);
+            "slot 3 replacement must bind to the freed indexed slot");
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_three_replacement.rumble_calls == 0,
+            "slot 3 replacement must not receive disconnected device rumble");
     require(observed_status_led_on,
-            "replacing the open slot must return the LED to solid ready");
+            "slot 3 replacement must restore the solid ready LED");
     const int replacement_ready_led_writes = observed_status_led_writes;
     tick_backend_timer(100);
     require(observed_status_led_on &&
                 observed_status_led_writes == replacement_ready_led_writes,
-            "replacement pair must keep the ready LED solid");
+            "replacement quartet must keep the ready LED solid");
 
-    bluepad32_input_backend_queue_rumble(1, SwitchRumbleOutput{117, 118});
-    platform_on_device_disconnected(&first_slot_one_replacement);
-    uni_hid_device_t second_slot_one_replacement = device(1);
-    require(platform_on_device_ready(&second_slot_one_replacement) ==
-                UNI_ERROR_SUCCESS,
-            "a subsequent slot 1 replacement must bind to the freed slot");
+    g_slots[3].pending_rumble = {
+        3, disconnected_generation, SwitchRumbleOutput{77, 88}};
+    g_slots[3].rumble_pending = true;
     process_rumble_timer(&g_rumble_timer);
-    require(second_slot_one_replacement.rumble_calls == 0,
-            "slot 1 replacement must not receive prior-generation rumble");
+    require(slot_three_replacement.rumble_calls == 0,
+            "stale slot 3 connection generation must be rejected");
 
-    const int slot_zero_calls_before_mailboxes = replacement.rumble_calls;
-    bluepad32_input_backend_queue_rumble(1, SwitchRumbleOutput{119, 120});
-    bluepad32_input_backend_queue_rumble(1, SwitchRumbleOutput{121, 122});
+    uni_controller_t replacement_data{};
+    replacement_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    replacement_data.gamepad.buttons = BUTTON_Y;
+    replacement_data.gamepad.accel[0] = 9000;
+    platform_on_controller_data(&slot_three_replacement, &replacement_data);
+    require(bluepad32_input_backend_snapshot(3, &states[3]) &&
+                states[3].button_x && states[3].imu_sample_count == 3,
+            "replacement input and IMU must populate only slot 3");
+    require(bluepad32_input_backend_snapshot(0, &states[0]) &&
+                states[0].button_a &&
+                bluepad32_input_backend_snapshot(1, &states[1]) &&
+                states[1].button_b &&
+                bluepad32_input_backend_snapshot(2, &states[2]) &&
+                states[2].button_y,
+            "slot 3 replacement must not disturb slots 0-2");
+
+    const int survivor_calls[kSlotCount - 1] = {
+        devices[0].rumble_calls,
+        devices[1].rumble_calls,
+        devices[2].rumble_calls};
+    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{90, 91});
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_three_replacement.rumble_calls == 1 &&
+                slot_three_replacement.last_low == 90 &&
+                slot_three_replacement.last_high == 91,
+            "new-generation slot 3 rumble must reach its replacement");
+    for (int slot = 0; slot < 3; ++slot) {
+        require(devices[slot].rumble_calls == survivor_calls[slot],
+                "slot 3 rumble must not affect slots 0-2");
+    }
+    const int all_slot_calls[kSlotCount] = {
+        devices[0].rumble_calls,
+        devices[1].rumble_calls,
+        devices[2].rumble_calls,
+        slot_three_replacement.rumble_calls};
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        bluepad32_input_backend_queue_rumble(
+            slot, SwitchRumbleOutput{static_cast<uint8_t>(100 + slot),
+                                     static_cast<uint8_t>(110 + slot)});
+    }
+    process_rumble_timer(&g_rumble_timer);
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        const uni_hid_device_t& target =
+            slot == 3 ? slot_three_replacement : devices[slot];
+        require(target.rumble_calls == all_slot_calls[slot] + 1 &&
+                    target.last_low == 100 + slot &&
+                    target.last_high == 110 + slot,
+                "survivor rumble must continue after slot 3 replacement");
+    }
+
+    uni_hid_device_t replacements[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+    for (int slot = 0; slot < 3; ++slot) {
+        const int starts_before_disconnect = scan_starts;
+        platform_on_device_disconnected(&devices[slot]);
+        require(scan_starts == starts_before_disconnect + 1 &&
+                    scanning_enabled && incoming_connections,
+                "disconnecting slots 0-2 must resume connection policy");
+        require(!bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+                    states[slot].lx == 32768,
+                "disconnect must neutralize its indexed slot");
+        for (int survivor = 0; survivor < kSlotCount; ++survivor) {
+            if (survivor == slot) {
+                continue;
+            }
+            require(bluepad32_input_backend_snapshot(survivor,
+                                                     &states[survivor]),
+                    "disconnect must preserve all three survivors");
+        }
+        require(platform_on_device_ready(&replacements[slot]) ==
+                    UNI_ERROR_SUCCESS,
+                "replacement must bind to each freed slot");
+        require(g_connection_status == ConnectionStatus::Ready &&
+                    !scanning_enabled && !incoming_connections,
+                "replacement must restore the full four-slot policy");
+    }
+
+    const int slot_zero_calls_before_mailboxes = replacements[0].rumble_calls;
+    const int slot_three_calls_before_mailboxes =
+        slot_three_replacement.rumble_calls;
+    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{119, 120});
+    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{121, 122});
     bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{123, 124});
     process_rumble_timer(&g_rumble_timer);
-    require(second_slot_one_replacement.rumble_calls == 1 &&
-                second_slot_one_replacement.last_low == 121 &&
-                second_slot_one_replacement.last_high == 122,
-            "slot 1 mailbox must dispatch only its latest queued value");
-    require(replacement.rumble_calls == slot_zero_calls_before_mailboxes + 1 &&
-                replacement.last_low == 123 && replacement.last_high == 124,
-            "slot 0 activity must not evict the slot 1 mailbox");
+    require(slot_three_replacement.rumble_calls ==
+                    slot_three_calls_before_mailboxes + 1 &&
+                slot_three_replacement.last_low == 121 &&
+                slot_three_replacement.last_high == 122,
+            "slot 3 mailbox must dispatch only its latest queued value");
+    require(replacements[0].rumble_calls ==
+                    slot_zero_calls_before_mailboxes + 1 &&
+                replacements[0].last_low == 123 &&
+                replacements[0].last_high == 124,
+            "slot 0 activity must not evict the slot 3 mailbox");
 }
 
 }  // namespace
@@ -422,10 +541,10 @@ void test_independent_lifecycle() {
 int main(int argc, char** argv) {
     require(argc == 2, "scenario argument required");
     const std::string scenario = argv[1];
-    if (scenario == "ready-0-1") {
-        test_ready_order(0);
-    } else if (scenario == "ready-1-0") {
-        test_ready_order(1);
+    if (scenario == "ready-forward") {
+        test_ready_order(false);
+    } else if (scenario == "ready-reverse") {
+        test_ready_order(true);
     } else if (scenario == "rejections") {
         test_rejections();
     } else if (scenario == "lifecycle") {

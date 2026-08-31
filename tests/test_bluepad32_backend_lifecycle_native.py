@@ -19,7 +19,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "-Wextra",
             "-Werror",
             "-pedantic",
-            "-DSWITCH_PICO_HID_INSTANCE_COUNT=2",
+            "-DSWITCH_PICO_HID_INSTANCE_COUNT=4",
             f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
             f"-I{root}",
             str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
@@ -30,5 +30,10 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         cwd=root,
     )
 
-    for scenario in ("ready-0-1", "ready-1-0", "rejections", "lifecycle"):
+    for scenario in (
+        "ready-forward",
+        "ready-reverse",
+        "rejections",
+        "lifecycle",
+    ):
         subprocess.run([str(executable), scenario], check=True, cwd=root)

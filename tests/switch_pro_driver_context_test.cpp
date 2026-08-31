@@ -8,6 +8,11 @@
 #include <iostream>
 
 namespace {
+constexpr uint8_t kInstanceCount = SWITCH_PICO_HID_INSTANCE_COUNT;
+constexpr uint8_t kInvalidInstance = kInstanceCount;
+static_assert(kInstanceCount == 4,
+              "the native driver harness must exercise four HID instances");
+
 
 struct SentReport {
     uint8_t instance = 0;
@@ -24,13 +29,12 @@ struct RumbleEvent {
 
 uint64_t now_ms = 0;
 uint32_t random_value = 1;
-bool hid_ready[SWITCH_PICO_HID_INSTANCE_COUNT] = {true, true};
-bool hid_report_succeeds[SWITCH_PICO_HID_INSTANCE_COUNT] = {true, true};
-std::array<unsigned, SWITCH_PICO_HID_INSTANCE_COUNT> hid_report_attempts{};
+std::array<bool, kInstanceCount> hid_ready{};
+std::array<bool, kInstanceCount> hid_report_succeeds{};
+std::array<unsigned, kInstanceCount> hid_report_attempts{};
 std::array<SentReport, 32> sent_reports{};
 unsigned sent_report_count = 0;
-RumbleEvent rumble_zero{};
-RumbleEvent rumble_one{};
+std::array<RumbleEvent, kInstanceCount> rumble_events{};
 int failures = 0;
 
 void expect(bool condition, const char* message) {
@@ -47,13 +51,12 @@ void clear_sent_reports() {
 
 void initialize_contexts() {
     now_ms = 0;
-    hid_ready[0] = true;
-    hid_ready[1] = true;
-    hid_report_succeeds[0] = true;
-    hid_report_succeeds[1] = true;
     hid_report_attempts = {};
-    switch_pro_init(0);
-    switch_pro_init(1);
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        hid_ready[instance] = true;
+        hid_report_succeeds[instance] = true;
+        switch_pro_init(instance);
+    }
     clear_sent_reports();
 }
 
@@ -178,40 +181,34 @@ std::array<uint8_t, 10> complete_rumble_report(
     return report;
 }
 
-void rumble_callback_zero(uint8_t instance,
-                          const SwitchRumbleOutput& output) {
-    ++rumble_zero.count;
-    rumble_zero.instance = instance;
-    rumble_zero.output = output;
-}
-
-void rumble_callback_one(uint8_t instance,
-                         const SwitchRumbleOutput& output) {
-    ++rumble_one.count;
-    rumble_one.instance = instance;
-    rumble_one.output = output;
+void rumble_callback(uint8_t instance, const SwitchRumbleOutput& output) {
+    expect(instance < rumble_events.size(),
+           "rumble callback received an invalid instance");
+    if (instance >= rumble_events.size()) {
+        return;
+    }
+    RumbleEvent& event = rumble_events[instance];
+    ++event.count;
+    event.instance = instance;
+    event.output = output;
 }
 
 void test_reset_materializes_neutral_sticks() {
     initialize_contexts();
-    SwitchProReport init_zero =
-        get_current_report(0, "GET_REPORT failed immediately after init");
-    SwitchProReport init_one =
-        get_current_report(1, "GET_REPORT failed for second initialized context");
-    expect_neutral_sticks(
-        init_zero, "instance 0 sticks were not neutral immediately after init");
-    expect_neutral_sticks(
-        init_one, "instance 1 sticks were not neutral immediately after init");
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        SwitchProReport initialized = get_current_report(
+            instance, "GET_REPORT failed immediately after init");
+        expect_neutral_sticks(
+            initialized, "instance sticks were not neutral after init");
+    }
 
     tud_mount_cb();
-    SwitchProReport mount_zero =
-        get_current_report(0, "GET_REPORT failed immediately after mount");
-    SwitchProReport mount_one =
-        get_current_report(1, "GET_REPORT failed for second mounted context");
-    expect_neutral_sticks(
-        mount_zero, "instance 0 sticks were not neutral immediately after mount");
-    expect_neutral_sticks(
-        mount_one, "instance 1 sticks were not neutral immediately after mount");
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        SwitchProReport mounted = get_current_report(
+            instance, "GET_REPORT failed immediately after mount");
+        expect_neutral_sticks(
+            mounted, "instance sticks were not neutral after mount");
+    }
 }
 
 void test_startup_identify_preserves_first_reply_counter() {
@@ -259,51 +256,81 @@ void test_failed_startup_identify_retries_preserve_counter() {
 
 void test_input_reports_and_timers_are_isolated() {
     initialize_contexts();
-    SwitchInputState zero{};
-    zero.lx = 0x1111;
-    zero.ly = 0x2222;
-    zero.rx = 0x3333;
-    zero.ry = 0x4444;
-    zero.button_a = true;
-    SwitchInputState one{};
-    one.lx = 0xaaaa;
-    one.ly = 0xbbbb;
-    one.rx = 0xcccc;
-    one.ry = 0xdddd;
-    one.button_b = true;
-    one.dpad_right = true;
-    switch_pro_set_input(0, zero);
-    switch_pro_set_input(1, one);
+    std::array<SwitchInputState, kInstanceCount> states{};
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        SwitchInputState& state = states[instance];
+        state.lx = static_cast<uint16_t>(0x1111u * (instance + 1u));
+        state.ly = static_cast<uint16_t>(0x2222u + 0x1111u * instance);
+        state.rx = static_cast<uint16_t>(0x5555u + 0x1111u * instance);
+        state.ry = static_cast<uint16_t>(0x8888u + 0x1111u * instance);
+    }
+    states[0].button_a = true;
+    states[1].button_b = true;
+    states[2].button_x = true;
+    states[3].button_y = true;
+
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        switch_pro_set_input(instance, states[instance]);
+    }
 
     now_ms = 15;
-    expect(switch_pro_task(0), "instance 0 did not send its timed report");
-    expect(switch_pro_task(1), "instance 1 timer was changed by instance 0");
-    const SentReport* sent_zero = latest_regular_report(0);
-    const SentReport* sent_one = latest_regular_report(1);
-    expect(sent_zero != nullptr, "instance 0 report used the wrong HID route");
-    expect(sent_one != nullptr, "instance 1 report used the wrong HID route");
-    SwitchProReport report_zero = copy_switch_report(sent_zero);
-    SwitchProReport report_one = copy_switch_report(sent_one);
-    expect(report_zero.inputs.buttonA && !report_zero.inputs.buttonB,
-           "instance 0 button state crossed with instance 1");
-    expect(report_one.inputs.buttonB && !report_one.inputs.buttonA,
-           "instance 1 button state crossed with instance 0");
-    expect(report_zero.inputs.leftStick.getX() !=
-               report_one.inputs.leftStick.getX(),
-           "instance stick reports were merged");
+    std::array<SwitchProReport, kInstanceCount> sent{};
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        expect(switch_pro_task(instance),
+               "configured instance did not send its timed report");
+        const SentReport* routed = latest_regular_report(instance);
+        expect(routed != nullptr, "input report used the wrong HID route");
+        sent[instance] = copy_switch_report(routed);
+        expect(sent[instance].inputs.buttonA == (instance == 0) &&
+                   sent[instance].inputs.buttonB == (instance == 1) &&
+                   sent[instance].inputs.buttonX == (instance == 2) &&
+                   sent[instance].inputs.buttonY == (instance == 3),
+               "button state crossed HID instances");
+    }
 
-    std::array<uint8_t, SWITCH_PRO_ENDPOINT_SIZE> get_zero{};
-    std::array<uint8_t, SWITCH_PRO_ENDPOINT_SIZE> get_one{};
-    expect(tud_hid_get_report_cb(0, 0, HID_REPORT_TYPE_INPUT,
-                                 get_zero.data(), get_zero.size()) ==
-               sizeof(SwitchProReport),
-           "GET_REPORT rejected valid instance 0");
-    expect(tud_hid_get_report_cb(1, 0, HID_REPORT_TYPE_INPUT,
-                                 get_one.data(), get_one.size()) ==
-               sizeof(SwitchProReport),
-           "GET_REPORT rejected valid instance 1");
-    expect(std::memcmp(get_zero.data(), get_one.data(), get_zero.size()) != 0,
-           "GET_REPORT returned a shared report for both instances");
+    std::array<std::array<uint8_t, SWITCH_PRO_ENDPOINT_SIZE>, kInstanceCount>
+        current{};
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        expect(tud_hid_get_report_cb(instance, 0, HID_REPORT_TYPE_INPUT,
+                                     current[instance].data(),
+                                     current[instance].size()) ==
+                   sizeof(SwitchProReport),
+               "GET_REPORT rejected a configured instance");
+    }
+    for (uint8_t left = 0; left < kInstanceCount; ++left) {
+        for (uint8_t right = static_cast<uint8_t>(left + 1u);
+             right < kInstanceCount; ++right) {
+            expect(std::memcmp(current[left].data(), current[right].data(),
+                               current[left].size()) != 0,
+                   "GET_REPORT returned shared state across HID instances");
+        }
+    }
+
+    SwitchInputState changed_zero = states[0];
+    changed_zero.button_a = false;
+    changed_zero.button_home = true;
+    switch_pro_set_input(0, changed_zero);
+    now_ms = 30;
+    expect(switch_pro_task(0),
+           "instance 0 did not apply its changed input state");
+    SwitchProReport unchanged_three = get_current_report(
+        3, "GET_REPORT failed for instance 3 after instance 0 changed");
+    expect(unchanged_three.inputs.buttonY &&
+               !unchanged_three.inputs.buttonHome,
+           "instance 0 input change leaked into instance 3");
+
+    SwitchInputState changed_three = states[3];
+    changed_three.button_y = false;
+    changed_three.button_capture = true;
+    switch_pro_set_input(3, changed_three);
+    now_ms = 45;
+    expect(switch_pro_task(3),
+           "instance 3 did not apply its changed input state");
+    SwitchProReport unchanged_zero = get_current_report(
+        0, "GET_REPORT failed for instance 0 after instance 3 changed");
+    expect(unchanged_zero.inputs.buttonHome &&
+               !unchanged_zero.inputs.buttonCapture,
+           "instance 3 input change leaked into instance 0");
 }
 
 void test_callback_send_and_imu_modes_are_isolated() {
@@ -381,75 +408,108 @@ void test_callback_send_and_imu_modes_are_isolated() {
 
 void test_rumble_callbacks_and_decoders_are_isolated() {
     initialize_contexts();
-    rumble_zero = {};
-    rumble_one = {};
-    switch_pro_set_rumble_callback(0, rumble_callback_zero);
-    switch_pro_set_rumble_callback(1, rumble_callback_one);
+    rumble_events = {};
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        switch_pro_set_rumble_callback(instance, rumble_callback);
+    }
     constexpr uint32_t neutral = 0x40400100u;
     auto full_payload = rumble_payload(type_2(64, 16, 64, 16), neutral);
     auto full_report = complete_rumble_report(full_payload);
-    tud_hid_report_received_cb(2, 0, full_report.data(), full_report.size());
-    expect(rumble_zero.count == 0 && rumble_one.count == 0,
-           "invalid output instance reached a rumble callback");
+    tud_hid_report_received_cb(kInvalidInstance, 0, full_report.data(),
+                               full_report.size());
+    for (const auto& event : rumble_events) {
+        expect(event.count == 0,
+               "invalid output instance reached a rumble callback");
+    }
 
     std::array<uint8_t, 9> stripped{};
     std::memcpy(stripped.data() + 1, full_payload.data(), full_payload.size());
     tud_hid_set_report_cb(0, REPORT_OUTPUT_10, HID_REPORT_TYPE_OUTPUT,
                           stripped.data(), stripped.size());
-    expect(rumble_zero.count == 1 && rumble_zero.instance == 0,
+    expect(rumble_events[0].count == 1 && rumble_events[0].instance == 0,
            "control output did not route to instance 0 callback");
-    expect(rumble_zero.output.low_frequency_magnitude == 16 &&
-               rumble_zero.output.high_frequency_magnitude == 16,
+    expect(rumble_events[0].output.low_frequency_magnitude == 16 &&
+               rumble_events[0].output.high_frequency_magnitude == 16,
            "instance 0 full rumble state decoded incorrectly");
-    expect(rumble_one.count == 0,
-           "instance 0 rumble invoked instance 1 callback");
+    for (uint8_t instance = 1; instance < kInstanceCount; ++instance) {
+        expect(rumble_events[instance].count == 0,
+               "instance 0 rumble invoked another instance callback");
+    }
 
     auto delta_payload = rumble_payload(type_1_one_sample(17, 20), neutral);
     auto delta_report = complete_rumble_report(delta_payload);
     tud_hid_report_received_cb(1, 0, delta_report.data(), delta_report.size());
-    expect(rumble_one.count == 1 && rumble_one.instance == 1,
+    expect(rumble_events[1].count == 1 && rumble_events[1].instance == 1,
            "interrupt output did not route to instance 1 callback");
-    expect(rumble_one.output.low_frequency_magnitude == 0 &&
-               rumble_one.output.high_frequency_magnitude == 1,
+    expect(rumble_events[1].output.low_frequency_magnitude == 0 &&
+               rumble_events[1].output.high_frequency_magnitude == 1,
            "instance 1 decoder inherited instance 0 rumble state");
     tud_hid_report_received_cb(0, 0, delta_report.data(), delta_report.size());
-    expect(rumble_zero.count == 2 &&
-               rumble_zero.output.low_frequency_magnitude == 17 &&
-               rumble_zero.output.high_frequency_magnitude == 18,
+    expect(rumble_events[0].count == 2 &&
+               rumble_events[0].output.low_frequency_magnitude == 17 &&
+               rumble_events[0].output.high_frequency_magnitude == 18,
            "instance 0 decoder lost its own prior rumble state");
-    expect(rumble_one.count == 1,
-           "instance 0 delta reached instance 1 callback");
+
+    for (uint8_t instance = 2; instance < kInstanceCount; ++instance) {
+        const uint8_t magnitude = instance == 2 ? 16 : 32;
+        auto payload =
+            rumble_payload(type_2(64, magnitude, 64, magnitude), neutral);
+        auto report = complete_rumble_report(payload);
+        tud_hid_report_received_cb(instance, 0, report.data(), report.size());
+        expect(rumble_events[instance].count == 1 &&
+                   rumble_events[instance].instance == instance,
+               "rumble output did not route to its configured instance");
+        expect(rumble_events[instance].output.low_frequency_magnitude ==
+                       magnitude &&
+                   rumble_events[instance].output.high_frequency_magnitude ==
+                       magnitude,
+               "configured instance decoded another rumble context");
+    }
+    expect(rumble_events[1].count == 1,
+           "another instance's rumble reached instance 1 callback");
 }
 
 void test_lifecycle_and_invalid_instances() {
     initialize_contexts();
-    expect(switch_pro_is_ready(0) && switch_pro_is_ready(1),
-           "initialized contexts were not ready");
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        expect(switch_pro_is_ready(instance),
+               "initialized context was not ready");
+    }
+
     tud_mount_cb();
-    expect(!switch_pro_is_ready(0) && !switch_pro_is_ready(1),
-           "mount did not reset every configured context");
-    send_config(0, DISABLE_USB_TIMEOUT);
-    expect(switch_pro_is_ready(0) && !switch_pro_is_ready(1),
-           "instance 0 handshake changed instance 1 readiness");
-    send_config(1, DISABLE_USB_TIMEOUT);
-    expect(switch_pro_is_ready(0) && switch_pro_is_ready(1),
-           "instance 1 handshake did not address its context");
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        expect(!switch_pro_is_ready(instance),
+               "mount did not reset every configured context");
+    }
+
+    for (uint8_t addressed = 0; addressed < kInstanceCount; ++addressed) {
+        send_config(addressed, DISABLE_USB_TIMEOUT);
+        for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+            expect(switch_pro_is_ready(instance) == (instance <= addressed),
+                   "handshake readiness crossed configured contexts");
+        }
+    }
+
     tud_umount_cb();
-    expect(!switch_pro_is_ready(0) && !switch_pro_is_ready(1),
-           "unmount did not reset every configured context");
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        expect(!switch_pro_is_ready(instance),
+               "unmount did not reset every configured context");
+    }
 
     SwitchInputState ignored{};
     ignored.button_home = true;
-    switch_pro_init(2);
-    switch_pro_set_input(2, ignored);
-    switch_pro_set_rumble_callback(2, rumble_callback_zero);
-    expect(!switch_pro_task(2), "invalid instance ran a driver task");
-    expect(!switch_pro_is_ready(2), "invalid instance reported ready");
+    switch_pro_init(kInvalidInstance);
+    switch_pro_set_input(kInvalidInstance, ignored);
+    switch_pro_set_rumble_callback(kInvalidInstance, rumble_callback);
+    expect(!switch_pro_task(kInvalidInstance),
+           "invalid instance ran a driver task");
+    expect(!switch_pro_is_ready(kInvalidInstance),
+           "invalid instance reported ready");
     std::array<uint8_t, SWITCH_PRO_ENDPOINT_SIZE> buffer{};
-    expect(tud_hid_get_report_cb(2, 0, HID_REPORT_TYPE_INPUT,
+    expect(tud_hid_get_report_cb(kInvalidInstance, 0, HID_REPORT_TYPE_INPUT,
                                  buffer.data(), buffer.size()) == 0,
            "invalid instance served GET_REPORT data");
-    expect(tud_hid_descriptor_report_cb(2) == nullptr,
+    expect(tud_hid_descriptor_report_cb(kInvalidInstance) == nullptr,
            "invalid instance served a report descriptor");
 }
 

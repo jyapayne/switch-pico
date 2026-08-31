@@ -26,6 +26,16 @@ constexpr uint8_t kInterfaceDescriptor = 0x04;
 constexpr uint8_t kEndpointDescriptor = 0x05;
 constexpr uint8_t kHidDescriptor = 0x21;
 
+#if EXPECTED_HID_INSTANCE_COUNT == 1
+constexpr std::array<uint8_t, 41> kUartConfigurationDescriptor = {
+    0x09, 0x02, 0x29, 0x00, 0x01, 0x01, 0x00, 0xA0, 0xFA,
+    0x09, 0x04, 0x00, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00,
+    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0xCB, 0x00,
+    0x07, 0x05, 0x81, 0x03, 0x40, 0x00, 0x08,
+    0x07, 0x05, 0x01, 0x03, 0x40, 0x00, 0x08,
+};
+#endif
+
 int failures = 0;
 
 void expect(bool condition, const char* message) {
@@ -52,6 +62,11 @@ void inspect_configuration_descriptor() {
     const auto* descriptor = switch_pro_configuration_descriptor;
     constexpr size_t descriptor_size =
         sizeof(switch_pro_configuration_descriptor);
+#if EXPECTED_HID_INSTANCE_COUNT == 1
+    expect(std::memcmp(descriptor, kUartConfigurationDescriptor.data(),
+                       descriptor_size) == 0,
+           "UART configuration descriptor bytes changed");
+#endif
 
     expect(descriptor[0] == 9 && descriptor[1] == kConfigurationDescriptor,
            "configuration header is malformed");
