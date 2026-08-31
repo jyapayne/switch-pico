@@ -1,12 +1,12 @@
 # Switch Pico Controller Bridge
 
-Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB. Input can come from the SDL3-to-UART computer bridge or, on Pico 2 W, directly from a Bluetooth controller through Bluepad32.
+Raspberry Pi Pico firmware that emulates one or more Switch Pro controllers over USB. Input can come from the SDL3-to-UART computer bridge or, on Pico 2 W, directly from Bluetooth controllers through Bluepad32.
 
 ## What you get
-- **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a wired Switch Pro, accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
+- **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a Switch Pro controller (one on standard Pico, two on Pico 2 W AIO), accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL3 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
-- **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts one Bluetooth controller and sends its controls, calibrated motion, and rumble through the same Switch Pro USB device without a computer.
+- **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts two concurrent Bluetooth controllers and sends their controls, calibrated motion, and rumble through two separate Switch Pro USB interfaces without a computer.
 
 ## Quick start
 1. Flash the Pico with `firmware/switch-pico.uf2` (or build your own) using BOOTSEL drag-and-drop (see “Manual UF2 flashing” below).
@@ -17,7 +17,11 @@ Raspberry Pi Pico firmware that emulates a Switch Pro controller over USB. Input
 
 ## Pico 2 W all-in-one Bluetooth option
 
-The AIO build runs TinyUSB and Switch report generation on Core 0 while Bluepad32, BTstack, and the CYW43439 radio run on Core 1. A fixed state snapshot and bounded rumble queue are the only cross-core interfaces.
+### Architecture
+
+The AIO build accepts two concurrent Bluetooth controllers on a single Pico 2 W. The device runs TinyUSB and Switch report generation on Core 0, while Bluepad32, BTstack, and the CYW43439 radio run on Core 1. Core 0 maintains two USB Pro HID interfaces (slots 0 and 1), and each Bluetooth connection is isolated in the Bluepad32 slot assigned when that connection becomes active. A fixed state snapshot and per-slot bounded rumble queue are the only cross-core synchronization points.
+
+Both USB interfaces are always present to the Switch. The Switch enumerates them as two separate Pro Controllers on the same physical device. Inputs and rumble are independent per controller.
 
 ### Build and flash
 
@@ -42,21 +46,40 @@ The default `python3 build.py` command and `firmware/switch-pico.*` artifacts re
 
 Both `build.py --aio` and direct AIO CMake configuration apply `patches/bluepad32-sdl3-imu.patch` idempotently before compiling Bluepad32. The patch makes supported motion controllers use SDL3-equivalent axes and fixed-point units before conversion to Nintendo samples. It intentionally leaves the dependency worktree dirty; the committed submodule revision remains Bluepad32 4.2.0.
 
-### Pair a controller
+### Pairing two controllers
 
 1. Flash and connect the Pico 2 W to the Switch.
 2. Enable `System Settings → Controllers and Sensors → Pro Controller Wired Communication`.
-3. Put one controller into Bluetooth pairing mode:
+3. Put the first controller into Bluetooth pairing mode:
    - DualSense: hold Create + PS.
    - DualShock 4: hold Share + PS.
    - Switch Pro: press its sync button.
    - Xbox Bluetooth controller: hold its pair button.
    - 8BitDo: use a Bluetooth mode supported by Bluepad32; use Switch/S mode when motion is required.
-4. Wait for the controller to connect. Pairing keys persist across Pico reboots.
+4. Wait for the first controller to connect and become ready. The LED continues slow-blinking because the second slot remains open. Pairing keys persist across Pico reboots.
+5. Put the second controller into pairing mode and wait for it to connect and become ready. The LED turns solid only after both controllers are active.
 
-The Pico 2 W onboard LED reports Bluetooth state: a slow 0.5-second blink means scanning, a fast 0.1-second blink means a controller connected but is not ready, and solid means the controller is ready. A solid LED immediately after boot that never starts blinking indicates Bluepad32 initialization did not complete.
+During initial setup, pairing order determines the initial slot assignment: the first controller paired occupies slot 0, and the second occupies slot 1. Pairing keys persist, so both controllers can reconnect after a Pico reboot without re-pairing. Slot numbers are not permanently bound to physical controllers: while one controller remains connected, a returning controller fills the other open slot; after a reboot or whenever both slots are empty, whichever persisted controller reconnects first receives slot 0, so the physical controllers can swap USB interfaces.
 
-Only one wireless controller owns the emulated Pro Controller. Turn off or disconnect it before pairing another; scanning resumes automatically after disconnect. A disconnect immediately publishes neutral buttons, sticks, and motion.
+### LED meanings and device state
+
+The Pico 2 W onboard LED reports the overall Bluetooth state:
+- **Slow blink (0.5 s period)**: at least one slot is open and scanning for a Bluetooth controller.
+- **Fast blink (0.1 s period)**: at least one controller is connected but not yet ready (handshake in progress).
+- **Solid**: both slots are filled and both controllers are ready for input.
+- **Solid immediately after boot that never starts blinking**: Bluepad32 initialization did not complete; check firmware flashing and UART logs.
+
+The LED transitions to slow blink as soon as any slot becomes empty (e.g., a controller is turned off or unpaired). Scanning resumes automatically.
+
+### Managing controller disconnect and reconnect
+
+Controllers can disconnect and reconnect independently:
+- **Disconnect one controller**: that controller's slot becomes empty. The LED transitions to slow blink if both slots are no longer filled. The other controller continues sending input.
+- **Reconnect while the other controller remains connected**: the returning controller fills the only open slot, preserving the current assignment. The LED transitions through fast blink and back to solid.
+- **Reconnect after both slots become empty or after reboot**: reconnection/autoconnect order determines the assignments. The physical controllers can swap USB interfaces if their order changes.
+- **Turn off or unpair a controller**: delete it from Bluetooth settings on the Pico or reset pairing entirely using Bluepad32 commands. It will no longer auto-reconnect; the slot remains open for a new controller.
+
+When a controller disconnects, the Pico immediately publishes neutral buttons, sticks, and motion for that slot. The other controller is unaffected.
 
 ### Controller capabilities
 
@@ -68,6 +91,26 @@ Only one wireless controller owns the emulated Pro Controller. Turn off or disco
 | Xbox Bluetooth controller | Yes | Yes | No hardware IMU |
 
 Motion is normalized to 1024 units per degree/second and 8192 units per g in SDL3 axes, then converted to Nintendo axes and raw counts. The latest normalized sample is duplicated across the report's three nominal 5 ms slots; it remains pending until a regular `0x30` USB report successfully consumes it.
+
+### Rumble per controller
+
+Rumble effects are per-slot and independent. The Switch sends rumble commands to a specific USB interface, and the Pico routes each command to the Bluetooth controller in the matching slot. Each slot has a critical-section-protected latest-value mailbox tagged with its connection generation; a newer pending command replaces the older one, and disconnect invalidates commands from the prior controller.
+
+### Hardware validation
+
+The dual-interface AIO build has been verified on a real Switch with two DualSense controllers: the Switch assigned two controller slots; buttons, sticks, calibrated motion, and rumble remained independent; disconnecting either controller left the other working; scanning resumed and the disconnected controller reconnected to the open slot.
+
+To reproduce the validation:
+
+1. **Verify USB enumeration**: Connect the Pico 2 W to a USB host (PC, Mac, or USB analyzer). Confirm that two HID devices are present (e.g., `lsusb -v` on Linux shows interface 0 and interface 1, both with Product ID 0x2009).
+2. **Verify Bluetooth pairing**: Pair two controllers via Bluepad32. Confirm the LED transitions from scanning → fast blink → solid.
+3. **Verify input on one controller**: Move sticks, press buttons, and check that the controller paired first during initial setup appears in slot 0.
+4. **Verify input on two controllers**: Move sticks on the controller paired second during initial setup, and confirm its inputs appear in slot 1 while the first controller is unaffected.
+5. **Verify disconnect and reconnect**: Turn off one controller while leaving the other connected. The LED reverts to slow blink. Turn the disconnected controller back on; it reconnects to the only open slot. Verify the occupied slot continues reporting the other controller's input.
+6. **Verify rumble per slot**: Send rumble to interface 0 and confirm only the slot 0 controller vibrates. Send rumble to interface 1 and confirm only the slot 1 controller vibrates.
+7. **Verify motion**: Enable gyro/accel on both controllers. Rotate each controller independently and confirm that motion is per-slot (rotating controller 0 does not affect controller 1's IMU output).
+
+On the tested Linux host, both HID interfaces enumerated (`lsusb -t` showed interface 0 and 1), but `hid-nintendo` probes timed out (`-110`) while requesting controller information from this composite device and removed their transient hidraw nodes. This is an observed, undiagnosed composite interoperability limitation; its root cause has not been established. The timeout was not observed on the Switch, so successful `hid-nintendo` binding is not the release criterion for dual-interface AIO firmware.
 
 Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry Pi's BTstack license.
 

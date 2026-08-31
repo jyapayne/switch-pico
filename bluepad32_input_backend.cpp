@@ -39,6 +39,7 @@ struct RumbleEnvelope {
 
 struct BackendSlot {
     SwitchInputState state;
+    // Non-null with active=false is a connected device still becoming ready.
     uni_hid_device_t* device;
     uint32_t state_generation;
     uint32_t connection_generation;
@@ -83,14 +84,22 @@ int slot_for_device(const uni_hid_device_t* device) {
     return slot >= 0 && slot < kSlotCount ? slot : -1;
 }
 
-bool all_slots_ready() {
+ConnectionStatus compute_connection_status() {
     critical_section_enter_blocking(&g_state_lock);
-    bool ready = true;
+    bool all_ready = true;
+    bool any_connecting = false;
     for (const BackendSlot& slot : g_slots) {
-        ready = ready && slot.active && slot.device != nullptr;
+        const bool has_device = slot.device != nullptr;
+        all_ready = all_ready && slot.active && has_device;
+        any_connecting = any_connecting || (!slot.active && has_device);
     }
     critical_section_exit(&g_state_lock);
-    return ready;
+
+    if (all_ready) {
+        return ConnectionStatus::Ready;
+    }
+    return any_connecting ? ConnectionStatus::Connecting
+                          : ConnectionStatus::Scanning;
 }
 
 void publish_device_state(uint8_t slot, uni_hid_device_t* device,
@@ -115,6 +124,8 @@ void publish_all_neutral() {
         ++slot.connection_generation;
     }
     critical_section_exit(&g_state_lock);
+    g_connection_status = ConnectionStatus::Initializing;
+    g_status_led_tick = 0;
 }
 
 constexpr int32_t clamp_axis(int32_t value) {
@@ -287,6 +298,16 @@ void resume_connections() {
     uni_bt_allow_incoming_connections(true);
     uni_bt_start_scanning_and_autoconnect_unsafe();
 }
+void recompute_connection_status() {
+    g_connection_status = compute_connection_status();
+    g_status_led_tick = 0;
+    if (g_connection_status == ConnectionStatus::Ready) {
+        uni_bt_stop_scanning_unsafe();
+        uni_bt_allow_incoming_connections(false);
+    } else {
+        resume_connections();
+    }
+}
 
 void platform_init(int argc, const char** argv) {
     (void)argc;
@@ -297,9 +318,7 @@ void platform_on_init_complete() {
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(&g_rumble_timer);
-    g_connection_status = ConnectionStatus::Scanning;
-    g_status_led_tick = 0;
-    resume_connections();
+    recompute_connection_status();
 }
 
 uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name, uint16_t cod, uint8_t rssi) {
@@ -307,14 +326,31 @@ uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name, uint
     (void)name;
     (void)cod;
     (void)rssi;
-    return all_slots_ready() ? UNI_ERROR_IGNORE_DEVICE : UNI_ERROR_SUCCESS;
+    return compute_connection_status() == ConnectionStatus::Ready
+               ? UNI_ERROR_IGNORE_DEVICE
+               : UNI_ERROR_SUCCESS;
 }
 
 void platform_on_device_connected(uni_hid_device_t* device) {
-    (void)device;
-    if (!all_slots_ready()) {
-        g_connection_status = ConnectionStatus::Connecting;
-        g_status_led_tick = 0;
+    const int slot_index = slot_for_device(device);
+    if (slot_index < 0) {
+        return;
+    }
+
+    bool tracked_connection = false;
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (!slot.active && slot.device == nullptr) {
+        slot.device = device;
+        slot.rumble_pending = false;
+        tracked_connection = true;
+    } else {
+        tracked_connection = slot.device == device;
+    }
+    critical_section_exit(&g_state_lock);
+
+    if (tracked_connection) {
+        recompute_connection_status();
     }
 }
 
@@ -324,24 +360,24 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
         return;
     }
 
-    bool disconnected_active_slot = false;
+    bool disconnected_tracked_device = false;
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
-    if (slot.active && slot.device == device) {
-        slot.state = make_neutral_state();
+    if (slot.device == device) {
+        if (slot.active) {
+            slot.state = make_neutral_state();
+            ++slot.state_generation;
+        }
         slot.device = nullptr;
         slot.active = false;
         slot.rumble_pending = false;
-        ++slot.state_generation;
         ++slot.connection_generation;
-        disconnected_active_slot = true;
+        disconnected_tracked_device = true;
     }
     critical_section_exit(&g_state_lock);
 
-    if (disconnected_active_slot) {
-        g_connection_status = ConnectionStatus::Scanning;
-        g_status_led_tick = 0;
-        resume_connections();
+    if (disconnected_tracked_device) {
+        recompute_connection_status();
     }
 }
 
@@ -358,13 +394,15 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     bool occupied_mismatch = false;
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
-    occupied_mismatch = slot.active && slot.device != device;
-    if (!occupied_mismatch && !slot.active) {
-        slot.state = make_neutral_state();
+    occupied_mismatch = slot.device != nullptr && slot.device != device;
+    if (!occupied_mismatch) {
         slot.device = device;
-        slot.active = true;
-        slot.rumble_pending = false;
-        ++slot.state_generation;
+        if (!slot.active) {
+            slot.state = make_neutral_state();
+            slot.active = true;
+            slot.rumble_pending = false;
+            ++slot.state_generation;
+        }
     }
     critical_section_exit(&g_state_lock);
 
@@ -372,15 +410,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         return UNI_ERROR_NO_SLOTS;
     }
 
-    g_status_led_tick = 0;
-    if (all_slots_ready()) {
-        g_connection_status = ConnectionStatus::Ready;
-        uni_bt_stop_scanning_unsafe();
-        uni_bt_allow_incoming_connections(false);
-    } else {
-        g_connection_status = ConnectionStatus::Scanning;
-        resume_connections();
-    }
+    recompute_connection_status();
     return UNI_ERROR_SUCCESS;
 }
 
