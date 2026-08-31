@@ -19,4 +19,5 @@ inline void btstack_run_loop_set_timer(btstack_timer_source_t* timer,
 }
 
 inline void btstack_run_loop_add_timer(btstack_timer_source_t*) {}
+uint32_t btstack_run_loop_get_time_ms();
 inline void btstack_run_loop_execute() {}

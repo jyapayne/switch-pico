@@ -1,3 +1,3 @@
 #pragma once
 
-inline void tight_loop_contents() {}
+void tight_loop_contents();

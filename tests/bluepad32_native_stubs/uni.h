@@ -3,6 +3,30 @@
 #include <stdint.h>
 
 typedef uint8_t bd_addr_t[6];
+typedef uint8_t link_key_t[16];
+typedef uint8_t sm_key_t[16];
+typedef int link_key_type_t;
+
+enum bd_addr_type_t {
+    BD_ADDR_TYPE_LE_PUBLIC = 0,
+    BD_ADDR_TYPE_LE_RANDOM = 1,
+    BD_ADDR_TYPE_LE_PUBLIC_IDENTITY = 2,
+    BD_ADDR_TYPE_LE_RANDOM_IDENTITY = 3,
+    BD_ADDR_TYPE_UNKNOWN = 0xfe,
+};
+
+enum hci_link_type_t {
+    HCI_LINK_TYPE_SCO = 0,
+    HCI_LINK_TYPE_ACL = 1,
+};
+
+struct btstack_link_key_iterator_t {
+    int index;
+};
+
+enum {
+    ERROR_CODE_SUCCESS = 0,
+};
 typedef int uni_property_idx_t;
 typedef int uni_platform_oob_event_t;
 struct uni_property_t {};
@@ -63,7 +87,20 @@ struct uni_report_parser_t {
     uni_play_dual_rumble_t play_dual_rumble;
 };
 
+enum uni_bt_conn_protocol_t {
+    UNI_BT_CONN_PROTOCOL_NONE,
+    UNI_BT_CONN_PROTOCOL_BR_EDR,
+    UNI_BT_CONN_PROTOCOL_BLE,
+};
+
+
+struct uni_bt_conn_t {
+    bd_addr_t btaddr;
+    uni_bt_conn_protocol_t protocol;
+};
+
 struct uni_hid_device_t {
+    uni_bt_conn_t conn;
     int idx;
     bool gamepad;
     uni_report_parser_t report_parser;
@@ -91,8 +128,14 @@ struct uni_platform {
 
 bool uni_hid_device_is_gamepad(const uni_hid_device_t* device);
 int uni_hid_device_get_idx_for_instance(const uni_hid_device_t* device);
+void uni_hid_device_disconnect(uni_hid_device_t* device);
 void uni_bt_allow_incoming_connections(bool enabled);
 void uni_bt_start_scanning_and_autoconnect_unsafe();
 void uni_bt_stop_scanning_unsafe();
+void uni_bt_bredr_scan_start();
+void uni_bt_bredr_scan_stop();
+void uni_bt_le_scan_start();
+void uni_bt_le_scan_stop();
 void uni_platform_set_custom(uni_platform* platform);
 int uni_init(int argc, const char** argv);
+

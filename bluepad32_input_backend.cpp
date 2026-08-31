@@ -2,10 +2,12 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>
 
 #include <btstack_run_loop.h>
 #include <pico/critical_section.h>
 #include <pico/cyw43_arch.h>
+#include <pico/flash.h>
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 #include <uni.h>
@@ -20,6 +22,7 @@ constexpr int32_t kTriggerThreshold = (kTriggerMaximum * 35) / 100;
 constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
+constexpr uint32_t kPairingWindowDurationMs = 60000;
 
 static_assert(kSlotCount == 4);
 static_assert(SWITCH_PICO_HID_INSTANCE_COUNT == kSlotCount);
@@ -29,6 +32,14 @@ enum class ConnectionStatus {
     Scanning,
     Connecting,
     Ready,
+};
+
+enum class ConnectionPolicyState {
+    Uninitialized,
+    Open,
+    Locked,
+    Paused,
+    FailedClosed,
 };
 
 struct RumbleEnvelope {
@@ -51,16 +62,22 @@ struct BackendSlot {
 critical_section_t g_state_lock;
 BackendSlot g_slots[kSlotCount];
 
-// These acknowledgement generations are only read or written by Core 0.
+// These acknowledgement generations and the pairing request producer are only
+// used by Core 0. The request is transferred under the cross-core state lock.
 uint32_t g_consumed_generation[kSlotCount]{};
 uint32_t g_last_snapshot_generation[kSlotCount]{};
+bool g_pairing_window_requested = false;
 bool g_initialized = false;
 bool g_started = false;
 
-// The timer and connection status are only read or written by Core 1 / BTstack.
+// These fields are only read or written by Core 1 / BTstack.
 btstack_timer_source_t g_rumble_timer{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
+ConnectionPolicyState g_connection_policy_state =
+    ConnectionPolicyState::Uninitialized;
+uint32_t g_pairing_window_deadline_ms = 0;
 uint16_t g_status_led_tick = 0;
+bool g_pairing_window_open = false;
 bool g_status_led_on = false;
 
 SwitchInputState make_neutral_state() {
@@ -74,6 +91,26 @@ SwitchInputState make_neutral_state() {
 
 bool valid_slot(uint8_t slot) {
     return slot < kSlotCount;
+}
+
+bool has_free_slot() {
+    critical_section_enter_blocking(&g_state_lock);
+    bool free_slot = false;
+    for (const BackendSlot& slot : g_slots) {
+        free_slot = free_slot || slot.device == nullptr;
+    }
+    critical_section_exit(&g_state_lock);
+    return free_slot;
+}
+
+bool has_active_controller() {
+    critical_section_enter_blocking(&g_state_lock);
+    bool active_controller = false;
+    for (const BackendSlot& slot : g_slots) {
+        active_controller = active_controller || slot.active;
+    }
+    critical_section_exit(&g_state_lock);
+    return active_controller;
 }
 
 int slot_for_device(const uni_hid_device_t* device) {
@@ -125,6 +162,8 @@ void publish_all_neutral() {
     }
     critical_section_exit(&g_state_lock);
     g_connection_status = ConnectionStatus::Initializing;
+    g_connection_policy_state = ConnectionPolicyState::FailedClosed;
+    g_pairing_window_open = false;
     g_status_led_tick = 0;
 }
 
@@ -240,21 +279,79 @@ SwitchInputState map_gamepad(const uni_gamepad_t& gamepad) {
     return state;
 }
 
+bool pairing_window_active_at(uint32_t now_ms) {
+    return g_pairing_window_open &&
+           static_cast<int32_t>(now_ms - g_pairing_window_deadline_ms) < 0;
+}
+
+bool update_pairing_window(uint32_t now_ms) {
+    critical_section_enter_blocking(&g_state_lock);
+    const bool requested = g_pairing_window_requested;
+    g_pairing_window_requested = false;
+    critical_section_exit(&g_state_lock);
+
+    if (requested) {
+        g_pairing_window_open = true;
+        g_pairing_window_deadline_ms = now_ms + kPairingWindowDurationMs;
+        g_status_led_tick = 0;
+        return true;
+    }
+    if (g_pairing_window_open && !pairing_window_active_at(now_ms)) {
+        g_pairing_window_open = false;
+        g_status_led_tick = 0;
+        return true;
+    }
+    return false;
+}
+
+void apply_connection_policy(uint32_t now_ms) {
+    const bool free_slot = has_free_slot();
+    const bool pairing_open = pairing_window_active_at(now_ms);
+    if ((!free_slot &&
+         g_connection_policy_state == ConnectionPolicyState::Paused) ||
+        (free_slot && pairing_open &&
+         g_connection_policy_state == ConnectionPolicyState::Open) ||
+        (free_slot && !pairing_open &&
+         g_connection_policy_state == ConnectionPolicyState::Locked)) {
+        return;
+    }
+
+    uni_bt_allow_incoming_connections(false);
+    uni_bt_stop_scanning_unsafe();
+
+    if (!free_slot) {
+        g_connection_policy_state = ConnectionPolicyState::Paused;
+        return;
+    }
+
+    if (!pairing_open) {
+        g_connection_policy_state = ConnectionPolicyState::Locked;
+        return;
+    }
+
+    // Use Bluepad32's normal pairing/autoconnect path while the physical
+    // BOOTSEL gesture has explicitly opened the pairing window.
+    uni_bt_allow_incoming_connections(true);
+    uni_bt_start_scanning_and_autoconnect_unsafe();
+    g_connection_policy_state = ConnectionPolicyState::Open;
+}
+
 void update_status_led() {
     ++g_status_led_tick;
     bool led_on = false;
-    switch (g_connection_status) {
-        case ConnectionStatus::Initializing:
-        case ConnectionStatus::Ready:
-            led_on = true;
-            break;
-        case ConnectionStatus::Scanning:
-            led_on = (g_status_led_tick % 200) < 100;
-            break;
-        case ConnectionStatus::Connecting:
-            led_on = (g_status_led_tick % 40) < 20;
-            break;
+
+    if (pairing_window_active_at(btstack_run_loop_get_time_ms())) {
+        const uint16_t phase = g_status_led_tick % 200;
+        led_on = phase < 20 || (phase >= 40 && phase < 60);
+    } else if (g_connection_status == ConnectionStatus::Connecting) {
+        led_on = (g_status_led_tick % 40) < 20;
+    } else if (g_connection_status == ConnectionStatus::Initializing ||
+               has_active_controller()) {
+        led_on = true;
+    } else {
+        led_on = (g_status_led_tick % 200) < 100;
     }
+
     if (led_on != g_status_led_on) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led_on);
         g_status_led_on = led_on;
@@ -262,6 +359,11 @@ void update_status_led() {
 }
 
 void process_rumble_timer(btstack_timer_source_t* timer) {
+    const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    if (update_pairing_window(now_ms)) {
+        apply_connection_policy(now_ms);
+    }
+
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         RumbleEnvelope envelope{};
         uni_hid_device_t* device = nullptr;
@@ -274,14 +376,16 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             slot.rumble_pending = false;
             dispatch = envelope.slot == slot_index && slot.active &&
                        slot.device != nullptr &&
-                       envelope.connection_generation == slot.connection_generation;
+                       envelope.connection_generation ==
+                           slot.connection_generation;
             if (dispatch) {
                 device = slot.device;
             }
         }
         critical_section_exit(&g_state_lock);
 
-        if (dispatch && device->report_parser.play_dual_rumble != nullptr) {
+        if (dispatch &&
+            device->report_parser.play_dual_rumble != nullptr) {
             device->report_parser.play_dual_rumble(
                 device, 0, kRumbleDurationMs,
                 envelope.rumble.high_frequency_magnitude,
@@ -294,19 +398,12 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     btstack_run_loop_add_timer(timer);
 }
 
-void resume_connections() {
-    uni_bt_allow_incoming_connections(true);
-    uni_bt_start_scanning_and_autoconnect_unsafe();
-}
 void recompute_connection_status() {
+    const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    update_pairing_window(now_ms);
     g_connection_status = compute_connection_status();
     g_status_led_tick = 0;
-    if (g_connection_status == ConnectionStatus::Ready) {
-        uni_bt_stop_scanning_unsafe();
-        uni_bt_allow_incoming_connections(false);
-    } else {
-        resume_connections();
-    }
+    apply_connection_policy(now_ms);
 }
 
 void platform_init(int argc, const char** argv) {
@@ -315,23 +412,35 @@ void platform_init(int argc, const char** argv) {
 }
 
 void platform_on_init_complete() {
+    // Discovery and incoming connections remain disabled until BOOTSEL opens
+    // the bounded pairing window.
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(&g_rumble_timer);
     recompute_connection_status();
 }
 
-uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name, uint16_t cod, uint8_t rssi) {
+uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name,
+                                          uint16_t cod, uint8_t rssi) {
     (void)addr;
     (void)name;
     (void)cod;
     (void)rssi;
-    return compute_connection_status() == ConnectionStatus::Ready
-               ? UNI_ERROR_IGNORE_DEVICE
-               : UNI_ERROR_SUCCESS;
+    return has_free_slot() &&
+                   g_connection_policy_state == ConnectionPolicyState::Open
+               ? UNI_ERROR_SUCCESS
+               : UNI_ERROR_IGNORE_DEVICE;
 }
 
 void platform_on_device_connected(uni_hid_device_t* device) {
+    if (device == nullptr) {
+        return;
+    }
+    if (g_connection_policy_state != ConnectionPolicyState::Open) {
+        uni_hid_device_disconnect(device);
+        return;
+    }
+
     const int slot_index = slot_for_device(device);
     if (slot_index < 0) {
         return;
@@ -453,22 +562,26 @@ uni_platform* get_platform() {
     return &platform;
 }
 
+[[noreturn]] void halt_wireless_backend() {
+    publish_all_neutral();
+    while (true) {
+        tight_loop_contents();
+    }
+}
+
 [[noreturn]] void core1_main() {
+    if (!flash_safe_execute_core_init()) {
+        halt_wireless_backend();
+    }
     if (cyw43_arch_init() != 0) {
-        publish_all_neutral();
-        while (true) {
-            tight_loop_contents();
-        }
+        halt_wireless_backend();
     }
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
     g_status_led_on = true;
 
     uni_platform_set_custom(get_platform());
     if (uni_init(0, nullptr) != 0) {
-        publish_all_neutral();
-        while (true) {
-            tight_loop_contents();
-        }
+        halt_wireless_backend();
     }
 
     btstack_run_loop_execute();
@@ -493,6 +606,11 @@ void bluepad32_input_backend_init() {
         g_consumed_generation[slot_index] = 0;
         g_last_snapshot_generation[slot_index] = 0;
     }
+    g_pairing_window_requested = false;
+    g_connection_status = ConnectionStatus::Initializing;
+    g_connection_policy_state = ConnectionPolicyState::Uninitialized;
+    g_pairing_window_deadline_ms = 0;
+    g_pairing_window_open = false;
     g_initialized = true;
 }
 
@@ -503,9 +621,26 @@ void bluepad32_input_backend_start() {
     if (g_started) {
         return;
     }
+    // Core 0 services USB from flash while Core 1 owns BTstack. Register both
+    // cores before either side can initiate a flash-backed BTstack TLV write.
+    if (!flash_safe_execute_core_init()) {
+        g_connection_policy_state = ConnectionPolicyState::FailedClosed;
+        return;
+    }
+
 
     g_started = true;
     multicore_launch_core1(core1_main);
+}
+
+void bluepad32_input_backend_open_pairing_window() {
+    if (!g_initialized) {
+        bluepad32_input_backend_init();
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    g_pairing_window_requested = true;
+    critical_section_exit(&g_state_lock);
 }
 
 bool bluepad32_input_backend_snapshot(uint8_t slot_index, SwitchInputState* out) {

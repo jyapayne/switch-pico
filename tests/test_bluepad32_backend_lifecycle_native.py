@@ -35,5 +35,8 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         "ready-reverse",
         "rejections",
         "lifecycle",
+        "pairing-policy",
+        "flash-core-start",
+        "flash-core-failure",
     ):
         subprocess.run([str(executable), scenario], check=True, cwd=root)

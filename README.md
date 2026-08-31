@@ -46,40 +46,38 @@ The default `python3 build.py` command and `firmware/switch-pico.*` artifacts re
 
 Both `build.py --aio` and direct AIO CMake configuration apply `patches/bluepad32-sdl3-imu.patch` idempotently before compiling Bluepad32. The patch makes supported motion controllers use SDL3-equivalent axes and fixed-point units before conversion to Nintendo samples. It intentionally leaves the dependency worktree dirty; the committed submodule revision remains Bluepad32 4.2.0.
 
-### Pairing two controllers
+### Pairing up to four controllers
 
 1. Flash and connect the Pico 2 W to the Switch.
 2. Enable `System Settings → Controllers and Sensors → Pro Controller Wired Communication`.
-3. Put the first controller into Bluetooth pairing mode:
+3. Hold the Pico's BOOTSEL button for about two seconds, until the onboard LED starts double-blinking. This opens a 60-second pairing window.
+4. Put a controller into Bluetooth pairing mode:
    - DualSense: hold Create + PS.
    - DualShock 4: hold Share + PS.
    - Switch Pro: press its sync button.
    - Xbox Bluetooth controller: hold its pair button.
    - 8BitDo: use a Bluetooth mode supported by Bluepad32; use Switch/S mode when motion is required.
-4. Wait for the first controller to connect and become ready. The LED continues slow-blinking because the second slot remains open. Pairing keys persist across Pico reboots.
-5. Put the second controller into pairing mode and wait for it to connect and become ready. The LED turns solid only after both controllers are active.
+5. Wait for the controller's player light to settle. Repeat step 4 for additional controllers while the window remains open. Holding BOOTSEL again extends the window by 60 seconds from that point.
 
-During initial setup, pairing order determines the initial slot assignment: the first controller paired occupies slot 0, and the second occupies slot 1. Pairing keys persist, so both controllers can reconnect after a Pico reboot without re-pairing. Slot numbers are not permanently bound to physical controllers: while one controller remains connected, a returning controller fills the other open slot; after a reboot or whenever both slots are empty, whichever persisted controller reconnects first receives slot 0, so the physical controllers can swap USB interfaces.
+Pairing order determines the initial USB slot assignment. Up to four controllers map 1:1 to the four emulated Switch Pro Controller interfaces.
+
+Outside the BOOTSEL-open window, Bluetooth discovery and incoming connections are disabled. The Pico does not scan for or reconnect disconnected controllers while locked. Pairing keys still persist, but reconnecting a previously paired controller also requires opening the BOOTSEL window before pressing its normal power button.
 
 ### LED meanings and device state
 
 The Pico 2 W onboard LED reports the overall Bluetooth state:
-- **Slow blink (0.5 s period)**: at least one slot is open and scanning for a Bluetooth controller.
-- **Fast blink (0.1 s period)**: at least one controller is connected but not yet ready (handshake in progress).
-- **Solid**: both slots are filled and both controllers are ready for input.
-- **Solid immediately after boot that never starts blinking**: Bluepad32 initialization did not complete; check firmware flashing and UART logs.
-
-The LED transitions to slow blink as soon as any slot becomes empty (e.g., a controller is turned off or unpaired). Scanning resumes automatically.
+- **Double blink**: the bounded pairing window is open.
+- **Fast blink**: a controller connection is still completing its handshake.
+- **Solid**: at least one controller is active.
+- **Slow blink**: no controller is active and pairing is locked.
+- **Solid immediately after boot that never transitions**: Bluepad32 initialization did not complete; check firmware flashing and UART logs.
 
 ### Managing controller disconnect and reconnect
 
-Controllers can disconnect and reconnect independently:
-- **Disconnect one controller**: that controller's slot becomes empty. The LED transitions to slow blink if both slots are no longer filled. The other controller continues sending input.
-- **Reconnect while the other controller remains connected**: the returning controller fills the only open slot, preserving the current assignment. The LED transitions through fast blink and back to solid.
-- **Reconnect after both slots become empty or after reboot**: reconnection/autoconnect order determines the assignments. The physical controllers can swap USB interfaces if their order changes.
-- **Turn off or unpair a controller**: delete it from Bluetooth settings on the Pico or reset pairing entirely using Bluepad32 commands. It will no longer auto-reconnect; the slot remains open for a new controller.
-
-When a controller disconnects, the Pico immediately publishes neutral buttons, sticks, and motion for that slot. The other controller is unaffected.
+- **Disconnect a controller**: its slot immediately publishes neutral buttons, sticks, and motion. Other connected controllers are unaffected.
+- **Reconnect a paired controller**: hold BOOTSEL until the LED double-blinks, then power on the controller normally.
+- **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
+- **Pairing window expires**: scanning and incoming connections stop; already connected controllers remain connected.
 
 ### Controller capabilities
 
@@ -98,15 +96,15 @@ Rumble effects are per-slot and independent. The Switch sends rumble commands to
 
 ### Hardware validation
 
-The dual-interface AIO build has been verified on a real Switch with two DualSense controllers: the Switch assigned two controller slots; buttons, sticks, calibrated motion, and rumble remained independent; disconnecting either controller left the other working; scanning resumed and the disconnected controller reconnected to the open slot.
+The four-interface AIO build has been verified on a real Switch with two DualSense controllers: the Switch assigned independent controller slots, and buttons, sticks, calibrated motion, rumble, and disconnect isolation worked per controller. Fresh DualSense pairing through the BOOTSEL-open window has also been verified on hardware.
 
 To reproduce the validation:
 
-1. **Verify USB enumeration**: Connect the Pico 2 W to a USB host (PC, Mac, or USB analyzer). Confirm that two HID devices are present (e.g., `lsusb -v` on Linux shows interface 0 and interface 1, both with Product ID 0x2009).
-2. **Verify Bluetooth pairing**: Pair two controllers via Bluepad32. Confirm the LED transitions from scanning → fast blink → solid.
-3. **Verify input on one controller**: Move sticks, press buttons, and check that the controller paired first during initial setup appears in slot 0.
-4. **Verify input on two controllers**: Move sticks on the controller paired second during initial setup, and confirm its inputs appear in slot 1 while the first controller is unaffected.
-5. **Verify disconnect and reconnect**: Turn off one controller while leaving the other connected. The LED reverts to slow blink. Turn the disconnected controller back on; it reconnects to the only open slot. Verify the occupied slot continues reporting the other controller's input.
+1. **Verify USB enumeration**: Connect the Pico 2 W to a USB host or analyzer. Confirm that four HID interfaces are present, using IN/OUT endpoint pairs `0x81/0x01` through `0x84/0x04`.
+2. **Verify Bluetooth pairing**: Hold BOOTSEL until the LED double-blinks, put a controller into explicit pairing mode, and confirm its player light settles.
+3. **Verify input on one controller**: Move sticks and press buttons; confirm only its assigned Switch slot changes.
+4. **Verify input on two controllers**: Move the second controller independently and confirm the first controller's slot is unaffected.
+5. **Verify the pairing gate**: Disconnect a controller and confirm it does not reconnect while locked. Open the BOOTSEL window, power it on, and confirm it can connect.
 6. **Verify rumble per slot**: Send rumble to interface 0 and confirm only the slot 0 controller vibrates. Send rumble to interface 1 and confirm only the slot 1 controller vibrates.
 7. **Verify motion**: Enable gyro/accel on both controllers. Rotate each controller independently and confirm that motion is per-slot (rotating controller 0 does not affect controller 1's IMU output).
 

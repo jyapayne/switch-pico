@@ -90,10 +90,14 @@ add_executable(switch-pico
         switch_haptics.cpp
 )
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
-    target_sources(switch-pico PRIVATE bluepad32_input_backend.cpp)
+    target_sources(switch-pico PRIVATE
+            bluepad32_input_backend.cpp
+            bootsel_pairing_button.cpp
+    )
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
+            PICO_FLASH_ASSUME_CORE1_SAFE=0
     )
 else()
     target_compile_definitions(switch-pico PRIVATE
@@ -125,6 +129,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             pico_btstack_classic
             pico_btstack_cyw43
             pico_multicore
+            pico_flash
     )
 endif()
 

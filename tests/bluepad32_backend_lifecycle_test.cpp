@@ -7,13 +7,29 @@
 
 namespace {
 
+
 bool incoming_connections = false;
 int scan_starts = 0;
 int scan_stops = 0;
 bool scanning_enabled = false;
+int classic_scan_starts = 0;
+int classic_scan_stops = 0;
+bool classic_scanning_enabled = false;
 uni_platform* installed_platform = nullptr;
 bool observed_status_led_on = false;
 int observed_status_led_writes = 0;
+uint32_t now_ms = 0;
+
+bool flash_core_init_result = true;
+int flash_core_init_calls = 0;
+int core1_launch_calls = 0;
+int cyw43_init_calls = 0;
+int uni_init_calls = 0;
+int device_disconnect_calls = 0;
+uni_hid_device_t* last_disconnected_device = nullptr;
+
+struct CoreStopped {};
+
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -29,10 +45,14 @@ void play_rumble(uni_hid_device_t* device, uint16_t, uint16_t,
     device->last_low = low;
 }
 
-uni_hid_device_t device(int idx, bool gamepad = true) {
+uni_hid_device_t device(
+    int idx, bool gamepad = true,
+    uni_bt_conn_protocol_t protocol = UNI_BT_CONN_PROTOCOL_NONE) {
     uni_hid_device_t result{};
     result.idx = idx;
     result.gamepad = gamepad;
+    result.conn.protocol = protocol;
+    result.conn.btaddr[5] = static_cast<uint8_t>(idx + 1);
     result.report_parser.play_dual_rumble = play_rumble;
     return result;
 }
@@ -47,18 +67,48 @@ int uni_hid_device_get_idx_for_instance(const uni_hid_device_t* device) {
     return device == nullptr ? -1 : device->idx;
 }
 
+void uni_hid_device_disconnect(uni_hid_device_t* device) {
+    ++device_disconnect_calls;
+    last_disconnected_device = device;
+}
+
 void uni_bt_allow_incoming_connections(bool enabled) {
     incoming_connections = enabled;
 }
 
-void uni_bt_start_scanning_and_autoconnect_unsafe() {
+
+void uni_bt_bredr_scan_start() {
+    ++classic_scan_starts;
+    classic_scanning_enabled = true;
+}
+
+void uni_bt_bredr_scan_stop() {
+    if (classic_scanning_enabled) {
+        ++classic_scan_stops;
+    }
+    classic_scanning_enabled = false;
+}
+
+void uni_bt_le_scan_start() {
     ++scan_starts;
     scanning_enabled = true;
 }
 
-void uni_bt_stop_scanning_unsafe() {
-    ++scan_stops;
+void uni_bt_le_scan_stop() {
+    if (scanning_enabled) {
+        ++scan_stops;
+    }
     scanning_enabled = false;
+}
+
+void uni_bt_start_scanning_and_autoconnect_unsafe() {
+    uni_bt_bredr_scan_start();
+    uni_bt_le_scan_start();
+}
+
+void uni_bt_stop_scanning_unsafe() {
+    uni_bt_bredr_scan_stop();
+    uni_bt_le_scan_stop();
 }
 
 void uni_platform_set_custom(uni_platform* platform) {
@@ -66,10 +116,17 @@ void uni_platform_set_custom(uni_platform* platform) {
 }
 
 int uni_init(int, const char**) {
+    ++uni_init_calls;
     return 0;
 }
 
+bool flash_safe_execute_core_init() {
+    ++flash_core_init_calls;
+    return flash_core_init_result;
+}
+
 int cyw43_arch_init() {
+    ++cyw43_init_calls;
     return 0;
 }
 
@@ -78,7 +135,18 @@ void cyw43_arch_gpio_put(int, bool enabled) {
     ++observed_status_led_writes;
 }
 
-void multicore_launch_core1(void (*)()) {}
+void multicore_launch_core1(void (*)()) {
+    ++core1_launch_calls;
+}
+
+void tight_loop_contents() {
+    throw CoreStopped{};
+}
+
+uint32_t btstack_run_loop_get_time_ms() {
+    return now_ms;
+}
+
 
 #include "../bluepad32_input_backend.cpp"
 
@@ -87,9 +155,22 @@ namespace {
 void start_backend() {
     bluepad32_input_backend_init();
     platform_on_init_complete();
-    require(incoming_connections, "initialization must allow connections");
-    require(scan_starts == 1, "initialization must start scanning");
+    require(!incoming_connections,
+            "initialization must keep incoming connections closed");
+    require(scan_starts == 0,
+            "initialization must not scan before a BOOTSEL request");
 }
+void start_pairing_backend() {
+    start_backend();
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
+    require(g_connection_policy_state == ConnectionPolicyState::Open &&
+                scanning_enabled && classic_scanning_enabled &&
+                incoming_connections,
+            "test connection setup requires an open pairing window");
+}
+
+
 
 void tick_backend_timer(int ticks) {
     for (int tick = 0; tick < ticks; ++tick) {
@@ -98,7 +179,7 @@ void tick_backend_timer(int ticks) {
 }
 
 void test_ready_order(bool reverse) {
-    start_backend();
+    start_pairing_backend();
     uni_hid_device_t devices[kSlotCount] = {
         device(0), device(1), device(2), device(3)};
     uni_hid_device_t replacements[kSlotCount] = {
@@ -107,23 +188,7 @@ void test_ready_order(bool reverse) {
     const int backward[kSlotCount] = {3, 2, 1, 0};
     const int* order = reverse ? backward : forward;
 
-    tick_backend_timer(99);
-    require(observed_status_led_on,
-            "scanning LED must stay on for the first slow-blink half-cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "scanning LED must turn off at the slow-blink half-cycle");
-
     platform_on_device_connected(&devices[order[0]]);
-    tick_backend_timer(19);
-    require(observed_status_led_on,
-            "connecting LED must stay on for the first fast-blink half-cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "connecting LED must turn off at the fast-blink half-cycle");
-    tick_backend_timer(20);
-    require(observed_status_led_on,
-            "connecting LED must turn on for the next fast-blink cycle");
 
     for (int position = 0; position < kSlotCount; ++position) {
         const int slot = order[position];
@@ -146,14 +211,6 @@ void test_ready_order(bool reverse) {
                     "scanning must continue while any slot remains free");
             require(incoming_connections,
                     "incoming connections must remain enabled before all slots are ready");
-            if (position == 0) {
-                tick_backend_timer(99);
-                require(observed_status_led_on,
-                        "a partially full backend must use the scanning LED on half-cycle");
-                tick_backend_timer(1);
-                require(!observed_status_led_on,
-                        "a partially full backend must use the scanning LED off half-cycle");
-            }
         }
     }
 
@@ -161,14 +218,6 @@ void test_ready_order(bool reverse) {
             "scanning must stop exactly when all four slots are ready");
     require(!incoming_connections,
             "incoming connections must be disabled only when all slots are full");
-    tick_backend_timer(1);
-    require(observed_status_led_on,
-            "four ready slots must turn the status LED on");
-    const int ready_led_writes = observed_status_led_writes;
-    tick_backend_timer(200);
-    require(observed_status_led_on &&
-                observed_status_led_writes == ready_led_writes,
-            "four ready slots must keep the status LED solid");
 
     for (int slot = 0; slot < kSlotCount; ++slot) {
         const int starts_before_disconnect = scan_starts;
@@ -245,19 +294,13 @@ void test_rejections() {
 }
 
 void test_independent_lifecycle() {
-    start_backend();
+    start_pairing_backend();
 
     uni_hid_device_t aborted = device(0);
     const uint32_t aborted_generation = g_slots[0].connection_generation;
     platform_on_device_connected(&aborted);
     require(g_slots[0].device == &aborted && !g_slots[0].active,
             "connected device must remain identifiable while becoming ready");
-    tick_backend_timer(19);
-    require(observed_status_led_on,
-            "a lone pending connection must use the fast LED on half-cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "a lone pending connection must use the fast LED off half-cycle");
 
     const int starts_before_aborted_disconnect = scan_starts;
     platform_on_device_disconnected(&aborted);
@@ -266,15 +309,10 @@ void test_independent_lifecycle() {
     require(g_slots[0].connection_generation == aborted_generation + 1,
             "pre-ready disconnect must invalidate its connection generation");
     require(g_connection_status == ConnectionStatus::Scanning &&
-                scanning_enabled && incoming_connections &&
-                scan_starts == starts_before_aborted_disconnect + 1,
-            "pre-ready disconnect with no peer must resume scanning");
-    tick_backend_timer(99);
-    require(observed_status_led_on,
-            "pre-ready disconnect must restore the slow LED on half-cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "pre-ready disconnect must restore the slow LED off half-cycle");
+                scanning_enabled && classic_scanning_enabled &&
+                incoming_connections &&
+                scan_starts == starts_before_aborted_disconnect,
+            "pre-ready disconnect must preserve the open pairing scan");
 
     uni_hid_device_t devices[kSlotCount] = {
         device(0), device(1), device(2), device(3)};
@@ -284,12 +322,6 @@ void test_independent_lifecycle() {
                     !g_slots[slot].active,
                 "each pending device must retain its indexed identity");
     }
-    tick_backend_timer(19);
-    require(observed_status_led_on,
-            "concurrent pending devices must use the fast LED on half-cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "concurrent pending devices must use the fast LED off half-cycle");
 
     const uint32_t first_pending_generation =
         g_slots[0].connection_generation;
@@ -306,15 +338,10 @@ void test_independent_lifecycle() {
                 first_pending_generation + 1,
             "pending disconnect beside peers must invalidate its generation");
     require(g_connection_status == ConnectionStatus::Connecting &&
-                scanning_enabled && incoming_connections &&
+                scanning_enabled && classic_scanning_enabled &&
+                incoming_connections &&
                 scan_starts == starts_before_first_pending_disconnect + 1,
-            "open slot must scan while other slots remain connecting");
-    tick_backend_timer(19);
-    require(observed_status_led_on,
-            "surviving pending devices must retain the fast LED on half-cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "surviving pending devices must retain the fast LED off half-cycle");
+            "open pairing slot must preserve pending peers and resume scanning");
 
     for (int slot = 1; slot < kSlotCount; ++slot) {
         require(platform_on_device_ready(&devices[slot]) == UNI_ERROR_SUCCESS,
@@ -412,11 +439,6 @@ void test_independent_lifecycle() {
                 devices[0].last_low == 115 &&
                 devices[0].last_high == 116,
             "slot 0 rumble must continue while slot 3 is disconnected");
-    require(observed_status_led_on,
-            "disconnect scanning must use the slow LED on half-cycle");
-    tick_backend_timer(1);
-    require(!observed_status_led_on,
-            "disconnect scanning must reach the slow LED off half-cycle");
 
     uni_hid_device_t slot_three_replacement = device(3);
     require(platform_on_device_ready(&slot_three_replacement) ==
@@ -425,13 +447,6 @@ void test_independent_lifecycle() {
     process_rumble_timer(&g_rumble_timer);
     require(slot_three_replacement.rumble_calls == 0,
             "slot 3 replacement must not receive disconnected device rumble");
-    require(observed_status_led_on,
-            "slot 3 replacement must restore the solid ready LED");
-    const int replacement_ready_led_writes = observed_status_led_writes;
-    tick_backend_timer(100);
-    require(observed_status_led_on &&
-                observed_status_led_writes == replacement_ready_led_writes,
-            "replacement quartet must keep the ready LED solid");
 
     g_slots[3].pending_rumble = {
         3, disconnected_generation, SwitchRumbleOutput{77, 88}};
@@ -536,6 +551,128 @@ void test_independent_lifecycle() {
             "slot 0 activity must not evict the slot 3 mailbox");
 }
 
+void test_pairing_window_policy() {
+    bd_addr_t address = {1, 2, 3, 4, 5, 6};
+
+    bluepad32_input_backend_init();
+    require(platform_on_device_discovered(address, "controller", 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE,
+            "discovery must remain closed before backend initialization");
+
+    start_backend();
+    require(g_connection_policy_state == ConnectionPolicyState::Locked &&
+                !classic_scanning_enabled && !scanning_enabled &&
+                !incoming_connections,
+            "boot must disable all discovery and incoming connections");
+    require(platform_on_device_discovered(address, "controller", 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE,
+            "locked policy must reject every discovery");
+
+    uni_hid_device_t rejected = device(0);
+    platform_on_device_connected(&rejected);
+    require(device_disconnect_calls == 1 &&
+                last_disconnected_device == &rejected &&
+                g_slots[0].device == nullptr,
+            "locked policy must disconnect every incoming controller");
+
+    bluepad32_input_backend_open_pairing_window();
+    require(!g_pairing_window_open,
+            "Core0 request must wait for Core1 consumption");
+    process_rumble_timer(&g_rumble_timer);
+    require(g_pairing_window_open &&
+                g_pairing_window_deadline_ms == 60000 &&
+                g_connection_policy_state == ConnectionPolicyState::Open &&
+                classic_scanning_enabled && scanning_enabled &&
+                incoming_connections,
+            "BOOTSEL window must run Bluepad32's normal pairing scan");
+    require(platform_on_device_discovered(address, "controller", 0, 0) ==
+                    UNI_ERROR_SUCCESS,
+            "open pairing window must accept a discovered controller");
+
+    uni_hid_device_t paired = device(0);
+    platform_on_device_connected(&paired);
+    require(device_disconnect_calls == 1 &&
+                g_slots[0].device == &paired,
+            "open pairing window must retain a connected controller");
+    platform_on_device_disconnected(&paired);
+
+    tick_backend_timer(20);
+    require(!observed_status_led_on,
+            "pairing double blink must finish its first pulse");
+    tick_backend_timer(20);
+    require(observed_status_led_on,
+            "pairing double blink must start its second pulse");
+    tick_backend_timer(20);
+    require(!observed_status_led_on,
+            "pairing double blink must finish its second pulse");
+
+    now_ms = 30000;
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
+    require(g_pairing_window_deadline_ms == 90000,
+            "pairing request must extend deadline from current Core1 time");
+
+    uni_hid_device_t devices[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        require(platform_on_device_ready(&devices[slot]) == UNI_ERROR_SUCCESS,
+                "policy test devices must fill all slots");
+    }
+    require(g_connection_policy_state == ConnectionPolicyState::Paused &&
+                g_pairing_window_open && !scanning_enabled &&
+                !classic_scanning_enabled && !incoming_connections,
+            "full slots must pause pairing without closing the deadline");
+
+    now_ms = 90000;
+    process_rumble_timer(&g_rumble_timer);
+    require(!g_pairing_window_open &&
+                g_connection_policy_state == ConnectionPolicyState::Paused,
+            "deadline must expire while slots remain full");
+    platform_on_device_disconnected(&devices[3]);
+    require(g_connection_policy_state == ConnectionPolicyState::Locked &&
+                !classic_scanning_enabled && !scanning_enabled &&
+                !incoming_connections,
+            "a freed slot after expiry must remain closed");
+    require(platform_on_device_discovered(address, "controller", 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE,
+            "expired pairing policy must reject discovery");
+}
+
+
+void test_flash_core_start_contract() {
+    bluepad32_input_backend_init();
+    flash_core_init_result = false;
+    bluepad32_input_backend_start();
+    require(flash_core_init_calls == 1 && core1_launch_calls == 0 &&
+                g_connection_policy_state ==
+                    ConnectionPolicyState::FailedClosed,
+            "Core0 flash-safe init failure must prevent Core1 launch");
+
+    flash_core_init_result = true;
+    bluepad32_input_backend_start();
+    require(flash_core_init_calls == 2 && core1_launch_calls == 1,
+            "Core0 must register as a flash-safe victim before Core1 launch");
+    bluepad32_input_backend_start();
+    require(flash_core_init_calls == 2 && core1_launch_calls == 1,
+            "backend start must remain idempotent");
+}
+
+void test_flash_core_init_fatal() {
+    bluepad32_input_backend_init();
+    flash_core_init_result = false;
+    bool stopped = false;
+    try {
+        core1_main();
+    } catch (const CoreStopped&) {
+        stopped = true;
+    }
+    require(stopped && flash_core_init_calls == 1 &&
+                cyw43_init_calls == 0 && uni_init_calls == 0 &&
+                g_connection_policy_state ==
+                    ConnectionPolicyState::FailedClosed,
+            "flash-safe Core1 init failure must halt before CYW43 init");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -549,6 +686,12 @@ int main(int argc, char** argv) {
         test_rejections();
     } else if (scenario == "lifecycle") {
         test_independent_lifecycle();
+    } else if (scenario == "pairing-policy") {
+        test_pairing_window_policy();
+    } else if (scenario == "flash-core-start") {
+        test_flash_core_start_contract();
+    } else if (scenario == "flash-core-failure") {
+        test_flash_core_init_fatal();
     } else {
         require(false, "unknown scenario");
     }

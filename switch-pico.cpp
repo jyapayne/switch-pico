@@ -7,6 +7,7 @@
 #include "hardware/uart.h"
 #else
 #include "bluepad32_input_backend.h"
+#include "bootsel_pairing_button.h"
 #endif
 
 #ifdef SWITCH_PICO_LOG
@@ -232,6 +233,9 @@ int main() {
     while (true) {
         tud_task();          // USB device tasks
 #ifdef SWITCH_PICO_BLUEPAD32
+        if (bootsel_pairing_button_task()) {
+            bluepad32_input_backend_open_pairing_window();
+        }
         for (uint8_t instance = 0;
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
             bluepad32_input_backend_snapshot(instance,
