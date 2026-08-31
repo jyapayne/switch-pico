@@ -4,6 +4,7 @@
 #include <string>
 
 #include <uni.h>
+#include "../controller_color_config.h"
 
 namespace {
 
@@ -44,6 +45,19 @@ void play_rumble(uni_hid_device_t* device, uint16_t, uint16_t,
     device->last_high = high;
     device->last_low = low;
 }
+void set_lightbar(uni_hid_device_t* device, uint8_t red, uint8_t green,
+                  uint8_t blue) {
+    ++device->lightbar_calls;
+    device->lightbar_red = red;
+    device->lightbar_green = green;
+    device->lightbar_blue = blue;
+}
+
+void set_player_leds(uni_hid_device_t* device, uint8_t leds) {
+    ++device->player_led_calls;
+    device->player_leds = leds;
+}
+
 
 uni_hid_device_t device(
     int idx, bool gamepad = true,
@@ -58,6 +72,7 @@ uni_hid_device_t device(
 }
 
 }  // namespace
+
 
 bool uni_hid_device_is_gamepad(const uni_hid_device_t* device) {
     return device != nullptr && device->gamepad;
@@ -149,6 +164,21 @@ uint32_t btstack_run_loop_get_time_ms() {
 
 
 #include "../bluepad32_input_backend.cpp"
+SwitchRgbColor switch_pro_get_slot_light_color(uint8_t instance) {
+    static constexpr SwitchRgbColor grips[] = {
+        {SWITCH_COLOR_SLOT_1_R, SWITCH_COLOR_SLOT_1_G,
+         SWITCH_COLOR_SLOT_1_B},
+        {SWITCH_COLOR_SLOT_2_R, SWITCH_COLOR_SLOT_2_G,
+         SWITCH_COLOR_SLOT_2_B},
+        {SWITCH_COLOR_SLOT_3_R, SWITCH_COLOR_SLOT_3_G,
+         SWITCH_COLOR_SLOT_3_B},
+        {SWITCH_COLOR_SLOT_4_R, SWITCH_COLOR_SLOT_4_G,
+         SWITCH_COLOR_SLOT_4_B},
+    };
+    return instance < sizeof(grips) / sizeof(grips[0])
+               ? switch_pro_calibrate_light_color(grips[instance])
+               : SwitchRgbColor{};
+}
 
 namespace {
 
@@ -639,6 +669,39 @@ void test_pairing_window_policy() {
 }
 
 
+void test_slot_lighting() {
+    start_pairing_backend();
+    uni_hid_device_t devices[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot) {
+        devices[slot].report_parser.set_lightbar_color = set_lightbar;
+        devices[slot].report_parser.set_player_leds = set_player_leds;
+        require(platform_on_device_ready(&devices[slot]) == UNI_ERROR_SUCCESS,
+                "color-capable controller did not become ready");
+        const SwitchRgbColor expected =
+            switch_pro_get_slot_light_color(slot);
+        require(devices[slot].lightbar_calls == 1 &&
+                    devices[slot].lightbar_red == expected.red &&
+                    devices[slot].lightbar_green == expected.green &&
+                    devices[slot].lightbar_blue == expected.blue &&
+                    devices[slot].player_led_calls == 0,
+                "slot color did not reach the controller lightbar");
+        require(platform_on_device_ready(&devices[slot]) == UNI_ERROR_SUCCESS &&
+                    devices[slot].lightbar_calls == 1,
+                "duplicate ready event rewrote controller lighting");
+    }
+
+    platform_on_device_disconnected(&devices[2]);
+    uni_hid_device_t fallback = device(2);
+    fallback.report_parser.set_player_leds = set_player_leds;
+    require(platform_on_device_ready(&fallback) == UNI_ERROR_SUCCESS &&
+                fallback.lightbar_calls == 0 &&
+                fallback.player_led_calls == 1 &&
+                fallback.player_leds == (1u << 2u),
+            "controller without RGB support did not receive its slot LED");
+}
+
 void test_flash_core_start_contract() {
     bluepad32_input_backend_init();
     flash_core_init_result = false;
@@ -688,6 +751,8 @@ int main(int argc, char** argv) {
         test_independent_lifecycle();
     } else if (scenario == "pairing-policy") {
         test_pairing_window_policy();
+    } else if (scenario == "slot-lighting") {
+        test_slot_lighting();
     } else if (scenario == "flash-core-start") {
         test_flash_core_start_contract();
     } else if (scenario == "flash-core-failure") {

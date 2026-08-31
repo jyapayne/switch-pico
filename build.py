@@ -22,13 +22,10 @@ AIO_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-aio.uf2"
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
 UF2_PATH = Path(os.environ.get("UF2_PATH", BUILD_DIR / "switch-pico.uf2")).expanduser()
 
-MACROS = (
-    "SWITCH_COLOR_LEFT_GRIP_R",
-    "SWITCH_COLOR_LEFT_GRIP_G",
-    "SWITCH_COLOR_LEFT_GRIP_B",
-    "SWITCH_COLOR_RIGHT_GRIP_R",
-    "SWITCH_COLOR_RIGHT_GRIP_G",
-    "SWITCH_COLOR_RIGHT_GRIP_B",
+MACROS = tuple(
+    f"SWITCH_COLOR_SLOT_{slot}_{component}"
+    for slot in range(1, 5)
+    for component in ("R", "G", "B")
 )
 
 def parse_args():
@@ -46,12 +43,12 @@ def parse_args():
     group.add_argument(
         "--random-grip-color",
         action="store_true",
-        help="Randomize both grip colors before building.",
+        help="Assign one random color to every emulated controller slot.",
     )
     group.add_argument(
         "--grip-color",
         metavar="RRGGBB",
-        help="Set both grip colors to the provided hex value.",
+        help="Set every emulated controller slot to the provided hex color.",
     )
     return parser.parse_args()
 
@@ -84,7 +81,7 @@ def update_grip_colors(rgb_hex):
             sys.exit(1)
         return updated
 
-    values = (r, g, b, r, g, b)
+    values = (r, g, b) * 4
     for macro, val in zip(MACROS, values):
         text = replace(macro, val, text)
 

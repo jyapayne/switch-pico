@@ -36,6 +36,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         "rejections",
         "lifecycle",
         "pairing-policy",
+        "slot-lighting",
         "flash-core-start",
         "flash-core-failure",
     ):

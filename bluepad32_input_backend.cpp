@@ -120,6 +120,18 @@ int slot_for_device(const uni_hid_device_t* device) {
     const int slot = uni_hid_device_get_idx_for_instance(device);
     return slot >= 0 && slot < kSlotCount ? slot : -1;
 }
+void apply_slot_lighting(uint8_t slot_index, uni_hid_device_t* device) {
+    const SwitchRgbColor color =
+        switch_pro_get_slot_light_color(slot_index);
+    if (device->report_parser.set_lightbar_color != nullptr) {
+        device->report_parser.set_lightbar_color(
+            device, color.red, color.green, color.blue);
+    } else if (device->report_parser.set_player_leds != nullptr) {
+        device->report_parser.set_player_leds(
+            device, static_cast<uint8_t>(1u << slot_index));
+    }
+}
+
 
 ConnectionStatus compute_connection_status() {
     critical_section_enter_blocking(&g_state_lock);
@@ -501,6 +513,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     }
 
     bool occupied_mismatch = false;
+    bool became_active = false;
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     occupied_mismatch = slot.device != nullptr && slot.device != device;
@@ -511,6 +524,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
             slot.active = true;
             slot.rumble_pending = false;
             ++slot.state_generation;
+            became_active = true;
         }
     }
     critical_section_exit(&g_state_lock);
@@ -518,6 +532,10 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     if (occupied_mismatch) {
         return UNI_ERROR_NO_SLOTS;
     }
+    if (became_active) {
+        apply_slot_lighting(static_cast<uint8_t>(slot_index), device);
+    }
+
 
     recompute_connection_status();
     return UNI_ERROR_SUCCESS;

@@ -1,8 +1,10 @@
 #include "switch_pro_driver.h"
+#include "controller_color_config.h"
 #include "tusb.h"
 #include "pico/time.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -139,6 +141,18 @@ void send_feature(uint8_t instance, uint8_t command, uint8_t value) {
     report[11] = value;
     tud_hid_report_received_cb(instance, 0, report.data(), report.size());
 }
+void send_spi_read(uint8_t instance, uint32_t address, uint8_t size) {
+    std::array<uint8_t, SWITCH_PRO_ENDPOINT_SIZE> report{};
+    report[0] = REPORT_FEATURE;
+    report[10] = SPI_READ;
+    report[11] = static_cast<uint8_t>(address);
+    report[12] = static_cast<uint8_t>(address >> 8u);
+    report[13] = static_cast<uint8_t>(address >> 16u);
+    report[14] = static_cast<uint8_t>(address >> 24u);
+    report[15] = size;
+    tud_hid_report_received_cb(instance, 0, report.data(), report.size());
+}
+
 
 void send_config(uint8_t instance, uint8_t subtype) {
     const uint8_t report[] = {REPORT_CONFIGURATION, subtype};
@@ -406,6 +420,64 @@ void test_callback_send_and_imu_modes_are_isolated() {
            "instance 1 quaternion accelerometer state was overwritten");
 }
 
+void test_grip_colors_are_isolated() {
+    initialize_contexts();
+    constexpr uint32_t grip_address =
+        0x6000u + offsetof(SwitchFactoryConfig, leftGripColor);
+    constexpr uint8_t grip_bytes =
+        sizeof(SwitchColorDefinition) * 2u;
+    constexpr SwitchRgbColor calibrated_blue =
+        switch_pro_calibrate_light_color({0x00, 0x89, 0xEB});
+    constexpr SwitchRgbColor calibrated_gray =
+        switch_pro_calibrate_light_color({0x96, 0x96, 0x96});
+    static_assert(calibrated_blue.red == 0x00 &&
+                  calibrated_blue.green == 0x35 &&
+                  calibrated_blue.blue == 0x9D);
+    static_assert(calibrated_gray.red == 0x64 &&
+                  calibrated_gray.green == 0x64 &&
+                  calibrated_gray.blue == 0x64);
+
+
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        send_spi_read(instance, grip_address, grip_bytes);
+        now_ms += 6;
+        expect(!switch_pro_task(instance),
+               "grip color SPI reply counted as regular input");
+        expect(sent_report_count == static_cast<unsigned>(instance + 1u),
+               "grip color SPI reply was not sent");
+        const SentReport& response = sent_reports[sent_report_count - 1u];
+        const SwitchRgbColor expected =
+            switch_pro_get_slot_color(instance);
+        const uint8_t expected_bytes[] = {
+            expected.red, expected.green, expected.blue,
+            expected.red, expected.green, expected.blue,
+        };
+        expect(response.instance == instance &&
+                   response.data[13] == 0x90 &&
+                   response.data[14] == SPI_READ &&
+                   std::memcmp(response.data.data() + 20, expected_bytes,
+                               sizeof(expected_bytes)) == 0,
+               "Switch grip color did not match its HID slot");
+        const SwitchRgbColor light =
+            switch_pro_get_slot_light_color(instance);
+        const SwitchRgbColor calibrated =
+            switch_pro_calibrate_light_color(expected);
+        expect(light.red == calibrated.red &&
+                   light.green == calibrated.green &&
+                   light.blue == calibrated.blue,
+               "physical controller light was not derived from its grip");
+    }
+
+    const SwitchRgbColor invalid_grip =
+        switch_pro_get_slot_color(kInvalidInstance);
+    const SwitchRgbColor invalid_light =
+        switch_pro_get_slot_light_color(kInvalidInstance);
+    expect(invalid_grip.red == 0 && invalid_grip.green == 0 &&
+               invalid_grip.blue == 0 && invalid_light.red == 0 &&
+               invalid_light.green == 0 && invalid_light.blue == 0,
+           "invalid HID slot returned a configured color");
+}
+
 void test_rumble_callbacks_and_decoders_are_isolated() {
     initialize_contexts();
     rumble_events = {};
@@ -613,6 +685,7 @@ int main() {
     test_input_reports_and_timers_are_isolated();
     test_callback_send_and_imu_modes_are_isolated();
     test_rumble_callbacks_and_decoders_are_isolated();
+    test_grip_colors_are_isolated();
     test_lifecycle_and_invalid_instances();
     test_uart_parser_is_pure();
     if (failures != 0) {

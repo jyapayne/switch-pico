@@ -1,6 +1,7 @@
 #include "switch_pro_driver.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <cstring>
 #include <stdio.h>
@@ -47,6 +48,7 @@ struct SwitchProContext {
     bool is_initialized = false;
     bool is_report_queued = false;
     SwitchDeviceInfo device_info{};
+    SwitchRgbColor grip_color{};
     uint8_t player_id = 0;
     uint8_t input_mode = 0x30;
     SwitchImuMode imu_mode = SwitchImuMode::Off;
@@ -75,7 +77,7 @@ static SwitchProContext* context_for(uint8_t instance) {
     return &contexts[instance];
 }
 
-// Optional compile-time colour override (body/buttons/grips).
+// Optional compile-time color palette shared with Bluetooth controller LEDs.
 #if __has_include("controller_color_config.h")
 #include "controller_color_config.h"
 #endif
@@ -89,16 +91,45 @@ static SwitchProContext* context_for(uint8_t instance) {
 #define SWITCH_COLOR_BUTTON_G 0xFF
 #define SWITCH_COLOR_BUTTON_B 0xFF
 #endif
-#ifndef SWITCH_COLOR_LEFT_GRIP_R
-#define SWITCH_COLOR_LEFT_GRIP_R 0xEC
-#define SWITCH_COLOR_LEFT_GRIP_G 0x00
-#define SWITCH_COLOR_LEFT_GRIP_B 0x8C
+#ifndef SWITCH_COLOR_SLOT_1_R
+#define SWITCH_COLOR_SLOT_1_R 0x00
+#define SWITCH_COLOR_SLOT_1_G 0x89
+#define SWITCH_COLOR_SLOT_1_B 0xEB
+#define SWITCH_COLOR_SLOT_2_R 0xE6
+#define SWITCH_COLOR_SLOT_2_G 0x39
+#define SWITCH_COLOR_SLOT_2_B 0x46
+#define SWITCH_COLOR_SLOT_3_R 0xF6
+#define SWITCH_COLOR_SLOT_3_G 0xC9
+#define SWITCH_COLOR_SLOT_3_B 0x45
+#define SWITCH_COLOR_SLOT_4_R 0x2E
+#define SWITCH_COLOR_SLOT_4_G 0xCC
+#define SWITCH_COLOR_SLOT_4_B 0x71
 #endif
-#ifndef SWITCH_COLOR_RIGHT_GRIP_R
-#define SWITCH_COLOR_RIGHT_GRIP_R 0xEC
-#define SWITCH_COLOR_RIGHT_GRIP_G 0x00
-#define SWITCH_COLOR_RIGHT_GRIP_B 0x8C
-#endif
+
+
+static constexpr SwitchRgbColor slot_colors[] = {
+    {SWITCH_COLOR_SLOT_1_R, SWITCH_COLOR_SLOT_1_G, SWITCH_COLOR_SLOT_1_B},
+    {SWITCH_COLOR_SLOT_2_R, SWITCH_COLOR_SLOT_2_G, SWITCH_COLOR_SLOT_2_B},
+    {SWITCH_COLOR_SLOT_3_R, SWITCH_COLOR_SLOT_3_G, SWITCH_COLOR_SLOT_3_B},
+    {SWITCH_COLOR_SLOT_4_R, SWITCH_COLOR_SLOT_4_G, SWITCH_COLOR_SLOT_4_B},
+};
+
+static_assert(SWITCH_PICO_HID_INSTANCE_COUNT <=
+              sizeof(slot_colors) / sizeof(slot_colors[0]));
+
+SwitchRgbColor switch_pro_get_slot_color(uint8_t instance) {
+    if (instance >= sizeof(slot_colors) / sizeof(slot_colors[0])) {
+        return {};
+    }
+    return slot_colors[instance];
+}
+SwitchRgbColor switch_pro_get_slot_light_color(uint8_t instance) {
+    if (instance >= sizeof(slot_colors) / sizeof(slot_colors[0])) {
+        return {};
+    }
+    return switch_pro_calibrate_light_color(slot_colors[instance]);
+}
+
 
 
 static const uint8_t factory_config_data[0xEFF] = {
@@ -148,10 +179,10 @@ static const uint8_t factory_config_data[0xEFF] = {
     SWITCH_COLOR_BUTTON_R, SWITCH_COLOR_BUTTON_G, SWITCH_COLOR_BUTTON_B,
 
     // left grip color
-    SWITCH_COLOR_LEFT_GRIP_R, SWITCH_COLOR_LEFT_GRIP_G, SWITCH_COLOR_LEFT_GRIP_B,
+    SWITCH_COLOR_SLOT_1_R, SWITCH_COLOR_SLOT_1_G, SWITCH_COLOR_SLOT_1_B,
 
     // right grip color
-    SWITCH_COLOR_RIGHT_GRIP_R, SWITCH_COLOR_RIGHT_GRIP_G, SWITCH_COLOR_RIGHT_GRIP_B,
+    SWITCH_COLOR_SLOT_1_R, SWITCH_COLOR_SLOT_1_G, SWITCH_COLOR_SLOT_1_B,
 
     0x01,
 
@@ -440,7 +471,8 @@ static bool send_report(uint8_t instance, SwitchProContext& context,
     return result;
 }
 
-static void read_spi_flash(uint8_t* dest, uint32_t address, uint8_t size) {
+static void read_spi_flash(const SwitchProContext& context, uint8_t* dest,
+                           uint32_t address, uint8_t size) {
     uint32_t address_bank = address & 0xFFFFFF00u;
     uint32_t address_offset = address & 0x000000FFu;
     const uint8_t* data = nullptr;
@@ -450,10 +482,31 @@ static void read_spi_flash(uint8_t* dest, uint32_t address, uint8_t size) {
         data = user_calibration_data;
     }
 
-    if (data != nullptr) {
-        memcpy(dest, data + address_offset, size);
-    } else {
+    if (data == nullptr) {
         memset(dest, 0xFF, size);
+        return;
+    }
+    memcpy(dest, data + address_offset, size);
+    if (address_bank != 0x6000u) {
+        return;
+    }
+
+    static_assert(sizeof(SwitchRgbColor) == sizeof(SwitchColorDefinition));
+    const uint8_t* color =
+        reinterpret_cast<const uint8_t*>(&context.grip_color);
+    constexpr size_t left_offset =
+        offsetof(SwitchFactoryConfig, leftGripColor);
+    constexpr size_t right_offset =
+        offsetof(SwitchFactoryConfig, rightGripColor);
+    for (uint8_t index = 0; index < size; ++index) {
+        const size_t offset = address_offset + index;
+        if (offset >= left_offset &&
+            offset < left_offset + sizeof(SwitchRgbColor)) {
+            dest[index] = color[offset - left_offset];
+        } else if (offset >= right_offset &&
+                   offset < right_offset + sizeof(SwitchRgbColor)) {
+            dest[index] = color[offset - right_offset];
+        }
     }
 }
 
@@ -573,8 +626,8 @@ static void handle_feature_report(SwitchProContext& context,
             context.report_buffer[17] = report_data[13];
             context.report_buffer[18] = report_data[14];
             context.report_buffer[19] = report_data[15];
-            read_spi_flash(&context.report_buffer[20], spi_read_address,
-                           spi_read_size);
+            read_spi_flash(context, &context.report_buffer[20],
+                           spi_read_address, spi_read_size);
             LOG_PRINTF("[HID] FEATURE SPI_READ addr=0x%08lx size=%u\n",
                        static_cast<unsigned long>(spi_read_address),
                        spi_read_size);
@@ -725,6 +778,7 @@ void switch_pro_init(uint8_t instance) {
         return;
     }
 
+    context->grip_color = switch_pro_get_slot_color(instance);
     context->device_info = {
         0x03,
         0x48,

@@ -3,10 +3,10 @@
 Raspberry Pi Pico firmware that emulates one or more Switch Pro controllers over USB. Input can come from the SDL3-to-UART computer bridge or, on Pico 2 W, directly from Bluetooth controllers through Bluepad32.
 
 ## What you get
-- **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a Switch Pro controller (one on standard Pico, two on Pico 2 W AIO), accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
+- **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a Switch Pro controller (one on standard Pico, four on Pico 2 W AIO), accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL3 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
-- **Colour override** (`controller_color_config.h`): compile‑time RGB overrides for body/buttons/grips as seen by the Switch.
-- **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts two concurrent Bluetooth controllers and sends their controls, calibrated motion, and rumble through two separate Switch Pro USB interfaces without a computer.
+- **Color configuration** (`controller_color_config.h`): compile-time RGB colors for emulated controller grips and supported Bluetooth controller LEDs.
+- **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts four concurrent Bluetooth controllers and sends their controls, calibrated motion, rumble, and slot identity through four separate Switch Pro USB interfaces without a computer.
 
 ## Quick start
 1. Flash the Pico with `firmware/switch-pico.uf2` (or build your own) using BOOTSEL drag-and-drop (see “Manual UF2 flashing” below).
@@ -78,6 +78,18 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Reconnect a paired controller**: hold BOOTSEL until the LED double-blinks, then power on the controller normally.
 - **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
 - **Pairing window expires**: scanning and incoming connections stop; already connected controllers remain connected.
+
+### Per-slot controller colors
+
+Each AIO slot has one color shared by its emulated Switch Pro grips and its physical Bluetooth controller:
+
+1. Blue `#0089EB`
+2. Red `#E63946`
+3. Yellow `#F6C945`
+4. Green `#2ECC71`
+
+When a controller becomes ready, RGB-capable devices such as DualSense and DualShock 4 receive a darker, more saturated RGB value derived automatically from the slot's Switch grip color. Controllers without an RGB light use player indicator 1, 2, 3, or 4 when Bluepad32 exposes player-LED control. Devices without either capability are left unchanged. Edit only the four grip colors in `controller_color_config.h`; rebuilding automatically recalibrates their lightbar colors.
+
 
 ### Controller capabilities
 
@@ -236,20 +248,21 @@ The generated files are:
 - `firmware/switch-pico.elf` and `firmware/switch-pico.uf2`, refreshed from the
   corresponding `build/` artifacts after every successful build.
 
-To customize the controller grip color while building, pass one of these mutually
-exclusive options:
+To assign one color to every emulated controller slot while building, pass one
+of these mutually exclusive options:
 
 ```sh
-# Use a random color for both grips
+# Use one random color for all slots
 python3 build.py --random-grip-color
 
-# Use a specific six-digit RGB color for both grips
+# Use one specific six-digit RGB color for all slots
 python3 build.py --grip-color FF00AA
 ```
 
-Both options update `controller_color_config.h` before building. With no color
-option, that file is left unchanged. Run `python3 build.py --help` to see the
-available command-line options.
+Both options update all four slot definitions in
+`controller_color_config.h` before building. With no color option, the
+per-slot blue/red/yellow/green palette is left unchanged. Run
+`python3 build.py --help` to see the available command-line options.
 
 If the tools or artifacts are in non-default locations, use these environment
 variables:

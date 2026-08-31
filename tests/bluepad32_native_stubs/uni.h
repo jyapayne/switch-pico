@@ -82,8 +82,13 @@ struct uni_controller_t {
 struct uni_hid_device_t;
 typedef void (*uni_play_dual_rumble_t)(uni_hid_device_t*, uint16_t,
                                         uint16_t, uint8_t, uint8_t);
+typedef void (*uni_set_player_leds_t)(uni_hid_device_t*, uint8_t);
+typedef void (*uni_set_lightbar_color_t)(uni_hid_device_t*, uint8_t, uint8_t,
+                                         uint8_t);
 
 struct uni_report_parser_t {
+    uni_set_player_leds_t set_player_leds;
+    uni_set_lightbar_color_t set_lightbar_color;
     uni_play_dual_rumble_t play_dual_rumble;
 };
 
@@ -107,6 +112,12 @@ struct uni_hid_device_t {
     int rumble_calls;
     uint8_t last_high;
     uint8_t last_low;
+    int lightbar_calls;
+    uint8_t lightbar_red;
+    uint8_t lightbar_green;
+    uint8_t lightbar_blue;
+    int player_led_calls;
+    uint8_t player_leds;
 };
 
 struct uni_platform {
