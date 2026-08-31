@@ -19,9 +19,9 @@ Raspberry Pi Pico firmware that emulates one or more Switch Pro controllers over
 
 ### Architecture
 
-The AIO build accepts two concurrent Bluetooth controllers on a single Pico 2 W. The device runs TinyUSB and Switch report generation on Core 0, while Bluepad32, BTstack, and the CYW43439 radio run on Core 1. Core 0 maintains two USB Pro HID interfaces (slots 0 and 1), and each Bluetooth connection is isolated in the Bluepad32 slot assigned when that connection becomes active. A fixed state snapshot and per-slot bounded rumble queue are the only cross-core synchronization points.
+The AIO build accepts up to four concurrent Bluetooth controllers on a single Pico 2 W. TinyUSB and the four Switch report generators run on Core 0; Bluepad32, BTstack, and the CYW43439 radio run on Core 1. Each Bluetooth device index maps directly to one always-present USB Pro HID interface. Per-slot state snapshots and generation-tagged latest-value rumble mailboxes are the only cross-core data paths.
 
-Both USB interfaces are always present to the Switch. The Switch enumerates them as two separate Pro Controllers on the same physical device. Inputs and rumble are independent per controller.
+All four USB interfaces are always present to the Switch as separate Pro Controllers on one physical USB device. Input, motion, rumble, lifecycle, and displayed grip color remain isolated per slot.
 
 ### Build and flash
 
@@ -120,7 +120,7 @@ To reproduce the validation:
 6. **Verify rumble per slot**: Send rumble to interface 0 and confirm only the slot 0 controller vibrates. Send rumble to interface 1 and confirm only the slot 1 controller vibrates.
 7. **Verify motion**: Enable gyro/accel on both controllers. Rotate each controller independently and confirm that motion is per-slot (rotating controller 0 does not affect controller 1's IMU output).
 
-On the tested Linux host, both HID interfaces enumerated (`lsusb -t` showed interface 0 and 1), but `hid-nintendo` probes timed out (`-110`) while requesting controller information from this composite device and removed their transient hidraw nodes. This is an observed, undiagnosed composite interoperability limitation; its root cause has not been established. The timeout was not observed on the Switch, so successful `hid-nintendo` binding is not the release criterion for dual-interface AIO firmware.
+On the tested Linux host, all four HID interfaces enumerated, but `hid-nintendo` timed out (`-110`) while requesting controller information from the composite device and removed the transient hidraw nodes. This is an observed, undiagnosed composite interoperability limitation; its root cause has not been established. The timeout was not observed on the Switch, so successful `hid-nintendo` binding is not the release criterion for the four-interface AIO firmware.
 
 Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry Pi's BTstack license.
 

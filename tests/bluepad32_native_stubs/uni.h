@@ -149,4 +149,3 @@ void uni_bt_le_scan_start();
 void uni_bt_le_scan_stop();
 void uni_platform_set_custom(uni_platform* platform);
 int uni_init(int argc, const char** argv);
-
