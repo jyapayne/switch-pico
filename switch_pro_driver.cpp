@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <map>
 #include <stdio.h>
 #include "pico/rand.h"
 #include "pico/time.h"
@@ -22,38 +21,59 @@
 // gyro (3 frames assumed 5ms apart delivered too often) => wild camera swing.
 #define SWITCH_PRO_IMU_REPORT_TIMER 15
 
-static SwitchInputState g_input_state{
-    false, false, false, false,
-    false, false, false, false, false, false, false, false,
-    false, false, false, false, false, false,
-    SWITCH_PRO_JOYSTICK_MID, SWITCH_PRO_JOYSTICK_MID,
-    SWITCH_PRO_JOYSTICK_MID, SWITCH_PRO_JOYSTICK_MID};
-
-static uint8_t report_buffer[SWITCH_PRO_ENDPOINT_SIZE] = {};
-static uint8_t last_report[SWITCH_PRO_ENDPOINT_SIZE] = {};
-static SwitchProReport switch_report{};
-static uint8_t last_report_counter = 0;
-static uint32_t last_report_timer = 0;
-static uint32_t last_host_activity_ms = 0;
-static bool is_ready = false;
-static bool is_initialized = false;
-static bool is_report_queued = false;
-static bool report_sent = false;
-static uint8_t queued_report_id = 0;
-static bool forced_ready = false;
-static uint8_t handshake_counter = 0;
-
-static SwitchDeviceInfo device_info{};
-static uint8_t player_id = 0;
-static uint8_t input_mode = 0x30;
 enum class SwitchImuMode : uint8_t {
     Off = 0,
     Raw = 1,
     Quaternion = 2,
 };
 
-static SwitchImuMode imu_mode = SwitchImuMode::Off;
-static bool is_vibration_enabled = false;
+struct MotionQuaternion {
+    float x;
+    float y;
+    float z;
+    float w;
+    int16_t accel_x;
+    int16_t accel_y;
+    int16_t accel_z;
+};
+
+struct SwitchProContext {
+    SwitchInputState input_state{};
+    uint8_t report_buffer[SWITCH_PRO_ENDPOINT_SIZE]{};
+    SwitchProReport switch_report{};
+    uint8_t last_report_counter = 0;
+    uint32_t last_report_timer = 0;
+    bool is_ready = false;
+    bool is_initialized = false;
+    bool is_report_queued = false;
+    SwitchDeviceInfo device_info{};
+    uint8_t player_id = 0;
+    uint8_t input_mode = 0x30;
+    SwitchImuMode imu_mode = SwitchImuMode::Off;
+    bool is_vibration_enabled = false;
+    uint16_t left_min_x = 0;
+    uint16_t left_min_y = 0;
+    uint16_t left_max_x = 0;
+    uint16_t left_max_y = 0;
+    uint16_t right_min_x = 0;
+    uint16_t right_min_y = 0;
+    uint16_t right_max_x = 0;
+    uint16_t right_max_y = 0;
+    SwitchRumbleCallback rumble_callback = nullptr;
+    SwitchHapticsDecoder rumble_decoder{};
+    MotionQuaternion motion_quaternion{0.0f, 0.0f, 0.0f, 1.0f, 0, 0, 0};
+};
+
+static_assert(SWITCH_PICO_HID_INSTANCE_COUNT > 0,
+              "at least one HID instance is required");
+static SwitchProContext contexts[SWITCH_PICO_HID_INSTANCE_COUNT]{};
+
+static SwitchProContext* context_for(uint8_t instance) {
+    if (instance >= SWITCH_PICO_HID_INSTANCE_COUNT) {
+        return nullptr;
+    }
+    return &contexts[instance];
+}
 
 // Optional compile-time colour override (body/buttons/grips).
 #if __has_include("controller_color_config.h")
@@ -80,14 +100,6 @@ static bool is_vibration_enabled = false;
 #define SWITCH_COLOR_RIGHT_GRIP_B 0x8C
 #endif
 
-static uint16_t leftMinX, leftMinY;
-static uint16_t leftCenX, leftCenY;
-static uint16_t leftMaxX, leftMaxY;
-static uint16_t rightMinX, rightMinY;
-static uint16_t rightCenX, rightCenY;
-static uint16_t rightMaxX, rightMaxY;
-static SwitchRumbleCallback rumble_callback = nullptr;
-static SwitchHapticsDecoder rumble_decoder;
 
 static const uint8_t factory_config_data[0xEFF] = {
     // serial number
@@ -188,30 +200,14 @@ static const uint8_t user_calibration_data[0x3F] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
 
-static const SwitchFactoryConfig* factory_config = reinterpret_cast<const SwitchFactoryConfig*>(factory_config_data);
-static const SwitchUserCalibration* user_calibration [[maybe_unused]] = reinterpret_cast<const SwitchUserCalibration*>(user_calibration_data);
-
-static std::map<uint32_t, const uint8_t*> spi_flash_data = {
-    {0x6000, factory_config_data},
-    {0x8000, user_calibration_data}
-};
+static const SwitchFactoryConfig* const factory_config =
+    reinterpret_cast<const SwitchFactoryConfig*>(factory_config_data);
 
 static inline uint16_t scale16To12(uint16_t pos) { return pos >> 4; }
 
-struct MotionQuaternion {
-    float x;
-    float y;
-    float z;
-    float w;
-    int16_t accel_x;
-    int16_t accel_y;
-    int16_t accel_z;
-};
-
-static MotionQuaternion motion_quaternion{0.0f, 0.0f, 0.0f, 1.0f, 0, 0, 0};
-
-static void reset_motion_quaternion() {
-    motion_quaternion = {0.0f, 0.0f, 0.0f, 1.0f, 0, 0, 0};
+static void reset_motion_quaternion(SwitchProContext& context) {
+    context.motion_quaternion =
+        {0.0f, 0.0f, 0.0f, 1.0f, 0, 0, 0};
 }
 
 static void write_int16_le(uint8_t* dst, int16_t value) {
@@ -219,24 +215,32 @@ static void write_int16_le(uint8_t* dst, int16_t value) {
     dst[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
 }
 
-static void write_bits_le(uint8_t* dst, uint16_t bit_offset, uint32_t value, uint8_t width) {
+static void write_bits_le(uint8_t* dst, uint16_t bit_offset, uint32_t value,
+                          uint8_t width) {
     for (uint8_t bit = 0; bit < width; ++bit) {
         if ((value & (1u << bit)) != 0) {
             uint16_t output_bit = static_cast<uint16_t>(bit_offset + bit);
-            dst[output_bit >> 3] |= static_cast<uint8_t>(1u << (output_bit & 7u));
+            dst[output_bit >> 3] |=
+                static_cast<uint8_t>(1u << (output_bit & 7u));
         }
     }
 }
 
-static void integrate_motion_sample(const SwitchImuSample& sample) {
+static void integrate_motion_sample(SwitchProContext& context,
+                                    const SwitchImuSample& sample) {
     constexpr float sample_dt = 0.005f;
     constexpr float gyro_rad_per_lsb = 1.0f / 818.5f;
+    MotionQuaternion& quaternion = context.motion_quaternion;
 
     // Nintendo mode 2 uses Y, X, Z sensor order for quaternion axes.
-    float angle_x = static_cast<float>(sample.gyro_y) * gyro_rad_per_lsb * sample_dt;
-    float angle_y = static_cast<float>(sample.gyro_x) * gyro_rad_per_lsb * sample_dt;
-    float angle_z = static_cast<float>(sample.gyro_z) * gyro_rad_per_lsb * sample_dt;
-    float norm = sqrtf(angle_x * angle_x + angle_y * angle_y + angle_z * angle_z);
+    float angle_x =
+        static_cast<float>(sample.gyro_y) * gyro_rad_per_lsb * sample_dt;
+    float angle_y =
+        static_cast<float>(sample.gyro_x) * gyro_rad_per_lsb * sample_dt;
+    float angle_z =
+        static_cast<float>(sample.gyro_z) * gyro_rad_per_lsb * sample_dt;
+    float norm =
+        sqrtf(angle_x * angle_x + angle_y * angle_y + angle_z * angle_z);
     float half = 0.5f * norm;
     float vector_scale = norm > 1e-12f ? sinf(half) / norm : 0.5f;
     float scalar = norm > 1e-12f ? cosf(half) : 1.0f;
@@ -246,40 +250,44 @@ static void integrate_motion_sample(const SwitchImuSample& sample) {
     float dz = angle_z * vector_scale;
     float dw = scalar;
 
-    float x = motion_quaternion.w * dx + motion_quaternion.x * dw
-            + motion_quaternion.y * dz - motion_quaternion.z * dy;
-    float y = motion_quaternion.w * dy - motion_quaternion.x * dz
-            + motion_quaternion.y * dw + motion_quaternion.z * dx;
-    float z = motion_quaternion.w * dz + motion_quaternion.x * dy
-            - motion_quaternion.y * dx + motion_quaternion.z * dw;
-    float w = motion_quaternion.w * dw - motion_quaternion.x * dx
-            - motion_quaternion.y * dy - motion_quaternion.z * dz;
+    float x = quaternion.w * dx + quaternion.x * dw
+            + quaternion.y * dz - quaternion.z * dy;
+    float y = quaternion.w * dy - quaternion.x * dz
+            + quaternion.y * dw + quaternion.z * dx;
+    float z = quaternion.w * dz + quaternion.x * dy
+            - quaternion.y * dx + quaternion.z * dw;
+    float w = quaternion.w * dw - quaternion.x * dx
+            - quaternion.y * dy - quaternion.z * dz;
     float magnitude = sqrtf(x * x + y * y + z * z + w * w);
     if (magnitude > 1e-12f) {
         float inverse = 1.0f / magnitude;
-        motion_quaternion.x = x * inverse;
-        motion_quaternion.y = y * inverse;
-        motion_quaternion.z = z * inverse;
-        motion_quaternion.w = w * inverse;
+        quaternion.x = x * inverse;
+        quaternion.y = y * inverse;
+        quaternion.z = z * inverse;
+        quaternion.w = w * inverse;
     } else {
-        reset_motion_quaternion();
+        reset_motion_quaternion(context);
     }
 
-    motion_quaternion.accel_x = sample.accel_x;
-    motion_quaternion.accel_y = sample.accel_y;
-    motion_quaternion.accel_z = sample.accel_z;
+    quaternion.accel_x = sample.accel_x;
+    quaternion.accel_y = sample.accel_y;
+    quaternion.accel_z = sample.accel_z;
 }
 
-static void fill_raw_imu_report_data(const SwitchInputState& state) {
+static void fill_raw_imu_report_data(SwitchProContext& context,
+                                     const SwitchInputState& state) {
     if (state.imu_sample_count == 0) {
-        memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
+        memset(context.switch_report.imuData, 0x00,
+               sizeof(context.switch_report.imuData));
         return;
     }
-    uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
-    uint8_t* dst = switch_report.imuData;
+    uint8_t sample_count =
+        state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
+    uint8_t* dst = context.switch_report.imuData;
     for (uint8_t i = 0; i < 3; ++i) {
         const SwitchImuSample& sample =
-            (i < sample_count) ? state.imu_samples[i] : state.imu_samples[sample_count - 1];
+            (i < sample_count) ? state.imu_samples[i]
+                               : state.imu_samples[sample_count - 1];
         write_int16_le(dst + 0, sample.accel_x);
         write_int16_le(dst + 2, sample.accel_y);
         write_int16_le(dst + 4, sample.accel_z);
@@ -290,43 +298,49 @@ static void fill_raw_imu_report_data(const SwitchInputState& state) {
     }
 }
 
-static void fill_quaternion_imu_report_data(const SwitchInputState& state, uint32_t now_ms) {
+static void fill_quaternion_imu_report_data(SwitchProContext& context,
+                                            const SwitchInputState& state,
+                                            uint32_t now_ms) {
     if (state.imu_sample_count > 0) {
-        uint8_t sample_count = state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
+        uint8_t sample_count =
+            state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
         for (uint8_t i = 0; i < 3; ++i) {
             const SwitchImuSample& sample =
-                (i < sample_count) ? state.imu_samples[i] : state.imu_samples[sample_count - 1];
-            integrate_motion_sample(sample);
+                (i < sample_count) ? state.imu_samples[i]
+                                   : state.imu_samples[sample_count - 1];
+            integrate_motion_sample(context, sample);
         }
     }
 
-    uint8_t* dst = switch_report.imuData;
-    memset(dst, 0x00, sizeof(switch_report.imuData));
+    MotionQuaternion& quaternion = context.motion_quaternion;
+    uint8_t* dst = context.switch_report.imuData;
+    memset(dst, 0x00, sizeof(context.switch_report.imuData));
 
     // Mode 2 accelerometer vectors are encoded in Y, X, Z order.
-    write_int16_le(dst + 0, motion_quaternion.accel_y);
-    write_int16_le(dst + 2, motion_quaternion.accel_x);
-    write_int16_le(dst + 4, motion_quaternion.accel_z);
+    write_int16_le(dst + 0, quaternion.accel_y);
+    write_int16_le(dst + 2, quaternion.accel_x);
+    write_int16_le(dst + 4, quaternion.accel_z);
 
-    float quaternion[4] = {
-        motion_quaternion.x,
-        motion_quaternion.y,
-        motion_quaternion.z,
-        motion_quaternion.w,
+    float components[4] = {
+        quaternion.x,
+        quaternion.y,
+        quaternion.z,
+        quaternion.w,
     };
     uint8_t max_index = 0;
     for (uint8_t i = 1; i < 4; ++i) {
-        if (fabsf(quaternion[i]) > fabsf(quaternion[max_index])) {
+        if (fabsf(components[i]) > fabsf(components[max_index])) {
             max_index = i;
         }
     }
 
     uint32_t packed_component[3]{};
-    float sign = quaternion[max_index] < 0.0f ? -1.0f : 1.0f;
+    float sign = components[max_index] < 0.0f ? -1.0f : 1.0f;
     for (uint8_t i = 0; i < 3; ++i) {
         int32_t component = static_cast<int32_t>(
-            quaternion[(max_index + i + 1) & 3] * 1073741824.0f * sign);
-        packed_component[i] = static_cast<uint32_t>(component >> 10) & 0x1FFFFFu;
+            components[(max_index + i + 1) & 3] * 1073741824.0f * sign);
+        packed_component[i] =
+            static_cast<uint32_t>(component >> 10) & 0x1FFFFFu;
     }
 
     write_bits_le(dst, 48, 2, 2);
@@ -341,20 +355,25 @@ static void fill_quaternion_imu_report_data(const SwitchInputState& state, uint3
     write_bits_le(dst, 282, 3, 6);
 }
 
-static void fill_imu_report_data(const SwitchInputState& state, uint32_t now_ms) {
-    switch (imu_mode) {
+static void fill_imu_report_data(SwitchProContext& context,
+                                 const SwitchInputState& state,
+                                 uint32_t now_ms) {
+    switch (context.imu_mode) {
         case SwitchImuMode::Raw:
-            fill_raw_imu_report_data(state);
+            fill_raw_imu_report_data(context, state);
             break;
         case SwitchImuMode::Quaternion:
-            fill_quaternion_imu_report_data(state, now_ms);
+            fill_quaternion_imu_report_data(context, state, now_ms);
             break;
         case SwitchImuMode::Off:
         default:
-            memset(switch_report.imuData, 0x00, sizeof(switch_report.imuData));
+            memset(context.switch_report.imuData, 0x00,
+                   sizeof(context.switch_report.imuData));
             break;
     }
 }
+
+static void update_switch_report_from_state(SwitchProContext& context);
 
 static SwitchInputState make_neutral_state() {
     SwitchInputState s{};
@@ -366,449 +385,445 @@ static SwitchInputState make_neutral_state() {
     return s;
 }
 
-static void send_identify() {
-    memset(report_buffer, 0x00, sizeof(report_buffer));
-    report_buffer[0] = REPORT_USB_INPUT_81;
-    report_buffer[1] = IDENTIFY;
-    report_buffer[2] = 0x00;
-    report_buffer[3] = device_info.controllerType;
-    for (uint8_t i = 0; i < 6; i++) {
-        report_buffer[4 + i] = device_info.macAddress[5 - i];
+static void reset_context_runtime(SwitchProContext& context, uint32_t now,
+                                  bool ready_before_mount) {
+    context.input_state = make_neutral_state();
+    memset(context.report_buffer, 0x00, sizeof(context.report_buffer));
+    context.switch_report = {};
+    context.switch_report.reportID = 0x30;
+    context.switch_report.inputs.connectionInfo = 0x01;
+    context.switch_report.inputs.batteryLevel = 0x08;
+    update_switch_report_from_state(context);
+    context.last_report_counter = 0;
+    context.last_report_timer = now;
+    context.is_ready = ready_before_mount;
+    context.is_initialized = ready_before_mount;
+    context.is_report_queued = false;
+    context.player_id = 0;
+    context.input_mode = 0x30;
+    context.imu_mode = SwitchImuMode::Off;
+    context.is_vibration_enabled = false;
+    context.rumble_decoder.reset();
+    reset_motion_quaternion(context);
+}
+
+static void reset_all_contexts(bool ready_before_mount) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    for (uint8_t instance = 0; instance < SWITCH_PICO_HID_INSTANCE_COUNT;
+         ++instance) {
+        reset_context_runtime(contexts[instance], now, ready_before_mount);
     }
 }
 
-static bool send_report(uint8_t reportID, const void* reportData, uint16_t reportLength) {
-    bool result = tud_hid_report(reportID, reportData, reportLength);
-    if (last_report_counter < 255) {
-        last_report_counter++;
-    } else {
-        last_report_counter = 0;
+static void send_identify(SwitchProContext& context) {
+    memset(context.report_buffer, 0x00, sizeof(context.report_buffer));
+    context.report_buffer[0] = REPORT_USB_INPUT_81;
+    context.report_buffer[1] = IDENTIFY;
+    context.report_buffer[2] = 0x00;
+    context.report_buffer[3] = context.device_info.controllerType;
+    for (uint8_t i = 0; i < 6; ++i) {
+        context.report_buffer[4 + i] =
+            context.device_info.macAddress[5 - i];
     }
+}
+
+static bool send_report(uint8_t instance, SwitchProContext& context,
+                        uint8_t report_id, const void* report_data,
+                        uint16_t report_length) {
+    bool result =
+        tud_hid_n_report(instance, report_id, report_data, report_length);
+    ++context.last_report_counter;
     if (!result) {
-        LOG_PRINTF("[HID] send_report failed id=%u len=%u\n", reportID, reportLength);
+        LOG_PRINTF("[HID %u] send_report failed id=%u len=%u\n", instance,
+                   report_id, report_length);
     }
     return result;
 }
 
 static void read_spi_flash(uint8_t* dest, uint32_t address, uint8_t size) {
-    uint32_t addressBank = address & 0xFFFFFF00;
-    uint32_t addressOffset = address & 0x000000FF;
-    auto it = spi_flash_data.find(addressBank);
+    uint32_t address_bank = address & 0xFFFFFF00u;
+    uint32_t address_offset = address & 0x000000FFu;
+    const uint8_t* data = nullptr;
+    if (address_bank == 0x6000u) {
+        data = factory_config_data;
+    } else if (address_bank == 0x8000u) {
+        data = user_calibration_data;
+    }
 
-    if (it != spi_flash_data.end()) {
-        const uint8_t* data = it->second;
-        memcpy(dest, data + addressOffset, size);
+    if (data != nullptr) {
+        memcpy(dest, data + address_offset, size);
     } else {
         memset(dest, 0xFF, size);
     }
 }
 
-static void forward_decoded_rumble(const uint8_t* report, uint16_t length) {
+static void forward_decoded_rumble(uint8_t instance,
+                                   SwitchProContext& context,
+                                   const uint8_t* report, uint16_t length) {
     // Output reports 0x10/0x01 include 8 rumble bytes starting at offset 2.
     if (length < 10) {
         return;
     }
 
-    SwitchRumbleOutput rumble = rumble_decoder.decode(report + 2);
-    if (rumble_callback) {
-        rumble_callback(rumble);
+    SwitchRumbleOutput rumble = context.rumble_decoder.decode(report + 2);
+    if (context.rumble_callback != nullptr) {
+        context.rumble_callback(instance, rumble);
     }
 }
 
-static void handle_config_report(uint8_t switchReportID, uint8_t switchReportSubID, const uint8_t *reportData, uint16_t reportLength) {
-    bool canSend = false;
-    last_host_activity_ms = to_ms_since_boot(get_absolute_time());
-
-    switch (switchReportSubID) {
+static void handle_config_report(SwitchProContext& context,
+                                 uint8_t switch_report_sub_id) {
+    switch (switch_report_sub_id) {
         case IDENTIFY:
-            send_identify();
-            canSend = true;
+            send_identify(context);
             LOG_PRINTF("[HID] CONFIG IDENTIFY\n");
             break;
         case HANDSHAKE:
-            report_buffer[0] = REPORT_USB_INPUT_81;
-            report_buffer[1] = HANDSHAKE;
-            canSend = true;
+            context.report_buffer[0] = REPORT_USB_INPUT_81;
+            context.report_buffer[1] = HANDSHAKE;
             LOG_PRINTF("[HID] CONFIG HANDSHAKE\n");
             break;
         case BAUD_RATE:
-            report_buffer[0] = REPORT_USB_INPUT_81;
-            report_buffer[1] = BAUD_RATE;
-            canSend = true;
+            context.report_buffer[0] = REPORT_USB_INPUT_81;
+            context.report_buffer[1] = BAUD_RATE;
             LOG_PRINTF("[HID] CONFIG BAUD_RATE\n");
             break;
         case DISABLE_USB_TIMEOUT:
-            report_buffer[0] = REPORT_OUTPUT_30;
-            report_buffer[1] = switchReportSubID;
-            //if (handshakeCounter < 4) {
-            //    handshakeCounter++;
-            //} else {
-                is_ready = true;
-            //}
-            canSend = true;
+            context.report_buffer[0] = REPORT_OUTPUT_30;
+            context.report_buffer[1] = switch_report_sub_id;
+            context.is_ready = true;
             LOG_PRINTF("[HID] CONFIG DISABLE_USB_TIMEOUT -> ready\n");
             break;
         case ENABLE_USB_TIMEOUT:
-            report_buffer[0] = REPORT_OUTPUT_30;
-            report_buffer[1] = switchReportSubID;
-            canSend = true;
+            context.report_buffer[0] = REPORT_OUTPUT_30;
+            context.report_buffer[1] = switch_report_sub_id;
             LOG_PRINTF("[HID] CONFIG ENABLE_USB_TIMEOUT\n");
             break;
         default:
-            report_buffer[0] = REPORT_OUTPUT_30;
-            report_buffer[1] = switchReportSubID;
-            canSend = true;
-            LOG_PRINTF("[HID] CONFIG unknown subid=0x%02x\n", switchReportSubID);
+            context.report_buffer[0] = REPORT_OUTPUT_30;
+            context.report_buffer[1] = switch_report_sub_id;
+            LOG_PRINTF("[HID] CONFIG unknown subid=0x%02x\n",
+                       switch_report_sub_id);
             break;
     }
 
-    if (canSend) is_report_queued = true;
+    context.is_report_queued = true;
 }
 
-static void handle_feature_report(uint8_t switchReportID, uint8_t switchReportSubID, const uint8_t *reportData, uint16_t reportLength) {
-    uint8_t commandID = reportData[10];
-    uint32_t spiReadAddress = 0;
-    uint8_t spiReadSize = 0;
-    bool canSend = false;
-    last_host_activity_ms = to_ms_since_boot(get_absolute_time());
+static void handle_feature_report(SwitchProContext& context,
+                                  const uint8_t* report_data) {
+    uint8_t command_id = report_data[10];
+    uint32_t spi_read_address = 0;
+    uint8_t spi_read_size = 0;
 
-    report_buffer[0] = REPORT_OUTPUT_21;
-    report_buffer[1] = last_report_counter;
-    memcpy(report_buffer + 2, &switch_report.inputs, sizeof(SwitchInputReport));
+    context.report_buffer[0] = REPORT_OUTPUT_21;
+    context.report_buffer[1] = context.last_report_counter;
+    memcpy(context.report_buffer + 2, &context.switch_report.inputs,
+           sizeof(SwitchInputReport));
 
-    switch (commandID) {
+    switch (command_id) {
         case GET_CONTROLLER_STATE:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            report_buffer[15] = 0x03;
-            canSend = true;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = 0x03;
             LOG_PRINTF("[HID] FEATURE GET_CONTROLLER_STATE\n");
             break;
         case BLUETOOTH_PAIR_REQUEST:
-            report_buffer[13] = 0x81;
-            report_buffer[14] = commandID;
-            report_buffer[15] = 0x03;
-            canSend = true;
+            context.report_buffer[13] = 0x81;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = 0x03;
             LOG_PRINTF("[HID] FEATURE BLUETOOTH_PAIR_REQUEST\n");
             break;
         case REQUEST_DEVICE_INFO:
-            report_buffer[13] = 0x82;
-            report_buffer[14] = 0x02;
-            memcpy(&report_buffer[15], &device_info, sizeof(device_info));
-            canSend = true;
+            context.report_buffer[13] = 0x82;
+            context.report_buffer[14] = 0x02;
+            memcpy(&context.report_buffer[15], &context.device_info,
+                   sizeof(context.device_info));
             LOG_PRINTF("[HID] FEATURE REQUEST_DEVICE_INFO\n");
             break;
         case SET_MODE:
-            input_mode = reportData[11];
-            report_buffer[13] = 0x80;
-            report_buffer[14] = 0x03;
-            report_buffer[15] = input_mode;
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE SET_MODE 0x%02x\n", input_mode);
+            context.input_mode = report_data[11];
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = 0x03;
+            context.report_buffer[15] = context.input_mode;
+            LOG_PRINTF("[HID] FEATURE SET_MODE 0x%02x\n",
+                       context.input_mode);
             break;
         case TRIGGER_BUTTONS:
-            report_buffer[13] = 0x83;
-            report_buffer[14] = 0x04;
-            canSend = true;
+            context.report_buffer[13] = 0x83;
+            context.report_buffer[14] = 0x04;
             LOG_PRINTF("[HID] FEATURE TRIGGER_BUTTONS\n");
             break;
         case SET_SHIPMENT:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            canSend = true;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
             LOG_PRINTF("[HID] FEATURE SET_SHIPMENT\n");
             break;
         case SPI_READ:
-            spiReadAddress = (reportData[14] << 24) | (reportData[13] << 16) | (reportData[12] << 8) | (reportData[11]);
-            spiReadSize = reportData[15];
-            report_buffer[13] = 0x90;
-            report_buffer[14] = reportData[10];
-            report_buffer[15] = reportData[11];
-            report_buffer[16] = reportData[12];
-            report_buffer[17] = reportData[13];
-            report_buffer[18] = reportData[14];
-            report_buffer[19] = reportData[15];
-            read_spi_flash(&report_buffer[20], spiReadAddress, spiReadSize);
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE SPI_READ addr=0x%08lx size=%u\n", (unsigned long)spiReadAddress, spiReadSize);
+            spi_read_address =
+                (static_cast<uint32_t>(report_data[14]) << 24u) |
+                (static_cast<uint32_t>(report_data[13]) << 16u) |
+                (static_cast<uint32_t>(report_data[12]) << 8u) |
+                static_cast<uint32_t>(report_data[11]);
+            spi_read_size = report_data[15];
+            context.report_buffer[13] = 0x90;
+            context.report_buffer[14] = report_data[10];
+            context.report_buffer[15] = report_data[11];
+            context.report_buffer[16] = report_data[12];
+            context.report_buffer[17] = report_data[13];
+            context.report_buffer[18] = report_data[14];
+            context.report_buffer[19] = report_data[15];
+            read_spi_flash(&context.report_buffer[20], spi_read_address,
+                           spi_read_size);
+            LOG_PRINTF("[HID] FEATURE SPI_READ addr=0x%08lx size=%u\n",
+                       static_cast<unsigned long>(spi_read_address),
+                       spi_read_size);
             break;
         case SET_NFC_IR_CONFIG:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            canSend = true;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
             LOG_PRINTF("[HID] FEATURE SET_NFC_IR_CONFIG\n");
             break;
         case SET_NFC_IR_STATE:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            canSend = true;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
             LOG_PRINTF("[HID] FEATURE SET_NFC_IR_STATE\n");
             break;
         case SET_PLAYER_LIGHTS:
-            player_id = reportData[11];
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE SET_PLAYER_LIGHTS player=%u\n", player_id);
+            context.player_id = report_data[11];
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
+            LOG_PRINTF("[HID] FEATURE SET_PLAYER_LIGHTS player=%u\n",
+                       context.player_id);
             break;
         case GET_PLAYER_LIGHTS:
-            player_id = reportData[11];
-            report_buffer[13] = 0xB0;
-            report_buffer[14] = commandID;
-            report_buffer[15] = player_id;
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE GET_PLAYER_LIGHTS player=%u\n", player_id);
+            context.player_id = report_data[11];
+            context.report_buffer[13] = 0xB0;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = context.player_id;
+            LOG_PRINTF("[HID] FEATURE GET_PLAYER_LIGHTS player=%u\n",
+                       context.player_id);
             break;
         case COMMAND_UNKNOWN_33:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            report_buffer[15] = 0x03;
-            canSend = true;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = 0x03;
             LOG_PRINTF("[HID] FEATURE COMMAND_UNKNOWN_33\n");
             break;
         case SET_HOME_LIGHT:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            report_buffer[15] = 0x00;
-            canSend = true;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = 0x00;
             LOG_PRINTF("[HID] FEATURE SET_HOME_LIGHT\n");
             break;
         case TOGGLE_IMU: {
             SwitchImuMode requested_mode = SwitchImuMode::Off;
-            if (reportData[11] == static_cast<uint8_t>(SwitchImuMode::Raw)) {
+            if (report_data[11] ==
+                static_cast<uint8_t>(SwitchImuMode::Raw)) {
                 requested_mode = SwitchImuMode::Raw;
-            } else if (reportData[11] == static_cast<uint8_t>(SwitchImuMode::Quaternion)) {
+            } else if (report_data[11] ==
+                       static_cast<uint8_t>(SwitchImuMode::Quaternion)) {
                 requested_mode = SwitchImuMode::Quaternion;
             }
-            if (requested_mode == SwitchImuMode::Quaternion && imu_mode != requested_mode) {
-                reset_motion_quaternion();
+            if (requested_mode == SwitchImuMode::Quaternion &&
+                context.imu_mode != requested_mode) {
+                reset_motion_quaternion(context);
             }
-            imu_mode = requested_mode;
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            report_buffer[15] = 0x00;
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE TOGGLE_IMU %u\n", static_cast<unsigned>(imu_mode));
+            context.imu_mode = requested_mode;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = 0x00;
+            LOG_PRINTF("[HID] FEATURE TOGGLE_IMU %u\n",
+                       static_cast<unsigned>(context.imu_mode));
             break;
         }
         case IMU_SENSITIVITY:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            canSend = true;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
             LOG_PRINTF("[HID] FEATURE IMU_SENSITIVITY\n");
             break;
         case ENABLE_VIBRATION:
-            is_vibration_enabled = reportData[11];
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            report_buffer[15] = 0x00;
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE ENABLE_VIBRATION %u\n", is_vibration_enabled);
+            context.is_vibration_enabled = report_data[11] != 0;
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = 0x00;
+            LOG_PRINTF("[HID] FEATURE ENABLE_VIBRATION %u\n",
+                       context.is_vibration_enabled);
             break;
         case READ_IMU:
-            report_buffer[13] = 0xC0;
-            report_buffer[14] = commandID;
-            report_buffer[15] = reportData[11];
-            report_buffer[16] = reportData[12];
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE READ_IMU addr=%u size=%u\n", reportData[11], reportData[12]);
+            context.report_buffer[13] = 0xC0;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = report_data[11];
+            context.report_buffer[16] = report_data[12];
+            LOG_PRINTF("[HID] FEATURE READ_IMU addr=%u size=%u\n",
+                       report_data[11], report_data[12]);
             break;
         case GET_VOLTAGE:
-            report_buffer[13] = 0xD0;
-            report_buffer[14] = 0x50;
-            report_buffer[15] = 0x83;
-            report_buffer[16] = 0x06;
-            canSend = true;
+            context.report_buffer[13] = 0xD0;
+            context.report_buffer[14] = 0x50;
+            context.report_buffer[15] = 0x83;
+            context.report_buffer[16] = 0x06;
             LOG_PRINTF("[HID] FEATURE GET_VOLTAGE\n");
             break;
         default:
-            report_buffer[13] = 0x80;
-            report_buffer[14] = commandID;
-            report_buffer[15] = 0x03;
-            canSend = true;
-            LOG_PRINTF("[HID] FEATURE unknown cmd=0x%02x\n", commandID);
+            context.report_buffer[13] = 0x80;
+            context.report_buffer[14] = command_id;
+            context.report_buffer[15] = 0x03;
+            LOG_PRINTF("[HID] FEATURE unknown cmd=0x%02x\n", command_id);
             break;
     }
 
-    if (canSend) is_report_queued = true;
+    context.is_report_queued = true;
 }
 
-static void update_switch_report_from_state() {
-    switch_report.inputs.dpadUp =    g_input_state.dpad_up;
-    switch_report.inputs.dpadDown =  g_input_state.dpad_down;
-    switch_report.inputs.dpadLeft =  g_input_state.dpad_left;
-    switch_report.inputs.dpadRight = g_input_state.dpad_right;
+static void update_switch_report_from_state(SwitchProContext& context) {
+    const SwitchInputState& state = context.input_state;
+    SwitchInputReport& inputs = context.switch_report.inputs;
+    inputs.dpadUp = state.dpad_up;
+    inputs.dpadDown = state.dpad_down;
+    inputs.dpadLeft = state.dpad_left;
+    inputs.dpadRight = state.dpad_right;
+    inputs.chargingGrip = 1;
+    inputs.buttonY = state.button_y;
+    inputs.buttonX = state.button_x;
+    inputs.buttonB = state.button_b;
+    inputs.buttonA = state.button_a;
+    inputs.buttonRightSR = 0;
+    inputs.buttonRightSL = 0;
+    inputs.buttonR = state.button_r;
+    inputs.buttonZR = state.button_zr;
+    inputs.buttonMinus = state.button_minus;
+    inputs.buttonPlus = state.button_plus;
+    inputs.buttonThumbR = state.button_r3;
+    inputs.buttonThumbL = state.button_l3;
+    inputs.buttonHome = state.button_home;
+    inputs.buttonCapture = state.button_capture;
+    inputs.buttonLeftSR = 0;
+    inputs.buttonLeftSL = 0;
+    inputs.buttonL = state.button_l;
+    inputs.buttonZL = state.button_zl;
 
-    switch_report.inputs.chargingGrip = 1;
+    uint16_t left_x = scale16To12(state.lx);
+    uint16_t left_y = scale16To12(state.ly);
+    uint16_t right_x = scale16To12(state.rx);
+    uint16_t right_y = scale16To12(state.ry);
 
-    switch_report.inputs.buttonY = g_input_state.button_y;
-    switch_report.inputs.buttonX = g_input_state.button_x;
-    switch_report.inputs.buttonB = g_input_state.button_b;
-    switch_report.inputs.buttonA = g_input_state.button_a;
-    switch_report.inputs.buttonRightSR = 0;
-    switch_report.inputs.buttonRightSL = 0;
-    switch_report.inputs.buttonR = g_input_state.button_r;
-    switch_report.inputs.buttonZR = g_input_state.button_zr;
-    switch_report.inputs.buttonMinus = g_input_state.button_minus;
-    switch_report.inputs.buttonPlus = g_input_state.button_plus;
-    switch_report.inputs.buttonThumbR = g_input_state.button_r3;
-    switch_report.inputs.buttonThumbL = g_input_state.button_l3;
-    switch_report.inputs.buttonHome = g_input_state.button_home;
-    switch_report.inputs.buttonCapture = g_input_state.button_capture;
-    switch_report.inputs.buttonLeftSR = 0;
-    switch_report.inputs.buttonLeftSL = 0;
-    switch_report.inputs.buttonL = g_input_state.button_l;
-    switch_report.inputs.buttonZL = g_input_state.button_zl;
-
-    uint16_t scaleLeftStickX = scale16To12(g_input_state.lx);
-    uint16_t scaleLeftStickY = scale16To12(g_input_state.ly);
-    uint16_t scaleRightStickX = scale16To12(g_input_state.rx);
-    uint16_t scaleRightStickY = scale16To12(g_input_state.ry);
-
-    switch_report.inputs.leftStick.setX(std::min(std::max(scaleLeftStickX,leftMinX), leftMaxX));
-    switch_report.inputs.leftStick.setY(-std::min(std::max(scaleLeftStickY,leftMinY), leftMaxY));
-    switch_report.inputs.rightStick.setX(std::min(std::max(scaleRightStickX,rightMinX), rightMaxX));
-    switch_report.inputs.rightStick.setY(-std::min(std::max(scaleRightStickY,rightMinY), rightMaxY));
-
-    switch_report.rumbleReport = 0x09;
+    inputs.leftStick.setX(
+        std::min(std::max(left_x, context.left_min_x), context.left_max_x));
+    inputs.leftStick.setY(-std::min(
+        std::max(left_y, context.left_min_y), context.left_max_y));
+    inputs.rightStick.setX(std::min(
+        std::max(right_x, context.right_min_x), context.right_max_x));
+    inputs.rightStick.setY(-std::min(
+        std::max(right_y, context.right_min_y), context.right_max_y));
+    context.switch_report.rumbleReport = 0x09;
 }
 
-void switch_pro_init() {
-    imu_mode = SwitchImuMode::Off;
-    rumble_decoder.reset();
-    reset_motion_quaternion();
-    player_id = 0;
-    last_report_counter = 0;
-    handshake_counter = 0;
-    is_ready = false;
-    is_initialized = false;
-    is_report_queued = false;
-    report_sent = false;
-    forced_ready = false;
-    forced_ready = true;
-    is_ready = true;
-    is_initialized = true;
-    last_report_timer = 0;
+void switch_pro_init(uint8_t instance) {
+    SwitchProContext* context = context_for(instance);
+    if (context == nullptr) {
+        return;
+    }
 
-    device_info = {
-        .majorVersion = 0x03,
-        .minorVersion = 0x48,
-        .controllerType = SWITCH_TYPE_PRO_CONTROLLER,
-        .unknown00 = 0x02,
-        .macAddress = {0x7c, 0xbb, 0x8a, static_cast<uint8_t>(get_rand_32() % 0xff), static_cast<uint8_t>(get_rand_32() % 0xff), static_cast<uint8_t>(get_rand_32() % 0xff)},
-        .unknown01 = 0x01,
-        .storedColors = 0x02,
+    context->device_info = {
+        0x03,
+        0x48,
+        SWITCH_TYPE_PRO_CONTROLLER,
+        0x02,
+        {0x7c, 0xbb, 0x8a,
+         static_cast<uint8_t>(get_rand_32() % 0xff),
+         static_cast<uint8_t>(get_rand_32() % 0xff),
+         static_cast<uint8_t>(get_rand_32() % 0xff)},
+        0x01,
+        0x02,
     };
 
-    switch_report = {
-        .reportID = 0x30,
-        .timestamp = 0,
+    factory_config->leftStickCalibration.getRealMin(
+        context->left_min_x, context->left_min_y);
+    factory_config->leftStickCalibration.getRealMax(
+        context->left_max_x, context->left_max_y);
+    factory_config->rightStickCalibration.getRealMin(
+        context->right_min_x, context->right_min_y);
+    factory_config->rightStickCalibration.getRealMax(
+        context->right_max_x, context->right_max_y);
 
-        .inputs {
-            .connectionInfo = 0x01, // Pro Controller powered by the console
-            .batteryLevel = 0x08,   // full battery
-
-            .buttonY = 0,
-            .buttonX = 0,
-            .buttonB = 0,
-            .buttonA = 0,
-            .buttonRightSR = 0,
-            .buttonRightSL = 0,
-            .buttonR = 0,
-            .buttonZR = 0,
-
-            .buttonMinus = 0,
-            .buttonPlus = 0,
-            .buttonThumbR = 0,
-            .buttonThumbL = 0,
-            .buttonHome = 0,
-            .buttonCapture = 0,
-            .dummy = 0,
-            .chargingGrip = 0,
-
-            .dpadDown = 0,
-            .dpadUp = 0,
-            .dpadRight = 0,
-            .dpadLeft = 0,
-            .buttonLeftSL = 0,
-            .buttonLeftSR = 0,
-            .buttonL = 0,
-            .buttonZL = 0,
-            .leftStick = {0xFF, 0xF7, 0x7F},
-            .rightStick = {0xFF, 0xF7, 0x7F},
-        },
-        .rumbleReport = 0,
-        .imuData = {0x00},
-        .padding = {0x00}
-    };
-
-    last_report_timer = to_ms_since_boot(get_absolute_time());
-    last_host_activity_ms = last_report_timer;
-
-    factory_config->leftStickCalibration.getRealMin(leftMinX, leftMinY);
-    factory_config->leftStickCalibration.getCenter(leftCenX, leftCenY);
-    factory_config->leftStickCalibration.getRealMax(leftMaxX, leftMaxY);
-    factory_config->rightStickCalibration.getRealMin(rightMinX, rightMinY);
-    factory_config->rightStickCalibration.getCenter(rightCenX, rightCenY);
-    factory_config->rightStickCalibration.getRealMax(rightMaxX, rightMaxY);
+    reset_context_runtime(*context,
+                          to_ms_since_boot(get_absolute_time()), true);
 }
 
-void switch_pro_set_input(const SwitchInputState& state) {
-    g_input_state = state;
+void switch_pro_set_input(uint8_t instance, const SwitchInputState& state) {
+    SwitchProContext* context = context_for(instance);
+    if (context != nullptr) {
+        context->input_state = state;
+    }
 }
 
-bool switch_pro_task() {
+bool switch_pro_task(uint8_t instance) {
+    SwitchProContext* context = context_for(instance);
+    if (context == nullptr) {
+        return false;
+    }
+
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    report_sent = false;
+    bool report_sent = false;
     bool regular_report_sent = false;
 
-    update_switch_report_from_state();
+    update_switch_report_from_state(*context);
 
     if (tud_suspended()) {
         tud_remote_wakeup();
     }
 
-    if (is_report_queued) {
-        if ((now - last_report_timer) > SWITCH_PRO_KEEPALIVE_TIMER) {
-            if (tud_hid_ready() && send_report(queued_report_id, report_buffer, 64) == true ) {
-                is_report_queued = false;
-                last_report_timer = now;
+    if (context->is_report_queued) {
+        if ((now - context->last_report_timer) >
+            SWITCH_PRO_KEEPALIVE_TIMER) {
+            if (tud_hid_n_ready(instance) &&
+                send_report(instance, *context, 0, context->report_buffer,
+                            SWITCH_PRO_ENDPOINT_SIZE)) {
+                context->is_report_queued = false;
+                context->last_report_timer = now;
             }
         }
         report_sent = true;
     }
 
-    if (is_ready && !report_sent) {
-        if ((now - last_report_timer) >= SWITCH_PRO_IMU_REPORT_TIMER) {
+    if (context->is_ready && !report_sent) {
+        if ((now - context->last_report_timer) >=
+            SWITCH_PRO_IMU_REPORT_TIMER) {
             // One timer tick per 5ms IMU frame; three frames per report.
-            fill_imu_report_data(g_input_state, now);
-            switch_report.timestamp += 3;
-            void * inputReport = &switch_report;
-            uint16_t report_size = sizeof(switch_report);
-            if (tud_hid_ready() && send_report(0, inputReport, report_size) == true ) {
-                memcpy(last_report, inputReport, report_size);
-                g_input_state.imu_sample_count = 0;
-                report_sent = true;
+            fill_imu_report_data(*context, context->input_state, now);
+            context->switch_report.timestamp += 3;
+            if (tud_hid_n_ready(instance) &&
+                send_report(instance, *context, 0, &context->switch_report,
+                            sizeof(context->switch_report))) {
+                context->input_state.imu_sample_count = 0;
                 regular_report_sent = true;
             }
-
-            last_report_timer = now;
+            context->last_report_timer = now;
         }
-    } else {
-        if (!is_initialized) {
-            send_identify();
-            if (tud_hid_ready() && tud_hid_report(0, report_buffer, 64) == true) {
-                is_initialized = true;
-                report_sent = true;
+    } else if (!context->is_initialized) {
+        send_identify(*context);
+        if (tud_hid_n_ready(instance)) {
+            bool result = tud_hid_n_report(
+                instance, 0, context->report_buffer,
+                SWITCH_PRO_ENDPOINT_SIZE);
+            if (result) {
+                context->is_initialized = true;
+            } else {
+                LOG_PRINTF("[HID %u] send_report failed id=0 len=%u\n",
+                           instance, SWITCH_PRO_ENDPOINT_SIZE);
             }
-
-            last_report_timer = now;
         }
+        context->last_report_timer = now;
     }
     return regular_report_sent;
 }
 
-bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchInputState* out_state) {
+bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
+                                  SwitchInputState& out_state) {
+    if (packet == nullptr) {
+        return false;
+    }
     // v2 format: 0xAA + 0x02 + payload_len + payload... + checksum
     if (length < 12) {
         return false;
@@ -907,35 +922,48 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchI
     state.rx = expand_axis(out.rx);
     state.ry = expand_axis(out.ry);
 
-    if (!out_state) {
-        return false;
-    }
-    *out_state = state;
+    out_state = state;
     return true;
 }
 
-void switch_pro_set_rumble_callback(SwitchRumbleCallback cb) {
-    rumble_callback = cb;
+void switch_pro_set_rumble_callback(uint8_t instance,
+                                    SwitchRumbleCallback callback) {
+    SwitchProContext* context = context_for(instance);
+    if (context != nullptr) {
+        context->rumble_callback = callback;
+    }
 }
 
-bool switch_pro_is_ready() {
-    return is_ready;
+bool switch_pro_is_ready(uint8_t instance) {
+    const SwitchProContext* context = context_for(instance);
+    return context != nullptr && context->is_ready;
 }
 
 // HID callbacks
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer, uint16_t reqlen) {
-    (void)instance;
-    LOG_PRINTF("[HID] get_report id=%u type=%u len=%u\n", report_id, report_type, reqlen);
-    if (!buffer) return 0;
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
+                               hid_report_type_t report_type, uint8_t* buffer,
+                               uint16_t requested_length) {
+    (void)report_id;
+    (void)report_type;
+    SwitchProContext* context = context_for(instance);
+    LOG_PRINTF("[HID %u] get_report id=%u type=%u len=%u\n", instance,
+               report_id, report_type, requested_length);
+    if (context == nullptr || buffer == nullptr) {
+        return 0;
+    }
 
-    // Serve the current input report for any GET_REPORT request.
-    uint16_t report_size = sizeof(switch_report);
-    if (reqlen < report_size) report_size = reqlen;
-    memcpy(buffer, &switch_report, report_size);
+    // Serve the addressed instance's current input report.
+    uint16_t report_size = sizeof(context->switch_report);
+    if (requested_length < report_size) {
+        report_size = requested_length;
+    }
+    memcpy(buffer, &context->switch_report, report_size);
     return report_size;
 }
 
-static void process_output_report(uint8_t callback_report_id,
+static void process_output_report(uint8_t instance,
+                                  SwitchProContext& context,
+                                  uint8_t callback_report_id,
                                   const uint8_t* payload,
                                   uint16_t payload_size) {
     uint8_t normalized[SWITCH_PRO_ENDPOINT_SIZE]{};
@@ -945,81 +973,89 @@ static void process_output_report(uint8_t callback_report_id,
         return;
     }
 
-    memset(report_buffer, 0x00, sizeof(report_buffer));
-    uint8_t switchReportID = normalized[0];
-    uint8_t switchReportSubID = normalized[1];
-    LOG_PRINTF("[HID] output id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
-               callback_report_id, switchReportID, switchReportSubID,
-               static_cast<unsigned>(normalized_size));
+    memset(context.report_buffer, 0x00, sizeof(context.report_buffer));
+    uint8_t switch_report_id = normalized[0];
+    uint8_t switch_report_sub_id = normalized[1];
+    LOG_PRINTF(
+        "[HID %u] output id=%u switchRID=0x%02x sub=0x%02x len=%u\n",
+        instance, callback_report_id, switch_report_id, switch_report_sub_id,
+        static_cast<unsigned>(normalized_size));
 
-    if (switchReportID == REPORT_OUTPUT_10 || switchReportID == REPORT_FEATURE) {
-        forward_decoded_rumble(normalized, static_cast<uint16_t>(normalized_size));
+    if (switch_report_id == REPORT_OUTPUT_10 ||
+        switch_report_id == REPORT_FEATURE) {
+        forward_decoded_rumble(
+            instance, context, normalized,
+            static_cast<uint16_t>(normalized_size));
     }
-    if (switchReportID == REPORT_OUTPUT_00) {
+    if (switch_report_id == REPORT_OUTPUT_00) {
         return;
     }
 
-    if (switchReportID == REPORT_FEATURE) {
-        queued_report_id = 0;
-        handle_feature_report(switchReportID, switchReportSubID, normalized,
-                              static_cast<uint16_t>(normalized_size));
-    } else if (switchReportID == REPORT_CONFIGURATION) {
-        queued_report_id = 0;
-        handle_config_report(switchReportID, switchReportSubID, normalized,
-                             static_cast<uint16_t>(normalized_size));
+    if (switch_report_id == REPORT_FEATURE) {
+        if (normalized_size >= 16) {
+            handle_feature_report(context, normalized);
+        }
+    } else if (switch_report_id == REPORT_CONFIGURATION) {
+        handle_config_report(context, switch_report_sub_id);
     }
 }
 
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                            hid_report_type_t report_type,
-                           const uint8_t* buffer, uint16_t bufsize) {
-    (void)instance;
-    if (report_type != HID_REPORT_TYPE_OUTPUT) {
+                           const uint8_t* buffer, uint16_t buffer_size) {
+    SwitchProContext* context = context_for(instance);
+    if (context == nullptr || report_type != HID_REPORT_TYPE_OUTPUT) {
         return;
     }
-    process_output_report(report_id, buffer, bufsize);
+    process_output_report(instance, *context, report_id, buffer, buffer_size);
 }
 
 void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id,
-                                const uint8_t* buffer, uint16_t bufsize) {
-    (void)instance;
-    process_output_report(report_id, buffer, bufsize);
+                                const uint8_t* buffer,
+                                uint16_t buffer_size) {
+    SwitchProContext* context = context_for(instance);
+    if (context == nullptr) {
+        return;
+    }
+    process_output_report(instance, *context, report_id, buffer, buffer_size);
 }
 
-uint8_t const * tud_hid_descriptor_report_cb(uint8_t itf) {
-    (void)itf;
+uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
+    if (context_for(instance) == nullptr) {
+        return nullptr;
+    }
     return switch_pro_report_descriptor;
 }
 
-uint8_t const * tud_descriptor_device_cb(void) {
+uint8_t const* tud_descriptor_device_cb(void) {
     return switch_pro_device_descriptor;
 }
 
-uint8_t const * tud_descriptor_configuration_cb(uint8_t index) {
+uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
     (void)index;
     return switch_pro_configuration_descriptor;
 }
 
-bool tud_control_request_cb(uint8_t rhport, tusb_control_request_t const * request) {
+bool tud_control_request_cb(uint8_t rhport,
+                            tusb_control_request_t const* request) {
     (void)rhport;
-    LOG_PRINTF("[CTRL] bmReq=0x%02x bReq=0x%02x wValue=0x%04x wIndex=0x%04x wLen=%u\n",
-               request->bmRequestType, request->bRequest, request->wValue, request->wIndex, request->wLength);
-    return false; // let TinyUSB handle it normally
+    (void)request;
+    LOG_PRINTF(
+        "[CTRL] bmReq=0x%02x bReq=0x%02x wValue=0x%04x wIndex=0x%04x "
+        "wLen=%u\n",
+        request->bmRequestType, request->bRequest, request->wValue,
+        request->wIndex, request->wLength);
+    return false;  // let TinyUSB handle it normally
 }
 
 void tud_mount_cb(void) {
     LOG_PRINTF("[USB] mount_cb\n");
-    last_host_activity_ms = to_ms_since_boot(get_absolute_time());
-    forced_ready = false;
-    is_ready = false;
-    is_initialized = false;
+    reset_all_contexts(false);
 }
 
 void tud_umount_cb(void) {
     LOG_PRINTF("[USB] umount_cb\n");
-    forced_ready = false;
-    is_ready = false;
-    is_initialized = false;
+    reset_all_contexts(false);
 }
 
 static uint16_t desc_str[32];

@@ -11,6 +11,10 @@
 #include "switch_haptics.h"
 #include "switch_pro_descriptors.h"
 
+#ifndef SWITCH_PICO_HID_INSTANCE_COUNT
+#define SWITCH_PICO_HID_INSTANCE_COUNT 1
+#endif
+
 typedef struct {
     int16_t accel_x;
     int16_t accel_y;
@@ -50,23 +54,26 @@ typedef struct {
     SwitchImuSample imu_samples[3];
 } SwitchInputState;
 
-// Initialize USB state and calibration before entering the main loop.
-void switch_pro_init();
+// Initialize one HID instance before entering the main loop.
+void switch_pro_init(uint8_t instance);
 
-// Update the desired controller state for the next USB report.
-void switch_pro_set_input(const SwitchInputState& state);
+// Update the desired controller state for one HID instance.
+void switch_pro_set_input(uint8_t instance, const SwitchInputState& state);
 
-// Drive the Switch Pro USB state machine; returns true only when a regular
+// Drive one Switch Pro USB state machine; returns true only when a regular
 // 0x30 input report was successfully queued.
-bool switch_pro_task();
+bool switch_pro_task(uint8_t instance);
 
 // Convert a packed UART message into controller state (returns true if parsed).
-// If out_state is null the parsed state is written directly to the driver.
-bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length, SwitchInputState* out_state = nullptr);
+bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
+                                  SwitchInputState& out_state);
 
 // Driver state helpers
-bool switch_pro_is_ready();
+bool switch_pro_is_ready(uint8_t instance);
 
-// Optional callback fired with decoded rumble intensities from the host.
-typedef void (*SwitchRumbleCallback)(const SwitchRumbleOutput& rumble);
-void switch_pro_set_rumble_callback(SwitchRumbleCallback cb);
+// Optional callback fired with decoded rumble intensities from one host
+// interface.
+typedef void (*SwitchRumbleCallback)(uint8_t instance,
+                                     const SwitchRumbleOutput& rumble);
+void switch_pro_set_rumble_callback(uint8_t instance,
+                                    SwitchRumbleCallback callback);

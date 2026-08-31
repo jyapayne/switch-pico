@@ -25,6 +25,8 @@
 #define UART_RUMBLE_TYPE 0x02
 #endif
 
+static constexpr uint8_t SWITCH_HID_INSTANCE = 0;
+
 static bool g_last_mounted = false;
 static bool g_last_ready = false;
 
@@ -66,7 +68,11 @@ static void send_rumble_uart_frame(const SwitchRumbleOutput& rumble) {
 }
 #endif
 
-static void on_rumble_from_switch(const SwitchRumbleOutput& rumble) {
+static void on_rumble_from_switch(uint8_t instance,
+                                  const SwitchRumbleOutput& rumble) {
+    if (instance != SWITCH_HID_INSTANCE) {
+        return;
+    }
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_queue_rumble(rumble);
 #else
@@ -118,7 +124,7 @@ static bool poll_uart_frames() {
 
         if (expected_len > 0 && index >= expected_len) {
             SwitchInputState parsed{};
-            if (switch_pro_apply_uart_packet(buffer, expected_len, &parsed)) {
+            if (switch_pro_apply_uart_packet(buffer, expected_len, parsed)) {
                 g_user_state = parsed;
                 new_data = true;
                 LOG_PRINTF("[UART] packet buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
@@ -153,7 +159,7 @@ static bool poll_uart_frames() {
 
 static void log_usb_state() {
     bool mounted = tud_mounted();
-    bool ready = switch_pro_is_ready();
+    bool ready = switch_pro_is_ready(SWITCH_HID_INSTANCE);
 
     if (mounted != g_last_mounted) {
         g_last_mounted = mounted;
@@ -176,10 +182,11 @@ int main() {
 #endif
 
     tusb_init();
-    switch_pro_init();
-    switch_pro_set_rumble_callback(on_rumble_from_switch);
+    switch_pro_init(SWITCH_HID_INSTANCE);
+    switch_pro_set_rumble_callback(SWITCH_HID_INSTANCE,
+                                   on_rumble_from_switch);
     g_user_state = neutral_input();
-    switch_pro_set_input(g_user_state);
+    switch_pro_set_input(SWITCH_HID_INSTANCE, g_user_state);
 
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_start();
@@ -199,13 +206,13 @@ int main() {
         (void)new_data;
 #endif
         SwitchInputState state = g_user_state;
-        switch_pro_set_input(state);
+        switch_pro_set_input(SWITCH_HID_INSTANCE, state);
 #ifdef SWITCH_PICO_BLUEPAD32
-        if (switch_pro_task()) {
+        if (switch_pro_task(SWITCH_HID_INSTANCE)) {
             bluepad32_input_backend_report_sent();
         }
 #else
-        (void)switch_pro_task();
+        (void)switch_pro_task(SWITCH_HID_INSTANCE);
 #endif
         log_usb_state();
     }
