@@ -90,17 +90,18 @@ Each AIO slot has one color shared by its emulated Switch Pro grips and its phys
 
 When a controller becomes ready, RGB-capable devices such as DualSense and DualShock 4 receive a darker, more saturated RGB value derived automatically from the slot's Switch grip color. Controllers without an RGB light use player indicator 1, 2, 3, or 4 when Bluepad32 exposes player-LED control. Devices without either capability are left unchanged. Edit only the four grip colors in `controller_color_config.h`; rebuilding automatically recalibrates their lightbar colors.
 
-
 ### Controller capabilities
 
 | Controller | Buttons/sticks | Rumble | Motion |
 |---|---:|---:|---:|
 | DualSense / DualShock 4 | Yes | Yes | Yes |
-| Switch Pro | Yes | Yes | Yes |
+| Switch Pro / Joy-Con | Yes | Yes | Yes |
+| PS Move ZCM1/ZCM2 | Buttons/trigger | Yes | Yes, after calibration |
+| Wii Remote | Mode-dependent | Yes | Accelerometer |
 | 8BitDo in Switch-compatible Bluetooth mode | Yes | Model-dependent | Yes when the mode exposes IMU |
 | Xbox Bluetooth controller | Yes | Yes | No hardware IMU |
 
-Motion is normalized to 1024 units per degree/second and 8192 units per g in SDL3 axes, then converted to Nintendo axes and raw counts. The latest normalized sample is duplicated across the report's three nominal 5 ms slots; it remains pending until a regular `0x30` USB report successfully consumes it.
+Motion-producing Bluepad32 parsers normalize to 1024 units per degree/second and 8192 units per g in SDL-oriented axes before conversion to Nintendo samples. PS Move motion remains neutral until all model-specific calibration blocks have been received and validated; buttons and rumble remain available while calibration is pending or unavailable. The latest normalized sample is duplicated across the report's three nominal 5 ms slots and remains pending until a regular `0x30` USB report successfully consumes it.
 
 ### Rumble per controller
 

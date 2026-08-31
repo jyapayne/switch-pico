@@ -1,3 +1,300 @@
+diff --git a/src/components/bluepad32/include/parser/uni_hid_parser_imu.h b/src/components/bluepad32/include/parser/uni_hid_parser_imu.h
+new file mode 100644
+index 0000000..dbd3024
+--- /dev/null
++++ b/src/components/bluepad32/include/parser/uni_hid_parser_imu.h
+@@ -0,0 +1,278 @@
++// SPDX-License-Identifier: Apache-2.0
++// Fixed-point IMU normalization helpers shared by controller parsers.
++
++#ifndef UNI_HID_PARSER_IMU_H
++#define UNI_HID_PARSER_IMU_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#define UNI_IMU_ACCEL_RES_PER_G 8192
++#define UNI_IMU_GYRO_RES_PER_DEG_S 1024
++
++typedef struct {
++    int32_t accel[3];
++    int32_t gyro[3];
++} uni_imu_fixed_sample_t;
++
++static inline void uni_imu_normalize_wii_accel(int16_t x,
++                                               int16_t y,
++                                               int16_t z,
++                                               int32_t out[3]) {
++    // SDL's Wii convention is (-X, Z, Y), with about 100 raw counts per g.
++    out[0] = -(int32_t)x * UNI_IMU_ACCEL_RES_PER_G / 100;
++    out[1] = (int32_t)z * UNI_IMU_ACCEL_RES_PER_G / 100;
++    out[2] = (int32_t)y * UNI_IMU_ACCEL_RES_PER_G / 100;
++}
++
++typedef enum {
++    UNI_PSMOVE_IMU_MODEL_ZCM1,
++    UNI_PSMOVE_IMU_MODEL_ZCM2,
++} uni_psmove_imu_model_t;
++
++typedef enum {
++    UNI_PSMOVE_CALIBRATION_IGNORED,
++    UNI_PSMOVE_CALIBRATION_INCOMPLETE,
++    UNI_PSMOVE_CALIBRATION_COMPLETE,
++    UNI_PSMOVE_CALIBRATION_INVALID,
++} uni_psmove_calibration_result_t;
++
++#define UNI_PSMOVE_CALIBRATION_REPORT_SIZE 49
++#define UNI_PSMOVE_ZCM1_CALIBRATION_SIZE 143
++#define UNI_PSMOVE_ZCM2_CALIBRATION_SIZE 96
++
++typedef struct {
++    uint8_t blob[UNI_PSMOVE_ZCM1_CALIBRATION_SIZE];
++    uint8_t received_blocks;
++    bool valid;
++} uni_psmove_imu_calibration_t;
++
++static inline int32_t uni_psmove_decode_calibration_value(
++    const uni_psmove_imu_calibration_t* calibration,
++    uni_psmove_imu_model_t model,
++    uint8_t offset) {
++    const uint16_t value =
++        (uint16_t)calibration->blob[offset] |
++        ((uint16_t)calibration->blob[offset + 1] << 8u);
++    return model == UNI_PSMOVE_IMU_MODEL_ZCM1
++               ? (int32_t)value - 0x8000
++               : (int32_t)(int16_t)value;
++}
++
++static inline int32_t uni_psmove_decode_input_value(
++    uni_psmove_imu_model_t model,
++    uint16_t value) {
++    return model == UNI_PSMOVE_IMU_MODEL_ZCM1
++               ? (int32_t)value - 0x8000
++               : (int32_t)(int16_t)value;
++}
++
++static inline void uni_psmove_get_accel_bounds(
++    const uni_psmove_imu_calibration_t* calibration,
++    uni_psmove_imu_model_t model,
++    uint8_t axis,
++    int32_t* low,
++    int32_t* high) {
++    static const uint8_t zcm1_low_offsets[3] = {0x0a, 0x24, 0x14};
++    static const uint8_t zcm1_high_offsets[3] = {0x16, 0x1e, 0x08};
++    static const uint8_t zcm2_low_offsets[3] = {0x08, 0x16, 0x24};
++    static const uint8_t zcm2_high_offsets[3] = {0x02, 0x10, 0x1e};
++    const uint8_t* low_offsets =
++        model == UNI_PSMOVE_IMU_MODEL_ZCM1 ? zcm1_low_offsets
++                                           : zcm2_low_offsets;
++    const uint8_t* high_offsets =
++        model == UNI_PSMOVE_IMU_MODEL_ZCM1 ? zcm1_high_offsets
++                                           : zcm2_high_offsets;
++    *low = uni_psmove_decode_calibration_value(calibration, model,
++                                                low_offsets[axis]);
++    *high = uni_psmove_decode_calibration_value(calibration, model,
++                                                 high_offsets[axis]);
++}
++
++static inline void uni_psmove_get_gyro_calibration(
++    const uni_psmove_imu_calibration_t* calibration,
++    uni_psmove_imu_model_t model,
++    uint8_t axis,
++    int32_t* offset,
++    int32_t* divisor,
++    int32_t* full_scale) {
++    static const uint8_t zcm1_bias_offsets[3] = {0x2a, 0x2c, 0x2e};
++    static const uint8_t zcm1_high_offsets[3] = {0x46, 0x50, 0x5a};
++    static const uint8_t zcm2_bias_offsets[3] = {0x26, 0x28, 0x2a};
++    static const uint8_t zcm2_low_offsets[3] = {0x42, 0x4a, 0x52};
++    static const uint8_t zcm2_high_offsets[3] = {0x30, 0x38, 0x40};
++
++    if (model == UNI_PSMOVE_IMU_MODEL_ZCM1) {
++        *offset = uni_psmove_decode_calibration_value(
++            calibration, model, zcm1_bias_offsets[axis]);
++        const int32_t high = uni_psmove_decode_calibration_value(
++            calibration, model, zcm1_high_offsets[axis]);
++        *divisor = high - *offset;
++        // ZCM1 gyro points are measured at +80 RPM = +480 degrees/s.
++        *full_scale = 480 * UNI_IMU_GYRO_RES_PER_DEG_S;
++        return;
++    }
++
++    *offset = uni_psmove_decode_calibration_value(
++        calibration, model, zcm2_bias_offsets[axis]);
++    const int32_t low = uni_psmove_decode_calibration_value(
++        calibration, model, zcm2_low_offsets[axis]);
++    const int32_t high = uni_psmove_decode_calibration_value(
++        calibration, model, zcm2_high_offsets[axis]);
++    *divisor = high - low;
++    // ZCM2 points span -90 to +90 RPM = 1080 degrees/s total.
++    *full_scale = 1080 * UNI_IMU_GYRO_RES_PER_DEG_S;
++}
++
++static inline bool uni_psmove_validate_calibration(
++    const uni_psmove_imu_calibration_t* calibration,
++    uni_psmove_imu_model_t model) {
++    for (uint8_t axis = 0; axis < 3; ++axis) {
++        int32_t low;
++        int32_t high;
++        uni_psmove_get_accel_bounds(calibration, model, axis, &low, &high);
++        if (high <= low) {
++            return false;
++        }
++
++        int32_t offset;
++        int32_t divisor;
++        int32_t full_scale;
++        uni_psmove_get_gyro_calibration(calibration, model, axis, &offset,
++                                        &divisor, &full_scale);
++        (void)offset;
++        (void)full_scale;
++        if (divisor <= 0) {
++            return false;
++        }
++    }
++    return true;
++}
++
++static inline uni_psmove_calibration_result_t
++uni_psmove_add_calibration_report(
++    uni_psmove_imu_calibration_t* calibration,
++    uni_psmove_imu_model_t model,
++    const uint8_t* report,
++    uint16_t len) {
++    if (calibration == NULL || report == NULL ||
++        len < UNI_PSMOVE_CALIBRATION_REPORT_SIZE || report[0] != 0x10) {
++        return UNI_PSMOVE_CALIBRATION_IGNORED;
++    }
++
++    size_t destination;
++    size_t source;
++    uint8_t block_mask;
++    if (report[1] == 0x00) {
++        destination = 0;
++        source = 0;
++        block_mask = 0x01;
++    } else if (model == UNI_PSMOVE_IMU_MODEL_ZCM1 && report[1] == 0x01) {
++        destination = UNI_PSMOVE_CALIBRATION_REPORT_SIZE;
++        source = 2;
++        block_mask = 0x02;
++    } else if (model == UNI_PSMOVE_IMU_MODEL_ZCM1 && report[1] == 0x82) {
++        destination = 2 * UNI_PSMOVE_CALIBRATION_REPORT_SIZE - 2;
++        source = 2;
++        block_mask = 0x04;
++    } else if (model == UNI_PSMOVE_IMU_MODEL_ZCM2 && report[1] == 0x81) {
++        destination = UNI_PSMOVE_CALIBRATION_REPORT_SIZE;
++        source = 2;
++        block_mask = 0x02;
++    } else {
++        calibration->valid = false;
++        return UNI_PSMOVE_CALIBRATION_INVALID;
++    }
++
++    memcpy(calibration->blob + destination, report + source,
++           UNI_PSMOVE_CALIBRATION_REPORT_SIZE - source);
++    calibration->received_blocks |= block_mask;
++
++    const uint8_t required_blocks =
++        model == UNI_PSMOVE_IMU_MODEL_ZCM1 ? 0x07 : 0x03;
++    if ((calibration->received_blocks & required_blocks) != required_blocks) {
++        return UNI_PSMOVE_CALIBRATION_INCOMPLETE;
++    }
++
++    calibration->valid =
++        uni_psmove_validate_calibration(calibration, model);
++    return calibration->valid ? UNI_PSMOVE_CALIBRATION_COMPLETE
++                              : UNI_PSMOVE_CALIBRATION_INVALID;
++}
++
++static inline int32_t uni_psmove_scale_accel(int32_t raw,
++                                             int32_t low,
++                                             int32_t high) {
++    const int64_t numerator =
++        (int64_t)(raw - low) * (2 * UNI_IMU_ACCEL_RES_PER_G);
++    return (int32_t)(numerator / (high - low)) - UNI_IMU_ACCEL_RES_PER_G;
++}
++
++static inline int32_t uni_imu_clamp_i64(int64_t value) {
++    if (value > INT32_MAX) {
++        return INT32_MAX;
++    }
++    if (value < INT32_MIN) {
++        return INT32_MIN;
++    }
++    return (int32_t)value;
++}
++
++static inline int32_t uni_psmove_scale_gyro(int32_t raw,
++                                            int32_t offset,
++                                            int32_t divisor,
++                                            int32_t full_scale) {
++    const int64_t scaled =
++        ((int64_t)(raw - offset) * full_scale) / divisor;
++    return uni_imu_clamp_i64(scaled);
++}
++
++static inline bool uni_psmove_normalize_imu(
++    uni_psmove_imu_model_t model,
++    const uni_psmove_imu_calibration_t* calibration,
++    const uint16_t accel_first[3],
++    const uint16_t accel_second[3],
++    const uint16_t gyro_first[3],
++    const uint16_t gyro_second[3],
++    uni_imu_fixed_sample_t* out) {
++    if (out == NULL) {
++        return false;
++    }
++    memset(out, 0, sizeof(*out));
++    if (calibration == NULL || !calibration->valid || accel_first == NULL ||
++        accel_second == NULL || gyro_first == NULL || gyro_second == NULL) {
++        return false;
++    }
++
++    for (uint8_t axis = 0; axis < 3; ++axis) {
++        int32_t accel = uni_psmove_decode_input_value(model,
++                                                       accel_first[axis]);
++        int32_t gyro = uni_psmove_decode_input_value(model,
++                                                      gyro_first[axis]);
++        if (model == UNI_PSMOVE_IMU_MODEL_ZCM1) {
++            accel = (accel + uni_psmove_decode_input_value(
++                                 model, accel_second[axis])) /
++                    2;
++            gyro = (gyro + uni_psmove_decode_input_value(
++                               model, gyro_second[axis])) /
++                   2;
++        }
++
++        int32_t low;
++        int32_t high;
++        uni_psmove_get_accel_bounds(calibration, model, axis, &low, &high);
++        out->accel[axis] = uni_psmove_scale_accel(accel, low, high);
++
++        int32_t offset;
++        int32_t divisor;
++        int32_t full_scale;
++        uni_psmove_get_gyro_calibration(calibration, model, axis, &offset,
++                                        &divisor, &full_scale);
++        out->gyro[axis] = uni_psmove_scale_gyro(
++            gyro, offset, divisor, full_scale);
++    }
++    return true;
++}
++
++#endif  // UNI_HID_PARSER_IMU_H
+diff --git a/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h b/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h
+index 6af4969..0aebb0a 100644
+--- a/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h
++++ b/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h
+@@ -14,6 +14,8 @@
+ void uni_hid_parser_psmove_setup(struct uni_hid_device_s* d);
+ void uni_hid_parser_psmove_init_report(struct uni_hid_device_s* d);
+ void uni_hid_parser_psmove_parse_input_report(struct uni_hid_device_s* d, const uint8_t* report, uint16_t len);
++void uni_hid_parser_psmove_parse_feature_report(
++    struct uni_hid_device_s* d, const uint8_t* report, uint16_t len);
+ void uni_hid_parser_psmove_set_lightbar_color(struct uni_hid_device_s* d, uint8_t r, uint8_t g, uint8_t b);
+ void uni_hid_parser_psmove_play_dual_rumble(struct uni_hid_device_s* d,
+                                             uint16_t start_delay_ms,
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds4.c b/src/components/bluepad32/parser/uni_hid_parser_ds4.c
 index ea063b8..7670caf 100644
 --- a/src/components/bluepad32/parser/uni_hid_parser_ds4.c
@@ -84,6 +381,144 @@ index a22ef26..3d5ecef 100644
          int32_t calib_data =
              mult_frac(ins->accel_calib_data[i].sens_numer, raw_data, ins->accel_calib_data[i].sens_denom);
          ctl->gamepad.accel[i] = calib_data;
+diff --git a/src/components/bluepad32/parser/uni_hid_parser_psmove.c b/src/components/bluepad32/parser/uni_hid_parser_psmove.c
+index 0265f93..5c0f2bb 100644
+--- a/src/components/bluepad32/parser/uni_hid_parser_psmove.c
++++ b/src/components/bluepad32/parser/uni_hid_parser_psmove.c
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include "parser/uni_hid_parser_psmove.h"
++#include "parser/uni_hid_parser_imu.h"
+ 
+ #include <string.h>
+ 
+@@ -27,11 +28,6 @@ typedef enum psmove_fsm {
+     PSMOVE_FSM_LED_UPDATED,          // LED updated
+ } psmove_fsm_t;
+ 
+-typedef enum psmove_model {
+-    PSMOVE_MODEL_UNK,
+-    PSMOVE_MODEL_ZCM1,
+-    PSMOVE_MODEL_ZCM2,
+-} psmove_model_t;
+ 
+ typedef enum {
+     PSMOVE_STATE_RUMBLE_DISABLED,
+@@ -41,9 +37,10 @@ typedef enum {
+ 
+ // psmove_instance_t represents data used by the psmove driver instance.
+ typedef struct psmove_instance_s {
+-    psmove_model_t model;
++    uni_psmove_imu_model_t model;
+     psmove_fsm_t state;
+     uint8_t led_rgb[3];
++    uni_psmove_imu_calibration_t imu_calibration;
+ 
+     btstack_timer_source_t rumble_timer_duration;
+     btstack_timer_source_t rumble_timer_delayed_start;
+@@ -127,6 +124,7 @@ static void psmove_send_output_report(uni_hid_device_t* d, psmove_output_report_
+ static void on_psmove_set_rumble_on(btstack_timer_source_t* ts);
+ static void on_psmove_set_rumble_off(btstack_timer_source_t* ts);
+ static void psmove_play_dual_rumble_now(uni_hid_device_t* d, uint16_t duration_ms, uint8_t magnitude);
++static void psmove_request_calibration_report(uni_hid_device_t* d);
+ 
+ void uni_hid_parser_psmove_init_report(uni_hid_device_t* d) {
+     uni_controller_t* ctl = &d->controller;
+@@ -154,6 +152,7 @@ void uni_hid_parser_psmove_parse_input_report(uni_hid_device_t* d, const uint8_t
+     }
+ 
+     uni_controller_t* ctl = &d->controller;
++    psmove_instance_t* ins = get_psmove_instance(d);
+ 
+     // Buttons
+     if (r->buttons[0] & 0x01)
+@@ -187,18 +186,39 @@ void uni_hid_parser_psmove_parse_input_report(uni_hid_device_t* d, const uint8_t
+ 
+     ctl->gamepad.throttle = r->trigger * 4;
+ 
+-    ctl->gamepad.accel[0] = r->accel_x;
+-    ctl->gamepad.accel[1] = r->accel_y;
+-    ctl->gamepad.accel[2] = r->accel_z;
+-
+-    ctl->gamepad.gyro[0] = r->gyro_x;
+-    ctl->gamepad.gyro[1] = r->gyro_y;
+-    ctl->gamepad.gyro[2] = r->gyro_z;
++    const uint16_t accel_first[3] = {r->accel_x, r->accel_y, r->accel_z};
++    const uint16_t accel_second[3] = {
++        r->accel_x2, r->accel_y2, r->accel_z2};
++    const uint16_t gyro_first[3] = {r->gyro_x, r->gyro_y, r->gyro_z};
++    const uint16_t gyro_second[3] = {
++        r->gyro_x2, r->gyro_y2, r->gyro_z2};
++    uni_imu_fixed_sample_t motion;
++    if (uni_psmove_normalize_imu(
++            ins->model, &ins->imu_calibration, accel_first, accel_second,
++            gyro_first, gyro_second, &motion)) {
++        memcpy(ctl->gamepad.accel, motion.accel, sizeof(motion.accel));
++        memcpy(ctl->gamepad.gyro, motion.gyro, sizeof(motion.gyro));
++    }
+ 
+     if (r->battery <= 5)
+         ctl->battery = r->battery * 51;
+ }
+ 
++void uni_hid_parser_psmove_parse_feature_report(
++    uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
++    psmove_instance_t* ins = get_psmove_instance(d);
++    const uni_psmove_calibration_result_t result =
++        uni_psmove_add_calibration_report(
++            &ins->imu_calibration, ins->model, report, len);
++    if (result == UNI_PSMOVE_CALIBRATION_INCOMPLETE) {
++        psmove_request_calibration_report(d);
++    } else if (result == UNI_PSMOVE_CALIBRATION_COMPLETE) {
++        logi("psmove: IMU calibration ready\n");
++    } else if (result == UNI_PSMOVE_CALIBRATION_INVALID) {
++        loge("psmove: invalid IMU calibration; motion disabled\n");
++    }
++}
++
+ void uni_hid_parser_psmove_play_dual_rumble(struct uni_hid_device_s* d,
+                                             uint16_t start_delay_ms,
+                                             uint16_t duration_ms,
+@@ -261,25 +281,34 @@ void uni_hid_parser_psmove_setup(struct uni_hid_device_s* d) {
+ 
+     switch (d->product_id) {
+         case ZCM1_PID:
+-            ins->model = PSMOVE_MODEL_ZCM1;
++            ins->model = UNI_PSMOVE_IMU_MODEL_ZCM1;
+             logi("psmove: Detected ZCM1 model\n");
+             break;
+         case ZCM2_PID:
+-            ins->model = PSMOVE_MODEL_ZCM2;
++            ins->model = UNI_PSMOVE_IMU_MODEL_ZCM2;
+             logi("psmove: Detected ZCM2 model\n");
+             break;
+         default:
+-            loge("psmove: Unknown PSMove PID = %#x, assuming ZCM1\n", ins->model);
+-            ins->model = PSMOVE_MODEL_ZCM1;
++            loge("psmove: Unknown PSMove PID = %#x, assuming ZCM1\n", d->product_id);
++            ins->model = UNI_PSMOVE_IMU_MODEL_ZCM1;
+             break;
+     }
+ 
++    psmove_request_calibration_report(d);
+     uni_hid_device_set_ready_complete(d);
+ }
+ 
+ //
+ // Helpers
+ //
++static void psmove_request_calibration_report(uni_hid_device_t* d) {
++    static const uint8_t report[] = {
++        ((HID_MESSAGE_TYPE_GET_REPORT << 4) | HID_REPORT_TYPE_FEATURE),
++        0x10,
++    };
++    uni_hid_device_send_ctrl_report(d, report, sizeof(report));
++}
++
+ static psmove_instance_t* get_psmove_instance(uni_hid_device_t* d) {
+     return (psmove_instance_t*)&d->parser_data[0];
+ }
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_switch.c b/src/components/bluepad32/parser/uni_hid_parser_switch.c
 index 599fc35..c72f056 100644
 --- a/src/components/bluepad32/parser/uni_hid_parser_switch.c
@@ -152,3 +587,38 @@ index 599fc35..c72f056 100644
  }
  
  // Process 0x30 input report: SWITCH_INPUT_IMU_DATA
+diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/components/bluepad32/parser/uni_hid_parser_wii.c
+index be2103e..4819639 100644
+--- a/src/components/bluepad32/parser/uni_hid_parser_wii.c
++++ b/src/components/bluepad32/parser/uni_hid_parser_wii.c
+@@ -19,6 +19,7 @@
+ #endif  // ENABLE_EEPROM_DUMP
+ 
+ #include "parser/uni_hid_parser_wii.h"
++#include "parser/uni_hid_parser_imu.h"
+ 
+ #include "controller/uni_controller.h"
+ #include "hid_usage.h"
+@@ -585,9 +586,7 @@ static void process_drm_ka(uni_hid_device_t* d, const uint8_t* report, uint16_t
+ 
+     uni_controller_t* ctl = &d->controller;
+ 
+-    ctl->gamepad.accel[0] = sx;
+-    ctl->gamepad.accel[1] = sy;
+-    ctl->gamepad.accel[2] = sz;
++    uni_imu_normalize_wii_accel(sx, sy, sz, ctl->gamepad.accel);
+ 
+     // Dpad works as dpad, useful to navigate menus.
+     ctl->gamepad.dpad |= (report[1] & 0x01) ? DPAD_DOWN : 0;
+diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad32/uni_hid_device.c
+index 67841e8..9fe7134 100644
+--- a/src/components/bluepad32/uni_hid_device.c
++++ b/src/components/bluepad32/uni_hid_device.c
+@@ -655,6 +655,7 @@ void uni_hid_device_guess_controller_type_from_pid_vid(uni_hid_device_t* d) {
+             d->report_parser.setup = uni_hid_parser_psmove_setup;
+             d->report_parser.init_report = uni_hid_parser_psmove_init_report;
+             d->report_parser.parse_input_report = uni_hid_parser_psmove_parse_input_report;
++            d->report_parser.parse_feature_report = uni_hid_parser_psmove_parse_feature_report;
+             d->report_parser.set_lightbar_color = uni_hid_parser_psmove_set_lightbar_color;
+             d->report_parser.play_dual_rumble = uni_hid_parser_psmove_play_dual_rumble;
+             logi("Device detected as PS Move: 0x%02x\n", type);
