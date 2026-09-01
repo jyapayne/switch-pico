@@ -25,6 +25,8 @@ constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
 constexpr uint32_t kPairingWindowDurationMs = 60000;
 constexpr uint32_t kPairingResetFeedbackDurationMs = 2000;
+// Bluetooth Classic units are 0.625 ms: 0x1900 = 4 seconds.
+constexpr uint16_t kClassicLinkSupervisionTimeout = 0x1900;
 constexpr uint8_t kAllBlePairingMethods =
     SM_STK_GENERATION_METHOD_JUST_WORKS |
     SM_STK_GENERATION_METHOD_OOB |
@@ -749,6 +751,7 @@ void platform_init(int argc, const char** argv) {
 }
 
 void platform_on_init_complete() {
+    gap_set_link_supervision_timeout(kClassicLinkSupervisionTimeout);
     gap_set_bondable_mode(false);
     sm_set_accepted_stk_generation_methods(0);
     gap_ssp_set_auto_accept(false);
@@ -830,6 +833,10 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
     critical_section_exit(&g_state_lock);
 
     if (disconnected_tracked_device) {
+        // A controller can disconnect while the policy is already Open.
+        // Restart both scans so host-initiated reconnect controllers such as
+        // 8BitDo Ultimate become reachable without rebooting the Pico.
+        g_connection_policy_state = ConnectionPolicyState::Uninitialized;
         recompute_connection_status();
     }
 }

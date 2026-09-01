@@ -171,6 +171,7 @@ int le_device_db_max_count();
 void le_device_db_info(
     int index, int* address_type, bd_addr_t address, sm_key_t irk);
 void gap_set_bondable_mode(int enabled);
+void gap_set_link_supervision_timeout(uint16_t link_supervision_timeout);
 void gap_ssp_set_auto_accept(int auto_accept);
 void sm_set_accepted_stk_generation_methods(
     uint8_t accepted_stk_generation_methods);

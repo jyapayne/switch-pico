@@ -80,6 +80,7 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 
 - **Disconnect a controller**: its slot immediately publishes neutral buttons, sticks, and motion. Other connected controllers are unaffected.
 - **Reconnect a paired controller**: power it on normally with its Home, PS, or Xbox button.
+- **8BitDo Ultimate Bluetooth reconnect**: leave its selector in Bluetooth mode, press Home once, then shake it. After an abrupt controller power-off, the Pico can remain solid for up to four seconds while Bluetooth link supervision confirms the disconnect; scanning restarts immediately afterward.
 - **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
 - **Pairing window expires**: new authentication is disabled; discovery and remembered-controller autoconnect continue while a slot is free.
 - **Clear all pairings**: hold BOOTSEL continuously for 10 seconds, through the initial double blink, until the rapid confirmation blink starts. All controllers are disconnected and must be paired again.

@@ -23,6 +23,7 @@ uint32_t now_ms = 0;
 bool bondable = true;
 bool ssp_auto_accept = true;
 uint8_t accepted_stk_methods = 0xff;
+uint16_t link_supervision_timeout = 0;
 btstack_packet_handler_t pairing_event_handler = nullptr;
 int confirmation_accepts = 0;
 int confirmation_rejections = 0;
@@ -188,6 +189,10 @@ void gap_set_bondable_mode(int enabled) {
     bondable = enabled != 0;
 }
 
+void gap_set_link_supervision_timeout(uint16_t timeout) {
+    link_supervision_timeout = timeout;
+}
+
 void gap_ssp_set_auto_accept(int auto_accept) {
     ssp_auto_accept = auto_accept != 0;
 }
@@ -303,9 +308,11 @@ void start_backend() {
     platform_on_init_complete();
     require(incoming_connections && scanning_enabled &&
                 classic_scanning_enabled && scan_starts == 1 &&
+                link_supervision_timeout ==
+                    kClassicLinkSupervisionTimeout &&
                 !bondable && accepted_stk_methods == 0 &&
                 !ssp_auto_accept && pairing_event_handler != nullptr,
-            "initialization must scan while keeping new pairing disabled");
+            "initialization must configure liveness and pairing policy");
 }
 void start_pairing_backend() {
     start_backend();
@@ -455,6 +462,11 @@ void test_independent_lifecycle() {
             "connected device must remain identifiable while becoming ready");
 
     const int starts_before_aborted_disconnect = scan_starts;
+    const int classic_starts_before_aborted_disconnect =
+        classic_scan_starts;
+    const int stops_before_aborted_disconnect = scan_stops;
+    const int classic_stops_before_aborted_disconnect =
+        classic_scan_stops;
     platform_on_device_disconnected(&aborted);
     require(g_slots[0].device == nullptr && !g_slots[0].active,
             "pre-ready disconnect must clear its pending slot identity");
@@ -463,8 +475,13 @@ void test_independent_lifecycle() {
     require(g_connection_status == ConnectionStatus::Scanning &&
                 scanning_enabled && classic_scanning_enabled &&
                 incoming_connections &&
-                scan_starts == starts_before_aborted_disconnect,
-            "pre-ready disconnect must preserve the open pairing scan");
+                scan_starts == starts_before_aborted_disconnect + 1 &&
+                classic_scan_starts ==
+                    classic_starts_before_aborted_disconnect + 1 &&
+                scan_stops == stops_before_aborted_disconnect + 1 &&
+                classic_scan_stops ==
+                    classic_stops_before_aborted_disconnect + 1,
+            "pre-ready disconnect must restart Classic and BLE scans");
 
     uni_hid_device_t devices[kSlotCount] = {
         device(0), device(1), device(2), device(3)};
