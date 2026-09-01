@@ -161,6 +161,15 @@ void uni_bt_bredr_scan_start();
 void uni_bt_bredr_scan_stop();
 void uni_bt_le_scan_start();
 void uni_bt_le_scan_stop();
+void uni_bt_del_keys_unsafe();
+int gap_link_key_iterator_init(btstack_link_key_iterator_t* iterator);
+int gap_link_key_iterator_get_next(
+    btstack_link_key_iterator_t* iterator, bd_addr_t address,
+    link_key_t link_key, link_key_type_t* type);
+void gap_link_key_iterator_done(btstack_link_key_iterator_t* iterator);
+int le_device_db_max_count();
+void le_device_db_info(
+    int index, int* address_type, bd_addr_t address, sm_key_t irk);
 void gap_set_bondable_mode(int enabled);
 void gap_ssp_set_auto_accept(int auto_accept);
 void sm_set_accepted_stk_generation_methods(

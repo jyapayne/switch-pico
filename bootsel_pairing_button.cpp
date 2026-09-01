@@ -62,36 +62,38 @@ BootselPairingButtonSample sample_bootsel() {
 
 }  // namespace
 
-bool BootselPairingButtonHoldFsm::update(
+BootselPairingButtonEvent BootselPairingButtonHoldFsm::update(
     BootselPairingButtonSample sample) {
     if (sample == BootselPairingButtonSample::kUnread) {
-        return false;
+        return BootselPairingButtonEvent::kNone;
     }
 
     if (sample == BootselPairingButtonSample::kReleased) {
         pressed_samples_ = 0;
-        hold_reported_ = false;
-        return false;
+        pairing_reported_ = false;
+        clear_reported_ = false;
+        return BootselPairingButtonEvent::kNone;
     }
 
-    if (hold_reported_) {
-        return false;
+    if (pressed_samples_ < kClearHoldSamples) {
+        ++pressed_samples_;
     }
-
-    ++pressed_samples_;
-    if (pressed_samples_ < kHoldSamples) {
-        return false;
+    if (pressed_samples_ >= kClearHoldSamples && !clear_reported_) {
+        clear_reported_ = true;
+        return BootselPairingButtonEvent::kClearPairings;
     }
-
-    hold_reported_ = true;
-    return true;
+    if (pressed_samples_ >= kPairingHoldSamples && !pairing_reported_) {
+        pairing_reported_ = true;
+        return BootselPairingButtonEvent::kOpenPairing;
+    }
+    return BootselPairingButtonEvent::kNone;
 }
 
-bool bootsel_pairing_button_task() {
+BootselPairingButtonEvent bootsel_pairing_button_task() {
     const uint32_t now_ms =
         static_cast<uint32_t>(to_ms_since_boot(get_absolute_time()));
     if (now_ms - g_last_sample_ms < kPollIntervalMs) {
-        return false;
+        return BootselPairingButtonEvent::kNone;
     }
     g_last_sample_ms = now_ms;
 

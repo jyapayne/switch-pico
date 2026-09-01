@@ -28,6 +28,12 @@ int confirmation_accepts = 0;
 int confirmation_rejections = 0;
 int passkey_accepts = 0;
 int passkey_rejections = 0;
+int delete_key_calls = 0;
+bd_addr_t classic_bonds[4]{};
+int classic_bond_count = 0;
+bd_addr_t ble_bonds[4]{};
+int ble_bond_types[4]{};
+int ble_bond_count = 0;
 
 bool flash_core_init_result = true;
 int flash_core_init_calls = 0;
@@ -134,6 +140,50 @@ void uni_bt_stop_scanning_unsafe() {
     uni_bt_bredr_scan_stop();
     uni_bt_le_scan_stop();
 }
+void uni_bt_del_keys_unsafe() {
+    ++delete_key_calls;
+    classic_bond_count = 0;
+    ble_bond_count = 0;
+}
+
+int gap_link_key_iterator_init(btstack_link_key_iterator_t* iterator) {
+    iterator->index = 0;
+    return 1;
+}
+
+int gap_link_key_iterator_get_next(
+    btstack_link_key_iterator_t* iterator, bd_addr_t address,
+    link_key_t link_key, link_key_type_t* type) {
+    if (iterator->index >= classic_bond_count) {
+        return 0;
+    }
+    memcpy(address, classic_bonds[iterator->index], sizeof(bd_addr_t));
+    memset(link_key, iterator->index + 1, sizeof(link_key_t));
+    *type = 0;
+    ++iterator->index;
+    return 1;
+}
+
+void gap_link_key_iterator_done(btstack_link_key_iterator_t*) {
+}
+
+int le_device_db_max_count() {
+    return 4;
+}
+
+void le_device_db_info(
+    int index, int* address_type, bd_addr_t address, sm_key_t irk) {
+    if (index < ble_bond_count) {
+        *address_type = ble_bond_types[index];
+        memcpy(address, ble_bonds[index], sizeof(bd_addr_t));
+        if (irk != nullptr) {
+            memset(irk, index + 1, sizeof(sm_key_t));
+        }
+        return;
+    }
+    *address_type = BD_ADDR_TYPE_UNKNOWN;
+}
+
 void gap_set_bondable_mode(int enabled) {
     bondable = enabled != 0;
 }
@@ -957,6 +1007,70 @@ void test_motion_hotkey() {
             "disconnect did not reset slot 0 motion hotkey state");
 }
 
+void test_clear_pairings() {
+    classic_bond_count = 1;
+    classic_bonds[0][0] = 0x10;
+    ble_bond_count = 1;
+    ble_bond_types[0] = BD_ADDR_TYPE_LE_PUBLIC;
+    ble_bonds[0][0] = 0x20;
+    start_pairing_backend();
+    require(g_pairing_snapshot.status ==
+                    Bluepad32PairingSnapshotStatus::kReady &&
+                g_pairing_snapshot.record_count == 2 &&
+                g_pairing_snapshot.records[0].transport ==
+                    Bluepad32PairingTransport::kClassic &&
+                g_pairing_snapshot.records[1].transport ==
+                    Bluepad32PairingTransport::kBle,
+            "initial pairing snapshot must enumerate Classic and BLE bonds");
+    const uint32_t snapshot_generation =
+        g_pairing_snapshot.generation;
+    uni_hid_device_t devices[2] = {device(0), device(1)};
+    for (uni_hid_device_t& controller : devices) {
+        require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+                "pairing reset controller did not become ready");
+    }
+    bluepad32_input_backend_queue_rumble(
+        0, SwitchRumbleOutput{100, 101});
+
+    bluepad32_input_backend_clear_pairings();
+    require(g_clear_pairings_requested && delete_key_calls == 0 &&
+                device_disconnect_calls == 0,
+            "Core0 pairing reset request must wait for Core1");
+    process_rumble_timer(&g_rumble_timer);
+
+    require(delete_key_calls == 1 && device_disconnect_calls == 2,
+            "pairing reset must delete bonds and disconnect every session");
+    require(g_pairing_snapshot.status ==
+                    Bluepad32PairingSnapshotStatus::kReady &&
+                g_pairing_snapshot.record_count == 0 &&
+                g_pairing_snapshot.generation ==
+                    snapshot_generation + 1,
+            "pairing reset must publish an empty refreshed snapshot");
+    for (const BackendSlot& slot : g_slots) {
+        require(slot.device == nullptr && !slot.active &&
+                    !slot.rumble_pending && !slot.feedback_pending &&
+                    slot.state.lx == kStickMidpoint &&
+                    slot.state.ly == kStickMidpoint &&
+                    slot.state.rx == kStickMidpoint &&
+                    slot.state.ry == kStickMidpoint &&
+                    slot.state.imu_sample_count == 0,
+                "pairing reset must publish neutral empty slots");
+    }
+    require(!g_pairing_window_open && !bondable &&
+                accepted_stk_methods == 0 &&
+                g_connection_policy_state == ConnectionPolicyState::Open &&
+                scanning_enabled && classic_scanning_enabled &&
+                incoming_connections && observed_status_led_on,
+            "pairing reset must close authentication and resume autoconnect");
+
+    tick_backend_timer(9);
+    require(!observed_status_led_on,
+            "pairing reset confirmation must use the rapid blink pattern");
+    process_rumble_timer(&g_rumble_timer);
+    require(delete_key_calls == 1 && device_disconnect_calls == 2,
+            "pairing reset request must execute only once");
+}
+
 void test_flash_core_start_contract() {
     bluepad32_input_backend_init();
     flash_core_init_result = false;
@@ -1012,6 +1126,8 @@ int main(int argc, char** argv) {
         test_abxy_hotkey();
     } else if (scenario == "motion-hotkey") {
         test_motion_hotkey();
+    } else if (scenario == "clear-pairings") {
+        test_clear_pairings();
     } else if (scenario == "flash-core-start") {
         test_flash_core_start_contract();
     } else if (scenario == "flash-core-failure") {

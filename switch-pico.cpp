@@ -233,8 +233,15 @@ int main() {
     while (true) {
         tud_task();          // USB device tasks
 #ifdef SWITCH_PICO_BLUEPAD32
-        if (bootsel_pairing_button_task()) {
-            bluepad32_input_backend_open_pairing_window();
+        switch (bootsel_pairing_button_task()) {
+            case BootselPairingButtonEvent::kOpenPairing:
+                bluepad32_input_backend_open_pairing_window();
+                break;
+            case BootselPairingButtonEvent::kClearPairings:
+                bluepad32_input_backend_clear_pairings();
+                break;
+            case BootselPairingButtonEvent::kNone:
+                break;
         }
         for (uint8_t instance = 0;
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {

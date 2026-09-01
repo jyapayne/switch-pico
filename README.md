@@ -63,10 +63,14 @@ Pairing order determines the initial USB slot assignment. Up to four controllers
 
 While a slot is free, the Pico continuously runs Bluepad32's normal Bluetooth discovery and autoconnect path. Pairing keys persist across Pico power cycles, so reconnect a previously paired controller by pressing its normal Home, PS, or Xbox power button; BOOTSEL is not required. Outside the BOOTSEL window, BTstack remains non-bondable, rejects new Classic SSP or legacy PIN authentication, and disables every BLE STK generation method. A controller in explicit pairing mode therefore cannot create a new Classic or BLE bond while the window is closed.
 
+To clear every stored Classic and BLE pairing without a PC, hold BOOTSEL continuously for 10 seconds. The normal pairing window opens after two seconds; continuing to hold until the LED changes to a rapid blink clears all bonds, disconnects active controllers, publishes neutral state to every slot, and closes new authentication. Release BOOTSEL, open a new pairing window, and pair controllers again.
+
+
 ### LED meanings and device state
 
 The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Double blink**: new controller authentication is enabled for the bounded pairing window.
+- **Rapid blink for two seconds**: all stored pairings were cleared.
 - **Fast blink**: a controller connection is still completing its handshake.
 - **Solid**: at least one controller is active.
 - **Slow blink**: no controller is active; Bluetooth discovery and autoconnect are running.
@@ -78,6 +82,18 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Reconnect a paired controller**: power it on normally with its Home, PS, or Xbox button.
 - **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
 - **Pairing window expires**: new authentication is disabled; discovery and remembered-controller autoconnect continue while a slot is free.
+- **Clear all pairings**: hold BOOTSEL continuously for 10 seconds, through the initial double blink, until the rapid confirmation blink starts. All controllers are disconnected and must be paired again.
+
+### Managing pairings from a PC
+
+Connect the Pico 2 W to the PC while the AIO firmware is running normally; do not enter the ROM BOOTSEL drive. The management command uses private vendor requests on USB endpoint 0, so it does not add an interface or depend on Linux `hidraw` nodes.
+
+```sh
+uv run switch-pico-pairings list
+uv run switch-pico-pairings clear --yes
+```
+
+`list` refreshes and prints stored Bluetooth Classic and BLE addresses. `clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and leaves autoconnect scanning active. The destructive command requires `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
 
 ### Per-controller ABXY layout
 
@@ -141,11 +157,11 @@ To reproduce the validation:
 2. **Verify Bluetooth pairing**: Hold BOOTSEL until the LED double-blinks, put a controller into explicit pairing mode, and confirm its player light settles.
 3. **Verify input on one controller**: Move sticks and press buttons; confirm only its assigned Switch slot changes.
 4. **Verify input on two controllers**: Move the second controller independently and confirm the first controller's slot is unaffected.
-5. **Verify the pairing gate**: Disconnect a controller and confirm it does not reconnect while locked. Open the BOOTSEL window, power it on, and confirm it can connect.
+5. **Verify the pairing gate**: Power-cycle the Pico and confirm a paired controller reconnects with its normal Home/PS/Xbox button without BOOTSEL. Put an unpaired controller into explicit pairing mode and confirm it remains blocked until the BOOTSEL window opens.
 6. **Verify rumble per slot**: Send rumble to interface 0 and confirm only the slot 0 controller vibrates. Send rumble to interface 1 and confirm only the slot 1 controller vibrates.
 7. **Verify motion**: Enable gyro/accel on both controllers. Rotate each controller independently and confirm that motion is per-slot (rotating controller 0 does not affect controller 1's IMU output).
 
-On the tested Linux host, all four HID interfaces enumerated, but `hid-nintendo` timed out (`-110`) while requesting controller information from the composite device and removed the transient hidraw nodes. This is an observed, undiagnosed composite interoperability limitation; its root cause has not been established. The timeout was not observed on the Switch, so successful `hid-nintendo` binding is not the release criterion for the four-interface AIO firmware.
+On the tested Linux host, all four HID interfaces enumerated, but `hid-nintendo` timed out (`-110`) while requesting controller information from the composite device and removed the transient hidraw nodes. This is an observed, undiagnosed composite interoperability limitation; its root cause has not been established. The timeout was not observed on the Switch, so successful `hid-nintendo` binding is not the release criterion for the four-interface AIO firmware. The pairing CLI uses vendor control transfers on endpoint 0 and does not depend on those hidraw nodes.
 
 Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry Pi's BTstack license.
 

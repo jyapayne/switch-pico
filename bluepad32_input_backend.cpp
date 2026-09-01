@@ -24,6 +24,7 @@ constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
 constexpr uint32_t kPairingWindowDurationMs = 60000;
+constexpr uint32_t kPairingResetFeedbackDurationMs = 2000;
 constexpr uint8_t kAllBlePairingMethods =
     SM_STK_GENERATION_METHOD_JUST_WORKS |
     SM_STK_GENERATION_METHOD_OOB |
@@ -125,6 +126,8 @@ BackendSlot g_slots[kSlotCount];
 uint32_t g_consumed_generation[kSlotCount]{};
 uint32_t g_last_snapshot_generation[kSlotCount]{};
 bool g_pairing_window_requested = false;
+bool g_clear_pairings_requested = false;
+bool g_pairing_snapshot_requested = false;
 bool g_initialized = false;
 bool g_started = false;
 
@@ -135,9 +138,11 @@ btstack_packet_callback_registration_t g_pairing_event_callback{};
 ConnectionPolicyState g_connection_policy_state =
     ConnectionPolicyState::Uninitialized;
 uint32_t g_pairing_window_deadline_ms = 0;
+uint32_t g_pairing_reset_feedback_deadline_ms = 0;
 uint16_t g_status_led_tick = 0;
 bool g_pairing_window_open = false;
 bool g_status_led_on = false;
+Bluepad32PairingSnapshot g_pairing_snapshot{};
 
 SwitchInputState make_neutral_state() {
     SwitchInputState state{};
@@ -507,6 +512,113 @@ bool update_pairing_window(uint32_t now_ms) {
     }
     return false;
 }
+void append_pairing_record(
+    Bluepad32PairingSnapshot& snapshot,
+    Bluepad32PairingTransport transport, uint8_t address_type,
+    const bd_addr_t address) {
+    if (snapshot.record_count >= BLUEPAD32_PAIRING_RECORD_CAPACITY) {
+        snapshot.overflow = true;
+        return;
+    }
+    Bluepad32PairingRecord& record =
+        snapshot.records[snapshot.record_count++];
+    record.transport = transport;
+    record.address_type = address_type;
+    memcpy(record.address, address, sizeof(record.address));
+}
+
+void refresh_pairing_snapshot() {
+    Bluepad32PairingSnapshot snapshot{};
+    snapshot.status = Bluepad32PairingSnapshotStatus::kReady;
+
+    btstack_link_key_iterator_t iterator{};
+    if (gap_link_key_iterator_init(&iterator)) {
+        bd_addr_t address{};
+        link_key_t link_key{};
+        link_key_type_t link_key_type{};
+        while (gap_link_key_iterator_get_next(
+            &iterator, address, link_key, &link_key_type)) {
+            append_pairing_record(
+                snapshot, Bluepad32PairingTransport::kClassic,
+                BD_ADDR_TYPE_UNKNOWN, address);
+        }
+        gap_link_key_iterator_done(&iterator);
+    }
+
+    for (int index = 0; index < le_device_db_max_count(); ++index) {
+        int address_type = BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t address{};
+        le_device_db_info(index, &address_type, address, nullptr);
+        if (address_type == BD_ADDR_TYPE_UNKNOWN) {
+            continue;
+        }
+        append_pairing_record(
+            snapshot, Bluepad32PairingTransport::kBle,
+            static_cast<uint8_t>(address_type), address);
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    snapshot.generation = g_pairing_snapshot.generation + 1;
+    g_pairing_snapshot = snapshot;
+    g_pairing_snapshot_requested = false;
+    critical_section_exit(&g_state_lock);
+}
+
+void process_pairing_snapshot_request() {
+    critical_section_enter_blocking(&g_state_lock);
+    const bool requested = g_pairing_snapshot_requested;
+    critical_section_exit(&g_state_lock);
+    if (requested) {
+        refresh_pairing_snapshot();
+    }
+}
+
+void apply_connection_policy();
+
+void process_clear_pairings(uint32_t now_ms) {
+    uni_hid_device_t* devices[kSlotCount]{};
+    critical_section_enter_blocking(&g_state_lock);
+    const bool requested = g_clear_pairings_requested;
+    g_clear_pairings_requested = false;
+    if (requested) {
+        g_pairing_window_requested = false;
+        for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
+            BackendSlot& slot = g_slots[slot_index];
+            devices[slot_index] = slot.device;
+            slot.state = make_neutral_state();
+            slot.device = nullptr;
+            slot.active = false;
+            slot.rumble_pending = false;
+            slot.feedback_pending = false;
+            slot.feedback_until_ms = 0;
+            reset_slot_hotkeys(slot);
+            ++slot.state_generation;
+            ++slot.connection_generation;
+        }
+    }
+    critical_section_exit(&g_state_lock);
+    if (!requested) {
+        return;
+    }
+
+    g_pairing_window_open = false;
+    gap_set_bondable_mode(false);
+    sm_set_accepted_stk_generation_methods(0);
+    uni_bt_del_keys_unsafe();
+    for (uni_hid_device_t* device : devices) {
+        if (device != nullptr) {
+            uni_hid_device_disconnect(device);
+        }
+    }
+    refresh_pairing_snapshot();
+
+    g_connection_status = ConnectionStatus::Scanning;
+    g_status_led_tick = 0;
+    g_pairing_reset_feedback_deadline_ms =
+        now_ms + kPairingResetFeedbackDurationMs;
+    apply_connection_policy();
+}
+
 
 void apply_connection_policy() {
     const bool free_slot = has_free_slot();
@@ -534,9 +646,13 @@ void apply_connection_policy() {
 
 void update_status_led() {
     ++g_status_led_tick;
+    const uint32_t now_ms = btstack_run_loop_get_time_ms();
     bool led_on = false;
 
-    if (pairing_window_active_at(btstack_run_loop_get_time_ms())) {
+    if (static_cast<int32_t>(
+            now_ms - g_pairing_reset_feedback_deadline_ms) < 0) {
+        led_on = (g_status_led_tick % 20) < 10;
+    } else if (pairing_window_active_at(now_ms)) {
         const uint16_t phase = g_status_led_tick % 200;
         led_on = phase < 20 || (phase >= 40 && phase < 60);
     } else if (g_connection_status == ConnectionStatus::Connecting) {
@@ -556,6 +672,8 @@ void update_status_led() {
 
 void process_rumble_timer(btstack_timer_source_t* timer) {
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    process_clear_pairings(now_ms);
+    process_pairing_snapshot_request();
     update_pairing_window(now_ms);
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
@@ -636,6 +754,7 @@ void platform_on_init_complete() {
     gap_ssp_set_auto_accept(false);
     g_pairing_event_callback.callback = handle_pairing_hci_event;
     hci_add_event_handler(&g_pairing_event_callback);
+    refresh_pairing_snapshot();
     // Keep Bluepad32 autoconnect active whenever at least one slot is free.
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);
@@ -850,9 +969,15 @@ void bluepad32_input_backend_init() {
         g_last_snapshot_generation[slot_index] = 0;
     }
     g_pairing_window_requested = false;
+    g_pairing_snapshot_requested = false;
+    g_pairing_snapshot = {};
+    g_pairing_snapshot.status =
+        Bluepad32PairingSnapshotStatus::kPending;
+    g_clear_pairings_requested = false;
     g_connection_status = ConnectionStatus::Initializing;
     g_connection_policy_state = ConnectionPolicyState::Uninitialized;
     g_pairing_window_deadline_ms = 0;
+    g_pairing_reset_feedback_deadline_ms = 0;
     g_pairing_window_open = false;
     g_initialized = true;
 }
@@ -885,6 +1010,44 @@ void bluepad32_input_backend_open_pairing_window() {
     g_pairing_window_requested = true;
     critical_section_exit(&g_state_lock);
 }
+void bluepad32_input_backend_clear_pairings() {
+    if (!g_initialized) {
+        bluepad32_input_backend_init();
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    g_clear_pairings_requested = true;
+    g_pairing_snapshot.status =
+        Bluepad32PairingSnapshotStatus::kPending;
+    critical_section_exit(&g_state_lock);
+}
+
+void bluepad32_input_backend_request_pairing_snapshot() {
+    if (!g_initialized) {
+        bluepad32_input_backend_init();
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    g_pairing_snapshot_requested = true;
+    g_pairing_snapshot.status =
+        Bluepad32PairingSnapshotStatus::kPending;
+    critical_section_exit(&g_state_lock);
+}
+
+void bluepad32_input_backend_pairing_snapshot(
+    Bluepad32PairingSnapshot* out) {
+    if (out == nullptr) {
+        return;
+    }
+    if (!g_initialized) {
+        bluepad32_input_backend_init();
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    *out = g_pairing_snapshot;
+    critical_section_exit(&g_state_lock);
+}
+
 
 bool bluepad32_input_backend_snapshot(uint8_t slot_index, SwitchInputState* out) {
     if (out == nullptr || !valid_slot(slot_index)) {

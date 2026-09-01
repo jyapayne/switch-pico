@@ -93,6 +93,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE
             bluepad32_input_backend.cpp
             bootsel_pairing_button.cpp
+            usb_pairing_management.cpp
     )
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
