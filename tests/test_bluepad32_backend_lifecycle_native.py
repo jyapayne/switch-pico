@@ -38,6 +38,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         "pairing-policy",
         "slot-lighting",
         "abxy-hotkey",
+        "motion-hotkey",
         "flash-core-start",
         "flash-core-failure",
     ):

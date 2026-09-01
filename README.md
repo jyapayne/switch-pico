@@ -91,6 +91,18 @@ Each connected AIO controller can toggle its own ABXY layout by pressing **L + R
 
 Edit `controller_hotkey_config.h` to change the chord, default layout, or confirmation pulse.
 
+### Per-controller motion toggle
+
+Press **D-pad Up + R + Start** together to disable or re-enable motion for one controller. On DualSense, use **D-pad Up + R1 + Options**.
+
+- A longer rumble confirms motion disabled.
+- A shorter rumble confirms motion enabled.
+- The chord is consumed locally and is not forwarded to the Switch.
+- Other controller slots are unaffected.
+- Motion returns to enabled after disconnect or reboot.
+
+Edit `controller_hotkey_config.h` to change the chord, default state, or feedback patterns.
+
 ### Per-slot controller colors
 
 Each AIO slot has one color shared by its emulated Switch Pro grips and its physical Bluetooth controller:

@@ -39,11 +39,12 @@ void require(bool condition, const char* message) {
     }
 }
 
-void play_rumble(uni_hid_device_t* device, uint16_t, uint16_t,
-                 uint8_t high, uint8_t low) {
+void play_rumble(uni_hid_device_t* device, uint16_t,
+                 uint16_t duration_ms, uint8_t high, uint8_t low) {
     ++device->rumble_calls;
     device->last_high = high;
     device->last_low = low;
+    device->last_rumble_duration_ms = duration_ms;
 }
 void set_lightbar(uni_hid_device_t* device, uint8_t red, uint8_t green,
                   uint8_t blue) {
@@ -793,9 +794,94 @@ void test_abxy_hotkey() {
     uni_hid_device_t replacement = device(0);
     require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS &&
                 g_slots[0].swap_abxy == kDefaultSwapAbxy &&
-                !g_slots[0].hotkey_latched &&
+                !g_slots[0].abxy_hotkey_latched &&
                 !g_slots[0].feedback_pending,
             "disconnect did not reset slot 0 hotkey state");
+}
+
+void test_motion_hotkey() {
+    start_pairing_backend();
+    uni_hid_device_t slot_zero = device(0);
+    uni_hid_device_t slot_one = device(1);
+    require(platform_on_device_ready(&slot_zero) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&slot_one) == UNI_ERROR_SUCCESS,
+            "motion hotkey test controllers did not become ready");
+
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    input.gamepad.accel[0] = 8192;
+    platform_on_controller_data(&slot_zero, &input);
+    SwitchInputState snapshot{};
+    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+                snapshot.imu_sample_count ==
+                    (kDefaultMotionEnabled ? 3 : 0),
+            "slot 0 did not start with configured motion state");
+
+    input.gamepad.dpad = kMotionHotkeyDpadMask;
+    input.gamepad.buttons = kMotionHotkeyButtonMask;
+    input.gamepad.misc_buttons = kMotionHotkeyMiscMask;
+    platform_on_controller_data(&slot_zero, &input);
+    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+                snapshot.imu_sample_count ==
+                    (kDefaultMotionEnabled ? 0 : 3) &&
+                !snapshot.dpad_up && !snapshot.button_r &&
+                !snapshot.button_plus,
+            "motion chord did not toggle motion or suppress its inputs");
+
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_zero.rumble_calls == 1 &&
+                slot_zero.last_rumble_duration_ms ==
+                    (kDefaultMotionEnabled
+                         ? kMotionDisabledFeedbackDurationMs
+                         : kMotionEnabledFeedbackDurationMs) &&
+                slot_zero.last_high ==
+                    (kDefaultMotionEnabled
+                         ? kMotionDisabledFeedbackWeakMagnitude
+                         : kMotionEnabledFeedbackWeakMagnitude) &&
+                slot_zero.last_low ==
+                    (kDefaultMotionEnabled
+                         ? kMotionDisabledFeedbackStrongMagnitude
+                         : kMotionEnabledFeedbackStrongMagnitude),
+            "motion toggle did not send distinct state feedback");
+
+    platform_on_controller_data(&slot_zero, &input);
+    process_rumble_timer(&g_rumble_timer);
+    require(g_slots[0].motion_enabled == !kDefaultMotionEnabled &&
+                slot_zero.rumble_calls == 1,
+            "held motion chord toggled or rumbled more than once");
+
+    uni_controller_t peer_input{};
+    peer_input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    peer_input.gamepad.accel[0] = 8192;
+    platform_on_controller_data(&slot_one, &peer_input);
+    require(bluepad32_input_backend_snapshot(1, &snapshot) &&
+                snapshot.imu_sample_count ==
+                    (kDefaultMotionEnabled ? 3 : 0),
+            "slot 0 motion chord changed slot 1 motion state");
+
+    input.gamepad = {};
+    platform_on_controller_data(&slot_zero, &input);
+    input.gamepad.accel[0] = 8192;
+    input.gamepad.dpad = kMotionHotkeyDpadMask;
+    input.gamepad.buttons = kMotionHotkeyButtonMask;
+    input.gamepad.misc_buttons = kMotionHotkeyMiscMask;
+    platform_on_controller_data(&slot_zero, &input);
+    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+                snapshot.imu_sample_count ==
+                    (kDefaultMotionEnabled ? 3 : 0),
+            "released motion chord did not re-arm or restore motion");
+    process_rumble_timer(&g_rumble_timer);
+    require(g_slots[0].motion_enabled == kDefaultMotionEnabled &&
+                slot_zero.rumble_calls == 2,
+            "second motion chord did not restore configured state");
+
+    platform_on_device_disconnected(&slot_zero);
+    uni_hid_device_t replacement = device(0);
+    require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS &&
+                g_slots[0].motion_enabled == kDefaultMotionEnabled &&
+                !g_slots[0].motion_hotkey_latched &&
+                !g_slots[0].feedback_pending,
+            "disconnect did not reset slot 0 motion hotkey state");
 }
 
 void test_flash_core_start_contract() {
@@ -851,6 +937,8 @@ int main(int argc, char** argv) {
         test_slot_lighting();
     } else if (scenario == "abxy-hotkey") {
         test_abxy_hotkey();
+    } else if (scenario == "motion-hotkey") {
+        test_motion_hotkey();
     } else if (scenario == "flash-core-start") {
         test_flash_core_start_contract();
     } else if (scenario == "flash-core-failure") {

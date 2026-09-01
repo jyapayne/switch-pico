@@ -112,6 +112,7 @@ struct uni_hid_device_t {
     int rumble_calls;
     uint8_t last_high;
     uint8_t last_low;
+    uint16_t last_rumble_duration_ms;
     int lightbar_calls;
     uint8_t lightbar_red;
     uint8_t lightbar_green;

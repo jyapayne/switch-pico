@@ -34,10 +34,35 @@ constexpr uint8_t kAbxyFeedbackWeakMagnitude =
     SWITCH_ABXY_FEEDBACK_WEAK_MAGNITUDE;
 constexpr uint8_t kAbxyFeedbackStrongMagnitude =
     SWITCH_ABXY_FEEDBACK_STRONG_MAGNITUDE;
+constexpr uint32_t kMotionHotkeyDpadMask =
+    SWITCH_MOTION_HOTKEY_DPAD_MASK;
+constexpr uint32_t kMotionHotkeyButtonMask =
+    SWITCH_MOTION_HOTKEY_BUTTON_MASK;
+constexpr uint32_t kMotionHotkeyMiscMask =
+    SWITCH_MOTION_HOTKEY_MISC_MASK;
+constexpr bool kDefaultMotionEnabled =
+    SWITCH_MOTION_DEFAULT_ENABLED != 0;
+constexpr uint16_t kMotionDisabledFeedbackDurationMs =
+    SWITCH_MOTION_DISABLED_FEEDBACK_DURATION_MS;
+constexpr uint8_t kMotionDisabledFeedbackWeakMagnitude =
+    SWITCH_MOTION_DISABLED_FEEDBACK_WEAK_MAGNITUDE;
+constexpr uint8_t kMotionDisabledFeedbackStrongMagnitude =
+    SWITCH_MOTION_DISABLED_FEEDBACK_STRONG_MAGNITUDE;
+constexpr uint16_t kMotionEnabledFeedbackDurationMs =
+    SWITCH_MOTION_ENABLED_FEEDBACK_DURATION_MS;
+constexpr uint8_t kMotionEnabledFeedbackWeakMagnitude =
+    SWITCH_MOTION_ENABLED_FEEDBACK_WEAK_MAGNITUDE;
+constexpr uint8_t kMotionEnabledFeedbackStrongMagnitude =
+    SWITCH_MOTION_ENABLED_FEEDBACK_STRONG_MAGNITUDE;
 
 static_assert(kAbxyHotkeyButtonMask != 0);
 static_assert(kAbxyHotkeyMiscMask != 0);
 static_assert(kAbxyFeedbackDurationMs > 0);
+static_assert(kMotionHotkeyDpadMask != 0);
+static_assert(kMotionHotkeyButtonMask != 0);
+static_assert(kMotionHotkeyMiscMask != 0);
+static_assert(kMotionDisabledFeedbackDurationMs > 0);
+static_assert(kMotionEnabledFeedbackDurationMs > 0);
 
 static_assert(kSlotCount == 4);
 static_assert(SWITCH_PICO_HID_INSTANCE_COUNT == kSlotCount);
@@ -62,6 +87,13 @@ struct RumbleEnvelope {
     uint32_t connection_generation;
     SwitchRumbleOutput rumble;
 };
+struct FeedbackEnvelope {
+    uint32_t connection_generation;
+    uint16_t duration_ms;
+    uint8_t weak_magnitude;
+    uint8_t strong_magnitude;
+};
+
 
 struct BackendSlot {
     SwitchInputState state;
@@ -72,11 +104,13 @@ struct BackendSlot {
     bool active;
     bool rumble_pending;
     bool swap_abxy;
-    bool hotkey_latched;
+    bool abxy_hotkey_latched;
+    bool motion_enabled;
+    bool motion_hotkey_latched;
     bool feedback_pending;
-    uint32_t feedback_generation;
     uint32_t feedback_until_ms;
     RumbleEnvelope pending_rumble;
+    FeedbackEnvelope pending_feedback;
 };
 
 critical_section_t g_state_lock;
@@ -229,7 +263,8 @@ constexpr int16_t clamp_int16(int64_t value) {
     return static_cast<int16_t>(value);
 }
 
-constexpr int64_t divide_round_nearest(int64_t numerator, int64_t denominator) {
+constexpr int64_t divide_round_nearest(int64_t numerator,
+                                       int64_t denominator) {
     if (numerator >= 0) {
         return (numerator + denominator / 2) / denominator;
     }
@@ -264,7 +299,8 @@ bool has_motion(const uni_gamepad_t& gamepad) {
 }
 
 SwitchInputState map_gamepad(const uni_gamepad_t& gamepad,
-                              bool swap_abxy) {
+                              bool swap_abxy,
+                              bool motion_enabled) {
     SwitchInputState state = make_neutral_state();
 
     state.dpad_up = (gamepad.dpad & DPAD_UP) != 0;
@@ -302,7 +338,7 @@ SwitchInputState map_gamepad(const uni_gamepad_t& gamepad,
     state.rx = scale_stick(gamepad.axis_rx);
     state.ry = scale_stick(gamepad.axis_ry);
 
-    if (has_motion(gamepad)) {
+    if (motion_enabled && has_motion(gamepad)) {
         // Dependency patches normalize both arrays to SDL3 PlayStation axes.
         SwitchImuSample sample{};
         sample.accel_x = convert_accel(-static_cast<int64_t>(gamepad.accel[2]));
@@ -319,31 +355,87 @@ SwitchInputState map_gamepad(const uni_gamepad_t& gamepad,
 
     return state;
 }
-struct LayoutDecision {
+struct HotkeyDecision {
     bool swap_abxy;
-    bool suppress_hotkey;
+    bool motion_enabled;
+    uint32_t suppress_dpad;
+    uint32_t suppress_buttons;
+    uint32_t suppress_misc_buttons;
 };
 
-LayoutDecision update_layout_hotkey(uint8_t slot_index,
-                                    uni_hid_device_t* device,
-                                    const uni_gamepad_t& gamepad) {
-    const bool chord_pressed =
+void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
+                          uint8_t weak_magnitude,
+                          uint8_t strong_magnitude) {
+    slot.feedback_pending = true;
+    slot.pending_feedback = {
+        slot.connection_generation, duration_ms, weak_magnitude,
+        strong_magnitude};
+}
+void reset_slot_hotkeys(BackendSlot& slot) {
+    slot.swap_abxy = kDefaultSwapAbxy;
+    slot.abxy_hotkey_latched = false;
+    slot.motion_enabled = kDefaultMotionEnabled;
+    slot.motion_hotkey_latched = false;
+    slot.feedback_pending = false;
+    slot.feedback_until_ms = 0;
+    slot.pending_feedback = {};
+}
+
+
+HotkeyDecision update_controller_hotkeys(
+    uint8_t slot_index, uni_hid_device_t* device,
+    const uni_gamepad_t& gamepad) {
+    const bool abxy_pressed =
         (gamepad.buttons & kAbxyHotkeyButtonMask) ==
             kAbxyHotkeyButtonMask &&
         (gamepad.misc_buttons & kAbxyHotkeyMiscMask) ==
             kAbxyHotkeyMiscMask;
-    LayoutDecision decision{kDefaultSwapAbxy, false};
+    const bool motion_pressed =
+        (gamepad.dpad & kMotionHotkeyDpadMask) ==
+            kMotionHotkeyDpadMask &&
+        (gamepad.buttons & kMotionHotkeyButtonMask) ==
+            kMotionHotkeyButtonMask &&
+        (gamepad.misc_buttons & kMotionHotkeyMiscMask) ==
+            kMotionHotkeyMiscMask;
+    HotkeyDecision decision{
+        kDefaultSwapAbxy, kDefaultMotionEnabled, 0, 0, 0};
 
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device == device) {
-        if (chord_pressed && !slot.hotkey_latched) {
+        if (abxy_pressed && !slot.abxy_hotkey_latched) {
             slot.swap_abxy = !slot.swap_abxy;
-            slot.feedback_pending = true;
-            slot.feedback_generation = slot.connection_generation;
+            queue_local_feedback(
+                slot, static_cast<uint16_t>(kAbxyFeedbackDurationMs),
+                kAbxyFeedbackWeakMagnitude,
+                kAbxyFeedbackStrongMagnitude);
+        } else if (motion_pressed && !slot.motion_hotkey_latched) {
+            slot.motion_enabled = !slot.motion_enabled;
+            if (slot.motion_enabled) {
+                queue_local_feedback(
+                    slot, kMotionEnabledFeedbackDurationMs,
+                    kMotionEnabledFeedbackWeakMagnitude,
+                    kMotionEnabledFeedbackStrongMagnitude);
+            } else {
+                queue_local_feedback(
+                    slot, kMotionDisabledFeedbackDurationMs,
+                    kMotionDisabledFeedbackWeakMagnitude,
+                    kMotionDisabledFeedbackStrongMagnitude);
+            }
         }
-        slot.hotkey_latched = chord_pressed;
-        decision = {slot.swap_abxy, chord_pressed};
+        slot.abxy_hotkey_latched = abxy_pressed;
+        slot.motion_hotkey_latched = motion_pressed;
+        decision.swap_abxy = slot.swap_abxy;
+        decision.motion_enabled = slot.motion_enabled;
+        if (abxy_pressed) {
+            decision.suppress_buttons |= kAbxyHotkeyButtonMask;
+            decision.suppress_misc_buttons |= kAbxyHotkeyMiscMask;
+        }
+        if (motion_pressed) {
+            decision.suppress_dpad |= kMotionHotkeyDpadMask;
+            decision.suppress_buttons |= kMotionHotkeyButtonMask;
+            decision.suppress_misc_buttons |= kMotionHotkeyMiscMask;
+        }
     }
     critical_section_exit(&g_state_lock);
     return decision;
@@ -437,6 +529,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         RumbleEnvelope envelope{};
+        FeedbackEnvelope feedback{};
         uni_hid_device_t* device = nullptr;
         bool feedback_dispatch = false;
         bool host_dispatch = false;
@@ -444,15 +537,17 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         critical_section_enter_blocking(&g_state_lock);
         BackendSlot& slot = g_slots[slot_index];
         if (slot.feedback_pending) {
+            feedback = slot.pending_feedback;
             feedback_dispatch =
                 slot.active && slot.device != nullptr &&
-                slot.feedback_generation == slot.connection_generation &&
+                feedback.connection_generation ==
+                    slot.connection_generation &&
                 slot.device->report_parser.play_dual_rumble != nullptr;
             slot.feedback_pending = false;
             if (feedback_dispatch) {
                 device = slot.device;
                 slot.feedback_until_ms =
-                    now_ms + kAbxyFeedbackDurationMs;
+                    now_ms + feedback.duration_ms;
             }
         }
 
@@ -475,9 +570,8 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 
         if (feedback_dispatch) {
             device->report_parser.play_dual_rumble(
-                device, 0, kAbxyFeedbackDurationMs,
-                kAbxyFeedbackWeakMagnitude,
-                kAbxyFeedbackStrongMagnitude);
+                device, 0, feedback.duration_ms,
+                feedback.weak_magnitude, feedback.strong_magnitude);
         } else if (host_dispatch &&
                    device->report_parser.play_dual_rumble != nullptr) {
             device->report_parser.play_dual_rumble(
@@ -546,10 +640,7 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     if (!slot.active && slot.device == nullptr) {
         slot.device = device;
         slot.rumble_pending = false;
-        slot.swap_abxy = kDefaultSwapAbxy;
-        slot.hotkey_latched = false;
-        slot.feedback_pending = false;
-        slot.feedback_until_ms = 0;
+        reset_slot_hotkeys(slot);
         tracked_connection = true;
     } else {
         tracked_connection = slot.device == device;
@@ -578,10 +669,7 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
         slot.device = nullptr;
         slot.active = false;
         slot.rumble_pending = false;
-        slot.swap_abxy = kDefaultSwapAbxy;
-        slot.hotkey_latched = false;
-        slot.feedback_pending = false;
-        slot.feedback_until_ms = 0;
+        reset_slot_hotkeys(slot);
         ++slot.connection_generation;
         disconnected_tracked_device = true;
     }
@@ -613,10 +701,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
             slot.state = make_neutral_state();
             slot.active = true;
             slot.rumble_pending = false;
-            slot.swap_abxy = kDefaultSwapAbxy;
-            slot.hotkey_latched = false;
-            slot.feedback_pending = false;
-            slot.feedback_until_ms = 0;
+            reset_slot_hotkeys(slot);
             ++slot.state_generation;
             became_active = true;
         }
@@ -644,14 +729,15 @@ void platform_on_controller_data(uni_hid_device_t* device,
     }
 
     uni_gamepad_t gamepad = controller->gamepad;
-    const LayoutDecision layout = update_layout_hotkey(
+    const HotkeyDecision hotkeys = update_controller_hotkeys(
         static_cast<uint8_t>(slot_index), device, gamepad);
-    if (layout.suppress_hotkey) {
-        gamepad.buttons &= ~kAbxyHotkeyButtonMask;
-        gamepad.misc_buttons &= ~kAbxyHotkeyMiscMask;
-    }
-    publish_device_state(static_cast<uint8_t>(slot_index), device,
-                         map_gamepad(gamepad, layout.swap_abxy));
+    gamepad.dpad &= ~hotkeys.suppress_dpad;
+    gamepad.buttons &= ~hotkeys.suppress_buttons;
+    gamepad.misc_buttons &= ~hotkeys.suppress_misc_buttons;
+    publish_device_state(
+        static_cast<uint8_t>(slot_index), device,
+        map_gamepad(gamepad, hotkeys.swap_abxy,
+                    hotkeys.motion_enabled));
 }
 
 const uni_property_t* platform_get_property(uni_property_idx_t index) {
@@ -724,7 +810,7 @@ void bluepad32_input_backend_init() {
         slot = {};
         slot.state = make_neutral_state();
         slot.pending_rumble.slot = slot_index;
-        slot.swap_abxy = kDefaultSwapAbxy;
+        reset_slot_hotkeys(slot);
         g_consumed_generation[slot_index] = 0;
         g_last_snapshot_generation[slot_index] = 0;
     }
