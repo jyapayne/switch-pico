@@ -24,6 +24,11 @@ constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
 constexpr uint32_t kPairingWindowDurationMs = 60000;
+constexpr uint8_t kAllBlePairingMethods =
+    SM_STK_GENERATION_METHOD_JUST_WORKS |
+    SM_STK_GENERATION_METHOD_OOB |
+    SM_STK_GENERATION_METHOD_PASSKEY |
+    SM_STK_GENERATION_METHOD_NUMERIC_COMPARISON;
 constexpr uint32_t kAbxyHotkeyButtonMask =
     SWITCH_ABXY_HOTKEY_BUTTON_MASK;
 constexpr uint32_t kAbxyHotkeyMiscMask = SWITCH_ABXY_HOTKEY_MISC_MASK;
@@ -126,6 +131,7 @@ bool g_started = false;
 // These fields are only read or written by Core 1 / BTstack.
 btstack_timer_source_t g_rumble_timer{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
+btstack_packet_callback_registration_t g_pairing_event_callback{};
 ConnectionPolicyState g_connection_policy_state =
     ConnectionPolicyState::Uninitialized;
 uint32_t g_pairing_window_deadline_ms = 0;
@@ -446,6 +452,38 @@ bool pairing_window_active_at(uint32_t now_ms) {
            static_cast<int32_t>(now_ms - g_pairing_window_deadline_ms) < 0;
 }
 
+void handle_pairing_hci_event(uint8_t packet_type, uint16_t channel,
+                              uint8_t* packet, uint16_t size) {
+    (void)channel;
+    if (packet_type != HCI_EVENT_PACKET || packet == nullptr || size < 8) {
+        return;
+    }
+
+    bd_addr_t address{};
+    const bool pairing_open =
+        pairing_window_active_at(btstack_run_loop_get_time_ms());
+    switch (hci_event_packet_get_type(packet)) {
+        case HCI_EVENT_USER_CONFIRMATION_REQUEST:
+            hci_event_user_confirmation_request_get_bd_addr(packet, address);
+            if (pairing_open) {
+                gap_ssp_confirmation_response(address);
+            } else {
+                gap_ssp_confirmation_negative(address);
+            }
+            break;
+        case HCI_EVENT_USER_PASSKEY_REQUEST:
+            hci_event_user_passkey_request_get_bd_addr(packet, address);
+            if (pairing_open) {
+                gap_ssp_passkey_response(address, 0);
+            } else {
+                gap_ssp_passkey_negative(address);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
 bool update_pairing_window(uint32_t now_ms) {
     critical_section_enter_blocking(&g_state_lock);
     const bool requested = g_pairing_window_requested;
@@ -455,12 +493,16 @@ bool update_pairing_window(uint32_t now_ms) {
     if (requested) {
         g_pairing_window_open = true;
         g_pairing_window_deadline_ms = now_ms + kPairingWindowDurationMs;
+        gap_set_bondable_mode(true);
+        sm_set_accepted_stk_generation_methods(kAllBlePairingMethods);
         g_status_led_tick = 0;
         return true;
     }
     if (g_pairing_window_open && !pairing_window_active_at(now_ms)) {
         g_pairing_window_open = false;
+        sm_set_accepted_stk_generation_methods(0);
         g_status_led_tick = 0;
+        gap_set_bondable_mode(false);
         return true;
     }
     return false;
@@ -589,6 +631,11 @@ void platform_init(int argc, const char** argv) {
 }
 
 void platform_on_init_complete() {
+    gap_set_bondable_mode(false);
+    sm_set_accepted_stk_generation_methods(0);
+    gap_ssp_set_auto_accept(false);
+    g_pairing_event_callback.callback = handle_pairing_hci_event;
+    hci_add_event_handler(&g_pairing_event_callback);
     // Keep Bluepad32 autoconnect active whenever at least one slot is free.
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);

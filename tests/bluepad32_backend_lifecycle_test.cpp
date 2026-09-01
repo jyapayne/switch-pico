@@ -20,6 +20,14 @@ uni_platform* installed_platform = nullptr;
 bool observed_status_led_on = false;
 int observed_status_led_writes = 0;
 uint32_t now_ms = 0;
+bool bondable = true;
+bool ssp_auto_accept = true;
+uint8_t accepted_stk_methods = 0xff;
+btstack_packet_handler_t pairing_event_handler = nullptr;
+int confirmation_accepts = 0;
+int confirmation_rejections = 0;
+int passkey_accepts = 0;
+int passkey_rejections = 0;
 
 bool flash_core_init_result = true;
 int flash_core_init_calls = 0;
@@ -126,6 +134,63 @@ void uni_bt_stop_scanning_unsafe() {
     uni_bt_bredr_scan_stop();
     uni_bt_le_scan_stop();
 }
+void gap_set_bondable_mode(int enabled) {
+    bondable = enabled != 0;
+}
+
+void gap_ssp_set_auto_accept(int auto_accept) {
+    ssp_auto_accept = auto_accept != 0;
+}
+void sm_set_accepted_stk_generation_methods(uint8_t methods) {
+    accepted_stk_methods = methods;
+}
+
+
+int gap_ssp_confirmation_response(const bd_addr_t) {
+    ++confirmation_accepts;
+    return 0;
+}
+
+int gap_ssp_confirmation_negative(const bd_addr_t) {
+    ++confirmation_rejections;
+    return 0;
+}
+
+int gap_ssp_passkey_response(const bd_addr_t, uint32_t) {
+    ++passkey_accepts;
+    return 0;
+}
+
+int gap_ssp_passkey_negative(const bd_addr_t) {
+    ++passkey_rejections;
+    return 0;
+}
+
+void hci_add_event_handler(
+    btstack_packet_callback_registration_t* callback_handler) {
+    pairing_event_handler = callback_handler->callback;
+}
+
+uint8_t hci_event_packet_get_type(const uint8_t* packet) {
+    return packet[0];
+}
+
+void copy_event_address(const uint8_t* packet, bd_addr_t address) {
+    for (size_t index = 0; index < sizeof(bd_addr_t); ++index) {
+        address[index] = packet[7 - index];
+    }
+}
+
+void hci_event_user_confirmation_request_get_bd_addr(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_event_address(packet, address);
+}
+
+void hci_event_user_passkey_request_get_bd_addr(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_event_address(packet, address);
+}
+
 
 void uni_platform_set_custom(uni_platform* platform) {
     installed_platform = platform;
@@ -187,8 +252,10 @@ void start_backend() {
     bluepad32_input_backend_init();
     platform_on_init_complete();
     require(incoming_connections && scanning_enabled &&
-                classic_scanning_enabled && scan_starts == 1,
-            "initialization must start Bluepad32 autoconnect");
+                classic_scanning_enabled && scan_starts == 1 &&
+                !bondable && accepted_stk_methods == 0 &&
+                !ssp_auto_accept && pairing_event_handler != nullptr,
+            "initialization must scan while keeping new pairing disabled");
 }
 void start_pairing_backend() {
     start_backend();
@@ -199,6 +266,11 @@ void start_pairing_backend() {
                 incoming_connections,
             "test connection setup requires an open pairing window");
 }
+void dispatch_pairing_event(uint8_t event_type) {
+    uint8_t packet[8] = {event_type, 6, 1, 2, 3, 4, 5, 6};
+    pairing_event_handler(HCI_EVENT_PACKET, 0, packet, sizeof(packet));
+}
+
 
 
 
@@ -597,6 +669,12 @@ void test_pairing_window_policy() {
     require(platform_on_device_discovered(address, "controller", 0, 0) ==
                     UNI_ERROR_SUCCESS,
             "boot policy must accept a discovered controller");
+    dispatch_pairing_event(HCI_EVENT_USER_CONFIRMATION_REQUEST);
+    dispatch_pairing_event(HCI_EVENT_USER_PASSKEY_REQUEST);
+    require(confirmation_rejections == 1 && passkey_rejections == 1 &&
+                confirmation_accepts == 0 && passkey_accepts == 0,
+            "closed BOOTSEL window must reject new SSP authentication");
+
 
     uni_hid_device_t reconnecting = device(0);
     platform_on_device_connected(&reconnecting);
@@ -609,12 +687,17 @@ void test_pairing_window_policy() {
     require(!g_pairing_window_open,
             "Core0 request must wait for Core1 consumption");
     process_rumble_timer(&g_rumble_timer);
-    require(g_pairing_window_open &&
+    require(g_pairing_window_open && bondable &&
+                accepted_stk_methods == kAllBlePairingMethods &&
                 g_pairing_window_deadline_ms == 60000 &&
                 g_connection_policy_state == ConnectionPolicyState::Open &&
                 classic_scanning_enabled && scanning_enabled &&
                 incoming_connections,
-            "BOOTSEL must expose pairing indication without interrupting scan");
+            "BOOTSEL must enable Classic and BLE pairing without interrupting autoconnect");
+    dispatch_pairing_event(HCI_EVENT_USER_CONFIRMATION_REQUEST);
+    dispatch_pairing_event(HCI_EVENT_USER_PASSKEY_REQUEST);
+    require(confirmation_accepts == 1 && passkey_accepts == 1,
+            "open BOOTSEL window must accept new SSP authentication");
 
     tick_backend_timer(20);
     require(!observed_status_led_on,
@@ -645,9 +728,10 @@ void test_pairing_window_policy() {
 
     now_ms = 90000;
     process_rumble_timer(&g_rumble_timer);
-    require(!g_pairing_window_open &&
+    require(!g_pairing_window_open && !bondable &&
+                accepted_stk_methods == 0 &&
                 g_connection_policy_state == ConnectionPolicyState::Paused,
-            "pairing indication must expire while slots remain full");
+            "Classic and BLE pairing authentication must close at the deadline");
     platform_on_device_disconnected(&devices[3]);
     require(g_connection_policy_state == ConnectionPolicyState::Open &&
                 classic_scanning_enabled && scanning_enabled &&
