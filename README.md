@@ -79,6 +79,18 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
 - **Pairing window expires**: scanning and incoming connections stop; already connected controllers remain connected.
 
+### Per-controller ABXY layout
+
+Each connected AIO controller can toggle its own ABXY layout by pressing **L + R + Select + Start** together. On DualSense, use **L1 + R1 + Create + Options**. The controller gives one short rumble when the toggle is accepted; release the chord before toggling again.
+
+- **Standard**: south→B, east→A, west→Y, north→X.
+- **Swapped**: south→A, east→B, west→X, north→Y.
+- The chord is consumed locally and is not forwarded to the Switch.
+- Other controller slots are unaffected.
+- Layout returns to the configured default after disconnect or reboot.
+
+Edit `controller_hotkey_config.h` to change the chord, default layout, or confirmation pulse.
+
 ### Per-slot controller colors
 
 Each AIO slot has one color shared by its emulated Switch Pro grips and its physical Bluetooth controller:

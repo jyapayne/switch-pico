@@ -54,9 +54,9 @@ enum {
     BUTTON_TRIGGER_R = 1 << 7,
     BUTTON_THUMB_L = 1 << 8,
     BUTTON_THUMB_R = 1 << 9,
-    MISC_BUTTON_SELECT = 1 << 0,
-    MISC_BUTTON_START = 1 << 1,
-    MISC_BUTTON_SYSTEM = 1 << 2,
+    MISC_BUTTON_SYSTEM = 1 << 0,
+    MISC_BUTTON_SELECT = 1 << 1,
+    MISC_BUTTON_START = 1 << 2,
     MISC_BUTTON_CAPTURE = 1 << 3,
 };
 

@@ -702,6 +702,102 @@ void test_slot_lighting() {
             "controller without RGB support did not receive its slot LED");
 }
 
+void require_south_button_mapping(const SwitchInputState& state,
+                                  bool swapped,
+                                  const char* message) {
+    require(state.button_a == swapped && state.button_b == !swapped &&
+                !state.button_x && !state.button_y,
+            message);
+}
+
+void test_abxy_hotkey() {
+    start_pairing_backend();
+    uni_hid_device_t slot_zero = device(0);
+    uni_hid_device_t slot_one = device(1);
+    require(platform_on_device_ready(&slot_zero) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&slot_one) == UNI_ERROR_SUCCESS,
+            "ABXY test controllers did not become ready");
+
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    input.gamepad.buttons = BUTTON_A;
+    platform_on_controller_data(&slot_zero, &input);
+    SwitchInputState snapshot{};
+    require(bluepad32_input_backend_snapshot(0, &snapshot),
+            "slot 0 ABXY state was not published");
+    require_south_button_mapping(
+        snapshot, kDefaultSwapAbxy,
+        "slot 0 did not start in the configured ABXY layout");
+
+    input.gamepad.buttons =
+        kAbxyHotkeyButtonMask | BUTTON_A;
+    input.gamepad.misc_buttons = kAbxyHotkeyMiscMask;
+    platform_on_controller_data(&slot_zero, &input);
+    require(bluepad32_input_backend_snapshot(0, &snapshot),
+            "toggled slot 0 state was not published");
+    require_south_button_mapping(
+        snapshot, !kDefaultSwapAbxy,
+        "hotkey did not toggle slot 0 ABXY mapping");
+    require(!snapshot.button_l && !snapshot.button_r &&
+                !snapshot.button_minus && !snapshot.button_plus,
+            "hotkey chord leaked into the Switch report");
+
+    bluepad32_input_backend_queue_rumble(
+        0, SwitchRumbleOutput{0x11, 0x22});
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_zero.rumble_calls == 1 &&
+                slot_zero.last_high == kAbxyFeedbackWeakMagnitude &&
+                slot_zero.last_low == kAbxyFeedbackStrongMagnitude &&
+                g_slots[0].rumble_pending,
+            "ABXY confirmation did not take priority over host rumble");
+
+    platform_on_controller_data(&slot_zero, &input);
+    process_rumble_timer(&g_rumble_timer);
+    require(g_slots[0].swap_abxy == !kDefaultSwapAbxy &&
+                slot_zero.rumble_calls == 1,
+            "held hotkey toggled or rumbled more than once");
+
+    input.gamepad = {};
+    platform_on_controller_data(&slot_zero, &input);
+    input.gamepad.buttons = kAbxyHotkeyButtonMask | BUTTON_A;
+    input.gamepad.misc_buttons = kAbxyHotkeyMiscMask;
+    platform_on_controller_data(&slot_zero, &input);
+    process_rumble_timer(&g_rumble_timer);
+    require(g_slots[0].swap_abxy == kDefaultSwapAbxy &&
+                slot_zero.rumble_calls == 2,
+            "released hotkey did not re-arm for a second toggle");
+
+    now_ms = kAbxyFeedbackDurationMs - 1;
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_zero.rumble_calls == 2 && g_slots[0].rumble_pending,
+            "host rumble interrupted ABXY confirmation");
+    now_ms = kAbxyFeedbackDurationMs;
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_zero.rumble_calls == 3 &&
+                slot_zero.last_high == 0x22 &&
+                slot_zero.last_low == 0x11 &&
+                !g_slots[0].rumble_pending,
+            "deferred host rumble did not resume after confirmation");
+
+    uni_controller_t peer_input{};
+    peer_input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    peer_input.gamepad.buttons = BUTTON_A;
+    platform_on_controller_data(&slot_one, &peer_input);
+    require(bluepad32_input_backend_snapshot(1, &snapshot),
+            "slot 1 ABXY state was not published");
+    require_south_button_mapping(
+        snapshot, kDefaultSwapAbxy,
+        "slot 0 hotkey changed slot 1 layout");
+
+    platform_on_device_disconnected(&slot_zero);
+    uni_hid_device_t replacement = device(0);
+    require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS &&
+                g_slots[0].swap_abxy == kDefaultSwapAbxy &&
+                !g_slots[0].hotkey_latched &&
+                !g_slots[0].feedback_pending,
+            "disconnect did not reset slot 0 hotkey state");
+}
+
 void test_flash_core_start_contract() {
     bluepad32_input_backend_init();
     flash_core_init_result = false;
@@ -753,6 +849,8 @@ int main(int argc, char** argv) {
         test_pairing_window_policy();
     } else if (scenario == "slot-lighting") {
         test_slot_lighting();
+    } else if (scenario == "abxy-hotkey") {
+        test_abxy_hotkey();
     } else if (scenario == "flash-core-start") {
         test_flash_core_start_contract();
     } else if (scenario == "flash-core-failure") {

@@ -1,4 +1,5 @@
 #include "bluepad32_input_backend.h"
+#include "controller_hotkey_config.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -23,6 +24,20 @@ constexpr uint16_t kRumbleDurationMs = 50;
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
 constexpr uint32_t kPairingWindowDurationMs = 60000;
+constexpr uint32_t kAbxyHotkeyButtonMask =
+    SWITCH_ABXY_HOTKEY_BUTTON_MASK;
+constexpr uint32_t kAbxyHotkeyMiscMask = SWITCH_ABXY_HOTKEY_MISC_MASK;
+constexpr bool kDefaultSwapAbxy = SWITCH_ABXY_DEFAULT_SWAPPED != 0;
+constexpr uint32_t kAbxyFeedbackDurationMs =
+    SWITCH_ABXY_FEEDBACK_DURATION_MS;
+constexpr uint8_t kAbxyFeedbackWeakMagnitude =
+    SWITCH_ABXY_FEEDBACK_WEAK_MAGNITUDE;
+constexpr uint8_t kAbxyFeedbackStrongMagnitude =
+    SWITCH_ABXY_FEEDBACK_STRONG_MAGNITUDE;
+
+static_assert(kAbxyHotkeyButtonMask != 0);
+static_assert(kAbxyHotkeyMiscMask != 0);
+static_assert(kAbxyFeedbackDurationMs > 0);
 
 static_assert(kSlotCount == 4);
 static_assert(SWITCH_PICO_HID_INSTANCE_COUNT == kSlotCount);
@@ -56,6 +71,11 @@ struct BackendSlot {
     uint32_t connection_generation;
     bool active;
     bool rumble_pending;
+    bool swap_abxy;
+    bool hotkey_latched;
+    bool feedback_pending;
+    uint32_t feedback_generation;
+    uint32_t feedback_until_ms;
     RumbleEnvelope pending_rumble;
 };
 
@@ -243,7 +263,8 @@ bool has_motion(const uni_gamepad_t& gamepad) {
     return false;
 }
 
-SwitchInputState map_gamepad(const uni_gamepad_t& gamepad) {
+SwitchInputState map_gamepad(const uni_gamepad_t& gamepad,
+                              bool swap_abxy) {
     SwitchInputState state = make_neutral_state();
 
     state.dpad_up = (gamepad.dpad & DPAD_UP) != 0;
@@ -256,6 +277,14 @@ SwitchInputState map_gamepad(const uni_gamepad_t& gamepad) {
     state.button_a = (gamepad.buttons & BUTTON_B) != 0;
     state.button_y = (gamepad.buttons & BUTTON_X) != 0;
     state.button_x = (gamepad.buttons & BUTTON_Y) != 0;
+    if (swap_abxy) {
+        bool temporary = state.button_a;
+        state.button_a = state.button_b;
+        state.button_b = temporary;
+        temporary = state.button_x;
+        state.button_x = state.button_y;
+        state.button_y = temporary;
+    }
     state.button_l = (gamepad.buttons & BUTTON_SHOULDER_L) != 0;
     state.button_r = (gamepad.buttons & BUTTON_SHOULDER_R) != 0;
     state.button_zl = (gamepad.buttons & BUTTON_TRIGGER_L) != 0 || gamepad.brake >= kTriggerThreshold;
@@ -290,6 +319,36 @@ SwitchInputState map_gamepad(const uni_gamepad_t& gamepad) {
 
     return state;
 }
+struct LayoutDecision {
+    bool swap_abxy;
+    bool suppress_hotkey;
+};
+
+LayoutDecision update_layout_hotkey(uint8_t slot_index,
+                                    uni_hid_device_t* device,
+                                    const uni_gamepad_t& gamepad) {
+    const bool chord_pressed =
+        (gamepad.buttons & kAbxyHotkeyButtonMask) ==
+            kAbxyHotkeyButtonMask &&
+        (gamepad.misc_buttons & kAbxyHotkeyMiscMask) ==
+            kAbxyHotkeyMiscMask;
+    LayoutDecision decision{kDefaultSwapAbxy, false};
+
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (slot.active && slot.device == device) {
+        if (chord_pressed && !slot.hotkey_latched) {
+            slot.swap_abxy = !slot.swap_abxy;
+            slot.feedback_pending = true;
+            slot.feedback_generation = slot.connection_generation;
+        }
+        slot.hotkey_latched = chord_pressed;
+        decision = {slot.swap_abxy, chord_pressed};
+    }
+    critical_section_exit(&g_state_lock);
+    return decision;
+}
+
 
 bool pairing_window_active_at(uint32_t now_ms) {
     return g_pairing_window_open &&
@@ -379,25 +438,48 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         RumbleEnvelope envelope{};
         uni_hid_device_t* device = nullptr;
-        bool dispatch = false;
+        bool feedback_dispatch = false;
+        bool host_dispatch = false;
 
         critical_section_enter_blocking(&g_state_lock);
         BackendSlot& slot = g_slots[slot_index];
-        if (slot.rumble_pending) {
+        if (slot.feedback_pending) {
+            feedback_dispatch =
+                slot.active && slot.device != nullptr &&
+                slot.feedback_generation == slot.connection_generation &&
+                slot.device->report_parser.play_dual_rumble != nullptr;
+            slot.feedback_pending = false;
+            if (feedback_dispatch) {
+                device = slot.device;
+                slot.feedback_until_ms =
+                    now_ms + kAbxyFeedbackDurationMs;
+            }
+        }
+
+        const bool feedback_active =
+            static_cast<int32_t>(now_ms - slot.feedback_until_ms) < 0;
+        if (!feedback_dispatch && !feedback_active &&
+            slot.rumble_pending) {
             envelope = slot.pending_rumble;
             slot.rumble_pending = false;
-            dispatch = envelope.slot == slot_index && slot.active &&
-                       slot.device != nullptr &&
-                       envelope.connection_generation ==
-                           slot.connection_generation;
-            if (dispatch) {
+            host_dispatch =
+                envelope.slot == slot_index && slot.active &&
+                slot.device != nullptr &&
+                envelope.connection_generation ==
+                    slot.connection_generation;
+            if (host_dispatch) {
                 device = slot.device;
             }
         }
         critical_section_exit(&g_state_lock);
 
-        if (dispatch &&
-            device->report_parser.play_dual_rumble != nullptr) {
+        if (feedback_dispatch) {
+            device->report_parser.play_dual_rumble(
+                device, 0, kAbxyFeedbackDurationMs,
+                kAbxyFeedbackWeakMagnitude,
+                kAbxyFeedbackStrongMagnitude);
+        } else if (host_dispatch &&
+                   device->report_parser.play_dual_rumble != nullptr) {
             device->report_parser.play_dual_rumble(
                 device, 0, kRumbleDurationMs,
                 envelope.rumble.high_frequency_magnitude,
@@ -464,6 +546,10 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     if (!slot.active && slot.device == nullptr) {
         slot.device = device;
         slot.rumble_pending = false;
+        slot.swap_abxy = kDefaultSwapAbxy;
+        slot.hotkey_latched = false;
+        slot.feedback_pending = false;
+        slot.feedback_until_ms = 0;
         tracked_connection = true;
     } else {
         tracked_connection = slot.device == device;
@@ -492,6 +578,10 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
         slot.device = nullptr;
         slot.active = false;
         slot.rumble_pending = false;
+        slot.swap_abxy = kDefaultSwapAbxy;
+        slot.hotkey_latched = false;
+        slot.feedback_pending = false;
+        slot.feedback_until_ms = 0;
         ++slot.connection_generation;
         disconnected_tracked_device = true;
     }
@@ -523,6 +613,10 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
             slot.state = make_neutral_state();
             slot.active = true;
             slot.rumble_pending = false;
+            slot.swap_abxy = kDefaultSwapAbxy;
+            slot.hotkey_latched = false;
+            slot.feedback_pending = false;
+            slot.feedback_until_ms = 0;
             ++slot.state_generation;
             became_active = true;
         }
@@ -541,14 +635,23 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     return UNI_ERROR_SUCCESS;
 }
 
-void platform_on_controller_data(uni_hid_device_t* device, uni_controller_t* controller) {
+void platform_on_controller_data(uni_hid_device_t* device,
+                                 uni_controller_t* controller) {
     const int slot_index = slot_for_device(device);
     if (slot_index < 0 || controller == nullptr ||
         controller->klass != UNI_CONTROLLER_CLASS_GAMEPAD) {
         return;
     }
+
+    uni_gamepad_t gamepad = controller->gamepad;
+    const LayoutDecision layout = update_layout_hotkey(
+        static_cast<uint8_t>(slot_index), device, gamepad);
+    if (layout.suppress_hotkey) {
+        gamepad.buttons &= ~kAbxyHotkeyButtonMask;
+        gamepad.misc_buttons &= ~kAbxyHotkeyMiscMask;
+    }
     publish_device_state(static_cast<uint8_t>(slot_index), device,
-                         map_gamepad(controller->gamepad));
+                         map_gamepad(gamepad, layout.swap_abxy));
 }
 
 const uni_property_t* platform_get_property(uni_property_idx_t index) {
@@ -621,6 +724,7 @@ void bluepad32_input_backend_init() {
         slot = {};
         slot.state = make_neutral_state();
         slot.pending_rumble.slot = slot_index;
+        slot.swap_abxy = kDefaultSwapAbxy;
         g_consumed_generation[slot_index] = 0;
         g_last_snapshot_generation[slot_index] = 0;
     }
