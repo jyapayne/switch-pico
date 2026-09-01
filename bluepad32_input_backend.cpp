@@ -77,7 +77,6 @@ enum class ConnectionStatus {
 enum class ConnectionPolicyState {
     Uninitialized,
     Open,
-    Locked,
     Paused,
     FailedClosed,
 };
@@ -467,15 +466,12 @@ bool update_pairing_window(uint32_t now_ms) {
     return false;
 }
 
-void apply_connection_policy(uint32_t now_ms) {
+void apply_connection_policy() {
     const bool free_slot = has_free_slot();
-    const bool pairing_open = pairing_window_active_at(now_ms);
     if ((!free_slot &&
          g_connection_policy_state == ConnectionPolicyState::Paused) ||
-        (free_slot && pairing_open &&
-         g_connection_policy_state == ConnectionPolicyState::Open) ||
-        (free_slot && !pairing_open &&
-         g_connection_policy_state == ConnectionPolicyState::Locked)) {
+        (free_slot &&
+         g_connection_policy_state == ConnectionPolicyState::Open)) {
         return;
     }
 
@@ -487,13 +483,8 @@ void apply_connection_policy(uint32_t now_ms) {
         return;
     }
 
-    if (!pairing_open) {
-        g_connection_policy_state = ConnectionPolicyState::Locked;
-        return;
-    }
-
-    // Use Bluepad32's normal pairing/autoconnect path while the physical
-    // BOOTSEL gesture has explicitly opened the pairing window.
+    // Bluepad32's normal scan/autoconnect path handles both remembered
+    // controllers powering on and controllers in explicit pairing mode.
     uni_bt_allow_incoming_connections(true);
     uni_bt_start_scanning_and_autoconnect_unsafe();
     g_connection_policy_state = ConnectionPolicyState::Open;
@@ -523,9 +514,7 @@ void update_status_led() {
 
 void process_rumble_timer(btstack_timer_source_t* timer) {
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
-    if (update_pairing_window(now_ms)) {
-        apply_connection_policy(now_ms);
-    }
+    update_pairing_window(now_ms);
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         RumbleEnvelope envelope{};
@@ -591,7 +580,7 @@ void recompute_connection_status() {
     update_pairing_window(now_ms);
     g_connection_status = compute_connection_status();
     g_status_led_tick = 0;
-    apply_connection_policy(now_ms);
+    apply_connection_policy();
 }
 
 void platform_init(int argc, const char** argv) {
@@ -600,8 +589,7 @@ void platform_init(int argc, const char** argv) {
 }
 
 void platform_on_init_complete() {
-    // Discovery and incoming connections remain disabled until BOOTSEL opens
-    // the bounded pairing window.
+    // Keep Bluepad32 autoconnect active whenever at least one slot is free.
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(&g_rumble_timer);

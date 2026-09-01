@@ -50,18 +50,17 @@ Both `build.py --aio` and direct AIO CMake configuration apply `patches/bluepad3
 
 1. Flash and connect the Pico 2 W to the Switch.
 2. Enable `System Settings → Controllers and Sensors → Pro Controller Wired Communication`.
-3. Hold the Pico's BOOTSEL button for about two seconds, until the onboard LED starts double-blinking. This opens a 60-second pairing window.
-4. Put a controller into Bluetooth pairing mode:
+3. Put a controller into Bluetooth pairing mode:
    - DualSense: hold Create + PS.
    - DualShock 4: hold Share + PS.
    - Switch Pro: press its sync button.
    - Xbox Bluetooth controller: hold its pair button.
    - 8BitDo: use a Bluetooth mode supported by Bluepad32; use Switch/S mode when motion is required.
-5. Wait for the controller's player light to settle. Repeat step 4 for additional controllers while the window remains open. Holding BOOTSEL again extends the window by 60 seconds from that point.
+4. Wait for the controller's player light to settle. Repeat step 3 for additional controllers while slots remain free. Optionally hold BOOTSEL for about two seconds to show the 60-second double-blink pairing indication.
 
 Pairing order determines the initial USB slot assignment. Up to four controllers map 1:1 to the four emulated Switch Pro Controller interfaces.
 
-Outside the BOOTSEL-open window, Bluetooth discovery and incoming connections are disabled. The Pico does not scan for or reconnect disconnected controllers while locked. Pairing keys still persist, but reconnecting a previously paired controller also requires opening the BOOTSEL window before pressing its normal power button.
+While a slot is free, the Pico continuously runs Bluepad32's normal Bluetooth discovery and autoconnect path. Pairing keys persist across Pico power cycles, so reconnect a previously paired controller by pressing its normal Home, PS, or Xbox power button; BOOTSEL is not required. A controller placed into explicit Bluetooth pairing mode can also pair during this scan.
 
 ### LED meanings and device state
 
@@ -69,15 +68,15 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Double blink**: the bounded pairing window is open.
 - **Fast blink**: a controller connection is still completing its handshake.
 - **Solid**: at least one controller is active.
-- **Slow blink**: no controller is active and pairing is locked.
+- **Slow blink**: no controller is active; Bluetooth discovery and autoconnect are running.
 - **Solid immediately after boot that never transitions**: Bluepad32 initialization did not complete; check firmware flashing and UART logs.
 
 ### Managing controller disconnect and reconnect
 
 - **Disconnect a controller**: its slot immediately publishes neutral buttons, sticks, and motion. Other connected controllers are unaffected.
-- **Reconnect a paired controller**: hold BOOTSEL until the LED double-blinks, then power on the controller normally.
-- **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
-- **Pairing window expires**: scanning and incoming connections stop; already connected controllers remain connected.
+- **Reconnect a paired controller**: power it on normally with its Home, PS, or Xbox button.
+- **Pair a new controller**: put it into its explicit Bluetooth pairing mode while a slot is free. BOOTSEL is optional and only changes the LED to the bounded double-blink indication.
+- **Pairing indication expires**: the LED returns to its normal state; scanning continues while a slot is free.
 
 ### Per-controller ABXY layout
 

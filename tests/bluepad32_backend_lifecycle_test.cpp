@@ -186,10 +186,9 @@ namespace {
 void start_backend() {
     bluepad32_input_backend_init();
     platform_on_init_complete();
-    require(!incoming_connections,
-            "initialization must keep incoming connections closed");
-    require(scan_starts == 0,
-            "initialization must not scan before a BOOTSEL request");
+    require(incoming_connections && scanning_enabled &&
+                classic_scanning_enabled && scan_starts == 1,
+            "initialization must start Bluepad32 autoconnect");
 }
 void start_pairing_backend() {
     start_backend();
@@ -591,20 +590,20 @@ void test_pairing_window_policy() {
             "discovery must remain closed before backend initialization");
 
     start_backend();
-    require(g_connection_policy_state == ConnectionPolicyState::Locked &&
-                !classic_scanning_enabled && !scanning_enabled &&
-                !incoming_connections,
-            "boot must disable all discovery and incoming connections");
+    require(g_connection_policy_state == ConnectionPolicyState::Open &&
+                classic_scanning_enabled && scanning_enabled &&
+                incoming_connections,
+            "boot must allow normal Bluepad32 autoconnect");
     require(platform_on_device_discovered(address, "controller", 0, 0) ==
-                    UNI_ERROR_IGNORE_DEVICE,
-            "locked policy must reject every discovery");
+                    UNI_ERROR_SUCCESS,
+            "boot policy must accept a discovered controller");
 
-    uni_hid_device_t rejected = device(0);
-    platform_on_device_connected(&rejected);
-    require(device_disconnect_calls == 1 &&
-                last_disconnected_device == &rejected &&
-                g_slots[0].device == nullptr,
-            "locked policy must disconnect every incoming controller");
+    uni_hid_device_t reconnecting = device(0);
+    platform_on_device_connected(&reconnecting);
+    require(device_disconnect_calls == 0 &&
+                g_slots[0].device == &reconnecting,
+            "boot policy must retain a reconnecting controller");
+    platform_on_device_disconnected(&reconnecting);
 
     bluepad32_input_backend_open_pairing_window();
     require(!g_pairing_window_open,
@@ -615,17 +614,7 @@ void test_pairing_window_policy() {
                 g_connection_policy_state == ConnectionPolicyState::Open &&
                 classic_scanning_enabled && scanning_enabled &&
                 incoming_connections,
-            "BOOTSEL window must run Bluepad32's normal pairing scan");
-    require(platform_on_device_discovered(address, "controller", 0, 0) ==
-                    UNI_ERROR_SUCCESS,
-            "open pairing window must accept a discovered controller");
-
-    uni_hid_device_t paired = device(0);
-    platform_on_device_connected(&paired);
-    require(device_disconnect_calls == 1 &&
-                g_slots[0].device == &paired,
-            "open pairing window must retain a connected controller");
-    platform_on_device_disconnected(&paired);
+            "BOOTSEL must expose pairing indication without interrupting scan");
 
     tick_backend_timer(20);
     require(!observed_status_led_on,
@@ -652,21 +641,21 @@ void test_pairing_window_policy() {
     require(g_connection_policy_state == ConnectionPolicyState::Paused &&
                 g_pairing_window_open && !scanning_enabled &&
                 !classic_scanning_enabled && !incoming_connections,
-            "full slots must pause pairing without closing the deadline");
+            "full slots must pause scanning without closing the deadline");
 
     now_ms = 90000;
     process_rumble_timer(&g_rumble_timer);
     require(!g_pairing_window_open &&
                 g_connection_policy_state == ConnectionPolicyState::Paused,
-            "deadline must expire while slots remain full");
+            "pairing indication must expire while slots remain full");
     platform_on_device_disconnected(&devices[3]);
-    require(g_connection_policy_state == ConnectionPolicyState::Locked &&
-                !classic_scanning_enabled && !scanning_enabled &&
-                !incoming_connections,
-            "a freed slot after expiry must remain closed");
+    require(g_connection_policy_state == ConnectionPolicyState::Open &&
+                classic_scanning_enabled && scanning_enabled &&
+                incoming_connections,
+            "a freed slot must resume autoconnect after pairing indication expires");
     require(platform_on_device_discovered(address, "controller", 0, 0) ==
-                    UNI_ERROR_IGNORE_DEVICE,
-            "expired pairing policy must reject discovery");
+                    UNI_ERROR_SUCCESS,
+            "resumed autoconnect must accept a discovered controller");
 }
 
 
