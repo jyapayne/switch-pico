@@ -61,7 +61,7 @@ Both `build.py --aio` and direct AIO CMake configuration apply `patches/bluepad3
 
 Pairing order determines the initial USB slot assignment. Up to four controllers map 1:1 to the four emulated Switch Pro Controller interfaces.
 
-While a slot is free, the Pico continuously runs Bluepad32's normal Bluetooth discovery and autoconnect path. Pairing keys persist across Pico power cycles, so reconnect a previously paired controller by pressing its normal Home, PS, or Xbox power button; BOOTSEL is not required. Outside the BOOTSEL window, BTstack remains non-bondable, rejects new Classic SSP or legacy PIN authentication, and disables every BLE STK generation method. A controller in explicit pairing mode therefore cannot create a new Classic or BLE bond while the window is closed.
+With no active controller, the Pico runs Bluepad32 discovery and autoconnect. After any controller becomes active, active discovery pauses to protect input, motion, and rumble latency; bonded controllers may still initiate incoming reconnects. Pairing keys persist across Pico power cycles, so reconnect a previously paired controller by pressing its normal Home, PS, or Xbox power button. Hold BOOTSEL for the bounded pairing window before pairing a new controller or a controller that requires host-side discovery. Outside that window, BTstack remains non-bondable and rejects new Classic and BLE authentication.
 
 To clear every stored Classic and BLE pairing without a PC, hold BOOTSEL continuously for 10 seconds. The normal pairing window opens after two seconds; continuing to hold until the LED changes to a rapid blink clears all bonds, disconnects active controllers, publishes neutral state to every slot, and closes new authentication. Release BOOTSEL, open a new pairing window, and pair controllers again.
 
@@ -82,19 +82,25 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Reconnect a paired controller**: power it on normally with its Home, PS, or Xbox button.
 - **8BitDo Ultimate Bluetooth reconnect**: leave its selector in Bluetooth mode, press Home once, then shake it. After an abrupt controller power-off, the Pico can remain solid for up to four seconds while Bluetooth link supervision confirms the disconnect; scanning restarts immediately afterward.
 - **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
-- **Pairing window expires**: new authentication is disabled; discovery and remembered-controller autoconnect continue while a slot is free.
+- **Pairing window expires**: new authentication and active discovery stop while a controller is active; remembered controllers may still initiate reconnects.
 - **Clear all pairings**: hold BOOTSEL continuously for 10 seconds, through the initial double blink, until the rapid confirmation blink starts. All controllers are disconnected and must be paired again.
 
-### Managing pairings from a PC
+### Managing configuration and pairings from a PC
 
-Connect the Pico 2 W to the PC while the AIO firmware is running normally; do not enter the ROM BOOTSEL drive. The management command uses private vendor requests on USB endpoint 0, so it does not add an interface or depend on Linux `hidraw` nodes.
+Connect the Pico 2 W to the PC while the AIO firmware is running normally; do not enter the ROM BOOTSEL drive. `switch-pico-config` uses versioned private vendor requests on USB endpoint 0, so it does not add an interface or depend on Linux `hidraw` nodes.
 
 ```sh
-uv run switch-pico-pairings list
-uv run switch-pico-pairings clear --yes
+uv run switch-pico-config status
+uv run switch-pico-config config show
+uv run switch-pico-config config set --pairing-window-seconds 90
+uv run switch-pico-config config reset --yes
+uv run switch-pico-config pairings list
+uv run switch-pico-config pairings clear --yes
 ```
 
-`list` refreshes and prints stored Bluetooth Classic and BLE addresses. `clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and leaves autoconnect scanning active. The destructive command requires `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
+Configuration records use version, size, generation, and CRC fields. Writes are chunked and atomically committed between two dedicated flash sectors; interrupted or corrupt writes fall back to the previous valid generation. Those sectors do not overlap Bluepad32's separate bond store. Rewriting identical configuration does not consume a flash write, and successful writes are rate-limited.
+
+`pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses. `pairings clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
 
 ### Per-controller ABXY layout
 

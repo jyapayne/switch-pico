@@ -285,6 +285,15 @@ uint32_t btstack_run_loop_get_time_ms() {
 
 
 #include "../bluepad32_input_backend.cpp"
+void configuration_service_prepare() {}
+void configuration_service_initialize_on_storage_core() {}
+void configuration_service_task_on_storage_core(uint32_t) {}
+void configuration_service_snapshot(ConfigurationServiceSnapshot* output) {
+    *output = {};
+    output->state = ConfigurationServiceState::kReady;
+    output->configuration.pairing_window_seconds =
+        ADAPTER_PAIRING_WINDOW_SECONDS_DEFAULT;
+}
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
 AdapterUsbMode test_adapter_mode = AdapterUsbMode::kXInput;
 AdapterUsbMode adapter_host_probe_mode() {

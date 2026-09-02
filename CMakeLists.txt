@@ -100,7 +100,12 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE
             bluepad32_input_backend.cpp
             bootsel_pairing_button.cpp
-            usb_pairing_management.cpp
+            adapter_configuration.cpp
+            configuration_storage.cpp
+            configuration_transaction.cpp
+            configuration_service.cpp
+            pico_configuration_storage.cpp
+            usb_configuration_management.cpp
     )
     if(SWITCH_PICO_ADAPTER_FEASIBILITY)
         target_sources(switch-pico PRIVATE
@@ -123,7 +128,7 @@ else()
 endif()
 
 pico_set_program_name(switch-pico "switch-pico")
-pico_set_program_version(switch-pico "0.1")
+pico_set_program_version(switch-pico "0.2.0")
 
 # Modify the below lines to enable/disable output over UART/USB
 # UART0 is enabled for debug logging; USB stdio remains off.

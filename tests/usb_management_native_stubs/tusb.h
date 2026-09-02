@@ -9,6 +9,7 @@ enum {
     CONTROL_STAGE_ACK = 2,
     TUSB_REQ_RCPT_DEVICE = 0,
     TUSB_DIR_OUT = 0,
+    TUSB_REQ_TYPE_VENDOR = 2,
     TUSB_DIR_IN = 1,
 };
 

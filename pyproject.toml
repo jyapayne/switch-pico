@@ -20,7 +20,7 @@ dependencies = [
 [project.scripts]
 controller-uart-bridge = "switch_pico_bridge.controller_uart_bridge:main"
 host-uart-logger = "switch_pico_bridge.host_uart_logger:main"
-switch-pico-pairings = "switch_pico_bridge.pairing_manager:main"
+switch-pico-config = "switch_pico_bridge.config_manager:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

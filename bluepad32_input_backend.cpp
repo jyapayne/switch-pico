@@ -1,5 +1,6 @@
 #include "bluepad32_input_backend.h"
 #include "controller_hotkey_config.h"
+#include "configuration_service.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -28,8 +29,10 @@ constexpr uint16_t kSwitchHostRumbleDurationMs = 50;
 constexpr uint16_t kXInputHostRumbleDurationMs = UINT16_MAX;
 #endif
 constexpr uint32_t kRumblePollIntervalMs = 5;
+constexpr uint32_t kConfigurationPollIntervalMs = 50;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
-constexpr uint32_t kPairingWindowDurationMs = 60000;
+constexpr uint32_t kDefaultPairingWindowDurationMs =
+    ADAPTER_PAIRING_WINDOW_SECONDS_DEFAULT * 1000u;
 constexpr uint32_t kPairingResetFeedbackDurationMs = 2000;
 // Bluetooth Classic units are 0.625 ms: 0x1900 = 4 seconds.
 constexpr uint16_t kClassicLinkSupervisionTimeout = 0x1900;
@@ -142,11 +145,14 @@ bool g_started = false;
 
 // These fields are only read or written by Core 1 / BTstack.
 btstack_timer_source_t g_rumble_timer{};
+btstack_timer_source_t g_configuration_timer{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
 btstack_packet_callback_registration_t g_pairing_event_callback{};
 ConnectionPolicyState g_connection_policy_state =
     ConnectionPolicyState::Uninitialized;
 uint32_t g_pairing_window_deadline_ms = 0;
+uint32_t g_pairing_window_duration_ms =
+    kDefaultPairingWindowDurationMs;
 uint32_t g_pairing_reset_feedback_deadline_ms = 0;
 uint16_t g_status_led_tick = 0;
 bool g_pairing_window_open = false;
@@ -531,8 +537,15 @@ bool update_pairing_window(uint32_t now_ms) {
     critical_section_exit(&g_state_lock);
 
     if (requested) {
+        ConfigurationServiceSnapshot configuration{};
+        configuration_service_snapshot(&configuration);
+        g_pairing_window_duration_ms =
+            static_cast<uint32_t>(
+                configuration.configuration.pairing_window_seconds) *
+            1000u;
         g_pairing_window_open = true;
-        g_pairing_window_deadline_ms = now_ms + kPairingWindowDurationMs;
+        g_pairing_window_deadline_ms =
+            now_ms + g_pairing_window_duration_ms;
         gap_set_bondable_mode(true);
         sm_set_accepted_stk_generation_methods(kAllBlePairingMethods);
         g_status_led_tick = 0;
@@ -719,8 +732,16 @@ void update_status_led() {
     }
 }
 
+void process_configuration_timer(btstack_timer_source_t* timer) {
+    configuration_service_task_on_storage_core(
+        btstack_run_loop_get_time_ms());
+    btstack_run_loop_set_timer(timer, kConfigurationPollIntervalMs);
+    btstack_run_loop_add_timer(timer);
+}
+
 void process_rumble_timer(btstack_timer_source_t* timer) {
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
+
     process_clear_pairings(now_ms);
     process_pairing_snapshot_request();
     if (update_pairing_window(now_ms)) {
@@ -814,6 +835,11 @@ void platform_on_init_complete() {
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(&g_rumble_timer);
+    btstack_run_loop_set_timer_handler(
+        &g_configuration_timer, process_configuration_timer);
+    btstack_run_loop_set_timer(
+        &g_configuration_timer, kConfigurationPollIntervalMs);
+    btstack_run_loop_add_timer(&g_configuration_timer);
     recompute_connection_status();
 }
 
@@ -994,6 +1020,7 @@ uni_platform* get_platform() {
     if (!flash_safe_execute_core_init()) {
         halt_wireless_backend();
     }
+    configuration_service_initialize_on_storage_core();
     if (cyw43_arch_init() != 0) {
         halt_wireless_backend();
     }
@@ -1019,6 +1046,7 @@ void bluepad32_input_backend_init() {
     }
 
     critical_section_init(&g_state_lock);
+    configuration_service_prepare();
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         BackendSlot& slot = g_slots[slot_index];
         slot = {};
@@ -1037,6 +1065,8 @@ void bluepad32_input_backend_init() {
     g_connection_status = ConnectionStatus::Initializing;
     g_connection_policy_state = ConnectionPolicyState::Uninitialized;
     g_pairing_window_deadline_ms = 0;
+    g_pairing_window_duration_ms =
+        kDefaultPairingWindowDurationMs;
     g_pairing_reset_feedback_deadline_ms = 0;
     g_pairing_window_open = false;
     g_initialized = true;

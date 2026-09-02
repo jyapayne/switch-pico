@@ -47,7 +47,7 @@ The AIO firmware currently has:
 - generation-tagged state snapshots and rumble mailboxes across cores
 - persistent Classic and BLE bonding
 - a physical BOOTSEL pairing window and pairing reset
-- endpoint-zero PC pairing management
+- versioned endpoint-zero configuration and pairing management
 - Switch Pro input, motion, colors, and rumble per slot
 - per-controller ABXY and motion hotkeys
 
@@ -65,7 +65,7 @@ The Bluetooth, UART, Switch, and XInput paths now share `ControllerState`:
 | Capability | Status | Evidence or remaining work |
 |---|---|---|
 | Bluetooth Classic and BLE | Complete | Bluepad32 supports both transports; bonds persist across reboot. |
-| Pairing gate, reconnect, list, and clear | Complete | Physical BOOTSEL flow and `switch-pico-pairings` are implemented. |
+| Pairing gate, reconnect, list, and clear | Complete | Physical BOOTSEL flow and `switch-pico-config pairings` use the versioned management protocol. |
 | Four concurrent controllers | Complete for Switch mode | Four independent USB interfaces and Bluetooth slots are implemented. |
 | Switch input | Complete | Buttons, sticks, lifecycle, colors, and per-slot isolation are hardware-tested. |
 | Switch motion | Complete for supported parsers | DualSense, Switch-family, Wii accelerometer, PS Move, and compatible 8BitDo modes are normalized. |
@@ -75,6 +75,7 @@ The Bluetooth, UART, Switch, and XInput paths now share `ControllerState`:
 | Automatic Windows/Switch selection | Feasibility complete | Windows enumeration fix is in `db4a860`; real Windows transition and rumble were reported working. |
 | Windows feasibility test | Complete | `tools/Test-AdapterFeasibility.ps1` checks transition, PnP health, four XInput slots, controls, and rumble isolation. |
 | Protocol-neutral controller state | Complete | `ControllerState` is shared by Bluetooth, UART, Switch, and XInput paths; analog trigger precision is retained. |
+| Persistent configuration protocol | Core complete | Two-copy CRC-validated flash storage, chunked transactions, generation recovery, and PC read/write/reset are hardware-tested. |
 | Production USB VID/PID | Missing | Prototype uses `CAFE:4010`; obtain an appropriate project VID/PID and repeat Windows binding tests. |
 | DInput output | Missing | Add generic HID descriptor and report driver. |
 | Mac output mode | Missing | Capture/define compatible descriptor and report semantics. |
@@ -246,9 +247,15 @@ Completion evidence:
 - Switch buttons, sticks, ZL/ZR, motion, and rumble matched the fixed master baseline
 - the scan-latency regression was bisected, fixed, documented, and retested before acceptance
 
-### Phase 2 — Persistent configuration protocol
+### Phase 2 — Persistent configuration protocol — Core complete
 
 Generalize endpoint-zero management beyond pairing while keeping Switch USB enumeration unchanged.
+
+The core delivery implements firmware/board/active-mode status, one
+versioned adapter configuration object, transactional writes, and pairing
+management. Connected-controller metadata and profile operations are added
+with the controller identity and profile schemas in Phases 3 and 5. Reboot
+operations remain with the guided updater in Phase 6.
 
 Operations:
 
@@ -278,16 +285,15 @@ Storage requirements:
 - separate flash region from Bluepad32 bond storage
 - bounded write frequency
 
-Host tooling:
+Current host tooling:
 
 ```text
 switch-pico-config status
-switch-pico-config mode xinput
-switch-pico-config profiles list
-switch-pico-config profiles export profile.json
-switch-pico-config profiles import profile.json
-switch-pico-config profiles activate 2
-switch-pico-config reboot --bootsel
+switch-pico-config config show
+switch-pico-config config set --pairing-window-seconds 90
+switch-pico-config config reset --yes
+switch-pico-config pairings list
+switch-pico-config pairings clear --yes
 ```
 
 Acceptance:
@@ -296,6 +302,25 @@ Acceptance:
 - Interrupted writes retain the previous valid configuration.
 - Pairing management migrates to the versioned protocol in the same cutover.
 - Configuration survives power cycling on hardware.
+
+Core completion evidence:
+
+- the configuration record has version, size, generation, payload CRC, and
+  header CRC fields with a fixed 512-byte payload ceiling
+- two dedicated Pico flash sectors sit immediately before, and cannot overlap,
+  BTstack's two-sector bond store
+- writes target the inactive copy, verify after programming, preserve the old
+  copy until validation, skip identical values, and allow at most one changed
+  commit per second
+- native tests reject malformed, truncated, out-of-order, oversized,
+  unsupported-schema, and bad-CRC data and recover from corrupt or interrupted
+  writes
+- pairing list/refresh/clear moved from the old pairing-only requests into the
+  versioned envelope and passed on hardware with two stored Classic bonds
+- 47 tests passed; UART, AIO, and feasibility firmware built
+- generation 1 with a 90-second pairing window survived a physical power cycle
+  and feasibility firmware reflash, after which reset stored the 60-second
+  default as generation 2
 
 ### Phase 3 — Mapping, tuning, profiles, and macros
 
@@ -511,17 +536,8 @@ Do not mark a host/controller combination complete from descriptor inspection or
 
 ## Next action
 
-Begin Phase 2: generalize endpoint-zero management into a versioned persistent
-configuration protocol while preserving pairing commands and Switch
-enumeration.
-
-The first Phase 2 delivery should remain narrow:
-
-1. define version, size, CRC, generation, and atomic-commit invariants
-2. reserve storage that cannot overlap Bluepad32 bonds
-3. add read/write/reset operations for one small configuration object
-4. migrate pairing management into the versioned envelope
-5. verify malformed requests, interrupted writes, rollback, and power-cycle persistence
-
-Do not begin profiles, macros, or tuning transforms until the storage and USB
-transaction boundary is proven.
+Begin Phase 3 now that the storage and USB transaction boundary is proven.
+Define the fixed-capacity profile schema first, then add mapping and tuning
+transforms before macros or Turbo. Wire profile list/import/export/activate
+commands through the Phase 2 transaction protocol only after each profile
+field has runtime semantics and deterministic tests.

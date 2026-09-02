@@ -1,0 +1,65 @@
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "bluepad32_input_backend.h"
+#include "configuration_service.h"
+
+namespace UsbConfigurationManagement {
+
+constexpr uint16_t kRequestValue = 0x5350;
+constexpr uint16_t kRequestIndex = 0x0001;
+constexpr uint8_t kProtocolVersion = 1;
+constexpr size_t kRequestHeaderSize = 16;
+constexpr size_t kResponseHeaderSize = 20;
+constexpr size_t kPairingRecordSize = 8;
+constexpr size_t kPairingPayloadHeaderSize = 4;
+constexpr size_t kMaximumRequestSize = 64;
+constexpr size_t kMaximumResponseSize =
+    kResponseHeaderSize + kPairingPayloadHeaderSize +
+    BLUEPAD32_PAIRING_RECORD_CAPACITY * kPairingRecordSize;
+constexpr size_t kMaximumChunkSize =
+    kMaximumRequestSize - kRequestHeaderSize - 8;
+
+enum class Operation : uint8_t {
+    kInfo = 0x01,
+    kConfigurationRead = 0x10,
+    kConfigurationBegin = 0x11,
+    kConfigurationChunk = 0x12,
+    kConfigurationCommit = 0x13,
+    kConfigurationReset = 0x14,
+    kTransactionStatus = 0x15,
+    kPairingRead = 0x20,
+    kPairingRefresh = 0x21,
+    kPairingClear = 0x22,
+};
+
+enum class Status : uint8_t {
+    kOk = 0,
+    kPending = 1,
+    kMalformed = 2,
+    kUnsupportedSchema = 3,
+    kTooLarge = 4,
+    kOutOfOrder = 5,
+    kBadCrc = 6,
+    kBusy = 7,
+    kStorageError = 8,
+};
+
+struct DecodedRequest {
+    Operation operation = Operation::kInfo;
+    const uint8_t* payload = nullptr;
+    uint16_t payload_size = 0;
+};
+
+bool decode_request(Operation setup_operation, const uint8_t* input,
+                    size_t input_size, DecodedRequest* output);
+size_t encode_response(Operation operation, Status status, uint8_t flags,
+                       uint16_t schema_version, uint32_t generation,
+                       const uint8_t* payload, size_t payload_size,
+                       uint8_t* output, size_t output_size);
+size_t encode_pairing_snapshot(const Bluepad32PairingSnapshot& snapshot,
+                               uint8_t* output, size_t output_size);
+
+}  // namespace UsbConfigurationManagement

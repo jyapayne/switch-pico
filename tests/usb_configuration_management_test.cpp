@@ -1,0 +1,301 @@
+#include "usb_configuration_management.h"
+
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <vector>
+
+#include <tusb.h>
+
+namespace {
+
+Bluepad32PairingSnapshot current_pairings{};
+ConfigurationServiceSnapshot current_configuration{};
+bool refresh_requested = false;
+bool clear_requested = false;
+std::vector<uint8_t> control_payload;
+std::vector<uint8_t> next_out_payload;
+uint32_t begin_transaction_id = 0;
+uint32_t append_transaction_id = 0;
+uint32_t commit_transaction_id = 0;
+size_t append_offset = 0;
+std::vector<uint8_t> appended_bytes;
+
+void require(bool condition, const char* message) {
+    if (!condition) {
+        std::cerr << message << '\n';
+        std::exit(1);
+    }
+}
+
+void write_u16(std::vector<uint8_t>* output, size_t offset,
+               uint16_t value) {
+    (*output)[offset] = static_cast<uint8_t>(value);
+    (*output)[offset + 1] = static_cast<uint8_t>(value >> 8);
+}
+
+void write_u32(std::vector<uint8_t>* output, size_t offset,
+               uint32_t value) {
+    (*output)[offset] = static_cast<uint8_t>(value);
+    (*output)[offset + 1] = static_cast<uint8_t>(value >> 8);
+    (*output)[offset + 2] = static_cast<uint8_t>(value >> 16);
+    (*output)[offset + 3] = static_cast<uint8_t>(value >> 24);
+}
+
+std::vector<uint8_t> make_request(
+    UsbConfigurationManagement::Operation operation,
+    const std::vector<uint8_t>& payload) {
+    using namespace UsbConfigurationManagement;
+    std::vector<uint8_t> request(kRequestHeaderSize + payload.size());
+    memcpy(request.data(), "SPMG", 4);
+    request[4] = kProtocolVersion;
+    request[5] = static_cast<uint8_t>(operation);
+    write_u16(&request, 8, static_cast<uint16_t>(payload.size()));
+    write_u32(&request, 12,
+              configuration_crc32(payload.data(), payload.size()));
+    memcpy(request.data() + kRequestHeaderSize, payload.data(),
+           payload.size());
+    return request;
+}
+
+tusb_control_request_t setup_request(
+    UsbConfigurationManagement::Operation operation, uint8_t direction,
+    uint16_t length) {
+    tusb_control_request_t request{};
+    request.bmRequestType_bit.recipient = TUSB_REQ_RCPT_DEVICE;
+    request.bmRequestType_bit.type = TUSB_REQ_TYPE_VENDOR;
+    request.bmRequestType_bit.direction = direction;
+    request.bRequest = static_cast<uint8_t>(operation);
+    request.wValue = UsbConfigurationManagement::kRequestValue;
+    request.wIndex = UsbConfigurationManagement::kRequestIndex;
+    request.wLength = length;
+    return request;
+}
+
+void test_envelope_encoding() {
+    using namespace UsbConfigurationManagement;
+    const uint8_t payload[] = {1, 2, 3};
+    uint8_t encoded[32]{};
+    const size_t size = encode_response(
+        Operation::kConfigurationRead, Status::kOk, 5, 1,
+        0x78563412, payload, sizeof(payload), encoded, sizeof(encoded));
+    require(size == kResponseHeaderSize + sizeof(payload) &&
+                memcmp(encoded, "SPMG", 4) == 0 &&
+                encoded[4] == kProtocolVersion &&
+                encoded[5] ==
+                    static_cast<uint8_t>(Operation::kConfigurationRead) &&
+                encoded[6] == static_cast<uint8_t>(Status::kOk) &&
+                encoded[7] == 5 && encoded[8] == 3 &&
+                encoded[10] == 1 && encoded[12] == 0x12 &&
+                encoded[15] == 0x78 &&
+                memcmp(&encoded[kResponseHeaderSize], payload,
+                       sizeof(payload)) == 0,
+            "versioned response envelope encoded incorrectly");
+    require(encode_response(
+                Operation::kConfigurationRead, Status::kOk, 0, 1, 0,
+                payload, sizeof(payload), encoded, size - 1) == 0,
+            "response encoder accepted a short destination");
+}
+
+void test_pairing_encoding() {
+    using namespace UsbConfigurationManagement;
+    Bluepad32PairingSnapshot snapshot{};
+    snapshot.generation = 0x78563412;
+    snapshot.status = Bluepad32PairingSnapshotStatus::kReady;
+    snapshot.record_count = 2;
+    snapshot.overflow = true;
+    snapshot.records[0].transport =
+        Bluepad32PairingTransport::kClassic;
+    snapshot.records[0].address_type = 0xfe;
+    const uint8_t classic_address[6] = {1, 2, 3, 4, 5, 6};
+    memcpy(snapshot.records[0].address, classic_address, 6);
+    snapshot.records[1].transport = Bluepad32PairingTransport::kBle;
+    snapshot.records[1].address_type = 2;
+    const uint8_t ble_address[6] = {6, 5, 4, 3, 2, 1};
+    memcpy(snapshot.records[1].address, ble_address, 6);
+
+    uint8_t payload[kMaximumResponseSize]{};
+    const size_t size =
+        encode_pairing_snapshot(snapshot, payload, sizeof(payload));
+    require(size == kResponseHeaderSize + kPairingPayloadHeaderSize +
+                        2 * kPairingRecordSize &&
+                payload[5] ==
+                    static_cast<uint8_t>(Operation::kPairingRead) &&
+                payload[7] == 1 && payload[12] == 0x12 &&
+                payload[kResponseHeaderSize] == 2 &&
+                payload[kResponseHeaderSize + 1] == 1 &&
+                payload[kResponseHeaderSize + 4] == 1 &&
+                payload[kResponseHeaderSize + 5] == 0xfe &&
+                memcmp(&payload[kResponseHeaderSize + 6],
+                       classic_address, 6) == 0,
+            "pairings were not migrated into the versioned envelope");
+}
+
+void perform_out(UsbConfigurationManagement::Operation operation,
+                 const std::vector<uint8_t>& payload,
+                 bool expected_ack = true) {
+    next_out_payload = make_request(operation, payload);
+    tusb_control_request_t request = setup_request(
+        operation, TUSB_DIR_OUT,
+        static_cast<uint16_t>(next_out_payload.size()));
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request),
+            "valid OUT setup was rejected");
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_ACK, &request) == expected_ack,
+            "OUT acknowledgement result was incorrect");
+}
+
+void test_vendor_requests() {
+    using namespace UsbConfigurationManagement;
+    current_pairings = {};
+    current_pairings.generation = 7;
+    current_pairings.status = Bluepad32PairingSnapshotStatus::kReady;
+    current_pairings.record_count = 1;
+    current_pairings.records[0].transport =
+        Bluepad32PairingTransport::kClassic;
+
+    tusb_control_request_t request = setup_request(
+        Operation::kPairingRead, TUSB_DIR_IN, kMaximumResponseSize);
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload[5] ==
+                    static_cast<uint8_t>(Operation::kPairingRead) &&
+                control_payload[12] == 7,
+            "pairing read did not use the versioned envelope");
+
+    perform_out(Operation::kPairingRefresh, {});
+    require(refresh_requested,
+            "pairing refresh was not dispatched");
+    perform_out(Operation::kPairingClear, {});
+    require(clear_requested, "pairing clear was not dispatched");
+
+    std::vector<uint8_t> begin(12);
+    write_u32(&begin, 0, 0x11223344);
+    write_u16(&begin, 4, ADAPTER_CONFIGURATION_SCHEMA_VERSION);
+    write_u16(&begin, 6, ADAPTER_CONFIGURATION_ENCODED_SIZE);
+    write_u32(&begin, 8, 0xaabbccdd);
+    perform_out(Operation::kConfigurationBegin, begin);
+    require(begin_transaction_id == 0x11223344,
+            "configuration begin was not dispatched");
+
+    std::vector<uint8_t> chunk(12);
+    write_u32(&chunk, 0, 0x11223344);
+    write_u16(&chunk, 4, 0);
+    write_u16(&chunk, 6, 4);
+    chunk[8] = 60;
+    perform_out(Operation::kConfigurationChunk, chunk);
+    require(append_transaction_id == 0x11223344 &&
+                append_offset == 0 && appended_bytes.size() == 4,
+            "configuration chunk was not dispatched");
+
+    std::vector<uint8_t> commit(4);
+    write_u32(&commit, 0, 0x11223344);
+    perform_out(Operation::kConfigurationCommit, commit);
+    require(commit_transaction_id == 0x11223344,
+            "configuration commit was not dispatched");
+
+    next_out_payload =
+        make_request(Operation::kPairingRefresh, {});
+    next_out_payload[12] ^= 1;
+    request = setup_request(
+        Operation::kPairingRefresh, TUSB_DIR_OUT,
+        static_cast<uint16_t>(next_out_payload.size()));
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                !tud_vendor_control_xfer_cb(
+                    0, CONTROL_STAGE_ACK, &request),
+            "bad request CRC was accepted");
+
+    request.wValue = 0;
+    require(!tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request),
+            "request with invalid magic was accepted");
+}
+
+}  // namespace
+
+uint32_t configuration_crc32(const uint8_t* data, size_t size) {
+    uint32_t crc = 0xffffffffu;
+    for (size_t index = 0; index < size; ++index) {
+        crc ^= data[index];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            const uint32_t mask = 0u - (crc & 1u);
+            crc = (crc >> 1) ^ (0xedb88320u & mask);
+        }
+    }
+    return ~crc;
+}
+
+void configuration_service_snapshot(ConfigurationServiceSnapshot* output) {
+    *output = current_configuration;
+}
+
+ConfigurationTransactionStatus configuration_service_begin(
+    uint32_t transaction_id, uint16_t, size_t, uint32_t) {
+    begin_transaction_id = transaction_id;
+    return ConfigurationTransactionStatus::kReceiving;
+}
+
+ConfigurationTransactionStatus configuration_service_append(
+    uint32_t transaction_id, size_t offset, const uint8_t* data,
+    size_t size) {
+    append_transaction_id = transaction_id;
+    append_offset = offset;
+    appended_bytes.assign(data, data + size);
+    return ConfigurationTransactionStatus::kReceiving;
+}
+
+ConfigurationTransactionStatus configuration_service_commit(
+    uint32_t transaction_id) {
+    commit_transaction_id = transaction_id;
+    return ConfigurationTransactionStatus::kPending;
+}
+
+ConfigurationTransactionStatus configuration_service_reset(uint32_t) {
+    return ConfigurationTransactionStatus::kPending;
+}
+
+void bluepad32_input_backend_request_pairing_snapshot() {
+    refresh_requested = true;
+}
+
+void bluepad32_input_backend_clear_pairings() {
+    clear_requested = true;
+}
+
+void bluepad32_input_backend_pairing_snapshot(
+    Bluepad32PairingSnapshot* out) {
+    *out = current_pairings;
+}
+
+bool tud_control_xfer(uint8_t, const tusb_control_request_t* request,
+                      void* buffer, uint16_t length) {
+    if (request->bmRequestType_bit.direction == TUSB_DIR_OUT) {
+        if (next_out_payload.size() != length) {
+            return false;
+        }
+        memcpy(buffer, next_out_payload.data(), length);
+    } else {
+        const auto* bytes = static_cast<const uint8_t*>(buffer);
+        control_payload.assign(bytes, bytes + length);
+    }
+    return true;
+}
+
+bool tud_control_status(uint8_t, const tusb_control_request_t*) {
+    return true;
+}
+
+#include "../adapter_configuration.cpp"
+#include "../usb_configuration_management.cpp"
+
+int main() {
+    current_configuration.state = ConfigurationServiceState::kReady;
+    current_configuration.configuration =
+        adapter_configuration_default();
+    test_envelope_encoding();
+    test_pairing_encoding();
+    test_vendor_requests();
+    return 0;
+}
