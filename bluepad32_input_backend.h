@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "controller_color.h"
+#include "controller_identity.h"
 #include "controller_state.h"
 #include "switch_haptics.h"
 
@@ -32,13 +33,21 @@ struct Bluepad32PairingSnapshot {
     bool overflow;
     Bluepad32PairingRecord records[BLUEPAD32_PAIRING_RECORD_CAPACITY];
 };
+struct Bluepad32SlotSnapshot {
+    bool active;
+    uint32_t connection_generation;
+    ControllerIdentity identity;
+    ControllerState state;
+};
+
 
 
 void bluepad32_input_backend_init();
 void bluepad32_input_backend_start();
 void bluepad32_input_backend_open_pairing_window();
 void bluepad32_input_backend_clear_pairings();
-bool bluepad32_input_backend_snapshot(uint8_t slot, ControllerState* out);
+void bluepad32_input_backend_snapshot(uint8_t slot,
+                                      Bluepad32SlotSnapshot* out);
 void bluepad32_input_backend_request_pairing_snapshot();
 void bluepad32_input_backend_pairing_snapshot(
     Bluepad32PairingSnapshot* out);

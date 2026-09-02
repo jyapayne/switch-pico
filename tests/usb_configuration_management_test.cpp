@@ -11,6 +11,9 @@ namespace {
 
 Bluepad32PairingSnapshot current_pairings{};
 ConfigurationServiceSnapshot current_configuration{};
+ProfileServiceListSnapshot current_profile_list{};
+ProfileServiceSelectedSnapshot current_profile_selected{};
+ProfileServiceTransactionSnapshot current_profile_transaction{};
 bool refresh_requested = false;
 bool clear_requested = false;
 std::vector<uint8_t> control_payload;
@@ -20,6 +23,16 @@ uint32_t append_transaction_id = 0;
 uint32_t commit_transaction_id = 0;
 size_t append_offset = 0;
 std::vector<uint8_t> appended_bytes;
+ControllerIdentity profile_identity{};
+uint8_t profile_index = 0;
+uint16_t profile_schema = 0;
+size_t profile_size = 0;
+uint32_t profile_crc = 0;
+bool profile_reset_requested = false;
+uint32_t profile_reset_transaction_id = 0;
+uint32_t profile_commit_transaction_id = 0;
+bool profile_activate_requested = false;
+uint32_t profile_activate_transaction_id = 0;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -40,6 +53,13 @@ void write_u32(std::vector<uint8_t>* output, size_t offset,
     (*output)[offset + 1] = static_cast<uint8_t>(value >> 8);
     (*output)[offset + 2] = static_cast<uint8_t>(value >> 16);
     (*output)[offset + 3] = static_cast<uint8_t>(value >> 24);
+}
+
+uint32_t read_u32(const std::vector<uint8_t>& input, size_t offset) {
+    return static_cast<uint32_t>(input[offset]) |
+           (static_cast<uint32_t>(input[offset + 1]) << 8) |
+           (static_cast<uint32_t>(input[offset + 2]) << 16) |
+           (static_cast<uint32_t>(input[offset + 3]) << 24);
 }
 
 std::vector<uint8_t> make_request(
@@ -213,6 +233,173 @@ void test_vendor_requests() {
             "request with invalid magic was accepted");
 }
 
+void test_profile_vendor_requests() {
+    using namespace UsbConfigurationManagement;
+    ControllerIdentity expected_identity{};
+    expected_identity.stable = true;
+    expected_identity.transport = ControllerTransport::kClassic;
+    expected_identity.address[5] = 7;
+    expected_identity.vendor_id = 0x057e;
+    expected_identity.product_id = 0x2009;
+
+    current_profile_list = {};
+    current_profile_list.metadata.state = ProfileServiceState::kReady;
+    current_profile_list.metadata.generation = 9;
+    current_profile_list.count = 2;
+    current_profile_list.rows[0].identity = controller_identity_global();
+    current_profile_list.rows[1].identity = expected_identity;
+    current_profile_list.rows[1].active_profile = 2;
+    tusb_control_request_t request = setup_request(
+        Operation::kProfileList, TUSB_DIR_IN, kMaximumResponseSize);
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload.size() == kResponseHeaderSize + 33 &&
+                control_payload[5] ==
+                    static_cast<uint8_t>(Operation::kProfileList) &&
+                control_payload[10] == CONTROLLER_PROFILE_SCHEMA_VERSION &&
+                control_payload[kResponseHeaderSize] == 2 &&
+                control_payload[kResponseHeaderSize + 31] == 2,
+            "profile list response was not encoded");
+
+    current_profile_selected = {};
+    current_profile_selected.metadata.state =
+        ProfileServiceState::kReady;
+    current_profile_selected.metadata.generation = 9;
+    current_profile_selected.valid = true;
+    current_profile_selected.status =
+        ConfigurationTransactionStatus::kCommitted;
+    current_profile_selected.identity = expected_identity;
+    current_profile_selected.profile_index = 2;
+    current_profile_selected.profile =
+        controller_profile_default(expected_identity, 2);
+    request = setup_request(
+        Operation::kProfileRead, TUSB_DIR_IN, kMaximumResponseSize);
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload.size() ==
+                    kResponseHeaderSize +
+                        CONTROLLER_PROFILE_ENCODED_SIZE &&
+                control_payload[kResponseHeaderSize] == 1 &&
+                control_payload[kResponseHeaderSize + 2] == 0 &&
+                control_payload[kResponseHeaderSize + 3] == 1,
+            "selected profile response was not encoded");
+
+    current_profile_transaction = {};
+    current_profile_transaction.metadata.state =
+        ProfileServiceState::kReady;
+    current_profile_transaction.metadata.generation = 9;
+    current_profile_transaction.transaction.transaction_id = 0x01020304;
+    current_profile_transaction.transaction.status =
+        ConfigurationTransactionStatus::kPending;
+    request = setup_request(
+        Operation::kProfileTransactionStatus, TUSB_DIR_IN,
+        kMaximumResponseSize);
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload.size() == kResponseHeaderSize + 20 &&
+                control_payload[6] ==
+                    static_cast<uint8_t>(Status::kPending) &&
+                read_u32(control_payload, kResponseHeaderSize) ==
+                    0x01020304,
+            "pending profile transaction status lost its transaction ID");
+
+    current_profile_transaction.transaction.status =
+        ConfigurationTransactionStatus::kCommitted;
+    current_profile_transaction.transaction.stored_generation =
+        0x11223344;
+    current_profile_transaction.transaction.stored_crc = 0xaabbccdd;
+    require(tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload[6] == static_cast<uint8_t>(Status::kOk) &&
+                read_u32(control_payload, kResponseHeaderSize) ==
+                    0x01020304 &&
+                read_u32(control_payload, kResponseHeaderSize + 12) ==
+                    0x11223344 &&
+                read_u32(control_payload, kResponseHeaderSize + 16) ==
+                    0xaabbccdd,
+            "final profile transaction status lost its commit result");
+
+    std::vector<uint8_t> identity_payload(15);
+    require(controller_identity_encode(
+                expected_identity, identity_payload.data(),
+                CONTROLLER_IDENTITY_ENCODED_SIZE),
+            "profile test identity did not encode");
+    identity_payload[14] = 2;
+    perform_out(Operation::kProfileSelect, identity_payload);
+    require(controller_identity_equal(expected_identity,
+                                      profile_identity) &&
+                profile_index == 2,
+            "profile selection was not dispatched");
+
+    std::vector<uint8_t> begin(28);
+    write_u32(&begin, 0, 0x55667788);
+    require(controller_identity_encode(
+                expected_identity, &begin[4],
+                CONTROLLER_IDENTITY_ENCODED_SIZE),
+            "profile begin identity did not encode");
+    begin[18] = 1;
+    write_u16(&begin, 20, CONTROLLER_PROFILE_SCHEMA_VERSION);
+    write_u16(&begin, 22, CONTROLLER_PROFILE_ENCODED_SIZE);
+    write_u32(&begin, 24, 0xaabbccdd);
+    perform_out(Operation::kProfileBegin, begin);
+    require(begin_transaction_id == 0x55667788 &&
+                profile_index == 1 &&
+                profile_schema == CONTROLLER_PROFILE_SCHEMA_VERSION &&
+                profile_size == CONTROLLER_PROFILE_ENCODED_SIZE &&
+                profile_crc == 0xaabbccdd,
+            "profile begin was not dispatched");
+
+    std::vector<uint8_t> chunk(48);
+    write_u32(&chunk, 0, 0x55667788);
+    write_u16(&chunk, 4, 0);
+    write_u16(&chunk, 6, 40);
+    perform_out(Operation::kProfileChunk, chunk);
+    require(append_transaction_id == 0x55667788 &&
+                append_offset == 0 && appended_bytes.size() == 40,
+            "profile chunk was not dispatched");
+
+    std::vector<uint8_t> commit(4);
+    write_u32(&commit, 0, 0x55667788);
+    perform_out(Operation::kProfileCommit, commit);
+    require(profile_commit_transaction_id == 0x55667788,
+            "profile commit was not dispatched");
+
+    std::vector<uint8_t> mutation(19);
+    write_u32(&mutation, 0, 0x10203040);
+    require(controller_identity_encode(
+                expected_identity, &mutation[4],
+                CONTROLLER_IDENTITY_ENCODED_SIZE),
+            "profile mutation identity did not encode");
+    mutation[18] = CONTROLLER_PROFILE_ALL;
+    perform_out(Operation::kProfileReset, mutation);
+    require(profile_reset_requested &&
+                profile_reset_transaction_id == 0x10203040,
+            "profile reset transaction was not dispatched");
+    write_u32(&mutation, 0, 0x50607080);
+    mutation[18] = 3;
+    perform_out(Operation::kProfileActivate, mutation);
+    require(profile_activate_requested && profile_index == 3 &&
+                profile_activate_transaction_id == 0x50607080,
+            "profile activation transaction was not dispatched");
+
+    write_u32(&mutation, 0, 0);
+    perform_out(Operation::kProfileActivate, mutation, false);
+    request = setup_request(
+        Operation::kProfileReset, TUSB_DIR_OUT, kRequestHeaderSize + 15);
+    require(!tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request),
+            "legacy profile reset payload was accepted");
+
+    begin[19] = 1;
+    perform_out(Operation::kProfileBegin, begin, false);
+    request = setup_request(
+        Operation::kProfileSelect, TUSB_DIR_OUT,
+        kRequestHeaderSize + 14);
+    require(!tud_vendor_control_xfer_cb(
+                0, CONTROL_STAGE_SETUP, &request),
+            "short profile selection request was accepted");
+}
+
 }  // namespace
 
 uint32_t configuration_crc32(const uint8_t* data, size_t size) {
@@ -256,6 +443,75 @@ ConfigurationTransactionStatus configuration_service_reset(uint32_t) {
     return ConfigurationTransactionStatus::kPending;
 }
 
+ConfigurationTransactionStatus profile_service_select(
+    const ControllerIdentity& identity, uint8_t selected_profile) {
+    profile_identity = identity;
+    profile_index = selected_profile;
+    return ConfigurationTransactionStatus::kPending;
+}
+
+ConfigurationTransactionStatus profile_service_begin(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t selected_profile, uint16_t schema_version,
+    size_t payload_size, uint32_t payload_crc) {
+    begin_transaction_id = transaction_id;
+    profile_identity = identity;
+    profile_index = selected_profile;
+    profile_schema = schema_version;
+    profile_size = payload_size;
+    profile_crc = payload_crc;
+    return ConfigurationTransactionStatus::kReceiving;
+}
+
+ConfigurationTransactionStatus profile_service_append(
+    uint32_t transaction_id, size_t offset, const uint8_t* data,
+    size_t size) {
+    append_transaction_id = transaction_id;
+    append_offset = offset;
+    appended_bytes.assign(data, data + size);
+    return ConfigurationTransactionStatus::kReceiving;
+}
+
+ConfigurationTransactionStatus profile_service_commit(
+    uint32_t transaction_id) {
+    profile_commit_transaction_id = transaction_id;
+    return ConfigurationTransactionStatus::kPending;
+}
+
+ConfigurationTransactionStatus profile_service_reset(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t selected_profile) {
+    profile_reset_transaction_id = transaction_id;
+    profile_identity = identity;
+    profile_index = selected_profile;
+    profile_reset_requested = true;
+    return ConfigurationTransactionStatus::kPending;
+}
+
+ConfigurationTransactionStatus profile_service_activate(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t selected_profile) {
+    profile_activate_transaction_id = transaction_id;
+    profile_identity = identity;
+    profile_index = selected_profile;
+    profile_activate_requested = true;
+    return ConfigurationTransactionStatus::kPending;
+}
+
+void profile_service_list_snapshot(ProfileServiceListSnapshot* output) {
+    *output = current_profile_list;
+}
+
+void profile_service_selected_snapshot(
+    ProfileServiceSelectedSnapshot* output) {
+    *output = current_profile_selected;
+}
+
+void profile_service_transaction_snapshot(
+    ProfileServiceTransactionSnapshot* output) {
+    *output = current_profile_transaction;
+}
+
 void bluepad32_input_backend_request_pairing_snapshot() {
     refresh_requested = true;
 }
@@ -288,6 +544,8 @@ bool tud_control_status(uint8_t, const tusb_control_request_t*) {
 }
 
 #include "../adapter_configuration.cpp"
+#include "../controller_identity.cpp"
+#include "../controller_profile.cpp"
 #include "../usb_configuration_management.cpp"
 
 int main() {
@@ -297,5 +555,6 @@ int main() {
     test_envelope_encoding();
     test_pairing_encoding();
     test_vendor_requests();
+    test_profile_vendor_requests();
     return 0;
 }

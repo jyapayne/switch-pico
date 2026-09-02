@@ -5,6 +5,7 @@
 
 #include "bluepad32_input_backend.h"
 #include "configuration_service.h"
+#include "profile_service.h"
 
 namespace UsbConfigurationManagement {
 
@@ -16,11 +17,14 @@ constexpr size_t kResponseHeaderSize = 20;
 constexpr size_t kPairingRecordSize = 8;
 constexpr size_t kPairingPayloadHeaderSize = 4;
 constexpr size_t kMaximumRequestSize = 64;
+constexpr size_t kProfileListPayloadSize =
+    1 + PROFILE_SERVICE_LIST_CAPACITY * 16;
 constexpr size_t kMaximumResponseSize =
-    kResponseHeaderSize + kPairingPayloadHeaderSize +
-    BLUEPAD32_PAIRING_RECORD_CAPACITY * kPairingRecordSize;
+    kResponseHeaderSize + kProfileListPayloadSize;
 constexpr size_t kMaximumChunkSize =
     kMaximumRequestSize - kRequestHeaderSize - 8;
+static_assert(kMaximumResponseSize == 293,
+              "profile list no longer fits the EP0 response buffer");
 
 enum class Operation : uint8_t {
     kInfo = 0x01,
@@ -33,6 +37,15 @@ enum class Operation : uint8_t {
     kPairingRead = 0x20,
     kPairingRefresh = 0x21,
     kPairingClear = 0x22,
+    kProfileList = 0x30,
+    kProfileSelect = 0x31,
+    kProfileRead = 0x32,
+    kProfileBegin = 0x33,
+    kProfileChunk = 0x34,
+    kProfileCommit = 0x35,
+    kProfileReset = 0x36,
+    kProfileActivate = 0x37,
+    kProfileTransactionStatus = 0x38,
 };
 
 enum class Status : uint8_t {
@@ -61,5 +74,12 @@ size_t encode_response(Operation operation, Status status, uint8_t flags,
                        uint8_t* output, size_t output_size);
 size_t encode_pairing_snapshot(const Bluepad32PairingSnapshot& snapshot,
                                uint8_t* output, size_t output_size);
+size_t encode_profile_list(const ProfileServiceListSnapshot& snapshot,
+                           uint8_t* output, size_t output_size);
+size_t encode_profile_read(const ProfileServiceSelectedSnapshot& snapshot,
+                           uint8_t* output, size_t output_size);
+size_t encode_profile_transaction(
+    const ProfileServiceTransactionSnapshot& snapshot,
+    uint8_t* output, size_t output_size);
 
 }  // namespace UsbConfigurationManagement

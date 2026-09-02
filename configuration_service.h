@@ -17,6 +17,7 @@ struct ConfigurationServiceSnapshot {
     AdapterConfiguration configuration{};
     uint32_t generation = 0;
     uint32_t payload_crc = 0;
+    uint32_t reset_generation = 0;
     ConfigurationTransactionSnapshot transaction{};
 };
 

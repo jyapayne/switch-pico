@@ -25,6 +25,7 @@ bool ssp_auto_accept = true;
 uint8_t accepted_stk_methods = 0xff;
 uint16_t link_supervision_timeout = 0;
 btstack_packet_handler_t pairing_event_handler = nullptr;
+btstack_packet_handler_t identity_event_handler = nullptr;
 int confirmation_accepts = 0;
 int confirmation_rejections = 0;
 int passkey_accepts = 0;
@@ -43,6 +44,8 @@ int cyw43_init_calls = 0;
 int uni_init_calls = 0;
 int device_disconnect_calls = 0;
 uni_hid_device_t* last_disconnected_device = nullptr;
+uni_hid_device_t* lookup_devices[8]{};
+size_t lookup_device_count = 0;
 
 struct CoreStopped {};
 
@@ -82,9 +85,19 @@ uni_hid_device_t device(
     result.idx = idx;
     result.gamepad = gamepad;
     result.conn.protocol = protocol;
+    result.conn.handle = static_cast<hci_con_handle_t>(0x40 + idx);
     result.conn.btaddr[5] = static_cast<uint8_t>(idx + 1);
+    result.vendor_id = static_cast<uint16_t>(0x1000 + idx);
+    result.product_id = static_cast<uint16_t>(0x2000 + idx);
     result.report_parser.play_dual_rumble = play_rumble;
     return result;
+}
+
+void register_lookup_device(uni_hid_device_t* candidate) {
+    require(lookup_device_count <
+                sizeof(lookup_devices) / sizeof(lookup_devices[0]),
+            "test BLE lookup registry overflow");
+    lookup_devices[lookup_device_count++] = candidate;
 }
 
 }  // namespace
@@ -96,6 +109,16 @@ bool uni_hid_device_is_gamepad(const uni_hid_device_t* device) {
 
 int uni_hid_device_get_idx_for_instance(const uni_hid_device_t* device) {
     return device == nullptr ? -1 : device->idx;
+}
+
+uni_hid_device_t* uni_hid_device_get_instance_for_connection_handle(
+    hci_con_handle_t handle) {
+    for (size_t index = 0; index < lookup_device_count; ++index) {
+        if (lookup_devices[index]->conn.handle == handle) {
+            return lookup_devices[index];
+        }
+    }
+    return nullptr;
 }
 
 void uni_hid_device_disconnect(uni_hid_device_t* device) {
@@ -226,6 +249,11 @@ void hci_add_event_handler(
     pairing_event_handler = callback_handler->callback;
 }
 
+void sm_add_event_handler(
+    btstack_packet_callback_registration_t* callback_handler) {
+    identity_event_handler = callback_handler->callback;
+}
+
 uint8_t hci_event_packet_get_type(const uint8_t* packet) {
     return packet[0];
 }
@@ -244,6 +272,108 @@ void hci_event_user_confirmation_request_get_bd_addr(
 void hci_event_user_passkey_request_get_bd_addr(
     const uint8_t* packet, bd_addr_t address) {
     copy_event_address(packet, address);
+}
+
+hci_con_handle_t sm_event_handle(const uint8_t* packet) {
+    return static_cast<hci_con_handle_t>(packet[2]) |
+           static_cast<hci_con_handle_t>(packet[3] << 8);
+}
+
+void copy_sm_event_address(const uint8_t* packet, size_t offset,
+                           bd_addr_t address) {
+    for (size_t index = 0; index < sizeof(bd_addr_t); ++index) {
+        address[index] = packet[offset + sizeof(bd_addr_t) - 1 - index];
+    }
+}
+
+hci_con_handle_t sm_event_identity_resolving_started_get_handle(
+    const uint8_t* packet) {
+    return sm_event_handle(packet);
+}
+
+hci_con_handle_t sm_event_identity_resolving_failed_get_handle(
+    const uint8_t* packet) {
+    return sm_event_handle(packet);
+}
+
+hci_con_handle_t sm_event_identity_resolving_succeeded_get_handle(
+    const uint8_t* packet) {
+    return sm_event_handle(packet);
+}
+
+uint8_t sm_event_identity_resolving_succeeded_get_addr_type(
+    const uint8_t* packet) {
+    return packet[4];
+}
+
+void sm_event_identity_resolving_succeeded_get_address(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_sm_event_address(packet, 5, address);
+}
+
+uint8_t sm_event_identity_resolving_succeeded_get_identity_addr_type(
+    const uint8_t* packet) {
+    return packet[11];
+}
+
+void sm_event_identity_resolving_succeeded_get_identity_address(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_sm_event_address(packet, 12, address);
+}
+
+hci_con_handle_t sm_event_identity_created_get_handle(
+    const uint8_t* packet) {
+    return sm_event_handle(packet);
+}
+
+void sm_event_identity_created_get_address(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_sm_event_address(packet, 5, address);
+}
+
+uint8_t sm_event_identity_created_get_identity_addr_type(
+    const uint8_t* packet) {
+    return packet[11];
+}
+
+void sm_event_identity_created_get_identity_address(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_sm_event_address(packet, 12, address);
+}
+
+hci_con_handle_t sm_event_reencryption_started_get_handle(
+    const uint8_t* packet) {
+    return sm_event_handle(packet);
+}
+
+uint8_t sm_event_reencryption_started_get_addr_type(
+    const uint8_t* packet) {
+    return packet[4];
+}
+
+void sm_event_reencryption_started_get_address(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_sm_event_address(packet, 5, address);
+}
+
+hci_con_handle_t sm_event_reencryption_complete_get_handle(
+    const uint8_t* packet) {
+    return sm_event_handle(packet);
+}
+
+uint8_t sm_event_reencryption_complete_get_addr_type(
+    const uint8_t* packet) {
+    return packet[4];
+}
+
+void sm_event_reencryption_complete_get_address(
+    const uint8_t* packet, bd_addr_t address) {
+    copy_sm_event_address(packet, 5, address);
+}
+
+uint8_t sm_event_reencryption_complete_get_status(
+    const uint8_t* packet) {
+    return packet[11];
 }
 
 
@@ -284,10 +414,26 @@ uint32_t btstack_run_loop_get_time_ms() {
 }
 
 
+#include "../controller_identity.cpp"
 #include "../bluepad32_input_backend.cpp"
+ControllerIdentity observed_profile_identities[8]{};
+size_t observed_profile_identity_count = 0;
 void configuration_service_prepare() {}
 void configuration_service_initialize_on_storage_core() {}
 void configuration_service_task_on_storage_core(uint32_t) {}
+void profile_service_prepare() {}
+void profile_service_initialize_on_storage_core() {}
+void profile_service_task_on_storage_core(uint32_t) {}
+bool profile_service_observe_identity_on_storage_core(
+    const ControllerIdentity& identity) {
+    require(observed_profile_identity_count <
+                sizeof(observed_profile_identities) /
+                    sizeof(observed_profile_identities[0]),
+            "profile identity observation fixture overflow");
+    observed_profile_identities[observed_profile_identity_count++] =
+        identity;
+    return true;
+}
 void configuration_service_snapshot(ConfigurationServiceSnapshot* output) {
     *output = {};
     output->state = ConfigurationServiceState::kReady;
@@ -319,6 +465,15 @@ SwitchRgbColor switch_pro_get_slot_light_color(uint8_t instance) {
 
 namespace {
 
+bool read_controller_state(uint8_t slot, ControllerState* output) {
+    Bluepad32SlotSnapshot snapshot{};
+    bluepad32_input_backend_snapshot(slot, &snapshot);
+    if (output != nullptr) {
+        *output = snapshot.state;
+    }
+    return snapshot.active;
+}
+
 void start_backend() {
     bluepad32_input_backend_init();
     platform_on_init_complete();
@@ -327,8 +482,9 @@ void start_backend() {
                 link_supervision_timeout ==
                     kClassicLinkSupervisionTimeout &&
                 !bondable && accepted_stk_methods == 0 &&
-                !ssp_auto_accept && pairing_event_handler != nullptr,
-            "initialization must configure liveness and pairing policy");
+                !ssp_auto_accept && pairing_event_handler != nullptr &&
+                identity_event_handler != nullptr,
+            "initialization must register Classic and BLE identity policy");
 }
 void start_pairing_backend() {
     start_backend();
@@ -342,6 +498,114 @@ void start_pairing_backend() {
 void dispatch_pairing_event(uint8_t event_type) {
     uint8_t packet[8] = {event_type, 6, 1, 2, 3, 4, 5, 6};
     pairing_event_handler(HCI_EVENT_PACKET, 0, packet, sizeof(packet));
+}
+
+void write_event_address(uint8_t* packet, size_t offset,
+                         const bd_addr_t address) {
+    for (size_t index = 0; index < sizeof(bd_addr_t); ++index) {
+        packet[offset + index] =
+            address[sizeof(bd_addr_t) - 1 - index];
+    }
+}
+
+void dispatch_identity_event(uint8_t event_type,
+                             const uni_hid_device_t& controller,
+                             uint8_t identity_address_type,
+                             const bd_addr_t identity_address,
+                             uint8_t status = ERROR_CODE_SUCCESS) {
+    uint8_t packet[20]{};
+    size_t packet_size = 0;
+    packet[0] = event_type;
+    packet[2] = static_cast<uint8_t>(controller.conn.handle);
+    packet[3] = static_cast<uint8_t>(controller.conn.handle >> 8);
+    switch (event_type) {
+        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:
+            packet_size = sizeof(packet);
+            packet[4] = BD_ADDR_TYPE_LE_RANDOM;
+            write_event_address(packet, 5, controller.conn.btaddr);
+            packet[11] = identity_address_type;
+            write_event_address(packet, 12, identity_address);
+            break;
+        case SM_EVENT_IDENTITY_CREATED:
+            packet_size = sizeof(packet);
+            packet[4] = identity_address_type;
+            write_event_address(packet, 5, identity_address);
+            packet[11] = identity_address_type;
+            write_event_address(packet, 12, identity_address);
+            break;
+        case SM_EVENT_REENCRYPTION_STARTED:
+            packet_size = 11;
+            packet[4] = identity_address_type;
+            write_event_address(packet, 5, identity_address);
+            break;
+        case SM_EVENT_REENCRYPTION_COMPLETE:
+            packet_size = 12;
+            packet[4] = identity_address_type;
+            write_event_address(packet, 5, identity_address);
+            packet[11] = status;
+            break;
+        default:
+            require(false, "unsupported identity event fixture");
+    }
+    packet[1] = static_cast<uint8_t>(packet_size - 2);
+    identity_event_handler(
+        HCI_EVENT_PACKET, 0, packet,
+        static_cast<uint16_t>(packet_size));
+}
+
+void require_identity(const ControllerIdentity& actual, bool stable,
+                      ControllerTransport transport, uint8_t address_type,
+                      const bd_addr_t address, uint16_t vendor_id,
+                      uint16_t product_id, const char* message) {
+    ControllerIdentity expected{};
+    expected.stable = stable;
+    expected.transport = transport;
+    expected.address_type = address_type;
+    memcpy(expected.address, address, sizeof(expected.address));
+    expected.vendor_id = vendor_id;
+    expected.product_id = product_id;
+    require(controller_identity_equal(actual, expected), message);
+}
+
+void test_identity_encoding_contract() {
+    ControllerIdentity identity{};
+    identity.stable = true;
+    identity.transport = ControllerTransport::kBle;
+    identity.address_type = BD_ADDR_TYPE_LE_RANDOM_IDENTITY;
+    const bd_addr_t address = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15};
+    memcpy(identity.address, address, sizeof(address));
+    identity.vendor_id = 0x1234;
+    identity.product_id = 0xabcd;
+
+    uint8_t encoded[CONTROLLER_IDENTITY_ENCODED_SIZE]{};
+    const uint8_t expected[CONTROLLER_IDENTITY_ENCODED_SIZE] = {
+        1, 2, 3, 0, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0x34, 0x12, 0xcd, 0xab};
+    require(controller_identity_encode(identity, encoded, sizeof(encoded)) &&
+                memcmp(encoded, expected, sizeof(expected)) == 0,
+            "controller identity wire encoding changed");
+
+    ControllerIdentity decoded{};
+    require(controller_identity_decode(encoded, sizeof(encoded), &decoded) &&
+                controller_identity_equal(identity, decoded),
+            "controller identity wire round trip failed");
+    decoded.product_id ^= 1;
+    require(!controller_identity_equal(identity, decoded),
+            "controller identity equality must include every field");
+    encoded[3] = 1;
+    require(!controller_identity_decode(encoded, sizeof(encoded), &decoded),
+            "controller identity decoder must reject a nonzero reserved byte");
+
+    const ControllerIdentity global = controller_identity_global();
+    memset(encoded, 0xff, sizeof(encoded));
+    require(controller_identity_is_global(global) &&
+                controller_identity_encode(global, encoded,
+                                           sizeof(encoded)),
+            "global identity helper must produce an encodable fallback");
+    for (uint8_t byte : encoded) {
+        require(byte == 0,
+                "global fallback identity must encode as all zeroes");
+    }
 }
 
 
@@ -376,7 +640,7 @@ void test_ready_order(bool reverse) {
             for (int ready = 0; ready <= position; ++ready) {
                 expected_active = expected_active || order[ready] == candidate;
             }
-            require(bluepad32_input_backend_snapshot(candidate, &snapshot) ==
+            require(read_controller_state(candidate, &snapshot) ==
                         expected_active,
                     "only ready indexed slots may become active");
         }
@@ -403,7 +667,7 @@ void test_ready_order(bool reverse) {
 
         for (int candidate = 0; candidate < kSlotCount; ++candidate) {
             ControllerState snapshot{};
-            require(bluepad32_input_backend_snapshot(candidate, &snapshot) ==
+            require(read_controller_state(candidate, &snapshot) ==
                         (candidate != slot),
                     "disconnect must preserve every surviving slot");
         }
@@ -444,7 +708,7 @@ void test_rejections() {
     collision_data.gamepad.buttons = BUTTON_B;
     platform_on_controller_data(&collision, &collision_data);
     ControllerState snapshot{};
-    require(bluepad32_input_backend_snapshot(0, &snapshot),
+    require(read_controller_state(0, &snapshot),
             "occupied slot must stay active");
     require(!snapshot.button_east,
             "mismatched device input must not enter the occupied slot");
@@ -453,13 +717,13 @@ void test_rejections() {
     slot_zero_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
     slot_zero_data.gamepad.accel[0] = 8192;
     platform_on_controller_data(&slot_zero, &slot_zero_data);
-    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+    require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count == 3,
             "valid slot input must remain observable");
-    require(!bluepad32_input_backend_snapshot(4, &snapshot),
+    require(!read_controller_state(4, &snapshot),
             "public snapshot must reject slot 4");
     bluepad32_input_backend_report_sent(4);
-    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+    require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count == 3,
             "slot 4 acknowledgement must not consume slot 0 IMU");
     bluepad32_input_backend_queue_rumble(4, ControllerRumbleOutput{1, 2});
@@ -469,6 +733,7 @@ void test_rejections() {
 }
 
 void test_independent_lifecycle() {
+    test_identity_encoding_contract();
     start_pairing_backend();
 
     uni_hid_device_t aborted = device(0);
@@ -500,7 +765,40 @@ void test_independent_lifecycle() {
             "pre-ready disconnect must restart Classic and BLE scans");
 
     uni_hid_device_t devices[kSlotCount] = {
-        device(0), device(1), device(2), device(3)};
+        device(0, true, UNI_BT_CONN_PROTOCOL_BR_EDR),
+        device(1, true, UNI_BT_CONN_PROTOCOL_BLE),
+        device(2, true, UNI_BT_CONN_PROTOCOL_BLE),
+        device(3, true, UNI_BT_CONN_PROTOCOL_BLE)};
+    const bd_addr_t classic_address =
+        {0x10, 0x11, 0x12, 0x13, 0x14, 0x15};
+    const bd_addr_t resolved_connection_address =
+        {0x41, 0x21, 0x22, 0x23, 0x24, 0x25};
+    const bd_addr_t created_connection_address =
+        {0x42, 0x31, 0x32, 0x33, 0x34, 0x35};
+    const bd_addr_t reencrypted_connection_address =
+        {0x43, 0x41, 0x42, 0x43, 0x44, 0x45};
+    memcpy(devices[0].conn.btaddr, classic_address,
+           sizeof(classic_address));
+    memcpy(devices[1].conn.btaddr, resolved_connection_address,
+           sizeof(resolved_connection_address));
+    memcpy(devices[2].conn.btaddr, created_connection_address,
+           sizeof(created_connection_address));
+    memcpy(devices[3].conn.btaddr, reencrypted_connection_address,
+           sizeof(reencrypted_connection_address));
+    const bd_addr_t resolved_address =
+        {0x20, 0x21, 0x22, 0x23, 0x24, 0x25};
+    const bd_addr_t reencrypted_address =
+        {0x30, 0x31, 0x32, 0x33, 0x34, 0x35};
+    dispatch_identity_event(
+        SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED, devices[1],
+        BD_ADDR_TYPE_LE_PUBLIC, resolved_address);
+    register_lookup_device(&devices[3]);
+    dispatch_identity_event(
+        SM_EVENT_REENCRYPTION_STARTED, devices[3],
+        BD_ADDR_TYPE_LE_RANDOM, reencrypted_address);
+    dispatch_identity_event(
+        SM_EVENT_REENCRYPTION_COMPLETE, devices[3],
+        BD_ADDR_TYPE_LE_RANDOM, reencrypted_address);
     for (int slot = 0; slot < kSlotCount; ++slot) {
         platform_on_device_connected(&devices[slot]);
         require(g_slots[slot].device == &devices[slot] &&
@@ -539,6 +837,73 @@ void test_independent_lifecycle() {
                 !scanning_enabled && !incoming_connections,
             "four ready lifecycle devices must stop connection policy");
 
+    Bluepad32SlotSnapshot lifecycle_snapshots[kSlotCount]{};
+    uint32_t baseline_connection_generations[kSlotCount]{};
+    for (int slot = 0; slot < kSlotCount; ++slot) {
+        bluepad32_input_backend_snapshot(
+            static_cast<uint8_t>(slot), &lifecycle_snapshots[slot]);
+        require(lifecycle_snapshots[slot].active,
+                "ready slot snapshot must publish active state");
+        baseline_connection_generations[slot] =
+            lifecycle_snapshots[slot].connection_generation;
+    }
+    require_identity(
+        lifecycle_snapshots[0].identity, true,
+        ControllerTransport::kClassic, BD_ADDR_TYPE_UNKNOWN,
+        devices[0].conn.btaddr, devices[0].vendor_id,
+        devices[0].product_id,
+        "Classic snapshot identity must use the connected device address");
+    require_identity(
+        lifecycle_snapshots[1].identity, true,
+        ControllerTransport::kBle, BD_ADDR_TYPE_LE_PUBLIC,
+        resolved_address, devices[1].vendor_id, devices[1].product_id,
+        "resolved BLE snapshot must use the stable identity address");
+    require(controller_identity_is_global(
+                lifecycle_snapshots[2].identity),
+            "unresolved BLE snapshot must use the global unstable identity");
+    require_identity(
+        lifecycle_snapshots[3].identity, true,
+        ControllerTransport::kBle, BD_ADDR_TYPE_LE_RANDOM,
+        reencrypted_address, devices[3].vendor_id,
+        devices[3].product_id,
+        "reencrypted BLE snapshot must use the bonded identity address");
+    require(observed_profile_identity_count == 3 &&
+                controller_identity_equal(
+                    observed_profile_identities[0],
+                    lifecycle_snapshots[1].identity) &&
+                controller_identity_equal(
+                    observed_profile_identities[1],
+                    lifecycle_snapshots[3].identity) &&
+                controller_identity_equal(
+                    observed_profile_identities[2],
+                    lifecycle_snapshots[0].identity),
+            "only stable ready identities must be enrolled for profiles");
+    require(baseline_connection_generations[0] ==
+                first_pending_generation + 1 &&
+                baseline_connection_generations[1] ==
+                    baseline_connection_generations[2] &&
+                baseline_connection_generations[2] ==
+                    baseline_connection_generations[3],
+            "connection generations must isolate each slot lifecycle");
+
+    const bd_addr_t created_address =
+        {0x40, 0x41, 0x42, 0x43, 0x44, 0x45};
+    register_lookup_device(&devices[2]);
+    dispatch_identity_event(
+        SM_EVENT_IDENTITY_CREATED, devices[2],
+        BD_ADDR_TYPE_LE_RANDOM, created_address);
+    bluepad32_input_backend_snapshot(2, &lifecycle_snapshots[2]);
+    require_identity(
+        lifecycle_snapshots[2].identity, true,
+        ControllerTransport::kBle, BD_ADDR_TYPE_LE_RANDOM,
+        created_address, devices[2].vendor_id, devices[2].product_id,
+        "new BLE identity event must update an active slot snapshot");
+    require(observed_profile_identity_count == 4 &&
+                controller_identity_equal(
+                    observed_profile_identities[3],
+                    lifecycle_snapshots[2].identity),
+            "late BLE identity creation must enroll the stable identity");
+
     const uint32_t buttons[kSlotCount] = {
         BUTTON_B, BUTTON_A, BUTTON_X, BUTTON_Y};
     uni_controller_t data[kSlotCount]{};
@@ -552,7 +917,7 @@ void test_independent_lifecycle() {
 
     ControllerState states[kSlotCount]{};
     for (int slot = 0; slot < kSlotCount; ++slot) {
-        require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+        require(read_controller_state(slot, &states[slot]) &&
                     states[slot].motion_sample_count == 3,
                 "every slot must expose independent input and IMU");
     }
@@ -571,13 +936,13 @@ void test_independent_lifecycle() {
 
     bluepad32_input_backend_report_sent(3);
     for (int slot = 0; slot < kSlotCount; ++slot) {
-        require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+        require(read_controller_state(slot, &states[slot]) &&
                     states[slot].motion_sample_count == (slot == 3 ? 0 : 3),
                 "slot 3 acknowledgement must not consume slots 0-2 IMU");
     }
     for (int slot = 0; slot < 3; ++slot) {
         bluepad32_input_backend_report_sent(slot);
-        require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+        require(read_controller_state(slot, &states[slot]) &&
                     states[slot].motion_sample_count == 0,
                 "each slot acknowledgement must consume only its own IMU");
     }
@@ -605,24 +970,43 @@ void test_independent_lifecycle() {
 
     bluepad32_input_backend_queue_rumble(3, ControllerRumbleOutput{55, 66});
     const uint32_t disconnected_generation =
-        g_slots[3].connection_generation;
+        baseline_connection_generations[3];
     const int starts_before_slot_three_disconnect = scan_starts;
     platform_on_device_disconnected(&devices[3]);
     require(scan_starts == starts_before_slot_three_disconnect + 1 &&
                 scanning_enabled && incoming_connections,
             "slot 3 disconnect must resume scanning and incoming connections");
-    require(!bluepad32_input_backend_snapshot(3, &states[3]) &&
+    require(!read_controller_state(3, &states[3]) &&
                 !states[3].button_north && states[3].left_stick_x == 0,
             "slot 3 disconnect must publish protocol-neutral state");
-    require(bluepad32_input_backend_snapshot(0, &states[0]) &&
+    bluepad32_input_backend_snapshot(3, &lifecycle_snapshots[3]);
+    require(!lifecycle_snapshots[3].active &&
+                lifecycle_snapshots[3].connection_generation ==
+                    disconnected_generation + 1 &&
+                controller_identity_is_global(
+                    lifecycle_snapshots[3].identity) &&
+                !lifecycle_snapshots[3].state.button_north &&
+                lifecycle_snapshots[3].state.left_stick_x == 0,
+            "disconnect snapshot must atomically publish neutral state, "
+            "cleared identity, and a new connection generation");
+    for (int survivor = 0; survivor < 3; ++survivor) {
+        bluepad32_input_backend_snapshot(
+            static_cast<uint8_t>(survivor),
+            &lifecycle_snapshots[survivor]);
+        require(lifecycle_snapshots[survivor].active &&
+                    lifecycle_snapshots[survivor].connection_generation ==
+                        baseline_connection_generations[survivor],
+                "disconnect generation must not leak into surviving slots");
+    }
+    require(read_controller_state(0, &states[0]) &&
                 states[0].button_east &&
-                bluepad32_input_backend_snapshot(1, &states[1]) &&
+                read_controller_state(1, &states[1]) &&
                 states[1].button_south &&
-                bluepad32_input_backend_snapshot(2, &states[2]) &&
+                read_controller_state(2, &states[2]) &&
                 states[2].button_west,
             "slot 3 disconnect must preserve slots 0-2");
     platform_on_controller_data(&devices[0], &data[0]);
-    require(bluepad32_input_backend_snapshot(0, &states[0]) &&
+    require(read_controller_state(0, &states[0]) &&
                 states[0].button_east,
             "slot 0 input must continue while slot 3 is disconnected");
     const int slot_zero_calls_while_scanning = devices[0].rumble_calls;
@@ -633,13 +1017,26 @@ void test_independent_lifecycle() {
                 devices[0].last_high == 116,
             "slot 0 rumble must continue while slot 3 is disconnected");
 
-    uni_hid_device_t slot_three_replacement = device(3);
+    uni_hid_device_t slot_three_replacement =
+        device(3, true, UNI_BT_CONN_PROTOCOL_BLE);
+    memcpy(slot_three_replacement.conn.btaddr,
+           devices[3].conn.btaddr, sizeof(devices[3].conn.btaddr));
     require(platform_on_device_ready(&slot_three_replacement) ==
                 UNI_ERROR_SUCCESS,
             "slot 3 replacement must bind to the freed indexed slot");
     process_rumble_timer(&g_rumble_timer);
     require(slot_three_replacement.rumble_calls == 0,
             "slot 3 replacement must not receive disconnected device rumble");
+    bluepad32_input_backend_snapshot(3, &lifecycle_snapshots[3]);
+    require(lifecycle_snapshots[3].active &&
+                lifecycle_snapshots[3].connection_generation ==
+                    disconnected_generation + 1 &&
+                controller_identity_is_global(
+                    lifecycle_snapshots[3].identity),
+            "replacement must keep the new generation and cannot inherit "
+            "the disconnected BLE identity");
+    require(observed_profile_identity_count == 4,
+            "unstable replacement must not be enrolled for profiles");
 
     g_slots[3].pending_rumble = {
         3, disconnected_generation, ControllerRumbleOutput{77, 88}};
@@ -653,14 +1050,14 @@ void test_independent_lifecycle() {
     replacement_data.gamepad.buttons = BUTTON_Y;
     replacement_data.gamepad.accel[0] = 9000;
     platform_on_controller_data(&slot_three_replacement, &replacement_data);
-    require(bluepad32_input_backend_snapshot(3, &states[3]) &&
+    require(read_controller_state(3, &states[3]) &&
                 states[3].button_north && states[3].motion_sample_count == 3,
             "replacement input and IMU must populate only slot 3");
-    require(bluepad32_input_backend_snapshot(0, &states[0]) &&
+    require(read_controller_state(0, &states[0]) &&
                 states[0].button_east &&
-                bluepad32_input_backend_snapshot(1, &states[1]) &&
+                read_controller_state(1, &states[1]) &&
                 states[1].button_south &&
-                bluepad32_input_backend_snapshot(2, &states[2]) &&
+                read_controller_state(2, &states[2]) &&
                 states[2].button_west,
             "slot 3 replacement must not disturb slots 0-2");
 
@@ -706,15 +1103,14 @@ void test_independent_lifecycle() {
         require(scan_starts == starts_before_disconnect + 1 &&
                     scanning_enabled && incoming_connections,
                 "disconnecting slots 0-2 must resume connection policy");
-        require(!bluepad32_input_backend_snapshot(slot, &states[slot]) &&
+        require(!read_controller_state(slot, &states[slot]) &&
                     states[slot].left_stick_x == 0,
                 "disconnect must publish protocol-neutral state");
         for (int survivor = 0; survivor < kSlotCount; ++survivor) {
             if (survivor == slot) {
                 continue;
             }
-            require(bluepad32_input_backend_snapshot(survivor,
-                                                     &states[survivor]),
+            require(read_controller_state(survivor, &states[survivor]),
                     "disconnect must preserve all three survivors");
         }
         require(platform_on_device_ready(&replacements[slot]) ==
@@ -898,7 +1294,7 @@ void test_abxy_hotkey() {
     input.gamepad.buttons = BUTTON_A;
     platform_on_controller_data(&slot_zero, &input);
     ControllerState snapshot{};
-    require(bluepad32_input_backend_snapshot(0, &snapshot),
+    require(read_controller_state(0, &snapshot),
             "slot 0 ABXY state was not published");
     require_south_button_mapping(
         snapshot, kDefaultSwapAbxy,
@@ -908,7 +1304,7 @@ void test_abxy_hotkey() {
         kAbxyHotkeyButtonMask | BUTTON_A;
     input.gamepad.misc_buttons = kAbxyHotkeyMiscMask;
     platform_on_controller_data(&slot_zero, &input);
-    require(bluepad32_input_backend_snapshot(0, &snapshot),
+    require(read_controller_state(0, &snapshot),
             "toggled slot 0 state was not published");
     require_south_button_mapping(
         snapshot, !kDefaultSwapAbxy,
@@ -960,7 +1356,7 @@ void test_abxy_hotkey() {
     peer_input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
     peer_input.gamepad.buttons = BUTTON_A;
     platform_on_controller_data(&slot_one, &peer_input);
-    require(bluepad32_input_backend_snapshot(1, &snapshot),
+    require(read_controller_state(1, &snapshot),
             "slot 1 ABXY state was not published");
     require_south_button_mapping(
         snapshot, kDefaultSwapAbxy,
@@ -988,7 +1384,7 @@ void test_motion_hotkey() {
     input.gamepad.accel[0] = 8192;
     platform_on_controller_data(&slot_zero, &input);
     ControllerState snapshot{};
-    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+    require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 3 : 0),
             "slot 0 did not start with configured motion state");
@@ -997,7 +1393,7 @@ void test_motion_hotkey() {
     input.gamepad.buttons = kMotionHotkeyButtonMask;
     input.gamepad.misc_buttons = kMotionHotkeyMiscMask;
     platform_on_controller_data(&slot_zero, &input);
-    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+    require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 0 : 3) &&
                 !snapshot.dpad_up && !snapshot.button_right_shoulder &&
@@ -1030,7 +1426,7 @@ void test_motion_hotkey() {
     peer_input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
     peer_input.gamepad.accel[0] = 8192;
     platform_on_controller_data(&slot_one, &peer_input);
-    require(bluepad32_input_backend_snapshot(1, &snapshot) &&
+    require(read_controller_state(1, &snapshot) &&
                 snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 3 : 0),
             "slot 0 motion chord changed slot 1 motion state");
@@ -1042,7 +1438,7 @@ void test_motion_hotkey() {
     input.gamepad.buttons = kMotionHotkeyButtonMask;
     input.gamepad.misc_buttons = kMotionHotkeyMiscMask;
     platform_on_controller_data(&slot_zero, &input);
-    require(bluepad32_input_backend_snapshot(0, &snapshot) &&
+    require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 3 : 0),
             "released motion chord did not re-arm or restore motion");
@@ -1078,7 +1474,7 @@ void test_protocol_neutral_analog_state() {
     platform_on_controller_data(&controller, &input);
 
     ControllerState state{};
-    require(bluepad32_input_backend_snapshot(0, &state),
+    require(read_controller_state(0, &state),
             "analog state was not published");
     require(state.left_stick_x == INT16_MIN &&
                 state.left_stick_y == 0 &&
@@ -1096,7 +1492,7 @@ void test_protocol_neutral_analog_state() {
     input.gamepad.buttons =
         BUTTON_TRIGGER_L | BUTTON_TRIGGER_R;
     platform_on_controller_data(&controller, &input);
-    require(bluepad32_input_backend_snapshot(0, &state) &&
+    require(read_controller_state(0, &state) &&
                 state.left_trigger == UINT16_MAX &&
                 state.right_trigger == UINT16_MAX,
             "digital trigger buttons did not map to full analog range");

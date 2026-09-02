@@ -1,0 +1,186 @@
+#include "controller_identity.h"
+#include "controller_profile.h"
+#include "pico_profile_storage.h"
+#include "profile_service.h"
+#include "profile_storage.h"
+
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+
+namespace {
+
+struct FakeFlash {
+    uint8_t bytes[PROFILE_STORAGE_BANK_COUNT][PROFILE_STORAGE_BANK_SIZE];
+};
+
+FakeFlash flash{};
+
+void require(bool condition, const char* message) {
+    if (!condition) {
+        std::cerr << message << '\n';
+        std::exit(1);
+    }
+}
+
+bool fake_read(void* context, uint8_t bank, size_t offset,
+               uint8_t* output, size_t size) {
+    auto* storage = static_cast<FakeFlash*>(context);
+    if (bank >= PROFILE_STORAGE_BANK_COUNT || output == nullptr ||
+        offset > PROFILE_STORAGE_BANK_SIZE ||
+        size > PROFILE_STORAGE_BANK_SIZE - offset) {
+        return false;
+    }
+    memcpy(output, &storage->bytes[bank][offset], size);
+    return true;
+}
+
+bool fake_erase_sector(void* context, uint8_t bank, size_t offset) {
+    auto* storage = static_cast<FakeFlash*>(context);
+    if (bank >= PROFILE_STORAGE_BANK_COUNT ||
+        offset % PROFILE_STORAGE_SECTOR_SIZE != 0 ||
+        offset > PROFILE_STORAGE_BANK_SIZE ||
+        PROFILE_STORAGE_SECTOR_SIZE > PROFILE_STORAGE_BANK_SIZE - offset) {
+        return false;
+    }
+    memset(&storage->bytes[bank][offset], 0xff,
+           PROFILE_STORAGE_SECTOR_SIZE);
+    return true;
+}
+
+bool fake_program(void* context, uint8_t bank, size_t offset,
+                  const uint8_t* data, size_t size) {
+    auto* storage = static_cast<FakeFlash*>(context);
+    if (bank >= PROFILE_STORAGE_BANK_COUNT || data == nullptr ||
+        size != PROFILE_STORAGE_PAGE_SIZE ||
+        offset % PROFILE_STORAGE_PAGE_SIZE != 0 ||
+        offset > PROFILE_STORAGE_BANK_SIZE ||
+        size > PROFILE_STORAGE_BANK_SIZE - offset) {
+        return false;
+    }
+    for (size_t index = 0; index < size; ++index) {
+        storage->bytes[bank][offset + index] &= data[index];
+    }
+    return true;
+}
+
+ProfileStorageIo fake_io() {
+    return {
+        &flash,
+        PROFILE_STORAGE_BANK_SIZE,
+        PROFILE_STORAGE_SECTOR_SIZE,
+        PROFILE_STORAGE_PAGE_SIZE,
+        fake_read,
+        fake_erase_sector,
+        fake_program,
+    };
+}
+
+ProfileServiceTransactionSnapshot transaction_snapshot() {
+    ProfileServiceTransactionSnapshot snapshot{};
+    profile_service_transaction_snapshot(&snapshot);
+    return snapshot;
+}
+
+ControllerProfileDatabase reload_database(
+    const ProfileServiceTransactionSnapshot& transaction,
+    uint32_t expected_generation) {
+    ControllerProfileDatabase recovered{};
+    ProfileStorage storage;
+    require(storage.initialize(fake_io(), &recovered) &&
+                storage.snapshot().valid &&
+                storage.snapshot().generation == expected_generation &&
+                storage.snapshot().generation ==
+                    transaction.transaction.stored_generation &&
+                storage.snapshot().payload_crc ==
+                    transaction.transaction.stored_crc,
+            "terminal transaction status did not identify persisted storage");
+    return recovered;
+}
+
+void test_pending_commands_are_not_decoded_as_profile_writes() {
+    memset(flash.bytes, 0xff, sizeof(flash.bytes));
+    profile_service_prepare();
+    profile_service_initialize_on_storage_core();
+
+    const ControllerIdentity identity = controller_identity_global();
+    constexpr uint8_t kProfileIndex = 2;
+    ControllerProfile customized =
+        controller_profile_default(identity, kProfileIndex);
+    customized.strong_rumble_scale = 17;
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(customized, encoded, sizeof(encoded)),
+            "customized profile did not encode");
+
+    constexpr uint32_t kWriteTransactionId = 0x10203040;
+    require(profile_service_begin(
+                kWriteTransactionId, identity, kProfileIndex,
+                CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
+                profile_storage_crc32(encoded, sizeof(encoded))) ==
+                ConfigurationTransactionStatus::kReceiving &&
+                profile_service_append(kWriteTransactionId, 0, encoded,
+                                       sizeof(encoded)) ==
+                    ConfigurationTransactionStatus::kReceiving &&
+                profile_service_commit(kWriteTransactionId) ==
+                    ConfigurationTransactionStatus::kPending,
+            "profile write did not reach pending");
+    profile_service_task_on_storage_core(0);
+    require(transaction_snapshot().transaction.status ==
+                ConfigurationTransactionStatus::kCommitted,
+            "profile write baseline did not commit");
+
+    constexpr uint32_t kResetTransactionId = 0xa5a55a5a;
+    require(profile_service_reset(kResetTransactionId, identity,
+                                  kProfileIndex) ==
+                ConfigurationTransactionStatus::kPending,
+            "profile reset did not reach pending");
+    ProfileServiceTransactionSnapshot reset = transaction_snapshot();
+    require(reset.transaction.transaction_id == kResetTransactionId &&
+                reset.transaction.status ==
+                    ConfigurationTransactionStatus::kPending,
+            "pending reset lost its transaction identity");
+
+    profile_service_task_on_storage_core(1000);
+    reset = transaction_snapshot();
+    require(reset.transaction.transaction_id == kResetTransactionId &&
+                reset.transaction.status ==
+                    ConfigurationTransactionStatus::kCommitted,
+            "one reset tick decoded profile payload or published a malformed result");
+    ControllerProfileDatabase recovered = reload_database(reset, 2);
+    require(recovered.fallback_profiles[kProfileIndex].strong_rumble_scale ==
+                UINT8_MAX,
+            "terminal reset status was published before reset persisted");
+
+    constexpr uint32_t kActivateTransactionId = 0x50607080;
+    constexpr uint8_t kActivatedProfile = 3;
+    require(profile_service_activate(kActivateTransactionId, identity,
+                                     kActivatedProfile) ==
+                ConfigurationTransactionStatus::kPending,
+            "profile activation did not reach pending");
+    ProfileServiceTransactionSnapshot activate = transaction_snapshot();
+    require(activate.transaction.transaction_id == kActivateTransactionId &&
+                activate.transaction.status ==
+                    ConfigurationTransactionStatus::kPending,
+            "pending activation lost its transaction identity");
+
+    profile_service_task_on_storage_core(2000);
+    activate = transaction_snapshot();
+    require(activate.transaction.transaction_id == kActivateTransactionId &&
+                activate.transaction.status ==
+                    ConfigurationTransactionStatus::kCommitted,
+            "one activation tick decoded profile payload or published a malformed result");
+    recovered = reload_database(activate, 3);
+    require(recovered.fallback_active_profile == kActivatedProfile,
+            "terminal activation status was published before activation persisted");
+}
+
+}  // namespace
+
+ProfileStorageIo pico_profile_storage_io() {
+    return fake_io();
+}
+
+int main() {
+    test_pending_commands_are_not_decoded_as_profile_writes();
+    return 0;
+}

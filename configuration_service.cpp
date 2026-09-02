@@ -171,6 +171,10 @@ ConfigurationTransactionStatus configuration_service_reset(
     if (status == ConfigurationTransactionStatus::kReceiving) {
         status = g_transaction.finish(transaction_id);
     }
+    if (status == ConfigurationTransactionStatus::kPending &&
+        g_snapshot.reset_generation != UINT32_MAX) {
+        ++g_snapshot.reset_generation;
+    }
     g_snapshot.transaction = g_transaction.snapshot();
     critical_section_exit(&g_lock);
     return status;

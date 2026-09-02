@@ -61,17 +61,39 @@ Status transaction_status(ConfigurationTransactionStatus status) {
     }
     return Status::kStorageError;
 }
+Status profile_service_status(const ProfileServiceMetadata& metadata) {
+    if (metadata.state == ProfileServiceState::kLoading) {
+        return Status::kPending;
+    }
+    if (metadata.state == ProfileServiceState::kStorageError) {
+        return Status::kStorageError;
+    }
+    return Status::kOk;
+}
+
 
 bool valid_out_size(Operation operation, size_t size) {
     switch (operation) {
         case Operation::kConfigurationBegin:
             return size == kRequestHeaderSize + 12;
+        case Operation::kProfileBegin:
+            return size == kRequestHeaderSize + 28;
         case Operation::kConfigurationChunk:
+            return size > kRequestHeaderSize + 8 &&
+                   size <= kMaximumRequestSize;
+        case Operation::kProfileChunk:
             return size > kRequestHeaderSize + 8 &&
                    size <= kMaximumRequestSize;
         case Operation::kConfigurationCommit:
         case Operation::kConfigurationReset:
             return size == kRequestHeaderSize + 4;
+        case Operation::kProfileCommit:
+            return size == kRequestHeaderSize + 4;
+        case Operation::kProfileSelect:
+            return size == kRequestHeaderSize + 15;
+        case Operation::kProfileReset:
+        case Operation::kProfileActivate:
+            return size == kRequestHeaderSize + 19;
         case Operation::kPairingRefresh:
         case Operation::kPairingClear:
             return size == kRequestHeaderSize;
@@ -218,6 +240,74 @@ size_t encode_pairing_snapshot(const Bluepad32PairingSnapshot& snapshot,
         payload, offset, output, output_size);
 }
 
+size_t encode_profile_list(const ProfileServiceListSnapshot& snapshot,
+                           uint8_t* output, size_t output_size) {
+    if (snapshot.count > PROFILE_SERVICE_LIST_CAPACITY) {
+        return 0;
+    }
+    uint8_t payload[kProfileListPayloadSize]{};
+    payload[0] = snapshot.count;
+    size_t offset = 1;
+    for (uint8_t index = 0; index < snapshot.count; ++index) {
+        if (!controller_identity_encode(snapshot.rows[index].identity,
+                                        &payload[offset],
+                                        CONTROLLER_IDENTITY_ENCODED_SIZE) ||
+            snapshot.rows[index].active_profile >=
+                CONTROLLER_PROFILE_COUNT) {
+            return 0;
+        }
+        payload[offset + 14] = snapshot.rows[index].active_profile;
+        offset += 16;
+    }
+    return encode_response(
+        Operation::kProfileList, profile_service_status(snapshot.metadata),
+        0, CONTROLLER_PROFILE_SCHEMA_VERSION, snapshot.metadata.generation,
+        payload, offset, output, output_size);
+}
+
+size_t encode_profile_read(const ProfileServiceSelectedSnapshot& snapshot,
+                           uint8_t* output, size_t output_size) {
+    Status status = profile_service_status(snapshot.metadata);
+    if (status == Status::kOk) {
+        status = transaction_status(snapshot.status);
+    }
+    uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    size_t payload_size = 0;
+    if (snapshot.valid) {
+        if (!controller_profile_encode(snapshot.profile, payload,
+                                       sizeof(payload))) {
+            return 0;
+        }
+        payload_size = sizeof(payload);
+    }
+    return encode_response(
+        Operation::kProfileRead, status, 0,
+        CONTROLLER_PROFILE_SCHEMA_VERSION, snapshot.metadata.generation,
+        payload, payload_size, output, output_size);
+}
+
+size_t encode_profile_transaction(
+    const ProfileServiceTransactionSnapshot& snapshot,
+    uint8_t* output, size_t output_size) {
+    const ConfigurationTransactionSnapshot& transaction =
+        snapshot.transaction;
+    uint8_t payload[20]{};
+    write_u32(&payload[0], transaction.transaction_id);
+    write_u16(&payload[4], transaction.received_size);
+    write_u16(&payload[6], transaction.expected_size);
+    write_u32(&payload[8], transaction.expected_crc);
+    write_u32(&payload[12], transaction.stored_generation);
+    write_u32(&payload[16], transaction.stored_crc);
+    Status status = profile_service_status(snapshot.metadata);
+    if (status == Status::kOk) {
+        status = transaction_status(transaction.status);
+    }
+    return encode_response(
+        Operation::kProfileTransactionStatus, status, 0,
+        CONTROLLER_PROFILE_SCHEMA_VERSION, snapshot.metadata.generation,
+        payload, sizeof(payload), output, output_size);
+}
+
 }  // namespace UsbConfigurationManagement
 
 namespace {
@@ -286,6 +376,96 @@ bool process_out_request() {
                 (static_cast<uint32_t>(payload[2]) << 16) |
                 (static_cast<uint32_t>(payload[3]) << 24));
             return true;
+        case Operation::kProfileSelect: {
+            ControllerIdentity identity{};
+            if (payload[14] >= CONTROLLER_PROFILE_COUNT ||
+                !controller_identity_decode(
+                    payload, CONTROLLER_IDENTITY_ENCODED_SIZE, &identity)) {
+                return false;
+            }
+            const ConfigurationTransactionStatus status =
+                profile_service_select(identity, payload[14]);
+            return status == ConfigurationTransactionStatus::kCommitted ||
+                   status == ConfigurationTransactionStatus::kPending;
+        }
+        case Operation::kProfileBegin: {
+            ControllerIdentity identity{};
+            if (payload[19] != 0 ||
+                !controller_identity_decode(
+                    &payload[4], CONTROLLER_IDENTITY_ENCODED_SIZE,
+                    &identity)) {
+                return false;
+            }
+            profile_service_begin(
+                static_cast<uint32_t>(payload[0]) |
+                    (static_cast<uint32_t>(payload[1]) << 8) |
+                    (static_cast<uint32_t>(payload[2]) << 16) |
+                    (static_cast<uint32_t>(payload[3]) << 24),
+                identity, payload[18],
+                static_cast<uint16_t>(payload[20] |
+                                      (payload[21] << 8)),
+                static_cast<uint16_t>(payload[22] |
+                                      (payload[23] << 8)),
+                static_cast<uint32_t>(payload[24]) |
+                    (static_cast<uint32_t>(payload[25]) << 8) |
+                    (static_cast<uint32_t>(payload[26]) << 16) |
+                    (static_cast<uint32_t>(payload[27]) << 24));
+            return true;
+        }
+        case Operation::kProfileChunk: {
+            const uint16_t chunk_size =
+                static_cast<uint16_t>(payload[6] |
+                                      (payload[7] << 8));
+            if (request.payload_size != 8 + chunk_size ||
+                chunk_size > kMaximumChunkSize) {
+                return false;
+            }
+            profile_service_append(
+                static_cast<uint32_t>(payload[0]) |
+                    (static_cast<uint32_t>(payload[1]) << 8) |
+                    (static_cast<uint32_t>(payload[2]) << 16) |
+                    (static_cast<uint32_t>(payload[3]) << 24),
+                static_cast<uint16_t>(payload[4] |
+                                      (payload[5] << 8)),
+                &payload[8], chunk_size);
+            return true;
+        }
+        case Operation::kProfileCommit:
+            profile_service_commit(
+                static_cast<uint32_t>(payload[0]) |
+                (static_cast<uint32_t>(payload[1]) << 8) |
+                (static_cast<uint32_t>(payload[2]) << 16) |
+                (static_cast<uint32_t>(payload[3]) << 24));
+            return true;
+        case Operation::kProfileReset:
+        case Operation::kProfileActivate: {
+            const uint32_t transaction_id =
+                static_cast<uint32_t>(payload[0]) |
+                (static_cast<uint32_t>(payload[1]) << 8) |
+                (static_cast<uint32_t>(payload[2]) << 16) |
+                (static_cast<uint32_t>(payload[3]) << 24);
+            ControllerIdentity identity{};
+            if (transaction_id == 0 ||
+                (request.operation == Operation::kProfileActivate &&
+                 payload[18] >= CONTROLLER_PROFILE_COUNT) ||
+                (request.operation == Operation::kProfileReset &&
+                 payload[18] != CONTROLLER_PROFILE_ALL &&
+                 payload[18] >= CONTROLLER_PROFILE_COUNT) ||
+                !controller_identity_decode(
+                    &payload[4], CONTROLLER_IDENTITY_ENCODED_SIZE,
+                    &identity)) {
+                return false;
+            }
+            const ConfigurationTransactionStatus status =
+                request.operation == Operation::kProfileReset
+                    ? profile_service_reset(
+                          transaction_id, identity, payload[18])
+                    : profile_service_activate(
+                          transaction_id, identity, payload[18]);
+            return status == ConfigurationTransactionStatus::kPending ||
+                   status == ConfigurationTransactionStatus::kUnchanged ||
+                   status == ConfigurationTransactionStatus::kCommitted;
+        }
         case Operation::kPairingRefresh:
             bluepad32_input_backend_request_pairing_snapshot();
             return true;
@@ -364,6 +544,27 @@ extern "C" bool tud_vendor_control_xfer_cb(
             Bluepad32PairingSnapshot snapshot{};
             bluepad32_input_backend_pairing_snapshot(&snapshot);
             response_size = encode_pairing_snapshot(
+                snapshot, response, sizeof(response));
+            break;
+        }
+        case Operation::kProfileList: {
+            ProfileServiceListSnapshot snapshot{};
+            profile_service_list_snapshot(&snapshot);
+            response_size = encode_profile_list(
+                snapshot, response, sizeof(response));
+            break;
+        }
+        case Operation::kProfileRead: {
+            ProfileServiceSelectedSnapshot snapshot{};
+            profile_service_selected_snapshot(&snapshot);
+            response_size = encode_profile_read(
+                snapshot, response, sizeof(response));
+            break;
+        }
+        case Operation::kProfileTransactionStatus: {
+            ProfileServiceTransactionSnapshot snapshot{};
+            profile_service_transaction_snapshot(&snapshot);
+            response_size = encode_profile_transaction(
                 snapshot, response, sizeof(response));
             break;
         }

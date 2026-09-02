@@ -99,6 +99,11 @@ add_executable(switch-pico
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE
             bluepad32_input_backend.cpp
+            controller_identity.cpp
+            controller_profile.cpp
+            profile_storage.cpp
+            profile_service.cpp
+            pico_profile_storage.cpp
             bootsel_pairing_button.cpp
             adapter_configuration.cpp
             configuration_storage.cpp

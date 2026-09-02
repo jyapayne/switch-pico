@@ -290,8 +290,10 @@ int main() {
         }
         for (uint8_t instance = 0;
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
-            bluepad32_input_backend_snapshot(instance,
-                                             &g_user_states[instance]);
+            Bluepad32SlotSnapshot snapshot{};
+            bluepad32_input_backend_snapshot(instance, &snapshot);
+            g_user_states[instance] =
+                snapshot.active ? snapshot.state : controller_neutral_state();
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
             bool sent = false;
             if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {

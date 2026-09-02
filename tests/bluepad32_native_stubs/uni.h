@@ -6,6 +6,7 @@ typedef uint8_t bd_addr_t[6];
 typedef uint8_t link_key_t[16];
 typedef uint8_t sm_key_t[16];
 typedef int link_key_type_t;
+typedef uint16_t hci_con_handle_t;
 
 enum bd_addr_type_t {
     BD_ADDR_TYPE_LE_PUBLIC = 0,
@@ -29,6 +30,12 @@ enum {
     HCI_EVENT_PACKET = 4,
     HCI_EVENT_USER_CONFIRMATION_REQUEST = 0x33,
     HCI_EVENT_USER_PASSKEY_REQUEST = 0x34,
+    SM_EVENT_IDENTITY_RESOLVING_STARTED = 0xcd,
+    SM_EVENT_IDENTITY_RESOLVING_FAILED = 0xce,
+    SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED = 0xcf,
+    SM_EVENT_IDENTITY_CREATED = 0xd3,
+    SM_EVENT_REENCRYPTION_STARTED = 0xd6,
+    SM_EVENT_REENCRYPTION_COMPLETE = 0xd7,
     SM_STK_GENERATION_METHOD_JUST_WORKS = 0x01,
     SM_STK_GENERATION_METHOD_OOB = 0x02,
     SM_STK_GENERATION_METHOD_PASSKEY = 0x04,
@@ -114,10 +121,13 @@ enum uni_bt_conn_protocol_t {
 
 struct uni_bt_conn_t {
     bd_addr_t btaddr;
+    hci_con_handle_t handle;
     uni_bt_conn_protocol_t protocol;
 };
 
 struct uni_hid_device_t {
+    uint16_t vendor_id;
+    uint16_t product_id;
     uni_bt_conn_t conn;
     int idx;
     bool gamepad;
@@ -154,6 +164,8 @@ struct uni_platform {
 bool uni_hid_device_is_gamepad(const uni_hid_device_t* device);
 int uni_hid_device_get_idx_for_instance(const uni_hid_device_t* device);
 void uni_hid_device_disconnect(uni_hid_device_t* device);
+uni_hid_device_t* uni_hid_device_get_instance_for_connection_handle(
+    hci_con_handle_t handle);
 void uni_bt_allow_incoming_connections(bool enabled);
 void uni_bt_start_scanning_and_autoconnect_unsafe();
 void uni_bt_stop_scanning_unsafe();
@@ -181,10 +193,48 @@ int gap_ssp_passkey_response(const bd_addr_t address, uint32_t passkey);
 int gap_ssp_passkey_negative(const bd_addr_t address);
 void hci_add_event_handler(
     btstack_packet_callback_registration_t* callback_handler);
+void sm_add_event_handler(
+    btstack_packet_callback_registration_t* callback_handler);
 uint8_t hci_event_packet_get_type(const uint8_t* packet);
 void hci_event_user_confirmation_request_get_bd_addr(
     const uint8_t* packet, bd_addr_t address);
 void hci_event_user_passkey_request_get_bd_addr(
     const uint8_t* packet, bd_addr_t address);
+hci_con_handle_t sm_event_identity_resolving_started_get_handle(
+    const uint8_t* packet);
+hci_con_handle_t sm_event_identity_resolving_failed_get_handle(
+    const uint8_t* packet);
+hci_con_handle_t sm_event_identity_resolving_succeeded_get_handle(
+    const uint8_t* packet);
+uint8_t sm_event_identity_resolving_succeeded_get_addr_type(
+    const uint8_t* packet);
+void sm_event_identity_resolving_succeeded_get_address(
+    const uint8_t* packet, bd_addr_t address);
+uint8_t sm_event_identity_resolving_succeeded_get_identity_addr_type(
+    const uint8_t* packet);
+void sm_event_identity_resolving_succeeded_get_identity_address(
+    const uint8_t* packet, bd_addr_t address);
+hci_con_handle_t sm_event_identity_created_get_handle(
+    const uint8_t* packet);
+void sm_event_identity_created_get_address(
+    const uint8_t* packet, bd_addr_t address);
+uint8_t sm_event_identity_created_get_identity_addr_type(
+    const uint8_t* packet);
+void sm_event_identity_created_get_identity_address(
+    const uint8_t* packet, bd_addr_t address);
+hci_con_handle_t sm_event_reencryption_started_get_handle(
+    const uint8_t* packet);
+uint8_t sm_event_reencryption_started_get_addr_type(
+    const uint8_t* packet);
+void sm_event_reencryption_started_get_address(
+    const uint8_t* packet, bd_addr_t address);
+hci_con_handle_t sm_event_reencryption_complete_get_handle(
+    const uint8_t* packet);
+uint8_t sm_event_reencryption_complete_get_addr_type(
+    const uint8_t* packet);
+void sm_event_reencryption_complete_get_address(
+    const uint8_t* packet, bd_addr_t address);
+uint8_t sm_event_reencryption_complete_get_status(
+    const uint8_t* packet);
 void uni_platform_set_custom(uni_platform* platform);
 int uni_init(int argc, const char** argv);

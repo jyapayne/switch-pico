@@ -1,6 +1,7 @@
 #include "bluepad32_input_backend.h"
 #include "controller_hotkey_config.h"
 #include "configuration_service.h"
+#include "profile_service.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -111,9 +112,21 @@ struct FeedbackEnvelope {
     uint8_t strong_magnitude;
 };
 
+// Security Manager identity events arrive before Bluepad32 publishes a ready
+// device. Retain only the four live handle/address associations so a BLE RPA
+// is never promoted to a stable identity on its own.
+struct BleIdentityMapping {
+    bool used;
+    hci_con_handle_t connection_handle;
+    bd_addr_t connection_address;
+    uint8_t identity_address_type;
+    bd_addr_t identity_address;
+};
+
 
 struct BackendSlot {
     ControllerState state;
+    ControllerIdentity identity;
     // Non-null with active=false is a connected device still becoming ready.
     uni_hid_device_t* device;
     uint32_t state_generation;
@@ -132,6 +145,7 @@ struct BackendSlot {
 
 critical_section_t g_state_lock;
 BackendSlot g_slots[kSlotCount];
+BleIdentityMapping g_ble_identity_mappings[kSlotCount]{};
 
 // These acknowledgement generations and the pairing request producer are only
 // used by Core 0. The request is transferred under the cross-core state lock.
@@ -148,6 +162,7 @@ btstack_timer_source_t g_rumble_timer{};
 btstack_timer_source_t g_configuration_timer{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
 btstack_packet_callback_registration_t g_pairing_event_callback{};
+btstack_packet_callback_registration_t g_identity_event_callback{};
 ConnectionPolicyState g_connection_policy_state =
     ConnectionPolicyState::Uninitialized;
 uint32_t g_pairing_window_deadline_ms = 0;
@@ -203,6 +218,186 @@ int slot_for_device(const uni_hid_device_t* device) {
     const int slot = uni_hid_device_get_idx_for_instance(device);
     return slot >= 0 && slot < kSlotCount ? slot : -1;
 }
+
+bool addresses_equal(const bd_addr_t first, const bd_addr_t second) {
+    return memcmp(first, second, sizeof(bd_addr_t)) == 0;
+}
+
+BleIdentityMapping* find_ble_identity_mapping(
+    hci_con_handle_t connection_handle,
+    const bd_addr_t connection_address) {
+    for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
+        if (mapping.used &&
+            mapping.connection_handle == connection_handle &&
+            addresses_equal(mapping.connection_address,
+                            connection_address)) {
+            return &mapping;
+        }
+    }
+    return nullptr;
+}
+
+BleIdentityMapping* find_ble_identity_mapping_for_handle(
+    hci_con_handle_t connection_handle) {
+    for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
+        if (mapping.used &&
+            mapping.connection_handle == connection_handle) {
+            return &mapping;
+        }
+    }
+    return nullptr;
+}
+
+BleIdentityMapping* reserve_ble_identity_mapping(
+    hci_con_handle_t connection_handle) {
+    BleIdentityMapping* available = nullptr;
+    for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
+        if (mapping.used &&
+            mapping.connection_handle == connection_handle) {
+            return &mapping;
+        }
+        if (!mapping.used && available == nullptr) {
+            available = &mapping;
+        }
+    }
+    return available;
+}
+
+ControllerIdentity make_ble_identity(
+    const BleIdentityMapping& mapping, const uni_hid_device_t* device) {
+    ControllerIdentity identity{};
+    identity.stable = true;
+    identity.transport = ControllerTransport::kBle;
+    identity.address_type = mapping.identity_address_type;
+    memcpy(identity.address, mapping.identity_address,
+           sizeof(identity.address));
+    identity.vendor_id = device->vendor_id;
+    identity.product_id = device->product_id;
+    return identity;
+}
+
+ControllerIdentity identity_for_device(const uni_hid_device_t* device) {
+    if (device == nullptr) {
+        return controller_identity_global();
+    }
+    if (device->conn.protocol == UNI_BT_CONN_PROTOCOL_BR_EDR) {
+        ControllerIdentity identity{};
+        identity.stable = true;
+        identity.transport = ControllerTransport::kClassic;
+        identity.address_type = BD_ADDR_TYPE_UNKNOWN;
+        memcpy(identity.address, device->conn.btaddr,
+               sizeof(identity.address));
+        identity.vendor_id = device->vendor_id;
+        identity.product_id = device->product_id;
+        return identity;
+    }
+    if (device->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE) {
+        const BleIdentityMapping* mapping = find_ble_identity_mapping(
+            device->conn.handle, device->conn.btaddr);
+        if (mapping != nullptr) {
+            return make_ble_identity(*mapping, device);
+        }
+    }
+    return controller_identity_global();
+}
+
+void publish_ble_identity(const BleIdentityMapping& mapping) {
+    ControllerIdentity observed_identity{};
+    bool observe_identity = false;
+    critical_section_enter_blocking(&g_state_lock);
+    for (BackendSlot& slot : g_slots) {
+        if (slot.device != nullptr &&
+            slot.device->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE &&
+            slot.device->conn.handle == mapping.connection_handle &&
+            addresses_equal(slot.device->conn.btaddr,
+                            mapping.connection_address)) {
+            slot.identity = make_ble_identity(mapping, slot.device);
+            if (slot.active) {
+                observed_identity = slot.identity;
+                observe_identity = true;
+            }
+        }
+    }
+    critical_section_exit(&g_state_lock);
+    if (observe_identity) {
+        profile_service_observe_identity_on_storage_core(
+            observed_identity);
+    }
+}
+
+void record_ble_identity(hci_con_handle_t connection_handle,
+                         const bd_addr_t connection_address,
+                         uint8_t identity_address_type,
+                         const bd_addr_t identity_address) {
+    BleIdentityMapping* mapping =
+        reserve_ble_identity_mapping(connection_handle);
+    if (mapping == nullptr) {
+        return;
+    }
+    *mapping = {};
+    mapping->used = true;
+    mapping->connection_handle = connection_handle;
+    memcpy(mapping->connection_address, connection_address,
+           sizeof(mapping->connection_address));
+    mapping->identity_address_type = identity_address_type;
+    memcpy(mapping->identity_address, identity_address,
+           sizeof(mapping->identity_address));
+    publish_ble_identity(*mapping);
+}
+
+void clear_ble_identity_for_handle(hci_con_handle_t connection_handle) {
+    for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
+        if (mapping.used &&
+            mapping.connection_handle == connection_handle) {
+            mapping = {};
+        }
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    for (BackendSlot& slot : g_slots) {
+        if (slot.device != nullptr &&
+            slot.device->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE &&
+            slot.device->conn.handle == connection_handle) {
+            slot.identity = controller_identity_global();
+        }
+    }
+    critical_section_exit(&g_state_lock);
+}
+
+void clear_ble_identity_for_device(const uni_hid_device_t* device) {
+    if (device == nullptr ||
+        device->conn.protocol != UNI_BT_CONN_PROTOCOL_BLE) {
+        return;
+    }
+    for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
+        if (mapping.used &&
+            mapping.connection_handle == device->conn.handle &&
+            addresses_equal(mapping.connection_address,
+                            device->conn.btaddr)) {
+            mapping = {};
+        }
+    }
+}
+
+void connection_address_for_handle(hci_con_handle_t connection_handle,
+                                   const bd_addr_t fallback,
+                                   bd_addr_t output) {
+    const uni_hid_device_t* device =
+        uni_hid_device_get_instance_for_connection_handle(
+            connection_handle);
+    if (device != nullptr) {
+        memcpy(output, device->conn.btaddr, sizeof(bd_addr_t));
+        return;
+    }
+    const BleIdentityMapping* mapping =
+        find_ble_identity_mapping_for_handle(connection_handle);
+    if (mapping != nullptr) {
+        memcpy(output, mapping->connection_address, sizeof(bd_addr_t));
+        return;
+    }
+    memcpy(output, fallback, sizeof(bd_addr_t));
+}
+
 void apply_slot_lighting(uint8_t slot_index, uni_hid_device_t* device) {
     const SwitchRgbColor color =
         switch_pro_get_slot_light_color(slot_index);
@@ -249,6 +444,7 @@ void publish_all_neutral() {
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
         slot.state = make_neutral_state();
+        slot.identity = controller_identity_global();
         slot.device = nullptr;
         slot.active = false;
         slot.rumble_pending = false;
@@ -256,6 +452,9 @@ void publish_all_neutral() {
         ++slot.connection_generation;
     }
     critical_section_exit(&g_state_lock);
+    for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
+        mapping = {};
+    }
     g_connection_status = ConnectionStatus::Initializing;
     g_connection_policy_state = ConnectionPolicyState::FailedClosed;
     g_pairing_window_open = false;
@@ -498,18 +697,101 @@ bool pairing_window_active_at(uint32_t now_ms) {
            static_cast<int32_t>(now_ms - g_pairing_window_deadline_ms) < 0;
 }
 
-void handle_pairing_hci_event(uint8_t packet_type, uint16_t channel,
-                              uint8_t* packet, uint16_t size) {
+void handle_btstack_event(uint8_t packet_type, uint16_t channel,
+                          uint8_t* packet, uint16_t size) {
     (void)channel;
-    if (packet_type != HCI_EVENT_PACKET || packet == nullptr || size < 8) {
+    if (packet_type != HCI_EVENT_PACKET || packet == nullptr || size < 2) {
         return;
     }
 
     bd_addr_t address{};
+    bd_addr_t identity_address{};
+    bd_addr_t connection_address{};
+    hci_con_handle_t connection_handle = 0;
     const bool pairing_open =
         pairing_window_active_at(btstack_run_loop_get_time_ms());
     switch (hci_event_packet_get_type(packet)) {
+        case SM_EVENT_IDENTITY_RESOLVING_STARTED:
+            if (size >= 11) {
+                clear_ble_identity_for_handle(
+                    sm_event_identity_resolving_started_get_handle(packet));
+            }
+            break;
+        case SM_EVENT_IDENTITY_RESOLVING_FAILED:
+            if (size >= 11) {
+                clear_ble_identity_for_handle(
+                    sm_event_identity_resolving_failed_get_handle(packet));
+            }
+            break;
+        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:
+            if (size >= 20) {
+                connection_handle =
+                    sm_event_identity_resolving_succeeded_get_handle(packet);
+                sm_event_identity_resolving_succeeded_get_address(
+                    packet, connection_address);
+                sm_event_identity_resolving_succeeded_get_identity_address(
+                    packet, identity_address);
+                record_ble_identity(
+                    connection_handle, connection_address,
+                    sm_event_identity_resolving_succeeded_get_identity_addr_type(
+                        packet),
+                    identity_address);
+            }
+            break;
+        case SM_EVENT_IDENTITY_CREATED:
+            if (size >= 20) {
+                connection_handle =
+                    sm_event_identity_created_get_handle(packet);
+                sm_event_identity_created_get_address(packet, address);
+                sm_event_identity_created_get_identity_address(
+                    packet, identity_address);
+                connection_address_for_handle(
+                    connection_handle, address, connection_address);
+                record_ble_identity(
+                    connection_handle, connection_address,
+                    sm_event_identity_created_get_identity_addr_type(packet),
+                    identity_address);
+            }
+            break;
+        case SM_EVENT_REENCRYPTION_STARTED:
+            if (size >= 11) {
+                connection_handle =
+                    sm_event_reencryption_started_get_handle(packet);
+                sm_event_reencryption_started_get_address(
+                    packet, identity_address);
+                connection_address_for_handle(
+                    connection_handle, identity_address,
+                    connection_address);
+                record_ble_identity(
+                    connection_handle, connection_address,
+                    sm_event_reencryption_started_get_addr_type(packet),
+                    identity_address);
+            }
+            break;
+        case SM_EVENT_REENCRYPTION_COMPLETE:
+            if (size >= 12) {
+                connection_handle =
+                    sm_event_reencryption_complete_get_handle(packet);
+                if (sm_event_reencryption_complete_get_status(packet) ==
+                    ERROR_CODE_SUCCESS) {
+                    sm_event_reencryption_complete_get_address(
+                        packet, identity_address);
+                    connection_address_for_handle(
+                        connection_handle, identity_address,
+                        connection_address);
+                    record_ble_identity(
+                        connection_handle, connection_address,
+                        sm_event_reencryption_complete_get_addr_type(packet),
+                        identity_address);
+                } else {
+                    clear_ble_identity_for_handle(connection_handle);
+                }
+            }
+            break;
         case HCI_EVENT_USER_CONFIRMATION_REQUEST:
+            if (size < 8) {
+                break;
+            }
             hci_event_user_confirmation_request_get_bd_addr(packet, address);
             if (pairing_open) {
                 gap_ssp_confirmation_response(address);
@@ -518,6 +800,9 @@ void handle_pairing_hci_event(uint8_t packet_type, uint16_t channel,
             }
             break;
         case HCI_EVENT_USER_PASSKEY_REQUEST:
+            if (size < 8) {
+                break;
+            }
             hci_event_user_passkey_request_get_bd_addr(packet, address);
             if (pairing_open) {
                 gap_ssp_passkey_response(address, 0);
@@ -634,6 +919,7 @@ void process_clear_pairings(uint32_t now_ms) {
             BackendSlot& slot = g_slots[slot_index];
             devices[slot_index] = slot.device;
             slot.state = make_neutral_state();
+            slot.identity = controller_identity_global();
             slot.device = nullptr;
             slot.active = false;
             slot.rumble_pending = false;
@@ -647,6 +933,9 @@ void process_clear_pairings(uint32_t now_ms) {
     critical_section_exit(&g_state_lock);
     if (!requested) {
         return;
+    }
+    for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
+        mapping = {};
     }
 
     g_pairing_window_open = false;
@@ -733,8 +1022,9 @@ void update_status_led() {
 }
 
 void process_configuration_timer(btstack_timer_source_t* timer) {
-    configuration_service_task_on_storage_core(
-        btstack_run_loop_get_time_ms());
+    const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    configuration_service_task_on_storage_core(now_ms);
+    profile_service_task_on_storage_core(now_ms);
     btstack_run_loop_set_timer(timer, kConfigurationPollIntervalMs);
     btstack_run_loop_add_timer(timer);
 }
@@ -828,7 +1118,9 @@ void platform_on_init_complete() {
     gap_set_bondable_mode(false);
     sm_set_accepted_stk_generation_methods(0);
     gap_ssp_set_auto_accept(false);
-    g_pairing_event_callback.callback = handle_pairing_hci_event;
+    g_pairing_event_callback.callback = handle_btstack_event;
+    g_identity_event_callback.callback = handle_btstack_event;
+    sm_add_event_handler(&g_identity_event_callback);
     hci_add_event_handler(&g_pairing_event_callback);
     refresh_pairing_snapshot();
     // Keep Bluepad32 autoconnect active whenever at least one slot is free.
@@ -869,6 +1161,8 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     if (slot_index < 0) {
         return;
     }
+    const ControllerIdentity connection_identity =
+        identity_for_device(device);
 
     bool tracked_connection = false;
     critical_section_enter_blocking(&g_state_lock);
@@ -880,6 +1174,9 @@ void platform_on_device_connected(uni_hid_device_t* device) {
         tracked_connection = true;
     } else {
         tracked_connection = slot.device == device;
+    }
+    if (tracked_connection) {
+        slot.identity = connection_identity;
     }
     critical_section_exit(&g_state_lock);
 
@@ -898,18 +1195,18 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     if (slot.device == device) {
-        if (slot.active) {
-            slot.state = make_neutral_state();
-            ++slot.state_generation;
-        }
+        slot.state = make_neutral_state();
+        slot.identity = controller_identity_global();
         slot.device = nullptr;
         slot.active = false;
         slot.rumble_pending = false;
         reset_slot_hotkeys(slot);
+        ++slot.state_generation;
         ++slot.connection_generation;
         disconnected_tracked_device = true;
     }
     critical_section_exit(&g_state_lock);
+    clear_ble_identity_for_device(device);
 
     if (disconnected_tracked_device) {
         // Re-evaluate from scratch: resume discovery only after the final
@@ -929,6 +1226,8 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     if (slot_index < 0) {
         return UNI_ERROR_NO_SLOTS;
     }
+    const ControllerIdentity connection_identity =
+        identity_for_device(device);
 
     bool occupied_mismatch = false;
     bool became_active = false;
@@ -936,6 +1235,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     BackendSlot& slot = g_slots[slot_index];
     occupied_mismatch = slot.device != nullptr && slot.device != device;
     if (!occupied_mismatch) {
+        slot.identity = connection_identity;
         slot.device = device;
         if (!slot.active) {
             slot.state = make_neutral_state();
@@ -953,6 +1253,10 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     }
     if (became_active) {
         apply_slot_lighting(static_cast<uint8_t>(slot_index), device);
+        if (connection_identity.stable) {
+            profile_service_observe_identity_on_storage_core(
+                connection_identity);
+        }
     }
 
 
@@ -1021,6 +1325,7 @@ uni_platform* get_platform() {
         halt_wireless_backend();
     }
     configuration_service_initialize_on_storage_core();
+    profile_service_initialize_on_storage_core();
     if (cyw43_arch_init() != 0) {
         halt_wireless_backend();
     }
@@ -1047,14 +1352,17 @@ void bluepad32_input_backend_init() {
 
     critical_section_init(&g_state_lock);
     configuration_service_prepare();
+    profile_service_prepare();
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         BackendSlot& slot = g_slots[slot_index];
         slot = {};
         slot.state = make_neutral_state();
+        slot.identity = controller_identity_global();
         slot.pending_rumble.slot = slot_index;
         reset_slot_hotkeys(slot);
         g_consumed_generation[slot_index] = 0;
         g_last_snapshot_generation[slot_index] = 0;
+        g_ble_identity_mappings[slot_index] = {};
     }
     g_pairing_window_requested = false;
     g_pairing_snapshot_requested = false;
@@ -1139,27 +1447,29 @@ void bluepad32_input_backend_pairing_snapshot(
 }
 
 
-bool bluepad32_input_backend_snapshot(uint8_t slot_index,
-                                      ControllerState* out) {
-    if (out == nullptr || !valid_slot(slot_index)) {
-        return false;
+void bluepad32_input_backend_snapshot(uint8_t slot_index,
+                                      Bluepad32SlotSnapshot* out) {
+    if (out == nullptr) {
+        return;
     }
-    if (!g_initialized) {
-        *out = make_neutral_state();
-        return false;
+    *out = {};
+    if (!valid_slot(slot_index) || !g_initialized) {
+        return;
     }
 
     critical_section_enter_blocking(&g_state_lock);
-    *out = g_slots[slot_index].state;
-    const bool controller_active = g_slots[slot_index].active;
-    const uint32_t generation = g_slots[slot_index].state_generation;
+    const BackendSlot& slot = g_slots[slot_index];
+    out->active = slot.active;
+    out->connection_generation = slot.connection_generation;
+    out->identity = slot.identity;
+    out->state = slot.state;
+    const uint32_t state_generation = slot.state_generation;
     critical_section_exit(&g_state_lock);
 
-    if (generation == g_consumed_generation[slot_index]) {
-        out->motion_sample_count = 0;
+    if (state_generation == g_consumed_generation[slot_index]) {
+        out->state.motion_sample_count = 0;
     }
-    g_last_snapshot_generation[slot_index] = generation;
-    return controller_active;
+    g_last_snapshot_generation[slot_index] = state_generation;
 }
 
 void bluepad32_input_backend_report_sent(uint8_t slot_index) {
