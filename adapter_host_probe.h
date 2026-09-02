@@ -14,4 +14,3 @@ AdapterUsbMode adapter_host_probe_mode();
 void adapter_host_probe_note_string_descriptor(uint8_t index);
 bool adapter_host_probe_vendor_control(uint8_t rhport, uint8_t stage,
                                        tusb_control_request_t const *request);
-void adapter_host_probe_task();

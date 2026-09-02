@@ -7,6 +7,7 @@ class AdapterHostProbeState {
     static constexpr uint32_t kRebootDelayMs = 100;
 
     void note_ms_os_string() { saw_ms_os_string_ = true; }
+    bool saw_ms_os_string() const { return saw_ms_os_string_; }
 
     void note_ms_compat_id_request(uint32_t now_ms) {
         if (!saw_ms_os_string_) {

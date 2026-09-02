@@ -160,6 +160,8 @@ void test_host_probe_sequence() {
     expect(!state.windows_confirmed(),
            "compatible-ID request without signature confirmed Windows");
     state.note_ms_os_string();
+    expect(state.saw_ms_os_string(),
+           "Microsoft OS string observation was not retained");
     state.note_ms_compat_id_request(20);
     expect(state.windows_confirmed(),
            "two-stage Windows signature not confirmed");

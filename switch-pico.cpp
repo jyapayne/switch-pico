@@ -278,9 +278,7 @@ int main() {
 
     while (true) {
         tud_task();          // USB device tasks
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-        adapter_host_probe_task();
-#endif
+
 #ifdef SWITCH_PICO_BLUEPAD32
         switch (bootsel_pairing_button_task()) {
             case BootselPairingButtonEvent::kOpenPairing:
