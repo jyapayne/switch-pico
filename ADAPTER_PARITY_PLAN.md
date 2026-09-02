@@ -1,0 +1,482 @@
+# USB Wireless Adapter Feature-Parity Plan
+
+## Goal
+
+Turn the Pico 2 W all-in-one firmware into an open, four-controller superset of the functional features advertised for the 8BitDo USB Wireless Adapter 2.
+
+The target is feature parity, not binary compatibility with 8BitDo Ultimate Software or its private USB configuration protocol. Configuration will use this project's own documented USB management protocol and host tools.
+
+Official feature references:
+
+- [USB Wireless Adapter 2 product page](https://www.8bitdo.com/usb-wireless-adapter-2/)
+- [USB Wireless Adapter 2 FAQ](https://support.8bitdo.com/faq/wireless-usb-adapter-2.html)
+- [USB Adapter 2 Ultimate Software](https://support.8bitdo.com/ultimate/usb-adapter-2.html)
+- [DualSense Adapter 2 manual](https://support.8bitdo.com/Manual/USB-Adapter-2/ps5-switch.html)
+- [Switch Pro Adapter 2 manual](https://support.8bitdo.com/Manual/USB-Adapter-2/switchpro-switch.html)
+
+## Scope decisions
+
+- Primary target: Pico 2 W AIO firmware with direct Bluetooth input.
+- Preserve the existing UART/Pico build and behavior.
+- Preserve four concurrent Bluetooth slots where the output protocol and host support them.
+- Implement equivalent mapping, tuning, profiles, macros, Turbo, output modes, firmware updating, and compatibility.
+- Use fixed-capacity state and no allocation in real-time input, macro, rumble, or USB-report paths.
+- Keep settings and Bluetooth bond storage separate.
+- DualShock 3 support is explicitly out of scope.
+- Proprietary 2.4 GHz controllers are out of scope; Bluetooth Classic and BLE controllers are in scope.
+- Do not impersonate 8BitDo or Microsoft USB identities in a release build.
+
+The official adapter also does not support the following, so they are not parity requirements:
+
+- waking the Switch
+- controller audio/headphone jacks
+- NFC/amiibo
+- IR camera
+- DualSense adaptive triggers
+- native DualSense haptics
+- exact Nintendo HD-rumble frequency and spatial fidelity on conventional-motor controllers
+- analog triggers while exposed as a Switch Pro Controller
+
+## Current architecture
+
+The AIO firmware currently has:
+
+- Bluepad32, BTstack, and the CYW43439 radio on Core 1
+- TinyUSB and USB controller state machines on Core 0
+- four fixed Bluetooth slots mapped to four USB interfaces
+- generation-tagged state snapshots and rumble mailboxes across cores
+- persistent Classic and BLE bonding
+- a physical BOOTSEL pairing window and pairing reset
+- endpoint-zero PC pairing management
+- Switch Pro input, motion, colors, and rumble per slot
+- per-controller ABXY and motion hotkeys
+
+The current Bluetooth backend converts controller input directly into `SwitchInputState`. This is the principal architectural blocker for other USB modes because it:
+
+- turns analog triggers into digital ZL/ZR early
+- assigns Switch-specific button labels before output selection
+- couples input normalization to Switch report semantics
+- gives mapping, profiles, and macros no protocol-neutral state on which to operate
+
+## Progress and gap matrix
+
+| Capability | Status | Evidence or remaining work |
+|---|---|---|
+| Bluetooth Classic and BLE | Complete | Bluepad32 supports both transports; bonds persist across reboot. |
+| Pairing gate, reconnect, list, and clear | Complete | Physical BOOTSEL flow and `switch-pico-pairings` are implemented. |
+| Four concurrent controllers | Complete for Switch mode | Four independent USB interfaces and Bluetooth slots are implemented. |
+| Switch input | Complete | Buttons, sticks, lifecycle, colors, and per-slot isolation are hardware-tested. |
+| Switch motion | Complete for supported parsers | DualSense, Switch-family, Wii accelerometer, PS Move, and compatible 8BitDo modes are normalized. |
+| Switch rumble | Complete for tested controllers | DualSense and 8BitDo Ultimate Bluetooth are hardware-tested; Ultimate requires enable, fixed LRA frequencies, and refresh. |
+| 8BitDo Ultimate reconnect | Complete | Bond preservation, scan restart, and four-second supervision timeout are implemented. |
+| XInput descriptors and reports | Feasibility complete | Four-interface prototype works on Windows and is covered by native descriptor/report tests. |
+| Automatic Windows/Switch selection | Feasibility complete | Windows enumeration fix is in `db4a860`; real Windows transition and rumble were reported working. |
+| Windows feasibility test | Complete | `tools/Test-AdapterFeasibility.ps1` checks transition, PnP health, four XInput slots, controls, and rumble isolation. |
+| Production USB VID/PID | Missing | Prototype uses `CAFE:4010`; obtain an appropriate project VID/PID and repeat Windows binding tests. |
+| DInput output | Missing | Add generic HID descriptor and report driver. |
+| Mac output mode | Missing | Capture/define compatible descriptor and report semantics. |
+| PlayStation Classic mode | Missing | Add strict one-controller legacy descriptor/report mode. |
+| Mega Drive mode | Missing | Add strict one-controller legacy descriptor/report mode. |
+| Manual output-mode selection | Missing | Add persistent PC command and controller chord. |
+| General button remapping | Partial | Only per-controller ABXY swap exists. |
+| Stick sensitivity | Missing in AIO | Add inner deadzone, outer saturation, curve, inversion, and center calibration. |
+| Trigger ranges | Missing | Preserve analog values, then add lower/upper range, curve, and digital threshold. |
+| Vibration intensity | Missing as configuration | Transport works; add per-profile weak/strong scaling. |
+| Macros | Missing | Add a bounded deterministic macro engine. |
+| Turbo and Auto Burst | Missing | Add exact 15 Hz behavior and cancellation rules. |
+| Persistent profiles | Missing | Hotkey state currently resets on disconnect/reboot. |
+| Profile switching | Missing | Add controller chord, USB command, rumble, and LED confirmation. |
+| Firmware updater | Partial | UF2 updating works; version query and guided reboot/install tool are missing. |
+| Switch 2 | Unverified | Requires real-hardware qualification. |
+| Windows/SteamOS/Linux/Android compatibility | Partial | Windows XInput feasibility passed; other host/output combinations need qualification. |
+| Full advertised controller matrix | Partial | Parsers exist for most families, but model-level hardware coverage is incomplete. |
+| Latency claim | Unmeasured | Establish p50/p95/p99 measurements and compare against the current build and Adapter 2. |
+
+## Completed feasibility work
+
+Branch: `feasibility/adapter-parity`
+
+Important commits:
+
+- `17b3d73` — initial four-interface XInput prototype
+- `7e3be86` — hardware-verified automatic mode switching
+- `8351cb1` — strong 8BitDo Switch-mode rumble on master
+- `db4a860` — Windows enumeration and rumble fixes
+
+Feasibility behavior:
+
+1. The Pico cold-boots with a Switch-compatible probe identity.
+2. Windows requests the Microsoft OS `MSFT100` descriptor and `XUSB10` compatible IDs.
+3. A Pico hardware alarm allows the control response to finish, then performs a one-shot watchdog reboot.
+4. The reboot selects four XInput interfaces using watchdog scratch state.
+5. The marker is consumed after boot so reset loops cannot persist.
+6. A cold power cycle returns to the initial probe state.
+
+The final Windows fix uses a distinct probe device revision because Windows caches Microsoft OS descriptor support by VID, PID, and `bcdDevice`. This prevents a cached result for a genuine Switch Pro Controller from suppressing the feasibility probe.
+
+Current test artifact:
+
+- `firmware/switch-pico-adapter-feasibility.uf2`
+
+Windows test command:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\tools\Test-AdapterFeasibility.ps1
+```
+
+The script should be started with the Pico disconnected. It records the Switch-to-XInput transition, checks all four XInput API slots, requires D-pad/face/shoulder/trigger/stick activity for each requested physical controller, tests per-slot rumble, and writes a JSON report to `%TEMP%`.
+
+## Implementation principles
+
+### Protocol-neutral state
+
+Create one controller state independent of every USB output protocol. It should contain:
+
+- positional face buttons
+- shoulders, stick clicks, Select/Start, Home, and Capture
+- D-pad
+- signed full-resolution left and right sticks
+- full-resolution analog triggers
+- motion samples
+- battery and capability metadata when provided
+- stable controller identity
+- connection generation
+
+The processing order is fixed:
+
+```text
+Bluetooth/raw input
+  -> parser normalization and calibration
+  -> stick and trigger transforms
+  -> button mapping
+  -> Turbo / Auto Burst / macros
+  -> selected USB output driver
+```
+
+Rumble travels in the opposite direction:
+
+```text
+host output report
+  -> protocol decoder
+  -> profile intensity scaling
+  -> slot-generation check
+  -> controller-specific Bluetooth rumble
+```
+
+Required invariants:
+
+- A disconnect publishes neutral immediately.
+- A profile or output-mode change cancels synthetic macro/Turbo state before switching.
+- No command from an old connection generation reaches a replacement controller.
+- One slot cannot mutate another slot's state, macro engine, profile, motion, or rumble.
+- The normal UART build retains its existing wire protocol and behavior.
+
+### USB output-driver boundary
+
+Each output driver should provide a small static interface for:
+
+- selecting device/configuration/string/report descriptors
+- initializing and resetting per-interface state
+- serializing protocol-neutral controller state
+- consuming host output reports
+- exposing readiness and capabilities
+
+Do not use heap allocation or virtual dispatch. Select one descriptor family before TinyUSB initialization. A mode change persists the selection and reboots; descriptors must not mutate while mounted.
+
+## Delivery phases
+
+### Phase 1 — Protocol-neutral controller state
+
+Changes:
+
+- Introduce a controller-neutral state type.
+- Preserve analog trigger values from Bluepad32.
+- Refactor the Switch driver into a consumer of that state.
+- Adapt the UART path without changing its external protocol.
+- Keep existing per-slot generation and motion-consumption behavior.
+
+Acceptance:
+
+- Existing Switch hardware behavior is unchanged.
+- Analog trigger endpoints and midpoint stick values survive the backend boundary.
+- Four slots remain isolated during connect, disconnect, and replacement.
+- Current pairing, motion, rumble, and descriptor tests pass.
+- UART and AIO firmware both build.
+
+### Phase 2 — Persistent configuration protocol
+
+Generalize endpoint-zero management beyond pairing while keeping Switch USB enumeration unchanged.
+
+Operations:
+
+- firmware and board version
+- active output mode
+- connected controller identity and capabilities
+- profile read/write/list/reset
+- active profile selection
+- configuration export/import
+- normal reboot and reboot to BOOTSEL
+
+Large values use a transaction:
+
+1. begin with schema version, size, and CRC
+2. upload bounded chunks
+3. validate completeness and CRC
+4. atomically commit
+5. return stored generation and CRC
+
+Storage requirements:
+
+- versioned schema
+- fixed maximum sizes
+- CRC validation
+- two-copy or journaled commit
+- recovery to the last valid generation after interrupted writes
+- separate flash region from Bluepad32 bond storage
+- bounded write frequency
+
+Host tooling:
+
+```text
+switch-pico-config status
+switch-pico-config mode xinput
+switch-pico-config profiles list
+switch-pico-config profiles export profile.json
+switch-pico-config profiles import profile.json
+switch-pico-config profiles activate 2
+switch-pico-config reboot --bootsel
+```
+
+Acceptance:
+
+- Malformed, truncated, out-of-order, oversized, and bad-CRC requests are rejected.
+- Interrupted writes retain the previous valid configuration.
+- Pairing management migrates to the versioned protocol in the same cutover.
+- Configuration survives power cycling on hardware.
+
+### Phase 3 — Mapping, tuning, profiles, and macros
+
+Use four profile slots per stable controller identity. Resolve identity from Bluetooth transport, identity address, VID, and PID; use a global default when stable identity is unavailable.
+
+Button mapping:
+
+- map any exposed logical button to a supported logical output
+- reject recursive/invalid mappings at configuration time
+- preserve controller-specific inputs such as touchpad click where the parser exposes them
+
+Sticks:
+
+- independent inner deadzone
+- independent outer saturation
+- fixed-point response curve
+- optional axis inversion
+- optional center calibration
+
+Triggers:
+
+- lower deadzone
+- upper saturation
+- fixed-point response curve
+- digital threshold for protocols such as Switch
+- analog output for XInput and DInput
+
+Vibration:
+
+- independent weak/strong scale
+- saturation after scaling
+- separate local confirmation policy
+
+Macros:
+
+- fixed maximum step count
+- press/release logical buttons
+- set/clear D-pad
+- optional stick/trigger values
+- bounded wait
+- explicit end
+- deterministic monotonic scheduler
+
+Cancellation must publish neutral synthetic state on:
+
+- controller disconnect
+- profile change
+- output-mode change
+- configured trigger cancellation
+- configuration reset
+
+Turbo behavior:
+
+- Turbo: 15 activations per second while held
+- Auto Burst: 15 activations per second after one press until explicitly cancelled
+- phase accumulator prevents scheduling jitter from changing the long-term rate
+
+Profile switching:
+
+- configurable controller chord
+- one to four rumble pulses
+- matching onboard LED count
+- controller RGB/player LED feedback when supported
+
+Acceptance:
+
+- Simulated-clock tests cover exact transitions and cancellation.
+- Boundary tests cover deadzones, saturation, curves, and thresholds.
+- Physical input plus macro plus Turbo precedence is deterministic.
+- No synthetic input remains stuck after any cancellation path.
+- Four controllers can use different profiles simultaneously.
+
+### Phase 4 — Production USB output modes
+
+Implement in this order:
+
+1. Existing Switch driver behind the output-driver boundary.
+2. Production XInput based on the verified feasibility implementation.
+3. DInput generic HID.
+4. Mac-compatible HID.
+5. PlayStation Classic.
+6. Mega Drive.
+
+Controller-count policy:
+
+- Switch, XInput, DInput, and Mac: target four independent interfaces.
+- PlayStation Classic and Mega Drive: expose one slot initially for strict compatibility.
+- Expand legacy modes only after real hosts accept a composite device.
+
+Mode selection:
+
+- persistent PC command
+- controller chord held for three seconds
+- mode-specific LED and rumble acknowledgement
+- `auto` mode for the verified Windows/Switch path
+- physical recovery gesture to a known mode
+
+Before release:
+
+- replace `CAFE:4010` with an appropriate project VID/PID
+- repeat Windows XUSB binding and four-slot tests
+- verify no phantom active controller remains after the probe transition
+- verify cold power on Switch does not trigger the Windows path
+
+Acceptance per mode:
+
+- descriptor golden tests
+- report serialization tests
+- output/rumble tests
+- real target enumeration
+- buttons, D-pad, sticks, triggers, and menu controls
+- disconnect/reconnect
+- multi-controller isolation where applicable
+
+### Phase 5 — Controller compatibility
+
+Target hardware families:
+
+| Family | Required checks |
+|---|---|
+| 8BitDo Bluetooth controller | pair, reconnect, complete input, profile, rumble |
+| 8BitDo Bluetooth arcade stick | buttons, stick/D-pad mode, reconnect |
+| Xbox One Bluetooth | BLE pairing, analog triggers, rumble |
+| Xbox Series | BLE pairing, analog triggers, rumble |
+| DualSense | input, Switch motion, rumble, lightbar |
+| DualShock 4 | input, Switch motion, rumble, lightbar |
+| Switch Pro | input, motion, rumble, player LED |
+| Joy-Con L/R | each half as the standalone controller exposed by Bluepad32 |
+| Wii Remote | buttons, accelerometer, rumble |
+| Wii Remote + Classic Controller | extension controls |
+| Wii U Pro | buttons, sticks, rumble |
+
+Maintain a model-level compatibility table. Parser presence alone is not proof of support. Capture parser/report fixtures when hardware is available.
+
+Evaluate a newer tagged Bluepad32 only when it closes a specific coverage gap. Local motion, reconnect, and 8BitDo rumble changes must be upstreamed or cleanly rebased before changing the pinned dependency revision.
+
+### Phase 6 — Firmware updater
+
+The ROM UF2 path remains the trusted update mechanism.
+
+Add:
+
+```text
+switch-pico-update firmware.uf2
+```
+
+Flow:
+
+1. query firmware version, board model, and compatibility
+2. verify release-manifest hash
+3. command ROM BOOTSEL reboot
+4. wait for the mass-storage device
+5. install the UF2
+6. wait for normal enumeration
+7. verify the new version
+
+Do not add a second in-application flash writer unless ROM UF2 cannot meet a concrete requirement.
+
+### Phase 7 — Performance and release qualification
+
+Measure:
+
+- Bluetooth report arrival to neutral-state publication
+- transform and macro processing
+- neutral state to queued USB report
+- physical actuation to host-visible report
+- one versus four controllers
+- idle versus simultaneous rumble
+- every USB output mode
+
+Report p50, p95, p99, and worst observed latency. Use a logic analyzer or instrumented actuator plus USB capture.
+
+Acceptance:
+
+- transformation work stays well below one report interval
+- no missed or reordered transitions
+- no regression against the current Switch build
+- four-controller operation does not starve USB, Bluetooth, motion, or rumble queues
+- compare against a real Adapter 2 under the same controller and host when available
+
+Final host matrix:
+
+- Switch
+- Switch 2
+- Windows 10 and 11
+- Steam Deck/SteamOS
+- Linux/Raspberry Pi
+- Android TV
+- PlayStation Classic
+- Retrofreak or documented compatible equivalent
+- Mega Drive target hardware or the same compatibility environment used by the official mode
+
+## Verification strategy
+
+Every phase must preserve these existing checks:
+
+- pairing gate and bond persistence
+- reconnect after reboot and runtime disconnect
+- four-interface descriptor integrity
+- per-slot input and rumble isolation
+- generation invalidation on disconnect
+- motion normalization and calibration gating
+- UART build compatibility
+
+Evidence priority:
+
+1. native deterministic tests for state machines, encoding, boundaries, and persistence
+2. firmware build for every affected variant
+3. host enumeration and API-level checks
+4. physical input, motion, and rumble on the target hardware
+
+Do not mark a host/controller combination complete from descriptor inspection or parser presence alone.
+
+## Next action
+
+Begin Phase 1: introduce the protocol-neutral controller state while preserving the current Switch and UART behavior.
+
+The first change should be deliberately narrow:
+
+1. define the neutral state and invariants
+2. make Bluepad32 publish it without losing analog triggers
+3. adapt the existing Switch path to consume it
+4. migrate all four slots in one clean cutover
+5. run existing tests and real Switch input/motion/rumble smoke tests
+
+Do not begin profiles, macros, or additional output modes until this boundary is proven. They all depend on it.
