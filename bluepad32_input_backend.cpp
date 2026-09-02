@@ -20,7 +20,14 @@ constexpr int32_t kAxisMinimum = -512;
 constexpr int32_t kAxisMaximum = 511;
 constexpr int32_t kTriggerMaximum = 1023;
 constexpr int32_t kTriggerThreshold = (kTriggerMaximum * 35) / 100;
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+// XInput vibration is stateful: it remains active until XInputSetState sends
+// a new magnitude. Use the longest Bluepad32 duration and stop explicitly on
+// the zero-magnitude packet.
+constexpr uint16_t kRumbleDurationMs = UINT16_MAX;
+#else
 constexpr uint16_t kRumbleDurationMs = 50;
+#endif
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
 constexpr uint32_t kPairingWindowDurationMs = 60000;
@@ -725,8 +732,11 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
                 feedback.weak_magnitude, feedback.strong_magnitude);
         } else if (host_dispatch &&
                    device->report_parser.play_dual_rumble != nullptr) {
+            const bool stop =
+                envelope.rumble.low_frequency_magnitude == 0 &&
+                envelope.rumble.high_frequency_magnitude == 0;
             device->report_parser.play_dual_rumble(
-                device, 0, kRumbleDurationMs,
+                device, 0, stop ? 0 : kRumbleDurationMs,
                 envelope.rumble.high_frequency_magnitude,
                 envelope.rumble.low_frequency_magnitude);
         }

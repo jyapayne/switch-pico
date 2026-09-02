@@ -10,9 +10,10 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
 
-    executable = tmp_path / "bluepad32_backend_lifecycle_test"
-    subprocess.run(
-        [
+    for adapter_feasibility in (False, True):
+        suffix = "_adapter" if adapter_feasibility else ""
+        executable = tmp_path / f"bluepad32_backend_lifecycle_test{suffix}"
+        command = [
             compiler,
             "-std=c++17",
             "-Wall",
@@ -20,27 +21,31 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "-Werror",
             "-pedantic",
             "-DSWITCH_PICO_HID_INSTANCE_COUNT=4",
-            f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
-            f"-I{root}",
-            str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
-            "-o",
-            str(executable),
-        ],
-        check=True,
-        cwd=root,
-    )
+        ]
+        if adapter_feasibility:
+            command.append("-DSWITCH_PICO_ADAPTER_FEASIBILITY=1")
+        command.extend(
+            [
+                f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
+                f"-I{root}",
+                str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
+                "-o",
+                str(executable),
+            ]
+        )
+        subprocess.run(command, check=True, cwd=root)
 
-    for scenario in (
-        "ready-forward",
-        "ready-reverse",
-        "rejections",
-        "lifecycle",
-        "pairing-policy",
-        "slot-lighting",
-        "abxy-hotkey",
-        "motion-hotkey",
-        "clear-pairings",
-        "flash-core-start",
-        "flash-core-failure",
-    ):
-        subprocess.run([str(executable), scenario], check=True, cwd=root)
+        for scenario in (
+            "ready-forward",
+            "ready-reverse",
+            "rejections",
+            "lifecycle",
+            "pairing-policy",
+            "slot-lighting",
+            "abxy-hotkey",
+            "motion-hotkey",
+            "clear-pairings",
+            "flash-core-start",
+            "flash-core-failure",
+        ):
+            subprocess.run([str(executable), scenario], check=True, cwd=root)

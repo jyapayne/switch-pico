@@ -1090,8 +1090,10 @@ uint8_t const* tud_descriptor_device_cb(void) {
     if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
         return XInputFeasibility::kDeviceDescriptor;
     }
-#endif
+    return XInputFeasibility::kSwitchProbeDeviceDescriptor;
+#else
     return switch_pro_device_descriptor;
+#endif
 }
 
 uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {

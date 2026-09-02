@@ -15,6 +15,7 @@ namespace XInputFeasibility {
 
 constexpr uint16_t kPrototypeVendorId = 0xcafe;
 constexpr uint16_t kPrototypeProductId = 0x4010;
+constexpr uint16_t kPrototypeDeviceRevision = 0x0101;
 constexpr uint8_t kInterfaceDescriptorSize = 39;
 constexpr uint16_t kConfigurationDescriptorSize =
     9 + SWITCH_PICO_HID_INSTANCE_COUNT * kInterfaceDescriptorSize;
@@ -23,21 +24,49 @@ constexpr uint16_t kMsCompatIdDescriptorSize =
 constexpr uint8_t kMsVendorRequest = 0x20;
 constexpr uint16_t kMsCompatIdIndex = 0x0004;
 
+constexpr uint16_t kSwitchProbeVendorId = 0x057e;
+constexpr uint16_t kSwitchProbeProductId = 0x2009;
+// Windows caches Microsoft OS descriptor support by VID, PID, and bcdDevice.
+// Use a revision distinct from genuine Pro Controllers so their cached
+// "unsupported" result cannot suppress this probe's 0xEE request.
+constexpr uint16_t kSwitchProbeDeviceRevision = 0x0211;
+
+static const uint8_t kSwitchProbeDeviceDescriptor[] = {
+    0x12,
+    0x01, // Device descriptor
+    0x00,
+    0x02, // USB 2.0
+    0x00,
+    0x00,
+    0x00, // Class information comes from the interface descriptor
+    0x40, // Endpoint zero packet size
+    static_cast<uint8_t>(kSwitchProbeVendorId & 0xff),
+    static_cast<uint8_t>(kSwitchProbeVendorId >> 8),
+    static_cast<uint8_t>(kSwitchProbeProductId & 0xff),
+    static_cast<uint8_t>(kSwitchProbeProductId >> 8),
+    static_cast<uint8_t>(kSwitchProbeDeviceRevision & 0xff),
+    static_cast<uint8_t>(kSwitchProbeDeviceRevision >> 8),
+    0x01,
+    0x02,
+    0x03, // Manufacturer, product, serial strings
+    0x01, // One configuration
+};
+
 static const uint8_t kDeviceDescriptor[] = {
     0x12,
     0x01, // Device descriptor
     0x00,
     0x02, // USB 2.0
-    0xff,
-    0xff,
-    0xff, // Vendor-specific device
+    0x00,
+    0x00,
+    0x00, // Composite device; each interface binds to the XUSB driver
     0x40, // Endpoint zero packet size
     static_cast<uint8_t>(kPrototypeVendorId & 0xff),
     static_cast<uint8_t>(kPrototypeVendorId >> 8),
     static_cast<uint8_t>(kPrototypeProductId & 0xff),
     static_cast<uint8_t>(kPrototypeProductId >> 8),
-    0x00,
-    0x01, // Prototype revision 1.00
+    static_cast<uint8_t>(kPrototypeDeviceRevision & 0xff),
+    static_cast<uint8_t>(kPrototypeDeviceRevision >> 8),
     0x01,
     0x02,
     0x03, // Manufacturer, product, serial strings
@@ -116,6 +145,7 @@ static const uint8_t kProbeMsCompatIdDescriptor[] = {
 };
 
 static_assert(sizeof(kDeviceDescriptor) == 18);
+static_assert(sizeof(kSwitchProbeDeviceDescriptor) == 18);
 static_assert(sizeof(kConfigurationDescriptor) == kConfigurationDescriptorSize);
 static_assert(sizeof(kMsCompatIdDescriptor) == kMsCompatIdDescriptorSize);
 static_assert(sizeof(kProbeMsCompatIdDescriptor) == 16);

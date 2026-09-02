@@ -32,10 +32,27 @@ uint32_t read_le32(const uint8_t *data) {
 
 void test_device_and_configuration_descriptors() {
     using namespace XInputFeasibility;
+    expect(read_le16(&kSwitchProbeDeviceDescriptor[8]) ==
+               kSwitchProbeVendorId,
+           "Switch probe VID mismatch");
+    expect(read_le16(&kSwitchProbeDeviceDescriptor[10]) ==
+               kSwitchProbeProductId,
+           "Switch probe PID mismatch");
+    expect(read_le16(&kSwitchProbeDeviceDescriptor[12]) ==
+               kSwitchProbeDeviceRevision,
+           "Switch probe revision mismatch");
+    expect(kSwitchProbeDeviceRevision != 0x0210,
+           "Switch probe reuses the genuine controller cache identity");
     expect(read_le16(&kDeviceDescriptor[8]) == kPrototypeVendorId,
            "prototype VID mismatch");
     expect(read_le16(&kDeviceDescriptor[10]) == kPrototypeProductId,
            "prototype PID mismatch");
+    expect(read_le16(&kDeviceDescriptor[12]) ==
+               kPrototypeDeviceRevision,
+           "prototype revision mismatch");
+    expect(kDeviceDescriptor[4] == 0 && kDeviceDescriptor[5] == 0 &&
+               kDeviceDescriptor[6] == 0,
+           "multi-interface prototype is not a composite USB device");
     expect(kPrototypeVendorId != 0x045e,
            "prototype must not impersonate Microsoft's VID");
     expect(read_le16(&kConfigurationDescriptor[2]) ==

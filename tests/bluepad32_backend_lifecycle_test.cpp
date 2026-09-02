@@ -575,9 +575,17 @@ void test_independent_lifecycle() {
     for (int slot = 0; slot < kSlotCount; ++slot) {
         require(devices[slot].rumble_calls == 1 &&
                     devices[slot].last_low == 11 + slot &&
-                    devices[slot].last_high == 21 + slot,
+                    devices[slot].last_high == 21 + slot &&
+                    devices[slot].last_rumble_duration_ms ==
+                        kRumbleDurationMs,
                 "each slot rumble must reach only its indexed controller");
     }
+
+    bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{0, 0});
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[0].rumble_calls == 2 &&
+                devices[0].last_rumble_duration_ms == 0,
+            "zero XInput magnitude must stop rumble immediately");
 
     bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{55, 66});
     const uint32_t disconnected_generation =

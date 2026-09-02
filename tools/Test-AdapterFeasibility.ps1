@@ -87,10 +87,10 @@ function Get-UsbIdentityDevices {
         [Parameter(Mandatory = $true)]
         [string]$Vid,
         [Parameter(Mandatory = $true)]
-        [string]$Pid
+        [string]$ProductId
     )
 
-    $pattern = "VID_{0}&PID_{1}" -f $Vid.ToUpperInvariant(), $Pid.ToUpperInvariant()
+    $pattern = "VID_{0}&PID_{1}" -f $Vid.ToUpperInvariant(), $ProductId.ToUpperInvariant()
     if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
         return @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
             Where-Object { $_.InstanceId -like "*$pattern*" })
@@ -165,7 +165,7 @@ Write-Host "Switch Pico Windows XInput feasibility test" -ForegroundColor Cyan
 Write-Host "Prototype identities: Switch probe 057E:2009 -> XInput CAFE:4010"
 Write-Host "Disconnect other XInput controllers before continuing."
 
-$baseline = Get-ConnectedXInputStates
+$baseline = @(Get-ConnectedXInputStates)
 Add-Result -Name "Clean XInput baseline" -Passed ($baseline.Count -eq 0) `
     -Detail ("{0} XInput controller(s) connected before the Pico" -f $baseline.Count)
 
@@ -176,8 +176,8 @@ if (-not $SkipInteractive) {
 
     $disconnectDeadline = (Get-Date).AddSeconds(10)
     do {
-        $switchPresent = (Get-UsbIdentityDevices -Vid "057E" -Pid "2009").Count -gt 0
-        $xinputPresent = (Get-UsbIdentityDevices -Vid "CAFE" -Pid "4010").Count -gt 0
+        $switchPresent = @(Get-UsbIdentityDevices -Vid "057E" -ProductId "2009").Count -gt 0
+        $xinputPresent = @(Get-UsbIdentityDevices -Vid "CAFE" -ProductId "4010").Count -gt 0
         if (-not $switchPresent -and -not $xinputPresent) { break }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $disconnectDeadline)
@@ -199,13 +199,13 @@ $switchSeenAt = $null
 $xinputSeenAt = $null
 
 while ((Get-Date) -lt $deadline) {
-    if (-not $seenSwitch -and (Get-UsbIdentityDevices -Vid "057E" -Pid "2009").Count -gt 0) {
+    if (-not $seenSwitch -and @(Get-UsbIdentityDevices -Vid "057E" -ProductId "2009").Count -gt 0) {
         $seenSwitch = $true
         $switchSeenAt = (Get-Date)
         Write-Host "Observed Switch probe identity 057E:2009" -ForegroundColor DarkCyan
     }
 
-    if ((Get-UsbIdentityDevices -Vid "CAFE" -Pid "4010").Count -gt 0) {
+    if (@(Get-UsbIdentityDevices -Vid "CAFE" -ProductId "4010").Count -gt 0) {
         $seenXInput = $true
         $xinputSeenAt = (Get-Date)
         Write-Host "Observed XInput identity CAFE:4010" -ForegroundColor DarkCyan
@@ -226,7 +226,7 @@ if ($SkipInteractive -and $seenXInput) {
         -Detail ("SwitchSeen={0}, XInputSeen={1}, transition={2} ms" -f $seenSwitch, $seenXInput, $transitionMs)
 }
 
-$xinputPnp = @(Get-UsbIdentityDevices -Vid "CAFE" -Pid "4010")
+$xinputPnp = @(Get-UsbIdentityDevices -Vid "CAFE" -ProductId "4010")
 Add-Result -Name "XInput PnP identity" -Passed ($xinputPnp.Count -gt 0) `
     -Detail ("Found {0} present PnP node(s) for CAFE:4010" -f $xinputPnp.Count)
 
@@ -237,7 +237,7 @@ Add-Result -Name "PnP device health" -Passed ($problemDevices.Count -eq 0) `
     -Detail ("{0} unhealthy PnP node(s)" -f $problemDevices.Count)
 
 Start-Sleep -Seconds 2
-$connectedStates = Get-ConnectedXInputStates
+$connectedStates = @(Get-ConnectedXInputStates)
 Add-Result -Name "Four XInput API slots" -Passed ($connectedStates.Count -eq 4) `
     -Detail ("XInputGetState reports {0}/4 connected slots" -f $connectedStates.Count)
 
@@ -344,7 +344,11 @@ $report = [ordered]@{
     Results = @($script:Results)
 }
 
-$report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutputPath -Encoding UTF8
+$reportJson = $report | ConvertTo-Json -Depth 8
+[System.IO.File]::WriteAllText(
+    $OutputPath,
+    $reportJson,
+    [System.Text.UTF8Encoding]::new($false))
 Write-Host ""
 Write-Host ("Wrote report: {0}" -f (Resolve-Path $OutputPath)) -ForegroundColor Cyan
 
