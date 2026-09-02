@@ -24,6 +24,8 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 option(SWITCH_PICO_LOG "Enable UART debug logging" OFF)
+option(SWITCH_PICO_ADAPTER_FEASIBILITY
+       "Build the automatic Switch/XInput feasibility prototype" OFF)
 set(SWITCH_PICO_INPUT_BACKEND "UART" CACHE STRING "Controller input backend")
 set_property(CACHE SWITCH_PICO_INPUT_BACKEND PROPERTY STRINGS UART BLUEPAD32)
 if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "UART"
@@ -37,6 +39,11 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
         AND NOT PICO_BOARD STREQUAL "pico2_w")
     message(FATAL_ERROR
             "SWITCH_PICO_INPUT_BACKEND=BLUEPAD32 requires PICO_BOARD=pico2_w")
+endif()
+if(SWITCH_PICO_ADAPTER_FEASIBILITY
+        AND NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
+    message(FATAL_ERROR
+            "SWITCH_PICO_ADAPTER_FEASIBILITY requires the BLUEPAD32 backend")
 endif()
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -95,6 +102,15 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             bootsel_pairing_button.cpp
             usb_pairing_management.cpp
     )
+    if(SWITCH_PICO_ADAPTER_FEASIBILITY)
+        target_sources(switch-pico PRIVATE
+                adapter_host_probe.cpp
+                xinput_feasibility_driver.cpp
+        )
+        target_compile_definitions(switch-pico PRIVATE
+                SWITCH_PICO_ADAPTER_FEASIBILITY=1
+        )
+    endif()
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
@@ -132,6 +148,9 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             pico_multicore
             pico_flash
     )
+    if(SWITCH_PICO_ADAPTER_FEASIBILITY)
+        target_link_libraries(switch-pico hardware_watchdog)
+    endif()
 endif()
 
 if (SWITCH_PICO_LOG)

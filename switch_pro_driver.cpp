@@ -8,6 +8,10 @@
 #include "pico/rand.h"
 #include "pico/time.h"
 #include "tusb.h"
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#include "adapter_host_probe.h"
+#include "xinput_feasibility_descriptors.h"
+#endif
 
 #ifdef SWITCH_PICO_LOG
 #define LOG_PRINTF(...) printf(__VA_ARGS__)
@@ -1082,11 +1086,21 @@ uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
 }
 
 uint8_t const* tud_descriptor_device_cb(void) {
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
+        return XInputFeasibility::kDeviceDescriptor;
+    }
+#endif
     return switch_pro_device_descriptor;
 }
 
 uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
     (void)index;
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
+        return XInputFeasibility::kConfigurationDescriptor;
+    }
+#endif
     return switch_pro_configuration_descriptor;
 }
 
@@ -1114,28 +1128,62 @@ void tud_umount_cb(void) {
 
 static uint16_t desc_str[32];
 
-uint16_t const * tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
+uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     (void)langid;
 
-    uint8_t chr_count;
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    adapter_host_probe_note_string_descriptor(index);
+    if (index == 0xee) {
+        static constexpr char kSignature[] = "MSFT100";
+        for (uint8_t i = 0; i < sizeof(kSignature) - 1; ++i) {
+            desc_str[1 + i] = kSignature[i];
+        }
+        desc_str[8] = XInputFeasibility::kMsVendorRequest;
+        desc_str[0] = static_cast<uint16_t>((0x03 << 8) | 18);
+        return desc_str;
+    }
+#endif
 
-    if ( index == 0 ) {
+    uint8_t chr_count = 0;
+    if (index == 0) {
         memcpy(&desc_str[1], switch_pro_string_language, 2);
         chr_count = 1;
     } else {
-        if ( index >= sizeof(switch_pro_string_descriptors)/sizeof(switch_pro_string_descriptors[0]) ) return nullptr;
+        const uint8_t* str = nullptr;
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+        static const uint8_t kManufacturer[] = "Switch Pico";
+        static const uint8_t kProduct[] = "XInput Feasibility";
+        static const uint8_t kSerial[] = "XINPUT-PROTOTYPE";
+        static const uint8_t* const kXInputStrings[] = {
+            nullptr, kManufacturer, kProduct, kSerial};
+        if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
+            if (index >= sizeof(kXInputStrings) /
+                             sizeof(kXInputStrings[0])) {
+                return nullptr;
+            }
+            str = kXInputStrings[index];
+        } else
+#endif
+        {
+            if (index >= sizeof(switch_pro_string_descriptors) /
+                             sizeof(switch_pro_string_descriptors[0])) {
+                return nullptr;
+            }
+            str = switch_pro_string_descriptors[index];
+        }
 
-        const uint8_t *str = switch_pro_string_descriptors[index];
-
-        chr_count = 0;
-        while ( str[chr_count] ) chr_count++;
-        if ( chr_count > 31 ) chr_count = 31;
-
-        for(uint8_t i=0; i<chr_count; i++) {
-            desc_str[1+i] = str[i];
+        while (str[chr_count] != 0) {
+            ++chr_count;
+        }
+        if (chr_count > 31) {
+            chr_count = 31;
+        }
+        for (uint8_t i = 0; i < chr_count; ++i) {
+            desc_str[1 + i] = str[i];
         }
     }
 
-    desc_str[0] = (uint16_t) ((0x03 << 8 ) | (2*chr_count + 2));
+    desc_str[0] =
+        static_cast<uint16_t>((0x03 << 8) | (2 * chr_count + 2));
     return desc_str;
 }

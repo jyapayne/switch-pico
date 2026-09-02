@@ -3,6 +3,9 @@
 #include <string.h>
 
 #include "tusb.h"
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#include "adapter_host_probe.h"
+#endif
 
 namespace UsbPairingManagement {
 
@@ -45,6 +48,11 @@ size_t encode_snapshot(const Bluepad32PairingSnapshot& snapshot,
 extern "C" bool tud_vendor_control_xfer_cb(
     uint8_t rhport, uint8_t stage,
     tusb_control_request_t const* request) {
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    if (adapter_host_probe_vendor_control(rhport, stage, request)) {
+        return true;
+    }
+#endif
     if (stage != CONTROL_STAGE_SETUP) {
         return true;
     }

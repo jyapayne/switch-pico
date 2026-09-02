@@ -8,6 +8,10 @@
 #else
 #include "bluepad32_input_backend.h"
 #include "bootsel_pairing_button.h"
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#include "adapter_host_probe.h"
+#include "xinput_feasibility_driver.h"
+#endif
 #endif
 
 #ifdef SWITCH_PICO_LOG
@@ -177,11 +181,26 @@ static void log_usb_state() {
 #ifdef SWITCH_PICO_BLUEPAD32
     for (uint8_t instance = 0;
          instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+        const bool ready =
+            adapter_host_probe_mode() == AdapterUsbMode::kXInput
+                ? xinput_feasibility_is_ready(instance)
+                : switch_pro_is_ready(instance);
+#else
         const bool ready = switch_pro_is_ready(instance);
+#endif
         if (ready != g_last_ready[instance]) {
             g_last_ready[instance] = ready;
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+            LOG_PRINTF("[%s %u] driver %s\n",
+                       adapter_host_probe_mode() == AdapterUsbMode::kXInput
+                           ? "XINPUT"
+                           : "SWITCH",
+                       instance, ready ? "ready" : "not ready");
+#else
             LOG_PRINTF("[SWITCH %u] driver %s\n", instance,
                        ready ? "ready (handshake OK)" : "not ready");
+#endif
         }
     }
 #else
@@ -200,6 +219,9 @@ int main() {
 
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_init();
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    adapter_host_probe_init();
+#endif
 #else
     init_uart_input();
 #endif
@@ -208,10 +230,27 @@ int main() {
 #ifdef SWITCH_PICO_BLUEPAD32
     for (uint8_t instance = 0;
          instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+        if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
+            xinput_feasibility_init(instance);
+            xinput_feasibility_set_rumble_callback(
+                instance, on_rumble_from_switch);
+            g_user_states[instance] = neutral_input();
+            xinput_feasibility_set_input(instance,
+                                         g_user_states[instance]);
+        } else {
+            switch_pro_init(instance);
+            switch_pro_set_rumble_callback(instance,
+                                           on_rumble_from_switch);
+            g_user_states[instance] = neutral_input();
+            switch_pro_set_input(instance, g_user_states[instance]);
+        }
+#else
         switch_pro_init(instance);
         switch_pro_set_rumble_callback(instance, on_rumble_from_switch);
         g_user_states[instance] = neutral_input();
         switch_pro_set_input(instance, g_user_states[instance]);
+#endif
     }
 #else
     switch_pro_init(SWITCH_HID_INSTANCE);
@@ -223,7 +262,14 @@ int main() {
 
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_start();
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    LOG_PRINTF("[BOOT] adapter feasibility mode=%s\n",
+               adapter_host_probe_mode() == AdapterUsbMode::kXInput
+                   ? "XInput"
+                   : "Switch probe");
+#else
     LOG_PRINTF("[BOOT] switch-pico starting (Bluepad32 wireless @ 115200)\n");
+#endif
 #else
     LOG_PRINTF("[BOOT] switch-pico starting (UART0 log @ 115200)\n");
     LOG_PRINTF("[INFO] UART1 pins TX=%d RX=%d baud=%d\n",
@@ -232,6 +278,9 @@ int main() {
 
     while (true) {
         tud_task();          // USB device tasks
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+        adapter_host_probe_task();
+#endif
 #ifdef SWITCH_PICO_BLUEPAD32
         switch (bootsel_pairing_button_task()) {
             case BootselPairingButtonEvent::kOpenPairing:
@@ -247,10 +296,25 @@ int main() {
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
             bluepad32_input_backend_snapshot(instance,
                                              &g_user_states[instance]);
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+            bool sent = false;
+            if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
+                xinput_feasibility_set_input(instance,
+                                             g_user_states[instance]);
+                sent = xinput_feasibility_task(instance);
+            } else {
+                switch_pro_set_input(instance, g_user_states[instance]);
+                sent = switch_pro_task(instance);
+            }
+            if (sent) {
+                bluepad32_input_backend_report_sent(instance);
+            }
+#else
             switch_pro_set_input(instance, g_user_states[instance]);
             if (switch_pro_task(instance)) {
                 bluepad32_input_backend_report_sent(instance);
             }
+#endif
         }
 #else
         bool new_data = poll_uart_frames();  // Pull controller state from UART1
