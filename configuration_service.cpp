@@ -14,6 +14,7 @@ bool g_prepared = false;
 ConfigurationStorage g_storage;
 ConfigurationTransaction g_transaction;
 ConfigurationServiceSnapshot g_snapshot;
+uint32_t g_published_reset_generation = 0;
 bool g_has_committed = false;
 uint32_t g_last_commit_ms = 0;
 
@@ -45,6 +46,7 @@ void configuration_service_prepare() {
     }
     critical_section_init(&g_lock);
     g_snapshot = {};
+    __atomic_store_n(&g_published_reset_generation, 0, __ATOMIC_RELAXED);
     g_snapshot.configuration = adapter_configuration_default();
     g_transaction.clear();
     g_prepared = true;
@@ -176,6 +178,10 @@ ConfigurationTransactionStatus configuration_service_reset(
         ++g_snapshot.reset_generation;
     }
     g_snapshot.transaction = g_transaction.snapshot();
+    if (status == ConfigurationTransactionStatus::kPending) {
+        __atomic_store_n(&g_published_reset_generation,
+                         g_snapshot.reset_generation, __ATOMIC_RELEASE);
+    }
     critical_section_exit(&g_lock);
     return status;
 }
@@ -187,4 +193,8 @@ void configuration_service_snapshot(ConfigurationServiceSnapshot* output) {
     critical_section_enter_blocking(&g_lock);
     *output = g_snapshot;
     critical_section_exit(&g_lock);
+}
+
+uint32_t configuration_service_reset_generation() {
+    return __atomic_load_n(&g_published_reset_generation, __ATOMIC_ACQUIRE);
 }

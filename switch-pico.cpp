@@ -306,16 +306,24 @@ int main() {
             case BootselPairingButtonEvent::kNone:
                 break;
         }
+        const uint32_t now_ms =
+            static_cast<uint32_t>(to_ms_since_boot(get_absolute_time()));
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+        const AdapterUsbMode output_mode = adapter_host_probe_mode();
+#else
+        constexpr AdapterUsbMode output_mode = AdapterUsbMode::kSwitchProbe;
+#endif
         for (uint8_t instance = 0;
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
             Bluepad32SlotSnapshot snapshot{};
             bluepad32_input_backend_snapshot(instance, &snapshot);
             const ControllerProfileTransformResult transformed =
-                controller_profile_runtime_transform(instance, snapshot);
+                controller_profile_runtime_transform(
+                    instance, snapshot, now_ms, output_mode);
             g_user_states[instance] = transformed.state;
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
             bool sent = false;
-            if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
+            if (output_mode == AdapterUsbMode::kXInput) {
                 xinput_feasibility_set_input(instance,
                                              g_user_states[instance]);
                 sent = xinput_feasibility_task(instance);

@@ -3,12 +3,12 @@ import subprocess
 from pathlib import Path
 
 
-def test_controller_profile_runtime_native(tmp_path: Path) -> None:
+def test_controller_synthetic_input_native(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
 
-    executable = tmp_path / "controller_profile_runtime_test"
+    executable = tmp_path / "controller_synthetic_input_test"
     subprocess.run(
         [
             compiler,
@@ -18,12 +18,11 @@ def test_controller_profile_runtime_native(tmp_path: Path) -> None:
             "-Werror",
             "-pedantic",
             f"-I{root}",
-            str(root / "tests" / "controller_profile_runtime_test.cpp"),
+            str(root / "tests" / "controller_synthetic_input_test.cpp"),
             str(root / "controller_identity.cpp"),
             str(root / "controller_profile.cpp"),
             str(root / "controller_profile_transform.cpp"),
             str(root / "controller_synthetic_input.cpp"),
-            str(root / "controller_profile_runtime.cpp"),
             "-o",
             str(executable),
         ],

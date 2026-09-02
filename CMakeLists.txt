@@ -102,6 +102,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             controller_identity.cpp
             controller_profile.cpp
             controller_profile_transform.cpp
+            controller_synthetic_input.cpp
             controller_profile_runtime.cpp
             profile_storage.cpp
             profile_service.cpp

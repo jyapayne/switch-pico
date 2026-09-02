@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "adapter_usb_mode.h"
+
 #include "bluepad32_input_backend.h"
 #include "controller_profile_transform.h"
 
@@ -17,10 +19,12 @@ struct ControllerProfileRuntimeLocalConfirmation {
 void controller_profile_runtime_reset();
 
 // Refresh a slot only when its connection key or database generation changes,
-// then transform the raw snapshot. Inactive snapshots return neutral output and
-// invalidate the slot immediately.
+// cancel synthetic state on every runtime invalidation, then apply the shared
+// transform and synthetic pipeline. Inactive snapshots return neutral output
+// and invalidate the slot immediately.
 ControllerProfileTransformResult controller_profile_runtime_transform(
-    uint8_t slot, const Bluepad32SlotSnapshot& snapshot);
+    uint8_t slot, const Bluepad32SlotSnapshot& snapshot, uint32_t now_ms,
+    AdapterUsbMode output_mode);
 
 // Refresh from the current slot snapshot and scale host-originated rumble.
 ControllerRumbleOutput controller_profile_runtime_scale_host_rumble(

@@ -36,3 +36,7 @@ ConfigurationTransactionStatus configuration_service_commit(
 ConfigurationTransactionStatus configuration_service_reset(
     uint32_t transaction_id);
 void configuration_service_snapshot(ConfigurationServiceSnapshot* output);
+
+// Lock-free publication for the report path. The value changes as soon as a
+// configuration reset is accepted.
+uint32_t configuration_service_reset_generation();
