@@ -101,6 +101,8 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             bluepad32_input_backend.cpp
             controller_identity.cpp
             controller_profile.cpp
+            controller_profile_transform.cpp
+            controller_profile_runtime.cpp
             profile_storage.cpp
             profile_service.cpp
             pico_profile_storage.cpp

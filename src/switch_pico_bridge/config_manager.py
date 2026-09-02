@@ -69,7 +69,8 @@ PAIRING_RECORD_CAPACITY = 16
 TRANSPORT_UNKNOWN = 0
 TRANSPORT_CLASSIC = 1
 TRANSPORT_BLE = 2
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_LEGACY_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
 PROFILE_SIZE = 256
 PROFILE_CAPACITY = 4
 PROFILE_IDENTITY_CAPACITY = 16
@@ -80,6 +81,8 @@ PROFILE_NONE_BUTTON = 0xFF
 PROFILE_MACRO_STEP_CAPACITY = 8
 PROFILE_MACRO_STEP_SIZE = 19
 PROFILE_MAXIMUM_WAIT_MS = 10000
+PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD = 0x8000
+PROFILE_DEFAULT_DIGITAL_THRESHOLD = 22934
 
 LOGICAL_BUTTONS = (
     "south",
@@ -513,10 +516,7 @@ class TriggerConfig:
             )
         _require_int(self.curve_q8_8, "trigger curve_q8_8", 1, 0xFFFF)
         _require_int(
-            self.digital_threshold,
-            "trigger digital_threshold",
-            self.lower_deadzone,
-            self.upper_saturation,
+            self.digital_threshold, "trigger digital_threshold", 0, 0xFFFF
         )
 
     @classmethod
@@ -574,6 +574,19 @@ class TriggerConfig:
                 0xFFFF,
             ),
         )
+
+def _migrate_legacy_trigger_threshold(trigger: TriggerConfig) -> TriggerConfig:
+    if (
+        trigger.digital_threshold
+        != PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
+    ):
+        return trigger
+    return TriggerConfig(
+        trigger.lower_deadzone,
+        trigger.upper_saturation,
+        trigger.curve_q8_8,
+        PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+    )
 
 
 @dataclass(frozen=True)
@@ -866,7 +879,9 @@ class ControllerProfile:
     @classmethod
     def default(cls) -> ControllerProfile:
         stick = StickConfig(0, 0, 0, 0x7FFF, 256, False, False)
-        trigger = TriggerConfig(0, 0xFFFF, 256, 0x8000)
+        trigger = TriggerConfig(
+            0, 0xFFFF, 256, PROFILE_DEFAULT_DIGITAL_THRESHOLD
+        )
         return cls(
             button_map=tuple(range(len(LOGICAL_BUTTONS))),
             left_stick=stick,
@@ -889,7 +904,11 @@ class ControllerProfile:
         if len(payload) != PROFILE_SIZE:
             raise ConfigManagerError("invalid profile size")
         version, size = struct.unpack_from("<HH", payload)
-        if version != PROFILE_SCHEMA_VERSION or size != PROFILE_SIZE:
+        if (
+            version
+            not in (PROFILE_LEGACY_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION)
+            or size != PROFILE_SIZE
+        ):
             raise ConfigManagerError("unsupported profile schema")
         if payload[75] != 0 or payload[81] != 0:
             raise ConfigManagerError("profile reserved fields must be zero")
@@ -912,12 +931,17 @@ class ControllerProfile:
             step != MacroStep.end() for step in all_steps[macro_count:]
         ):
             raise ConfigManagerError("unused macro steps must be canonical end")
+        left_trigger = TriggerConfig.from_bytes(payload[52:62])
+        right_trigger = TriggerConfig.from_bytes(payload[62:72])
+        if version == PROFILE_LEGACY_SCHEMA_VERSION:
+            left_trigger = _migrate_legacy_trigger_threshold(left_trigger)
+            right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
         return cls(
             button_map=tuple(payload[4:20]),
             left_stick=StickConfig.from_bytes(payload[20:36]),
             right_stick=StickConfig.from_bytes(payload[36:52]),
-            left_trigger=TriggerConfig.from_bytes(payload[52:62]),
-            right_trigger=TriggerConfig.from_bytes(payload[62:72]),
+            left_trigger=left_trigger,
+            right_trigger=right_trigger,
             weak_rumble_scale=payload[72],
             strong_rumble_scale=payload[73],
             confirmation_policy=payload[74],
@@ -1020,11 +1044,12 @@ class ControllerProfile:
             "turbo",
         )
         obj = _require_object(value, fields, "profile")
+        schema_version = _require_int(
+            obj["schema_version"], "profile.schema_version", 0, 0xFFFF
+        )
         if (
-            _require_int(
-                obj["schema_version"], "profile.schema_version", 0, 0xFFFF
-            )
-            != PROFILE_SCHEMA_VERSION
+            schema_version
+            not in (PROFILE_LEGACY_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION)
             or _require_int(obj["size"], "profile.size", 0, 0xFFFF)
             != PROFILE_SIZE
         ):
@@ -1056,6 +1081,15 @@ class ControllerProfile:
             raise ConfigManagerError(
                 "profile.macro.steps must contain one to eight steps"
             )
+        left_trigger = TriggerConfig.from_json_object(
+            triggers["left"], "profile.triggers.left"
+        )
+        right_trigger = TriggerConfig.from_json_object(
+            triggers["right"], "profile.triggers.right"
+        )
+        if schema_version == PROFILE_LEGACY_SCHEMA_VERSION:
+            left_trigger = _migrate_legacy_trigger_threshold(left_trigger)
+            right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
         return cls(
             button_map=tuple(
                 _button_index(
@@ -1069,12 +1103,8 @@ class ControllerProfile:
             right_stick=StickConfig.from_json_object(
                 sticks["right"], "profile.sticks.right"
             ),
-            left_trigger=TriggerConfig.from_json_object(
-                triggers["left"], "profile.triggers.left"
-            ),
-            right_trigger=TriggerConfig.from_json_object(
-                triggers["right"], "profile.triggers.right"
-            ),
+            left_trigger=left_trigger,
+            right_trigger=right_trigger,
             weak_rumble_scale=_require_int(
                 rumble["weak_scale"],
                 "profile.rumble.weak_scale",
@@ -1345,7 +1375,10 @@ def reset_configuration(device: UsbDevice, timeout: float) -> TransactionStatus:
 
 def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
     _raise_status(envelope)
-    if envelope.schema_version != PROFILE_SCHEMA_VERSION:
+    if envelope.schema_version not in (
+        PROFILE_LEGACY_SCHEMA_VERSION,
+        PROFILE_SCHEMA_VERSION,
+    ):
         raise ConfigManagerError("unsupported profile-list schema")
     if not envelope.payload:
         raise ConfigManagerError("short profile-list payload")
@@ -1407,7 +1440,10 @@ def select_profile(
 def read_selected_profile(device: UsbDevice) -> ControllerProfile:
     envelope = _control_in(device, OP_PROFILE_READ)
     _raise_status(envelope)
-    if envelope.schema_version != PROFILE_SCHEMA_VERSION:
+    if envelope.schema_version not in (
+        PROFILE_LEGACY_SCHEMA_VERSION,
+        PROFILE_SCHEMA_VERSION,
+    ):
         raise ConfigManagerError("unsupported profile schema")
     return ControllerProfile.from_bytes(envelope.payload)
 

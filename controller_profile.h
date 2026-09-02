@@ -5,7 +5,8 @@
 
 #include "controller_identity.h"
 
-constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 1;
+constexpr uint16_t CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION = 1;
+constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 2;
 constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 256;
 constexpr uint8_t CONTROLLER_PROFILE_COUNT = 4;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT = 16;
@@ -13,9 +14,12 @@ constexpr uint8_t CONTROLLER_PROFILE_MACRO_STEP_CAPACITY = 8;
 constexpr uint16_t CONTROLLER_PROFILE_MAX_WAIT_MS = 10000;
 constexpr uint8_t CONTROLLER_PROFILE_NO_BUTTON = 0xff;
 constexpr uint8_t CONTROLLER_PROFILE_ALL = 0xff;
+// Exact 16-bit counterpart of the existing 358-of-1023 Switch boundary.
+constexpr uint16_t CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD = 22934;
 
 constexpr uint8_t CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY = 16;
-constexpr uint16_t CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION = 1;
+constexpr uint16_t CONTROLLER_PROFILE_DATABASE_LEGACY_SCHEMA_VERSION = 1;
+constexpr uint16_t CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION = 2;
 constexpr size_t CONTROLLER_PROFILE_DATABASE_HEADER_SIZE = 32;
 constexpr size_t CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE = 16;
 constexpr size_t CONTROLLER_PROFILE_DATABASE_ENTRY_SIZE =
@@ -92,7 +96,9 @@ struct ControllerProfileTriggerConfiguration {
     uint16_t lower_deadzone = 0;
     uint16_t upper_saturation = UINT16_MAX;
     uint16_t curve_q8_8 = 256;
-    uint16_t digital_threshold = 0x8000;
+    // Compared against the transformed uint16 trigger output.
+    uint16_t digital_threshold =
+        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD;
 };
 
 struct ControllerProfileMacroStep {

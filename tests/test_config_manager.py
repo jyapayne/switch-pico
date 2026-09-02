@@ -500,6 +500,13 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerIdentity.from_bytes(malformed_identity)
 
+    default_profile = config_manager.ControllerProfile.default()
+    assert default_profile.left_trigger.digital_threshold == 22934
+    assert default_profile.right_trigger.digital_threshold == 22934
+    default_wire = default_profile.to_bytes()
+    assert struct.unpack_from("<H", default_wire, 58)[0] == 22934
+    assert struct.unpack_from("<H", default_wire, 68)[0] == 22934
+
     profile = custom_profile()
     encoded = profile.to_bytes()
     assert len(encoded) == config_manager.PROFILE_SIZE
@@ -513,10 +520,142 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
 
     serialized = profile.to_json()
-    assert serialized.startswith('{\n  "schema_version": 1,\n  "size": 256,')
+    assert serialized.startswith('{\n  "schema_version": 2,\n  "size": 256,')
     decoded = config_manager.ControllerProfile.from_json(serialized)
     assert decoded == profile
     assert decoded.to_json() == serialized
+
+    legacy_default_wire = bytearray(default_wire)
+    struct.pack_into(
+        "<H",
+        legacy_default_wire,
+        0,
+        config_manager.PROFILE_LEGACY_SCHEMA_VERSION,
+    )
+    struct.pack_into(
+        "<HHHH",
+        legacy_default_wire,
+        52,
+        30000,
+        40000,
+        256,
+        config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD,
+    )
+    struct.pack_into(
+        "<HHHH",
+        legacy_default_wire,
+        62,
+        30000,
+        40000,
+        256,
+        config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD,
+    )
+    migrated_default = config_manager.ControllerProfile.from_bytes(
+        legacy_default_wire
+    )
+    assert (
+        migrated_default.left_trigger.digital_threshold
+        == config_manager.PROFILE_DEFAULT_DIGITAL_THRESHOLD
+    )
+    assert (
+        migrated_default.right_trigger.digital_threshold
+        == config_manager.PROFILE_DEFAULT_DIGITAL_THRESHOLD
+    )
+    assert migrated_default.left_trigger.lower_deadzone == 30000
+    assert migrated_default.left_trigger.upper_saturation == 40000
+    assert migrated_default.right_trigger.lower_deadzone == 30000
+    assert migrated_default.right_trigger.upper_saturation == 40000
+    assert migrated_default.to_bytes()[0] == config_manager.PROFILE_SCHEMA_VERSION
+
+    current_old_value_wire = bytearray(default_wire)
+    struct.pack_into(
+        "<H",
+        current_old_value_wire,
+        58,
+        config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD,
+    )
+    assert (
+        config_manager.ControllerProfile.from_bytes(
+            current_old_value_wire
+        ).left_trigger.digital_threshold
+        == config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
+    )
+
+    legacy_custom_wire = bytearray(encoded)
+    struct.pack_into(
+        "<H",
+        legacy_custom_wire,
+        0,
+        config_manager.PROFILE_LEGACY_SCHEMA_VERSION,
+    )
+    assert (
+        config_manager.ControllerProfile.from_bytes(legacy_custom_wire)
+        == profile
+    )
+
+    legacy_json_object = default_profile.to_json_object()
+    legacy_json_object["schema_version"] = (
+        config_manager.PROFILE_LEGACY_SCHEMA_VERSION
+    )
+    legacy_json_object["triggers"]["left"]["digital_threshold"] = (
+        config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
+    )
+    legacy_json_object["triggers"]["right"]["digital_threshold"] = 33000
+    legacy_json_object["triggers"]["left"]["lower_deadzone"] = 30000
+    legacy_json_object["triggers"]["left"]["upper_saturation"] = 40000
+    migrated_json = config_manager.ControllerProfile.from_json_object(
+        legacy_json_object
+    )
+    assert (
+        migrated_json.left_trigger.digital_threshold
+        == config_manager.PROFILE_DEFAULT_DIGITAL_THRESHOLD
+    )
+    assert migrated_json.right_trigger.digital_threshold == 33000
+    assert migrated_json.left_trigger.lower_deadzone == 30000
+    assert migrated_json.left_trigger.upper_saturation == 40000
+
+
+def test_trigger_threshold_uses_transformed_output_domain() -> None:
+    for threshold in (0, 0xFFFF):
+        trigger = config_manager.TriggerConfig(30000, 40000, 256, threshold)
+        assert config_manager.TriggerConfig.from_bytes(trigger.to_bytes()) == trigger
+        assert (
+            config_manager.TriggerConfig.from_json_object(
+                trigger.to_json_object(), "trigger"
+            )
+            == trigger
+        )
+
+        current_wire = bytearray(
+            config_manager.ControllerProfile.default().to_bytes()
+        )
+        struct.pack_into(
+            "<HHHH", current_wire, 52, 30000, 40000, 256, threshold
+        )
+        current_profile = config_manager.ControllerProfile.from_bytes(
+            current_wire
+        )
+        assert current_profile.left_trigger.digital_threshold == threshold
+        assert current_profile.to_bytes() == current_wire
+
+    for threshold in (-1, 0x10000):
+        with pytest.raises(
+            config_manager.ConfigManagerError,
+            match="trigger digital_threshold",
+        ):
+            config_manager.TriggerConfig(30000, 40000, 256, threshold)
+
+    for lower_deadzone, upper_saturation in (
+        (40000, 40000),
+        (40001, 40000),
+    ):
+        with pytest.raises(
+            config_manager.ConfigManagerError,
+            match="lower_deadzone must be below upper_saturation",
+        ):
+            config_manager.TriggerConfig(
+                lower_deadzone, upper_saturation, 256, 0
+            )
 
 
 def test_profile_list_select_read_and_chunked_commit() -> None:

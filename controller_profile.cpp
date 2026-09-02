@@ -17,6 +17,7 @@ constexpr uint8_t kMacroOverrideMask =
     kControllerProfileOverrideRightStick |
     kControllerProfileOverrideLeftTrigger |
     kControllerProfileOverrideRightTrigger;
+constexpr uint16_t kLegacyDefaultDigitalThreshold = 0x8000;
 
 uint16_t profile_read_u16(const uint8_t* input) {
     return static_cast<uint16_t>(input[0]) |
@@ -144,7 +145,8 @@ ControllerProfile controller_profile_default(const ControllerIdentity& identity,
         trigger.lower_deadzone = 0;
         trigger.upper_saturation = UINT16_MAX;
         trigger.curve_q8_8 = 256;
-        trigger.digital_threshold = 0x8000;
+        trigger.digital_threshold =
+            CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD;
     }
     profile.weak_rumble_scale = UINT8_MAX;
     profile.strong_rumble_scale = UINT8_MAX;
@@ -176,9 +178,7 @@ bool controller_profile_validate(const ControllerProfile& profile) {
     for (const ControllerProfileTriggerConfiguration& trigger :
          profile.triggers) {
         if (trigger.lower_deadzone >= trigger.upper_saturation ||
-            trigger.curve_q8_8 == 0 ||
-            trigger.digital_threshold < trigger.lower_deadzone ||
-            trigger.digital_threshold > trigger.upper_saturation) {
+            trigger.curve_q8_8 == 0) {
             return false;
         }
     }
@@ -272,13 +272,19 @@ bool controller_profile_encode(const ControllerProfile& profile,
 bool controller_profile_decode(const uint8_t* input, size_t input_size,
                                ControllerProfile* output) {
     if (input == nullptr || output == nullptr ||
-        input_size != CONTROLLER_PROFILE_ENCODED_SIZE ||
-        profile_read_u16(&input[0]) != CONTROLLER_PROFILE_SCHEMA_VERSION ||
+        input_size != CONTROLLER_PROFILE_ENCODED_SIZE) {
+        return false;
+    }
+    const uint16_t schema_version = profile_read_u16(&input[0]);
+    if ((schema_version != CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION &&
+         schema_version != CONTROLLER_PROFILE_SCHEMA_VERSION) ||
         profile_read_u16(&input[2]) != CONTROLLER_PROFILE_ENCODED_SIZE ||
-        !profile_bytes_are_zero(&input[31], 5) || !profile_bytes_are_zero(&input[47], 5) ||
-        !profile_bytes_are_zero(&input[60], 2) || !profile_bytes_are_zero(&input[70], 2) ||
-        input[75] != 0 || input[81] != 0 ||
-        !profile_bytes_are_zero(&input[98], 2) || !profile_bytes_are_zero(&input[252], 4)) {
+        !profile_bytes_are_zero(&input[31], 5) ||
+        !profile_bytes_are_zero(&input[47], 5) ||
+        !profile_bytes_are_zero(&input[60], 2) ||
+        !profile_bytes_are_zero(&input[70], 2) || input[75] != 0 ||
+        input[81] != 0 || !profile_bytes_are_zero(&input[98], 2) ||
+        !profile_bytes_are_zero(&input[252], 4)) {
         return false;
     }
 
@@ -307,6 +313,11 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
         trigger.upper_saturation = profile_read_u16(&encoded[2]);
         trigger.curve_q8_8 = profile_read_u16(&encoded[4]);
         trigger.digital_threshold = profile_read_u16(&encoded[6]);
+        if (schema_version == CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION &&
+            trigger.digital_threshold == kLegacyDefaultDigitalThreshold) {
+            trigger.digital_threshold =
+                CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD;
+        }
     }
     profile.weak_rumble_scale = input[72];
     profile.strong_rumble_scale = input[73];
@@ -489,11 +500,16 @@ bool controller_profile_database_decode(
         return false;
     }
     uint8_t header[CONTROLLER_PROFILE_DATABASE_HEADER_SIZE]{};
-    if (!read(context, 0, header, sizeof(header)) ||
-        memcmp(header, kDatabaseMagic, sizeof(kDatabaseMagic)) != 0 ||
-        profile_read_u16(&header[4]) !=
-            CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION ||
-        profile_read_u16(&header[6]) != CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
+    if (!read(context, 0, header, sizeof(header))) {
+        return false;
+    }
+    const uint16_t schema_version = profile_read_u16(&header[4]);
+    if (memcmp(header, kDatabaseMagic, sizeof(kDatabaseMagic)) != 0 ||
+        (schema_version !=
+             CONTROLLER_PROFILE_DATABASE_LEGACY_SCHEMA_VERSION &&
+         schema_version != CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION) ||
+        profile_read_u16(&header[6]) !=
+            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
         header[8] != CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY ||
         header[9] != CONTROLLER_PROFILE_COUNT ||
         header[10] >= CONTROLLER_PROFILE_COUNT ||

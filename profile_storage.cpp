@@ -236,8 +236,10 @@ bool ProfileStorage::read_header(uint8_t bank, BankHeader* output) const {
         !io_.read(io_.context, bank, 0, header, sizeof(header)) ||
         memcmp(header, kRecordMagic, sizeof(kRecordMagic)) != 0 ||
         storage_read_u16(&header[4]) != kRecordFormatVersion ||
-        storage_read_u16(&header[6]) !=
-            CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION ||
+        (storage_read_u16(&header[6]) !=
+             CONTROLLER_PROFILE_DATABASE_LEGACY_SCHEMA_VERSION &&
+         storage_read_u16(&header[6]) !=
+             CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION) ||
         storage_read_u32(&header[12]) !=
             CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
         profile_storage_crc32(header, kHeaderCrcOffset) !=

@@ -27,8 +27,11 @@ constexpr uint16_t SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD =
 // Initialize one HID instance before entering the main loop.
 void switch_pro_init(uint8_t instance);
 
-// Update the desired controller state for one HID instance.
-void switch_pro_set_input(uint8_t instance, const ControllerState& state);
+// Update the desired controller state and digital trigger thresholds for one
+// HID instance.
+void switch_pro_set_input(uint8_t instance, const ControllerState& state,
+                          uint16_t left_trigger_threshold,
+                          uint16_t right_trigger_threshold);
 
 // Drive one Switch Pro USB state machine; returns true only when a regular
 // 0x30 input report was successfully queued.

@@ -7,6 +7,7 @@
 #include "hardware/uart.h"
 #else
 #include "bluepad32_input_backend.h"
+#include "controller_profile_runtime.h"
 #include "bootsel_pairing_button.h"
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
 #include "adapter_host_probe.h"
@@ -33,6 +34,10 @@
 #ifdef SWITCH_PICO_BLUEPAD32
 static_assert(SWITCH_PICO_HID_INSTANCE_COUNT ==
               BLUEPAD32_INPUT_BACKEND_SLOT_COUNT);
+static_assert(CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT ==
+              BLUEPAD32_INPUT_BACKEND_SLOT_COUNT);
+static_assert(SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD ==
+              CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD);
 static bool g_last_ready[BLUEPAD32_INPUT_BACKEND_SLOT_COUNT]{};
 static ControllerState
     g_user_states[BLUEPAD32_INPUT_BACKEND_SLOT_COUNT]{};
@@ -80,7 +85,11 @@ static void on_rumble_from_switch(uint8_t instance,
     if (instance >= BLUEPAD32_INPUT_BACKEND_SLOT_COUNT) {
         return;
     }
-    bluepad32_input_backend_queue_rumble(instance, rumble);
+    Bluepad32SlotSnapshot snapshot{};
+    bluepad32_input_backend_snapshot(instance, &snapshot);
+    bluepad32_input_backend_queue_rumble(
+        instance, controller_profile_runtime_scale_host_rumble(
+                      instance, snapshot, rumble));
 #else
     if (instance != SWITCH_HID_INSTANCE) {
         return;
@@ -217,6 +226,7 @@ int main() {
 
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_init();
+    controller_profile_runtime_reset();
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
     adapter_host_probe_init();
 #endif
@@ -241,13 +251,19 @@ int main() {
             switch_pro_set_rumble_callback(instance,
                                            on_rumble_from_switch);
             g_user_states[instance] = neutral_input();
-            switch_pro_set_input(instance, g_user_states[instance]);
+            switch_pro_set_input(
+                instance, g_user_states[instance],
+                CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+                CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD);
         }
 #else
         switch_pro_init(instance);
         switch_pro_set_rumble_callback(instance, on_rumble_from_switch);
         g_user_states[instance] = neutral_input();
-        switch_pro_set_input(instance, g_user_states[instance]);
+        switch_pro_set_input(
+            instance, g_user_states[instance],
+            CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+            CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD);
 #endif
     }
 #else
@@ -255,7 +271,9 @@ int main() {
     switch_pro_set_rumble_callback(SWITCH_HID_INSTANCE,
                                    on_rumble_from_switch);
     g_user_state = neutral_input();
-    switch_pro_set_input(SWITCH_HID_INSTANCE, g_user_state);
+    switch_pro_set_input(SWITCH_HID_INSTANCE, g_user_state,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
 #endif
 
 #ifdef SWITCH_PICO_BLUEPAD32
@@ -292,8 +310,9 @@ int main() {
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
             Bluepad32SlotSnapshot snapshot{};
             bluepad32_input_backend_snapshot(instance, &snapshot);
-            g_user_states[instance] =
-                snapshot.active ? snapshot.state : controller_neutral_state();
+            const ControllerProfileTransformResult transformed =
+                controller_profile_runtime_transform(instance, snapshot);
+            g_user_states[instance] = transformed.state;
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
             bool sent = false;
             if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
@@ -301,14 +320,20 @@ int main() {
                                              g_user_states[instance]);
                 sent = xinput_feasibility_task(instance);
             } else {
-                switch_pro_set_input(instance, g_user_states[instance]);
+                switch_pro_set_input(
+                    instance, g_user_states[instance],
+                    transformed.left_trigger_digital_threshold,
+                    transformed.right_trigger_digital_threshold);
                 sent = switch_pro_task(instance);
             }
             if (sent) {
                 bluepad32_input_backend_report_sent(instance);
             }
 #else
-            switch_pro_set_input(instance, g_user_states[instance]);
+            switch_pro_set_input(
+                instance, g_user_states[instance],
+                transformed.left_trigger_digital_threshold,
+                transformed.right_trigger_digital_threshold);
             if (switch_pro_task(instance)) {
                 bluepad32_input_backend_report_sent(instance);
             }
@@ -318,7 +343,9 @@ int main() {
         bool new_data = poll_uart_frames();  // Pull controller state from UART1
         (void)new_data;
         ControllerState state = g_user_state;
-        switch_pro_set_input(SWITCH_HID_INSTANCE, state);
+        switch_pro_set_input(SWITCH_HID_INSTANCE, state,
+                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
         (void)switch_pro_task(SWITCH_HID_INSTANCE);
 #endif
         log_usb_state();

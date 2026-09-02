@@ -43,6 +43,10 @@ struct MotionQuaternion {
 
 struct SwitchProContext {
     ControllerState input_state{};
+    uint16_t left_trigger_threshold =
+        SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
+    uint16_t right_trigger_threshold =
+        SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
     uint8_t report_buffer[SWITCH_PRO_ENDPOINT_SIZE]{};
     SwitchProReport switch_report{};
     uint8_t last_report_counter = 0;
@@ -420,6 +424,8 @@ static ControllerState make_neutral_state() {
 static void reset_context_runtime(SwitchProContext& context, uint32_t now,
                                   bool ready_before_mount) {
     context.input_state = make_neutral_state();
+    context.left_trigger_threshold = SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
+    context.right_trigger_threshold = SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
     memset(context.report_buffer, 0x00, sizeof(context.report_buffer));
     context.switch_report = {};
     context.switch_report.reportID = 0x30;
@@ -747,7 +753,7 @@ static void update_switch_report_from_state(SwitchProContext& context) {
     inputs.buttonRightSL = 0;
     inputs.buttonR = state.button_right_shoulder;
     inputs.buttonZR =
-        state.right_trigger >= SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
+        state.right_trigger >= context.right_trigger_threshold;
     inputs.buttonMinus = state.button_select;
     inputs.buttonPlus = state.button_start;
     inputs.buttonThumbR = state.button_right_stick;
@@ -758,7 +764,7 @@ static void update_switch_report_from_state(SwitchProContext& context) {
     inputs.buttonLeftSL = 0;
     inputs.buttonL = state.button_left_shoulder;
     inputs.buttonZL =
-        state.left_trigger >= SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
+        state.left_trigger >= context.left_trigger_threshold;
 
     uint16_t left_x =
         scale16To12(controller_axis_to_unsigned(state.left_stick_x));
@@ -813,10 +819,14 @@ void switch_pro_init(uint8_t instance) {
                           to_ms_since_boot(get_absolute_time()), true);
 }
 
-void switch_pro_set_input(uint8_t instance, const ControllerState& state) {
+void switch_pro_set_input(uint8_t instance, const ControllerState& state,
+                          uint16_t left_trigger_threshold,
+                          uint16_t right_trigger_threshold) {
     SwitchProContext* context = context_for(instance);
     if (context != nullptr) {
         context->input_state = state;
+        context->left_trigger_threshold = left_trigger_threshold;
+        context->right_trigger_threshold = right_trigger_threshold;
     }
 }
 

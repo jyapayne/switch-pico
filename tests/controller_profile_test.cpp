@@ -1,5 +1,6 @@
 #include "controller_identity.h"
 #include "controller_profile.h"
+#include "tests/controller_profile_legacy_fixtures.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -44,9 +45,9 @@ void test_profile_wire_schema() {
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)),
             "default profile did not encode");
-    require(encoded[0] == 1 && encoded[1] == 0 &&
+    require(encoded[0] == 2 && encoded[1] == 0 &&
                 encoded[2] == 0 && encoded[3] == 1,
-            "profile header is not little-endian v1/256");
+            "profile header is not little-endian v2/256");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
         require(encoded[4 + index] == index,
@@ -56,7 +57,12 @@ void test_profile_wire_schema() {
                 encoded[30] == 0,
             "default stick encoding changed");
     require(encoded[54] == 0xff && encoded[55] == 0xff &&
-                encoded[58] == 0x00 && encoded[59] == 0x80,
+                encoded[58] ==
+                    static_cast<uint8_t>(
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD) &&
+                encoded[59] ==
+                    static_cast<uint8_t>(
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8),
             "default trigger encoding changed");
     require(encoded[72] == 0xff && encoded[73] == 0xff &&
                 encoded[74] == 3 && encoded[78] == 0xff &&
@@ -84,11 +90,35 @@ void test_profile_wire_schema() {
         invalid.sticks[0].outer_saturation;
     require(!controller_profile_validate(invalid),
             "empty stick range was accepted");
+    ControllerProfile boundary = profile;
+    boundary.triggers[0].lower_deadzone = 30000;
+    boundary.triggers[0].upper_saturation = 40000;
+    boundary.triggers[0].digital_threshold = 0;
+    uint8_t boundary_encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(boundary, boundary_encoded,
+                                      sizeof(boundary_encoded)) &&
+                controller_profile_decode(boundary_encoded,
+                                          sizeof(boundary_encoded),
+                                          &decoded) &&
+                decoded.triggers[0].digital_threshold == 0,
+            "current profile rejected zero transformed trigger threshold");
+    boundary.triggers[0].digital_threshold = UINT16_MAX;
+    require(controller_profile_encode(boundary, boundary_encoded,
+                                      sizeof(boundary_encoded)) &&
+                controller_profile_decode(boundary_encoded,
+                                          sizeof(boundary_encoded),
+                                          &decoded) &&
+                decoded.triggers[0].digital_threshold == UINT16_MAX,
+            "current profile rejected maximum transformed trigger threshold");
     invalid = profile;
-    invalid.triggers[0].digital_threshold = 0;
-    invalid.triggers[0].lower_deadzone = 1;
+    invalid.triggers[0].lower_deadzone =
+        invalid.triggers[0].upper_saturation;
     require(!controller_profile_validate(invalid),
-            "trigger threshold outside its range was accepted");
+            "empty raw trigger range was accepted");
+    invalid.triggers[0].lower_deadzone = UINT16_MAX;
+    invalid.triggers[0].upper_saturation = UINT16_MAX - 1;
+    require(!controller_profile_validate(invalid),
+            "reversed raw trigger range was accepted");
     invalid = profile;
     invalid.turbo_modes[0] =
         static_cast<ControllerProfileTurboMode>(3);
@@ -108,6 +138,97 @@ void test_profile_wire_schema() {
         ControllerProfileMacroStepType::kState;
     require(!controller_profile_validate(invalid),
             "macro without a final end was accepted");
+}
+
+void test_legacy_profile_migration() {
+    ControllerProfile migrated{};
+    require(controller_profile_decode(
+                kLegacyDefaultProfile, sizeof(kLegacyDefaultProfile),
+                &migrated),
+            "legacy default profile did not decode");
+    require(migrated.triggers[0].digital_threshold ==
+                    CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD &&
+                migrated.triggers[1].digital_threshold ==
+                    CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+            "legacy inherited thresholds were not migrated");
+
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(migrated, encoded, sizeof(encoded)),
+            "migrated default profile did not encode");
+    for (size_t index = 0; index < sizeof(encoded); ++index) {
+        const bool schema_byte = index == 0;
+        const bool threshold_byte =
+            (index >= 58 && index < 60) ||
+            (index >= 68 && index < 70);
+        if (!schema_byte && !threshold_byte) {
+            require(encoded[index] == kLegacyDefaultProfile[index],
+                    "legacy default profile changed an unrelated byte");
+        }
+    }
+    require(encoded[0] == CONTROLLER_PROFILE_SCHEMA_VERSION &&
+                encoded[58] ==
+                    static_cast<uint8_t>(
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD) &&
+                encoded[59] ==
+                    static_cast<uint8_t>(
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8) &&
+                encoded[68] ==
+                    static_cast<uint8_t>(
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD) &&
+                encoded[69] ==
+                    static_cast<uint8_t>(
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8),
+            "migrated default profile did not encode as v2");
+
+    require(controller_profile_decode(
+                kLegacyNarrowRawRangeProfile,
+                sizeof(kLegacyNarrowRawRangeProfile), &migrated),
+            "legacy narrow-raw-range profile did not decode");
+    require(migrated.triggers[0].lower_deadzone == 30000 &&
+                migrated.triggers[0].upper_saturation == 40000 &&
+                migrated.triggers[0].digital_threshold ==
+                    CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD &&
+                migrated.triggers[1].lower_deadzone == 30000 &&
+                migrated.triggers[1].upper_saturation == 40000 &&
+                migrated.triggers[1].digital_threshold ==
+                    CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+            "legacy narrow raw range or inherited threshold was not migrated");
+    require(controller_profile_encode(migrated, encoded, sizeof(encoded)),
+            "migrated narrow-raw-range profile did not encode");
+    for (size_t index = 0; index < sizeof(encoded); ++index) {
+        const bool schema_byte = index == 0;
+        const bool threshold_byte =
+            (index >= 58 && index < 60) ||
+            (index >= 68 && index < 70);
+        if (!schema_byte && !threshold_byte) {
+            require(
+                encoded[index] == kLegacyNarrowRawRangeProfile[index],
+                "narrow-raw-range migration changed unrelated profile data");
+        }
+    }
+
+    require(controller_profile_decode(
+                kLegacyCustomThresholdProfile,
+                sizeof(kLegacyCustomThresholdProfile), &migrated),
+            "legacy custom-threshold profile did not decode");
+    require(migrated.triggers[0].digital_threshold == 0x1234 &&
+                migrated.triggers[1].digital_threshold == 0xabcd,
+            "legacy custom thresholds were not preserved");
+    require(controller_profile_encode(migrated, encoded, sizeof(encoded)),
+            "legacy custom-threshold profile did not re-encode");
+    for (size_t index = 1; index < sizeof(encoded); ++index) {
+        require(encoded[index] == kLegacyCustomThresholdProfile[index],
+                "legacy custom-threshold profile changed data");
+    }
+
+    ControllerProfile current =
+        controller_profile_default(controller_identity_global(), 0);
+    current.triggers[0].digital_threshold = 0x8000;
+    require(controller_profile_encode(current, encoded, sizeof(encoded)) &&
+                controller_profile_decode(encoded, sizeof(encoded),
+                                          &migrated) &&
+                migrated.triggers[0].digital_threshold == 0x8000,
+            "v2 custom threshold matching the legacy default was migrated");
 }
 
 void test_database_round_trip_and_capacity() {
@@ -141,6 +262,10 @@ void test_database_round_trip_and_capacity() {
                     database, offset, &encoded_database[offset], size),
                 "database range did not encode");
     }
+    require(encoded_database[4] ==
+                    CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION &&
+                encoded_database[5] == 0,
+            "database encoder did not emit v2");
     require(controller_profile_database_decode(
                 read_encoded_database, nullptr, &decoded_database),
             "database did not decode");
@@ -157,6 +282,7 @@ void test_database_round_trip_and_capacity() {
 }  // namespace
 int main() {
     test_profile_wire_schema();
+    test_legacy_profile_migration();
     test_database_round_trip_and_capacity();
     return 0;
 }

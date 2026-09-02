@@ -289,7 +289,9 @@ void test_input_reports_and_timers_are_isolated() {
     states[3].button_west = true;
 
     for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
-        switch_pro_set_input(instance, states[instance]);
+        switch_pro_set_input(instance, states[instance],
+                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     }
 
     now_ms = 15;
@@ -328,7 +330,9 @@ void test_input_reports_and_timers_are_isolated() {
     ControllerState changed_zero = states[0];
     changed_zero.button_east = false;
     changed_zero.button_system = true;
-    switch_pro_set_input(0, changed_zero);
+    switch_pro_set_input(0, changed_zero,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     now_ms = 30;
     expect(switch_pro_task(0),
            "instance 0 did not apply its changed input state");
@@ -341,7 +345,9 @@ void test_input_reports_and_timers_are_isolated() {
     ControllerState changed_three = states[3];
     changed_three.button_west = false;
     changed_three.button_capture = true;
-    switch_pro_set_input(3, changed_three);
+    switch_pro_set_input(3, changed_three,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     now_ms = 45;
     expect(switch_pro_task(3),
            "instance 3 did not apply its changed input state");
@@ -370,8 +376,10 @@ void test_callback_send_and_imu_modes_are_isolated() {
     ControllerState one = zero;
     one.button_north = true;
     one.motion_samples[0] = {1001, 2002, 3003, 4004, 5005, 6006};
-    switch_pro_set_input(0, zero);
-    switch_pro_set_input(1, one);
+    switch_pro_set_input(0, zero, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+    switch_pro_set_input(1, one, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     now_ms = 21;
     expect(switch_pro_task(0), "raw-IMU instance did not send input");
     expect(switch_pro_task(1), "off-IMU instance timer did not send input");
@@ -400,8 +408,11 @@ void test_callback_send_and_imu_modes_are_isolated() {
         stationary.right_stick_x = stationary.right_stick_y = 0;
     stationary.motion_sample_count = 1;
     stationary.motion_samples[0] = {1000, 2000, 3000, 0, 0, 0};
-    switch_pro_set_input(0, moving);
-    switch_pro_set_input(1, stationary);
+    switch_pro_set_input(0, moving, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+    switch_pro_set_input(1, stationary,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     now_ms = 21;
     expect(switch_pro_task(0), "moving quaternion instance did not report");
     expect(switch_pro_task(1), "stationary quaternion timer crossed instances");
@@ -578,7 +589,9 @@ void test_lifecycle_and_invalid_instances() {
     ControllerState ignored{};
     ignored.button_system = true;
     switch_pro_init(kInvalidInstance);
-    switch_pro_set_input(kInvalidInstance, ignored);
+    switch_pro_set_input(kInvalidInstance, ignored,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     switch_pro_set_rumble_callback(kInvalidInstance, rumble_callback);
     expect(!switch_pro_task(kInvalidInstance),
            "invalid instance ran a driver task");
@@ -598,7 +611,8 @@ void test_protocol_neutral_trigger_threshold() {
     state.left_trigger =
         static_cast<uint16_t>(SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD - 1u);
     state.right_trigger = SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
-    switch_pro_set_input(0, state);
+    switch_pro_set_input(0, state, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     now_ms = 15;
     expect(switch_pro_task(0), "trigger threshold report was not sent");
     SwitchProReport report = copy_switch_report(latest_regular_report(0));
@@ -607,12 +621,34 @@ void test_protocol_neutral_trigger_threshold() {
 
     state.left_trigger = SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
     state.right_trigger = CONTROLLER_TRIGGER_MIN;
-    switch_pro_set_input(0, state);
+    switch_pro_set_input(0, state, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     now_ms = 30;
     expect(switch_pro_task(0), "second trigger threshold report was not sent");
     report = copy_switch_report(latest_regular_report(0));
     expect(report.inputs.buttonZL && !report.inputs.buttonZR,
            "Switch trigger threshold changed at the upper boundary");
+}
+
+void test_custom_trigger_thresholds_are_isolated() {
+    initialize_contexts();
+    ControllerState state{};
+    state.left_trigger = 300;
+    state.right_trigger = 300;
+    switch_pro_set_input(0, state, 300, 301);
+    switch_pro_set_input(1, state, 301, 300);
+
+    now_ms = 15;
+    expect(switch_pro_task(0) && switch_pro_task(1),
+           "custom trigger threshold reports were not sent");
+    const SwitchProReport first =
+        copy_switch_report(latest_regular_report(0));
+    const SwitchProReport second =
+        copy_switch_report(latest_regular_report(1));
+    expect(first.inputs.buttonZL && !first.inputs.buttonZR,
+           "instance 0 did not use its exact left/right trigger thresholds");
+    expect(!second.inputs.buttonZL && second.inputs.buttonZR,
+           "instance 1 trigger thresholds crossed HID contexts");
 }
 
 void test_uart_parser_is_pure() {
@@ -621,7 +657,9 @@ void test_uart_parser_is_pure() {
     driver_state.left_stick_x = driver_state.left_stick_y =
         driver_state.right_stick_x = driver_state.right_stick_y = 0;
     driver_state.button_north = true;
-    switch_pro_set_input(0, driver_state);
+    switch_pro_set_input(0, driver_state,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
     now_ms = 15;
     switch_pro_task(0);
 
@@ -724,6 +762,7 @@ int main() {
     test_grip_colors_are_isolated();
     test_lifecycle_and_invalid_instances();
     test_protocol_neutral_trigger_threshold();
+    test_custom_trigger_thresholds_are_isolated();
     test_uart_parser_is_pure();
     if (failures != 0) {
         std::cerr << failures << " driver context test(s) failed\n";

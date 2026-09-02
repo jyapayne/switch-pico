@@ -82,6 +82,13 @@ ProfileServiceTransactionSnapshot transaction_snapshot() {
     return snapshot;
 }
 
+ProfileServiceActiveProfileSnapshot active_profile_snapshot(
+    const ControllerIdentity& identity) {
+    ProfileServiceActiveProfileSnapshot snapshot{};
+    profile_service_active_profile_snapshot(identity, &snapshot);
+    return snapshot;
+}
+
 ControllerProfileDatabase reload_database(
     const ProfileServiceTransactionSnapshot& transaction,
     uint32_t expected_generation) {
@@ -102,6 +109,14 @@ void test_pending_commands_are_not_decoded_as_profile_writes() {
     memset(flash.bytes, 0xff, sizeof(flash.bytes));
     profile_service_prepare();
     profile_service_initialize_on_storage_core();
+    ProfileServiceActiveProfileSnapshot active =
+        active_profile_snapshot(controller_identity_global());
+    require(active.valid &&
+                active.metadata.state == ProfileServiceState::kReady &&
+                active.metadata.generation == 0 &&
+                profile_service_database_generation() == 0 &&
+                active.profile_index == 0,
+            "initial active profile snapshot was not coherent");
 
     const ControllerIdentity identity = controller_identity_global();
     constexpr uint8_t kProfileIndex = 2;
@@ -128,6 +143,11 @@ void test_pending_commands_are_not_decoded_as_profile_writes() {
     require(transaction_snapshot().transaction.status ==
                 ConfigurationTransactionStatus::kCommitted,
             "profile write baseline did not commit");
+    active = active_profile_snapshot(identity);
+    require(active.valid && active.metadata.generation == 1 &&
+                profile_service_database_generation() == 1 &&
+                active.profile_index == 0,
+            "profile write did not publish one coherent generation");
 
     constexpr uint32_t kResetTransactionId = 0xa5a55a5a;
     require(profile_service_reset(kResetTransactionId, identity,
@@ -150,6 +170,11 @@ void test_pending_commands_are_not_decoded_as_profile_writes() {
     require(recovered.fallback_profiles[kProfileIndex].strong_rumble_scale ==
                 UINT8_MAX,
             "terminal reset status was published before reset persisted");
+    active = active_profile_snapshot(identity);
+    require(active.valid && active.metadata.generation == 2 &&
+                profile_service_database_generation() == 2 &&
+                active.profile_index == 0,
+            "profile reset did not refresh the active snapshot generation");
 
     constexpr uint32_t kActivateTransactionId = 0x50607080;
     constexpr uint8_t kActivatedProfile = 3;
@@ -162,6 +187,10 @@ void test_pending_commands_are_not_decoded_as_profile_writes() {
                 activate.transaction.status ==
                     ConfigurationTransactionStatus::kPending,
             "pending activation lost its transaction identity");
+    active = active_profile_snapshot(identity);
+    require(active.valid && active.metadata.generation == 2 &&
+                active.profile_index == 0,
+            "pending activation leaked an uncommitted active profile");
 
     profile_service_task_on_storage_core(2000);
     activate = transaction_snapshot();
@@ -172,6 +201,14 @@ void test_pending_commands_are_not_decoded_as_profile_writes() {
     recovered = reload_database(activate, 3);
     require(recovered.fallback_active_profile == kActivatedProfile,
             "terminal activation status was published before activation persisted");
+    active = active_profile_snapshot(identity);
+    require(active.valid && active.metadata.generation == 3 &&
+                profile_service_database_generation() == 3 &&
+                active.profile_index == kActivatedProfile &&
+                active.profile.strong_rumble_scale ==
+                    recovered.fallback_profiles[kActivatedProfile]
+                        .strong_rumble_scale,
+            "activation did not publish profile, index, and generation together");
 }
 
 }  // namespace

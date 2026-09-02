@@ -279,7 +279,12 @@ void test_profile_vendor_requests() {
                 control_payload.size() ==
                     kResponseHeaderSize +
                         CONTROLLER_PROFILE_ENCODED_SIZE &&
-                control_payload[kResponseHeaderSize] == 1 &&
+                control_payload[10] ==
+                    CONTROLLER_PROFILE_SCHEMA_VERSION &&
+                control_payload[kResponseHeaderSize] ==
+                    static_cast<uint8_t>(
+                        CONTROLLER_PROFILE_SCHEMA_VERSION) &&
+                control_payload[kResponseHeaderSize + 1] == 0 &&
                 control_payload[kResponseHeaderSize + 2] == 0 &&
                 control_payload[kResponseHeaderSize + 3] == 1,
             "selected profile response was not encoded");

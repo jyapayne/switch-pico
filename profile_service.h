@@ -42,6 +42,13 @@ struct ProfileServiceSelectedSnapshot {
     ControllerProfile profile{};
 };
 
+struct ProfileServiceActiveProfileSnapshot {
+    ProfileServiceMetadata metadata{};
+    bool valid = false;
+    uint8_t profile_index = 0;
+    ControllerProfile profile{};
+};
+
 struct ProfileServiceTransactionSnapshot {
     ProfileServiceMetadata metadata{};
     ControllerIdentity identity{};
@@ -78,6 +85,7 @@ void profile_service_selected_snapshot(
     ProfileServiceSelectedSnapshot* output);
 void profile_service_transaction_snapshot(
     ProfileServiceTransactionSnapshot* output);
-bool profile_service_active_profile(const ControllerIdentity& identity,
-                                    ControllerProfile* output,
-                                    uint8_t* profile_index);
+uint32_t profile_service_database_generation();
+void profile_service_active_profile_snapshot(
+    const ControllerIdentity& identity,
+    ProfileServiceActiveProfileSnapshot* output);

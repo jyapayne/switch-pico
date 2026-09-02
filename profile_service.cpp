@@ -29,13 +29,23 @@ struct ProfileTransaction {
     uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
 };
 
+struct PublishedActiveProfile {
+    ControllerIdentity identity{};
+    uint8_t profile_index = 0;
+    ControllerProfile profile{};
+};
+
 critical_section_t g_lock;
 bool g_prepared = false;
 ProfileStorage g_storage;
 ControllerProfileDatabase g_database;
 ProfileServiceMetadata g_metadata;
+uint32_t g_published_generation = 0;
 ProfileServiceListSnapshot g_list;
 ProfileServiceSelectedSnapshot g_selected;
+PublishedActiveProfile
+    g_active_profiles[PROFILE_SERVICE_LIST_CAPACITY]{};
+uint8_t g_active_profile_count = 0;
 ProfileTransaction g_transaction;
 PendingCommand g_command;
 bool g_identity_dirty = false;
@@ -65,6 +75,26 @@ void refresh_list_locked() {
     }
 }
 
+void refresh_active_profiles_locked() {
+    g_active_profile_count = 1;
+    g_active_profiles[0].identity = controller_identity_global();
+    g_active_profiles[0].profile_index =
+        g_database.fallback_active_profile;
+    g_active_profiles[0].profile =
+        g_database.fallback_profiles[g_database.fallback_active_profile];
+    for (const ControllerProfileDatabaseEntry& entry : g_database.entries) {
+        if (!entry.used ||
+            g_active_profile_count >= PROFILE_SERVICE_LIST_CAPACITY) {
+            continue;
+        }
+        PublishedActiveProfile& active =
+            g_active_profiles[g_active_profile_count++];
+        active.identity = entry.identity;
+        active.profile_index = entry.active_profile;
+        active.profile = entry.profiles[entry.active_profile];
+    }
+}
+
 void refresh_selected_locked() {
     g_selected.metadata = g_metadata;
     const ControllerProfile* profile = controller_profile_database_get(
@@ -84,8 +114,11 @@ void refresh_metadata_locked(ProfileServiceState state) {
     g_metadata.state = state;
     g_metadata.generation = stored.valid ? stored.generation : 0;
     g_metadata.payload_crc = stored.valid ? stored.payload_crc : 0;
+    refresh_active_profiles_locked();
     refresh_list_locked();
     refresh_selected_locked();
+    __atomic_store_n(&g_published_generation, g_metadata.generation,
+                     __ATOMIC_RELEASE);
 }
 
 ConfigurationTransactionStatus database_result_status(
@@ -134,8 +167,11 @@ void profile_service_prepare() {
     }
     critical_section_init(&g_lock);
     g_metadata = {};
+    __atomic_store_n(&g_published_generation, 0, __ATOMIC_RELAXED);
     g_list = {};
     g_selected = {};
+    g_active_profiles[0] = {};
+    g_active_profile_count = 0;
     g_selected.identity = controller_identity_global();
     g_selected.profile_index = 0;
     g_transaction = {};
@@ -522,27 +558,36 @@ void profile_service_transaction_snapshot(
     critical_section_exit(&g_lock);
 }
 
-bool profile_service_active_profile(const ControllerIdentity& identity,
-                                    ControllerProfile* output,
-                                    uint8_t* profile_index) {
-    if (output == nullptr || profile_index == nullptr ||
-        !valid_identity(identity)) {
-        return false;
+uint32_t profile_service_database_generation() {
+    return __atomic_load_n(&g_published_generation, __ATOMIC_ACQUIRE);
+}
+
+void profile_service_active_profile_snapshot(
+    const ControllerIdentity& identity,
+    ProfileServiceActiveProfileSnapshot* output) {
+    if (output == nullptr) {
+        return;
     }
+    *output = {};
+    if (!valid_identity(identity)) {
+        return;
+    }
+
     critical_section_enter_blocking(&g_lock);
-    if (g_metadata.state != ProfileServiceState::kReady) {
-        critical_section_exit(&g_lock);
-        return false;
-    }
-    const ControllerProfileDatabaseEntry* entry =
-        controller_profile_database_find(g_database, identity);
-    if (entry != nullptr) {
-        *profile_index = entry->active_profile;
-        *output = entry->profiles[entry->active_profile];
-    } else {
-        *profile_index = g_database.fallback_active_profile;
-        *output = g_database.fallback_profiles[*profile_index];
+    output->metadata = g_metadata;
+    if (g_metadata.state == ProfileServiceState::kReady &&
+        g_active_profile_count != 0) {
+        const PublishedActiveProfile* active = &g_active_profiles[0];
+        for (uint8_t index = 1; index < g_active_profile_count; ++index) {
+            if (controller_identity_equal(
+                    g_active_profiles[index].identity, identity)) {
+                active = &g_active_profiles[index];
+                break;
+            }
+        }
+        output->profile_index = active->profile_index;
+        output->profile = active->profile;
+        output->valid = true;
     }
     critical_section_exit(&g_lock);
-    return true;
 }
