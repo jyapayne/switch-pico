@@ -14,10 +14,10 @@ constexpr uint8_t kRhport = 0;
 constexpr uint8_t kEndpointBufferSize = 32;
 
 struct XInputContext {
-    SwitchInputState input{};
+    ControllerState input{};
     XInputFeasibility::InputReport input_report{};
     uint8_t output_report[kEndpointBufferSize]{};
-    SwitchRumbleCallback rumble_callback = nullptr;
+    ControllerRumbleCallback rumble_callback = nullptr;
     uint8_t endpoint_in = 0;
     uint8_t endpoint_out = 0;
     bool configured = false;
@@ -43,7 +43,7 @@ XInputContext *context_for_endpoint(uint8_t endpoint) {
 }
 
 void reset_context(XInputContext &context) {
-    const SwitchRumbleCallback callback = context.rumble_callback;
+    const ControllerRumbleCallback callback = context.rumble_callback;
     context = {};
     context.rumble_callback = callback;
 }
@@ -138,7 +138,7 @@ bool driver_transfer(uint8_t rhport, uint8_t endpoint, xfer_result_t result,
         return false;
     }
     if (endpoint == context->endpoint_out) {
-        SwitchRumbleOutput rumble{};
+        ControllerRumbleOutput rumble{};
         if (XInputFeasibility::parse_rumble_report(context->output_report,
                                                    transferred, &rumble) &&
             context->rumble_callback != nullptr) {
@@ -168,15 +168,14 @@ void xinput_feasibility_init(uint8_t instance) {
 }
 
 void xinput_feasibility_set_rumble_callback(uint8_t instance,
-                                            SwitchRumbleCallback callback) {
+                                            ControllerRumbleCallback callback) {
     XInputContext *context = context_for(instance);
     if (context != nullptr) {
         context->rumble_callback = callback;
     }
 }
-
 void xinput_feasibility_set_input(uint8_t instance,
-                                  const SwitchInputState &state) {
+                                  const ControllerState& state) {
     XInputContext *context = context_for(instance);
     if (context != nullptr) {
         context->input = state;

@@ -13,11 +13,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "controller_color_config.h"
 BUILD_DIR = SCRIPT_DIR / "build"
 AIO_BUILD_DIR = SCRIPT_DIR / "build-aio"
+FEASIBILITY_BUILD_DIR = SCRIPT_DIR / "build-feasibility"
 FIRMWARE_DIR = SCRIPT_DIR / "firmware"
 FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico.elf"
 FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico.uf2"
 AIO_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-aio.elf"
 AIO_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-aio.uf2"
+FEASIBILITY_FIRMWARE_ELF_PATH = (
+    FIRMWARE_DIR / "switch-pico-adapter-feasibility.elf"
+)
+FEASIBILITY_FIRMWARE_UF2_PATH = (
+    FIRMWARE_DIR / "switch-pico-adapter-feasibility.uf2"
+)
 
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
 UF2_PATH = Path(os.environ.get("UF2_PATH", BUILD_DIR / "switch-pico.uf2")).expanduser()
@@ -34,10 +41,16 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Default behavior leaves controller_color_config.h unchanged.",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--aio",
         action="store_true",
         help="Build and flash the Pico 2 W Bluepad32 all-in-one firmware.",
+    )
+    mode_group.add_argument(
+        "--adapter-feasibility",
+        action="store_true",
+        help="Build and flash the Pico 2 W automatic Switch/XInput prototype.",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -118,19 +131,22 @@ def resolve_picotool():
 
 def build(
     aio,
+    adapter_feasibility,
     build_dir,
     elf_path,
     uf2_path,
     firmware_elf_path,
     firmware_uf2_path,
 ):
-    if aio:
+    if aio or adapter_feasibility:
         run_cmd([sys.executable, str(SCRIPT_DIR / "tools" / "prepare_bluepad32.py")])
         definitions = [
             "-DSWITCH_PICO_LOG=OFF",
             "-DPICO_BOARD=pico2_w",
             "-DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32",
         ]
+        if adapter_feasibility:
+            definitions.append("-DSWITCH_PICO_ADAPTER_FEASIBILITY=ON")
     else:
         definitions = [
             "-DSWITCH_PICO_LOG=OFF",
@@ -196,7 +212,13 @@ def main():
         update_grip_colors(color)
         print(f"Grip color set to #{color} in {CONFIG_FILE.name}")
 
-    if args.aio:
+    if args.adapter_feasibility:
+        build_dir = FEASIBILITY_BUILD_DIR
+        elf_path = FEASIBILITY_BUILD_DIR / "switch-pico.elf"
+        uf2_path = FEASIBILITY_BUILD_DIR / "switch-pico.uf2"
+        firmware_elf_path = FEASIBILITY_FIRMWARE_ELF_PATH
+        firmware_uf2_path = FEASIBILITY_FIRMWARE_UF2_PATH
+    elif args.aio:
         build_dir = AIO_BUILD_DIR
         elf_path = AIO_BUILD_DIR / "switch-pico.elf"
         uf2_path = AIO_BUILD_DIR / "switch-pico.uf2"
@@ -211,13 +233,17 @@ def main():
 
     build(
         args.aio,
+        args.adapter_feasibility,
         build_dir,
         elf_path,
         uf2_path,
         firmware_elf_path,
         firmware_uf2_path,
     )
-    flash(elf_path, allow_elf_override=not args.aio)
+    flash(
+        elf_path,
+        allow_elf_override=not args.aio and not args.adapter_feasibility,
+    )
 
 if __name__ == "__main__":
     main()

@@ -51,12 +51,14 @@ The AIO firmware currently has:
 - Switch Pro input, motion, colors, and rumble per slot
 - per-controller ABXY and motion hotkeys
 
-The current Bluetooth backend converts controller input directly into `SwitchInputState`. This is the principal architectural blocker for other USB modes because it:
+The Bluetooth, UART, Switch, and XInput paths now share `ControllerState`:
 
-- turns analog triggers into digital ZL/ZR early
-- assigns Switch-specific button labels before output selection
-- couples input normalization to Switch report semantics
-- gives mapping, profiles, and macros no protocol-neutral state on which to operate
+- face buttons use positional names instead of protocol labels
+- sticks use signed full-range axes with zero at rest
+- triggers retain their full 16-bit analog values
+- motion samples and generation-based consumption remain per slot
+- normalized conventional rumble uses `ControllerRumbleOutput`
+- Switch and XInput serializers own their protocol-specific mappings
 
 ## Progress and gap matrix
 
@@ -72,6 +74,7 @@ The current Bluetooth backend converts controller input directly into `SwitchInp
 | XInput descriptors and reports | Feasibility complete | Four-interface prototype works on Windows and is covered by native descriptor/report tests. |
 | Automatic Windows/Switch selection | Feasibility complete | Windows enumeration fix is in `db4a860`; real Windows transition and rumble were reported working. |
 | Windows feasibility test | Complete | `tools/Test-AdapterFeasibility.ps1` checks transition, PnP health, four XInput slots, controls, and rumble isolation. |
+| Protocol-neutral controller state | Complete | `ControllerState` is shared by Bluetooth, UART, Switch, and XInput paths; analog trigger precision is retained. |
 | Production USB VID/PID | Missing | Prototype uses `CAFE:4010`; obtain an appropriate project VID/PID and repeat Windows binding tests. |
 | DInput output | Missing | Add generic HID descriptor and report driver. |
 | Mac output mode | Missing | Capture/define compatible descriptor and report semantics. |
@@ -80,7 +83,7 @@ The current Bluetooth backend converts controller input directly into `SwitchInp
 | Manual output-mode selection | Missing | Add persistent PC command and controller chord. |
 | General button remapping | Partial | Only per-controller ABXY swap exists. |
 | Stick sensitivity | Missing in AIO | Add inner deadzone, outer saturation, curve, inversion, and center calibration. |
-| Trigger ranges | Missing | Preserve analog values, then add lower/upper range, curve, and digital threshold. |
+| Trigger ranges | Partial | Full analog values are preserved; profile-configurable lower/upper range, curve, and digital threshold remain. |
 | Vibration intensity | Missing as configuration | Transport works; add per-profile weak/strong scaling. |
 | Macros | Missing | Add a bounded deterministic macro engine. |
 | Turbo and Auto Burst | Missing | Add exact 15 Hz behavior and cancellation rules. |
@@ -126,6 +129,36 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ```
 
 The script should be started with the Pico disconnected. It records the Switch-to-XInput transition, checks all four XInput API slots, requires D-pad/face/shoulder/trigger/stick activity for each requested physical controller, tests per-slot rumble, and writes a JSON report to `%TEMP%`.
+
+### Bluetooth discovery latency regression
+
+Hardware bisect established `edf6eca` (`Add dual-controller AIO USB
+transport`) as the first commit with delayed IMU and rumble. The preceding
+`7941294` build was responsive. The extra USB interface was not the cause.
+`edf6eca` changed the Bluetooth policy so Classic inquiry and BLE scanning
+continued whenever any controller slot was free. With one controller active
+and another slot empty, discovery consumed CYW43439 radio time and delayed HID
+input and output traffic.
+
+Commit `7449d6d` fixes the regression with three connection-policy states:
+
+- **Open:** active discovery and incoming connections; used with zero active
+  controllers or while the explicit BOOTSEL pairing window is open.
+- **Passive:** active discovery stopped, incoming connections allowed; used
+  whenever at least one controller is active and a slot remains free.
+- **Paused:** discovery and incoming connections stopped because all slots are
+  occupied.
+
+The diagnostic proof kept the dual-controller USB build unchanged and only
+stopped discovery after the first controller became ready; IMU responsiveness
+immediately returned. The production policy was then verified on the current
+four-controller master build, with both IMU and rumble reported good.
+
+Important tradeoff: controllers that initiate their own reconnect can join
+while the firmware is passive. Controllers that require host-side discovery,
+including an additional 8BitDo Ultimate, require opening the BOOTSEL pairing
+window while another controller is active. Do not restore continuous inquiry
+as a convenience feature; it causes gameplay latency.
 
 ## Implementation principles
 
@@ -186,7 +219,7 @@ Do not use heap allocation or virtual dispatch. Select one descriptor family bef
 
 ## Delivery phases
 
-### Phase 1 — Protocol-neutral controller state
+### Phase 1 — Protocol-neutral controller state — Complete
 
 Changes:
 
@@ -203,6 +236,15 @@ Acceptance:
 - Four slots remain isolated during connect, disconnect, and replacement.
 - Current pairing, motion, rumble, and descriptor tests pass.
 - UART and AIO firmware both build.
+
+Completion evidence:
+
+- 49 native tests passed, including analog trigger and Switch threshold boundaries
+- UART, AIO, and feasibility firmware built successfully
+- XInput hardware exposed full-range sticks and 8-bit analog triggers
+- XInput rumble passed on the 8BitDo Ultimate
+- Switch buttons, sticks, ZL/ZR, motion, and rumble matched the fixed master baseline
+- the scan-latency regression was bisected, fixed, documented, and retested before acceptance
 
 ### Phase 2 — Persistent configuration protocol
 
@@ -469,14 +511,17 @@ Do not mark a host/controller combination complete from descriptor inspection or
 
 ## Next action
 
-Begin Phase 1: introduce the protocol-neutral controller state while preserving the current Switch and UART behavior.
+Begin Phase 2: generalize endpoint-zero management into a versioned persistent
+configuration protocol while preserving pairing commands and Switch
+enumeration.
 
-The first change should be deliberately narrow:
+The first Phase 2 delivery should remain narrow:
 
-1. define the neutral state and invariants
-2. make Bluepad32 publish it without losing analog triggers
-3. adapt the existing Switch path to consume it
-4. migrate all four slots in one clean cutover
-5. run existing tests and real Switch input/motion/rumble smoke tests
+1. define version, size, CRC, generation, and atomic-commit invariants
+2. reserve storage that cannot overlap Bluepad32 bonds
+3. add read/write/reset operations for one small configuration object
+4. migrate pairing management into the versioned envelope
+5. verify malformed requests, interrupted writes, rollback, and power-cycle persistence
 
-Do not begin profiles, macros, or additional output modes until this boundary is proven. They all depend on it.
+Do not begin profiles, macros, or tuning transforms until the storage and USB
+transaction boundary is proven.

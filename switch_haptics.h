@@ -4,10 +4,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct SwitchRumbleOutput {
+struct ControllerRumbleOutput {
     uint8_t low_frequency_magnitude;
     uint8_t high_frequency_magnitude;
 };
+typedef void (*ControllerRumbleCallback)(
+    uint8_t instance, const ControllerRumbleOutput& rumble);
+
 
 size_t normalize_switch_output_report(uint8_t report_id,
                                       const uint8_t* payload,
@@ -19,7 +22,7 @@ public:
     SwitchHapticsDecoder();
 
     void reset();
-    SwitchRumbleOutput decode(const uint8_t payload[8]);
+    ControllerRumbleOutput decode(const uint8_t payload[8]);
 
 private:
     struct ActuatorState {

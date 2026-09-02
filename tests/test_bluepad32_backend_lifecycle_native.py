@@ -44,6 +44,8 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "slot-lighting",
             "abxy-hotkey",
             "motion-hotkey",
+            "analog-state",
+            "rumble-mode",
             "clear-pairings",
             "flash-core-start",
             "flash-core-failure",

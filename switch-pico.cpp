@@ -34,12 +34,12 @@
 static_assert(SWITCH_PICO_HID_INSTANCE_COUNT ==
               BLUEPAD32_INPUT_BACKEND_SLOT_COUNT);
 static bool g_last_ready[BLUEPAD32_INPUT_BACKEND_SLOT_COUNT]{};
-static SwitchInputState
+static ControllerState
     g_user_states[BLUEPAD32_INPUT_BACKEND_SLOT_COUNT]{};
 #else
 static constexpr uint8_t SWITCH_HID_INSTANCE = 0;
 static bool g_last_ready = false;
-static SwitchInputState g_user_state;
+static ControllerState g_user_state;
 #endif
 
 static bool g_last_mounted = false;
@@ -53,17 +53,12 @@ static void init_uart_input() {
 }
 #endif
 
-static SwitchInputState neutral_input() {
-    SwitchInputState state{};
-    state.lx = SWITCH_PRO_JOYSTICK_MID;
-    state.ly = SWITCH_PRO_JOYSTICK_MID;
-    state.rx = SWITCH_PRO_JOYSTICK_MID;
-    state.ry = SWITCH_PRO_JOYSTICK_MID;
-    return state;
+static ControllerState neutral_input() {
+    return controller_neutral_state();
 }
 
 #ifndef SWITCH_PICO_BLUEPAD32
-static void send_rumble_uart_frame(const SwitchRumbleOutput& rumble) {
+static void send_rumble_uart_frame(const ControllerRumbleOutput& rumble) {
     uint8_t frame[5] = {
         UART_RUMBLE_HEADER,
         UART_RUMBLE_TYPE,
@@ -80,7 +75,7 @@ static void send_rumble_uart_frame(const SwitchRumbleOutput& rumble) {
 #endif
 
 static void on_rumble_from_switch(uint8_t instance,
-                                  const SwitchRumbleOutput& rumble) {
+                                  const ControllerRumbleOutput& rumble) {
 #ifdef SWITCH_PICO_BLUEPAD32
     if (instance >= BLUEPAD32_INPUT_BACKEND_SLOT_COUNT) {
         return;
@@ -137,30 +132,33 @@ static bool poll_uart_frames() {
         }
 
         if (expected_len > 0 && index >= expected_len) {
-            SwitchInputState parsed{};
+            ControllerState parsed{};
             if (switch_pro_apply_uart_packet(buffer, expected_len, parsed)) {
                 g_user_state = parsed;
                 new_data = true;
                 LOG_PRINTF("[UART] packet buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
-                           (parsed.button_a   ? SWITCH_PRO_MASK_A   : 0) |
-                           (parsed.button_b   ? SWITCH_PRO_MASK_B   : 0) |
-                           (parsed.button_x   ? SWITCH_PRO_MASK_X   : 0) |
-                           (parsed.button_y   ? SWITCH_PRO_MASK_Y   : 0) |
-                           (parsed.button_l   ? SWITCH_PRO_MASK_L   : 0) |
-                           (parsed.button_r   ? SWITCH_PRO_MASK_R   : 0) |
-                           (parsed.button_zl  ? SWITCH_PRO_MASK_ZL  : 0) |
-                           (parsed.button_zr  ? SWITCH_PRO_MASK_ZR  : 0) |
-                           (parsed.button_plus? SWITCH_PRO_MASK_PLUS: 0) |
-                           (parsed.button_minus?SWITCH_PRO_MASK_MINUS:0) |
-                           (parsed.button_home?SWITCH_PRO_MASK_HOME:0) |
+                           (parsed.button_east   ? SWITCH_PRO_MASK_A   : 0) |
+                           (parsed.button_south   ? SWITCH_PRO_MASK_B   : 0) |
+                           (parsed.button_north   ? SWITCH_PRO_MASK_X   : 0) |
+                           (parsed.button_west   ? SWITCH_PRO_MASK_Y   : 0) |
+                           (parsed.button_left_shoulder   ? SWITCH_PRO_MASK_L   : 0) |
+                           (parsed.button_right_shoulder   ? SWITCH_PRO_MASK_R   : 0) |
+                           (parsed.left_trigger  ? SWITCH_PRO_MASK_ZL  : 0) |
+                           (parsed.right_trigger  ? SWITCH_PRO_MASK_ZR  : 0) |
+                           (parsed.button_start? SWITCH_PRO_MASK_PLUS: 0) |
+                           (parsed.button_select?SWITCH_PRO_MASK_MINUS:0) |
+                           (parsed.button_system?SWITCH_PRO_MASK_HOME:0) |
                            (parsed.button_capture?SWITCH_PRO_MASK_CAPTURE:0) |
-                           (parsed.button_l3  ? SWITCH_PRO_MASK_L3  : 0) |
-                           (parsed.button_r3  ? SWITCH_PRO_MASK_R3  : 0),
+                           (parsed.button_left_stick  ? SWITCH_PRO_MASK_L3  : 0) |
+                           (parsed.button_right_stick  ? SWITCH_PRO_MASK_R3  : 0),
                            parsed.dpad_up ? SWITCH_PRO_HAT_UP :
                             parsed.dpad_down ? SWITCH_PRO_HAT_DOWN :
                             parsed.dpad_left ? SWITCH_PRO_HAT_LEFT :
                             parsed.dpad_right ? SWITCH_PRO_HAT_RIGHT : SWITCH_PRO_HAT_NOTHING,
-                            parsed.lx >> 8, parsed.ly >> 8, parsed.rx >> 8, parsed.ry >> 8);
+                            controller_axis_to_unsigned(parsed.left_stick_x) >> 8,
+                            controller_axis_to_unsigned(parsed.left_stick_y) >> 8,
+                            controller_axis_to_unsigned(parsed.right_stick_x) >> 8,
+                            controller_axis_to_unsigned(parsed.right_stick_y) >> 8);
             }
             index = 0;
             expected_len = 0;
@@ -317,7 +315,7 @@ int main() {
 #else
         bool new_data = poll_uart_frames();  // Pull controller state from UART1
         (void)new_data;
-        SwitchInputState state = g_user_state;
+        ControllerState state = g_user_state;
         switch_pro_set_input(SWITCH_HID_INSTANCE, state);
         (void)switch_pro_task(SWITCH_HID_INSTANCE);
 #endif

@@ -259,10 +259,10 @@ index 0265f93..5c0f2bb 100644
      return (psmove_instance_t*)&d->parser_data[0];
  }
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_switch.c b/src/components/bluepad32/parser/uni_hid_parser_switch.c
-index 599fc35..9f073b4 100644
+index 599fc35..0105c53 100644
 --- a/src/components/bluepad32/parser/uni_hid_parser_switch.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_switch.c
-@@ -51,13 +51,15 @@ static const int16_t DEFAULT_ACCEL_OFFSET = 0;
+@@ -51,13 +51,22 @@ static const int16_t DEFAULT_ACCEL_OFFSET = 0;
  static const int16_t DEFAULT_ACCEL_SCALE = 16384;
  static const int16_t DEFAULT_GYRO_OFFSET = 0;
  static const int16_t DEFAULT_GYRO_SCALE = 13371;
@@ -276,10 +276,17 @@ index 599fc35..9f073b4 100644
  #define SWITCH_DUMP_ROM_DATA_SIZE 24  // Max size is 24
  #define SWITCH_SETUP_TIMEOUT_MS 800
 +#define SWITCH_RUMBLE_REFRESH_MS 40
++#define SWITCH_RUMBLE_LOW_FREQUENCY_HZ 453
++#define SWITCH_RUMBLE_LEFT_HIGH_FREQUENCY_HZ 135
++#define SWITCH_RUMBLE_RIGHT_HIGH_FREQUENCY_HZ 99
++#define SWITCH_RUMBLE_AMPLITUDE_MAX 1003
++#define SWITCH_RUMBLE_MAGNITUDE_MAX UINT8_MAX
++#define SWITCH_RUMBLE_AMPLITUDE_ROUNDING_BIAS \
++    (SWITCH_RUMBLE_MAGNITUDE_MAX / 2)
  #if ENABLE_SPI_FLASH_DUMP
  static const uint32_t SWITCH_DUMP_ROM_DATA_ADDR_START = 0x20000;
  static const uint32_t SWITCH_DUMP_ROM_DATA_ADDR_END = 0x30000;
-@@ -72,6 +74,7 @@ enum switch_state {
+@@ -72,6 +81,7 @@ enum switch_state {
      STATE_READ_FACTORY_IMU_CALIBRATION,    // Factory IMU calibration info
      STATE_SET_FULL_REPORT,                 // Request report 0x30
      STATE_ENABLE_IMU,                      // Enable/Disable gyro/accel
@@ -287,7 +294,7 @@ index 599fc35..9f073b4 100644
      STATE_DUMP_FLASH,                      // Dump SPI Flash memory
      STATE_UPDATE_LED,                      // Update LEDs
      STATE_READY,                           // Gamepad setup ready!
-@@ -111,6 +114,7 @@ enum switch_subcmd {
+@@ -111,6 +121,7 @@ enum switch_subcmd {
      SUBCMD_SPI_FLASH_READ = 0x10,
      SUBCMD_SET_PLAYER_LEDS = 0x30,
      SUBCMD_ENABLE_IMU = 0x40,
@@ -295,7 +302,7 @@ index 599fc35..9f073b4 100644
  };
  
  typedef enum {
-@@ -137,6 +141,7 @@ typedef struct switch_instance_s {
+@@ -137,6 +148,7 @@ typedef struct switch_instance_s {
      // Although technically, we can use one timer for delay and duration, easier to debug/maintain if we have two.
      btstack_timer_source_t rumble_timer_duration;
      btstack_timer_source_t rumble_timer_delayed_start;
@@ -303,7 +310,7 @@ index 599fc35..9f073b4 100644
      switch_state_rumble_t rumble_state;
  
      btstack_timer_source_t setup_timer;
-@@ -322,6 +327,7 @@ static void fsm_read_user_stick_calibration(struct uni_hid_device_s* d);
+@@ -322,6 +334,7 @@ static void fsm_read_user_stick_calibration(struct uni_hid_device_s* d);
  static void fsm_read_factory_imu_calibration(struct uni_hid_device_s* d);
  static void fsm_set_full_report(struct uni_hid_device_s* d);
  static void fsm_enable_imu(struct uni_hid_device_s* d);
@@ -311,7 +318,7 @@ index 599fc35..9f073b4 100644
  static void fsm_update_led(struct uni_hid_device_s* d);
  static void fsm_ready(struct uni_hid_device_s* d);
  static void process_reply_read_spi_dump(struct uni_hid_device_s* d, const uint8_t* data, int len);
-@@ -333,11 +339,16 @@ static void process_reply_set_report_mode(struct uni_hid_device_s* d, const stru
+@@ -333,11 +346,16 @@ static void process_reply_set_report_mode(struct uni_hid_device_s* d, const stru
  static void process_reply_spi_flash_read(struct uni_hid_device_s* d, const struct switch_report_21_s* r, int len);
  static void process_reply_set_player_leds(struct uni_hid_device_s* d, const struct switch_report_21_s* r, int len);
  static void process_reply_enable_imu(struct uni_hid_device_s* d, const struct switch_report_21_s* r, int len);
@@ -328,7 +335,7 @@ index 599fc35..9f073b4 100644
  static void switch_play_dual_rumble_now(uni_hid_device_t* d,
                                          uint16_t duration_ms,
                                          uint8_t weak_magnitude,
-@@ -451,6 +462,10 @@ static void process_fsm(struct uni_hid_device_s* d) {
+@@ -451,6 +469,10 @@ static void process_fsm(struct uni_hid_device_s* d) {
              break;
          case STATE_ENABLE_IMU:
              logd("STATE_ENABLE_IMU\n");
@@ -339,7 +346,7 @@ index 599fc35..9f073b4 100644
              fsm_dump_rom(d);
              break;
          case STATE_DUMP_FLASH:
-@@ -725,6 +740,12 @@ static void process_reply_enable_imu(struct uni_hid_device_s* d, const struct sw
+@@ -725,6 +747,12 @@ static void process_reply_enable_imu(struct uni_hid_device_s* d, const struct sw
      ARG_UNUSED(r);
      ARG_UNUSED(len);
  }
@@ -352,7 +359,7 @@ index 599fc35..9f073b4 100644
  
  // Process 0x21 input report: SWITCH_INPUT_SUBCMD_REPLY
  static void process_input_subcmd_reply(struct uni_hid_device_s* d, const uint8_t* report, int len) {
-@@ -752,6 +773,9 @@ static void process_input_subcmd_reply(struct uni_hid_device_s* d, const uint8_t
+@@ -752,6 +780,9 @@ static void process_input_subcmd_reply(struct uni_hid_device_s* d, const uint8_t
          case SUBCMD_ENABLE_IMU:
              process_reply_enable_imu(d, r, len);
              break;
@@ -362,7 +369,7 @@ index 599fc35..9f073b4 100644
          default:
              loge("Switch: Error, unexpected subcmd_id=0x%02x in report 0x21\n", r->subcmd_id);
              break;
-@@ -823,19 +847,26 @@ static void parse_imu(uni_hid_device_t* d, const struct switch_imu_data_s* r) {
+@@ -823,19 +854,26 @@ static void parse_imu(uni_hid_device_t* d, const struct switch_imu_data_s* r) {
      switch_instance_t* ins = get_switch_instance(d);
      uni_controller_t* ctl = &d->controller;
  
@@ -398,7 +405,7 @@ index 599fc35..9f073b4 100644
      if (ins->controller_type == SWITCH_CONTROLLER_TYPE_JCR) {
          accel[1] = -accel[1];
          accel[2] = -accel[2];
-@@ -843,10 +874,13 @@ static void parse_imu(uni_hid_device_t* d, const struct switch_imu_data_s* r) {
+@@ -843,10 +881,13 @@ static void parse_imu(uni_hid_device_t* d, const struct switch_imu_data_s* r) {
          gyro[2] = -gyro[2];
      }
  
@@ -416,7 +423,7 @@ index 599fc35..9f073b4 100644
  }
  
  // Process 0x30 input report: SWITCH_INPUT_IMU_DATA
-@@ -1172,6 +1206,18 @@ static void fsm_enable_imu(struct uni_hid_device_s* d) {
+@@ -1172,6 +1213,18 @@ static void fsm_enable_imu(struct uni_hid_device_s* d) {
      req->data[0] = (ins->mode == SWITCH_MODE_IMU);
      send_subcmd(d, req, sizeof(out));
  }
@@ -435,18 +442,21 @@ index 599fc35..9f073b4 100644
  
  static void fsm_update_led(struct uni_hid_device_s* d) {
      switch_instance_t* ins = get_switch_instance(d);
-@@ -1203,6 +1249,10 @@ static struct switch_rumble_freq_data find_rumble_freq(uint16_t freq) {
+@@ -1203,6 +1256,13 @@ static struct switch_rumble_freq_data find_rumble_freq(uint16_t freq) {
      return rumble_freqs[i];
  }
  
 +static uint16_t switch_magnitude_to_amp(uint8_t magnitude) {
-+    return (uint16_t)(((uint32_t)magnitude * 1003 + 127) / 255);
++    return (uint16_t)(
++        ((uint32_t)magnitude * SWITCH_RUMBLE_AMPLITUDE_MAX +
++         SWITCH_RUMBLE_AMPLITUDE_ROUNDING_BIAS) /
++        SWITCH_RUMBLE_MAGNITUDE_MAX);
 +}
 +
  static struct switch_rumble_amp_data find_rumble_amp(uint16_t amp) {
      unsigned int i = 0;
      if (amp > rumble_amps[0].amp) {
-@@ -1259,6 +1309,7 @@ void uni_hid_parser_switch_play_dual_rumble(struct uni_hid_device_s* d,
+@@ -1259,6 +1319,7 @@ void uni_hid_parser_switch_play_dual_rumble(struct uni_hid_device_s* d,
              break;
          case SWITCH_STATE_RUMBLE_IN_PROGRESS:
              btstack_run_loop_remove_timer(&ins->rumble_timer_duration);
@@ -454,7 +464,7 @@ index 599fc35..9f073b4 100644
              break;
          default:
              // Do nothing
-@@ -1366,6 +1417,7 @@ static void switch_stop_rumble_now(uni_hid_device_t* d) {
+@@ -1366,6 +1427,7 @@ static void switch_stop_rumble_now(uni_hid_device_t* d) {
  
      // No need to protect it with a mutex since it runs in the same main thread
      assert(ins->rumble_state == SWITCH_STATE_RUMBLE_IN_PROGRESS);
@@ -462,7 +472,7 @@ index 599fc35..9f073b4 100644
      ins->rumble_state = SWITCH_STATE_RUMBLE_DISABLED;
  
      struct switch_subcmd_request req = {0};
-@@ -1379,6 +1431,22 @@ static void switch_stop_rumble_now(uni_hid_device_t* d) {
+@@ -1379,6 +1441,24 @@ static void switch_stop_rumble_now(uni_hid_device_t* d) {
      send_subcmd(d, (struct switch_subcmd_request*)&req, sizeof(req) - 1);
  }
  
@@ -474,9 +484,11 @@ index 599fc35..9f073b4 100644
 +    };
 +    // Fixed frequencies match the standard Switch LRA envelope and the
 +    // 8BitDo Switch-mode implementation. Magnitudes control amplitude only.
-+    switch_encode_rumble(req.rumble_left, 453, 135,
++    switch_encode_rumble(req.rumble_left, SWITCH_RUMBLE_LOW_FREQUENCY_HZ,
++                         SWITCH_RUMBLE_LEFT_HIGH_FREQUENCY_HZ,
 +                         switch_magnitude_to_amp(weak_magnitude));
-+    switch_encode_rumble(req.rumble_right, 453, 99,
++    switch_encode_rumble(req.rumble_right, SWITCH_RUMBLE_LOW_FREQUENCY_HZ,
++                         SWITCH_RUMBLE_RIGHT_HIGH_FREQUENCY_HZ,
 +                         switch_magnitude_to_amp(strong_magnitude));
 +    // Rumble request don't include the last byte of "switch_subcmd_request": subcmd_id
 +    send_subcmd(d, &req, sizeof(req) - 1);
@@ -485,7 +497,7 @@ index 599fc35..9f073b4 100644
  static void switch_play_dual_rumble_now(uni_hid_device_t* d,
                                          uint16_t duration_ms,
                                          uint8_t weak_magnitude,
-@@ -1391,14 +1459,17 @@ static void switch_play_dual_rumble_now(uni_hid_device_t* d,
+@@ -1391,14 +1471,17 @@ static void switch_play_dual_rumble_now(uni_hid_device_t* d,
          return;
      }
  
@@ -510,7 +522,7 @@ index 599fc35..9f073b4 100644
  
      // Set timer to turn off rumble
      ins->rumble_timer_duration.process = &on_switch_set_rumble_off;
-@@ -1414,6 +1485,20 @@ static void on_switch_set_rumble_on(btstack_timer_source_t* ts) {
+@@ -1414,6 +1497,20 @@ static void on_switch_set_rumble_on(btstack_timer_source_t* ts) {
  
      switch_play_dual_rumble_now(d, ins->rumble_duration_ms, ins->rumble_weak_magnitude, ins->rumble_strong_magnitude);
  }

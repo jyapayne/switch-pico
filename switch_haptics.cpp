@@ -289,7 +289,7 @@ uint8_t SwitchHapticsDecoder::amplitude_to_magnitude(uint8_t amplitude_index) {
     return static_cast<uint8_t>(magnitude);
 }
 
-SwitchRumbleOutput SwitchHapticsDecoder::decode(const uint8_t payload[8]) {
+ControllerRumbleOutput SwitchHapticsDecoder::decode(const uint8_t payload[8]) {
     AmplitudePeak peaks[2] = {
         {actuators_[0].low_amplitude, actuators_[0].high_amplitude},
         {actuators_[1].low_amplitude, actuators_[1].high_amplitude},

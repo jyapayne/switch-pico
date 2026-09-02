@@ -26,7 +26,7 @@ struct SentReport {
 struct RumbleEvent {
     unsigned count = 0;
     uint8_t instance = 0xff;
-    SwitchRumbleOutput output{};
+    ControllerRumbleOutput output{};
 };
 
 uint64_t now_ms = 0;
@@ -95,7 +95,8 @@ SwitchProReport get_current_report(uint8_t instance,
 
 void expect_neutral_sticks(SwitchProReport& report,
                            const char* state_failure) {
-    constexpr uint16_t packed_mid = SWITCH_PRO_JOYSTICK_MID >> 4u;
+    constexpr uint16_t packed_mid =
+        CONTROLLER_AXIS_UNSIGNED_CENTER >> 4u;
     constexpr uint16_t packed_inverted_mid =
         static_cast<uint16_t>(-static_cast<int32_t>(packed_mid)) & 0x0fffu;
     expect(report.inputs.leftStick.getX() == packed_mid &&
@@ -195,7 +196,7 @@ std::array<uint8_t, 10> complete_rumble_report(
     return report;
 }
 
-void rumble_callback(uint8_t instance, const SwitchRumbleOutput& output) {
+void rumble_callback(uint8_t instance, const ControllerRumbleOutput& output) {
     expect(instance < rumble_events.size(),
            "rumble callback received an invalid instance");
     if (instance >= rumble_events.size()) {
@@ -270,18 +271,22 @@ void test_failed_startup_identify_retries_preserve_counter() {
 
 void test_input_reports_and_timers_are_isolated() {
     initialize_contexts();
-    std::array<SwitchInputState, kInstanceCount> states{};
+    std::array<ControllerState, kInstanceCount> states{};
     for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
-        SwitchInputState& state = states[instance];
-        state.lx = static_cast<uint16_t>(0x1111u * (instance + 1u));
-        state.ly = static_cast<uint16_t>(0x2222u + 0x1111u * instance);
-        state.rx = static_cast<uint16_t>(0x5555u + 0x1111u * instance);
-        state.ry = static_cast<uint16_t>(0x8888u + 0x1111u * instance);
+        ControllerState& state = states[instance];
+        state.left_stick_x = controller_axis_from_unsigned(
+            static_cast<uint16_t>(0x1111u * (instance + 1u)));
+        state.left_stick_y = controller_axis_from_unsigned(
+            static_cast<uint16_t>(0x2222u + 0x1111u * instance));
+        state.right_stick_x = controller_axis_from_unsigned(
+            static_cast<uint16_t>(0x5555u + 0x1111u * instance));
+        state.right_stick_y = controller_axis_from_unsigned(
+            static_cast<uint16_t>(0x8888u + 0x1111u * instance));
     }
-    states[0].button_a = true;
-    states[1].button_b = true;
-    states[2].button_x = true;
-    states[3].button_y = true;
+    states[0].button_east = true;
+    states[1].button_south = true;
+    states[2].button_north = true;
+    states[3].button_west = true;
 
     for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
         switch_pro_set_input(instance, states[instance]);
@@ -320,9 +325,9 @@ void test_input_reports_and_timers_are_isolated() {
         }
     }
 
-    SwitchInputState changed_zero = states[0];
-    changed_zero.button_a = false;
-    changed_zero.button_home = true;
+    ControllerState changed_zero = states[0];
+    changed_zero.button_east = false;
+    changed_zero.button_system = true;
     switch_pro_set_input(0, changed_zero);
     now_ms = 30;
     expect(switch_pro_task(0),
@@ -333,8 +338,8 @@ void test_input_reports_and_timers_are_isolated() {
                !unchanged_three.inputs.buttonHome,
            "instance 0 input change leaked into instance 3");
 
-    SwitchInputState changed_three = states[3];
-    changed_three.button_y = false;
+    ControllerState changed_three = states[3];
+    changed_three.button_west = false;
     changed_three.button_capture = true;
     switch_pro_set_input(3, changed_three);
     now_ms = 45;
@@ -357,13 +362,14 @@ void test_callback_send_and_imu_modes_are_isolated() {
     expect(reports_for_instance(1) == 0,
            "feature callback queued a reply on instance 1");
 
-    SwitchInputState zero{};
-    zero.lx = zero.ly = zero.rx = zero.ry = SWITCH_PRO_JOYSTICK_MID;
-    zero.imu_sample_count = 1;
-    zero.imu_samples[0] = {101, 202, 303, 404, 505, 606};
-    SwitchInputState one = zero;
-    one.button_x = true;
-    one.imu_samples[0] = {1001, 2002, 3003, 4004, 5005, 6006};
+    ControllerState zero{};
+    zero.left_stick_x = zero.left_stick_y =
+        zero.right_stick_x = zero.right_stick_y = 0;
+    zero.motion_sample_count = 1;
+    zero.motion_samples[0] = {101, 202, 303, 404, 505, 606};
+    ControllerState one = zero;
+    one.button_north = true;
+    one.motion_samples[0] = {1001, 2002, 3003, 4004, 5005, 6006};
     switch_pro_set_input(0, zero);
     switch_pro_set_input(1, one);
     now_ms = 21;
@@ -384,15 +390,16 @@ void test_callback_send_and_imu_modes_are_isolated() {
     now_ms = 6;
     switch_pro_task(0);
     switch_pro_task(1);
-    SwitchInputState moving{};
-    moving.lx = moving.ly = moving.rx = moving.ry = SWITCH_PRO_JOYSTICK_MID;
-    moving.imu_sample_count = 1;
-    moving.imu_samples[0] = {100, 200, 300, 20000, 0, 0};
-    SwitchInputState stationary{};
-    stationary.lx = stationary.ly = stationary.rx = stationary.ry =
-        SWITCH_PRO_JOYSTICK_MID;
-    stationary.imu_sample_count = 1;
-    stationary.imu_samples[0] = {1000, 2000, 3000, 0, 0, 0};
+    ControllerState moving{};
+    moving.left_stick_x = moving.left_stick_y =
+        moving.right_stick_x = moving.right_stick_y = 0;
+    moving.motion_sample_count = 1;
+    moving.motion_samples[0] = {100, 200, 300, 20000, 0, 0};
+    ControllerState stationary{};
+    stationary.left_stick_x = stationary.left_stick_y =
+        stationary.right_stick_x = stationary.right_stick_y = 0;
+    stationary.motion_sample_count = 1;
+    stationary.motion_samples[0] = {1000, 2000, 3000, 0, 0, 0};
     switch_pro_set_input(0, moving);
     switch_pro_set_input(1, stationary);
     now_ms = 21;
@@ -568,8 +575,8 @@ void test_lifecycle_and_invalid_instances() {
                "unmount did not reset every configured context");
     }
 
-    SwitchInputState ignored{};
-    ignored.button_home = true;
+    ControllerState ignored{};
+    ignored.button_system = true;
     switch_pro_init(kInvalidInstance);
     switch_pro_set_input(kInvalidInstance, ignored);
     switch_pro_set_rumble_callback(kInvalidInstance, rumble_callback);
@@ -579,18 +586,41 @@ void test_lifecycle_and_invalid_instances() {
            "invalid instance reported ready");
     std::array<uint8_t, SWITCH_PRO_ENDPOINT_SIZE> buffer{};
     expect(tud_hid_get_report_cb(kInvalidInstance, 0, HID_REPORT_TYPE_INPUT,
+
                                  buffer.data(), buffer.size()) == 0,
            "invalid instance served GET_REPORT data");
     expect(tud_hid_descriptor_report_cb(kInvalidInstance) == nullptr,
            "invalid instance served a report descriptor");
 }
+void test_protocol_neutral_trigger_threshold() {
+    initialize_contexts();
+    ControllerState state{};
+    state.left_trigger =
+        static_cast<uint16_t>(SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD - 1u);
+    state.right_trigger = SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
+    switch_pro_set_input(0, state);
+    now_ms = 15;
+    expect(switch_pro_task(0), "trigger threshold report was not sent");
+    SwitchProReport report = copy_switch_report(latest_regular_report(0));
+    expect(!report.inputs.buttonZL && report.inputs.buttonZR,
+           "Switch trigger threshold changed at the lower boundary");
+
+    state.left_trigger = SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
+    state.right_trigger = CONTROLLER_TRIGGER_MIN;
+    switch_pro_set_input(0, state);
+    now_ms = 30;
+    expect(switch_pro_task(0), "second trigger threshold report was not sent");
+    report = copy_switch_report(latest_regular_report(0));
+    expect(report.inputs.buttonZL && !report.inputs.buttonZR,
+           "Switch trigger threshold changed at the upper boundary");
+}
 
 void test_uart_parser_is_pure() {
     initialize_contexts();
-    SwitchInputState driver_state{};
-    driver_state.lx = driver_state.ly = driver_state.rx = driver_state.ry =
-        SWITCH_PRO_JOYSTICK_MID;
-    driver_state.button_x = true;
+    ControllerState driver_state{};
+    driver_state.left_stick_x = driver_state.left_stick_y =
+        driver_state.right_stick_x = driver_state.right_stick_y = 0;
+    driver_state.button_north = true;
     switch_pro_set_input(0, driver_state);
     now_ms = 15;
     switch_pro_task(0);
@@ -610,14 +640,20 @@ void test_uart_parser_is_pure() {
     for (unsigned i = 0; i < packet.size() - 1; ++i) {
         packet.back() = static_cast<uint8_t>(packet.back() + packet[i]);
     }
-    SwitchInputState parsed{};
+    ControllerState parsed{};
     expect(switch_pro_apply_uart_packet(packet.data(), packet.size(), parsed),
            "valid UART packet was rejected");
-    expect(parsed.button_a && parsed.button_l && parsed.dpad_down &&
+    expect(parsed.button_east && parsed.button_left_shoulder && parsed.dpad_down &&
                parsed.dpad_left,
            "UART buttons or hat were parsed incorrectly");
-    expect(parsed.lx == 0x1212 && parsed.ly == 0x3434 &&
-               parsed.rx == 0x5656 && parsed.ry == 0x7878,
+    expect(parsed.left_stick_x ==
+               controller_axis_from_unsigned(0x1212) &&
+               parsed.left_stick_y ==
+               controller_axis_from_unsigned(0x3434) &&
+               parsed.right_stick_x ==
+               controller_axis_from_unsigned(0x5656) &&
+               parsed.right_stick_y ==
+               controller_axis_from_unsigned(0x7878),
            "UART axes were parsed incorrectly");
 
     std::array<uint8_t, SWITCH_PRO_ENDPOINT_SIZE> current{};
@@ -628,14 +664,14 @@ void test_uart_parser_is_pure() {
     expect(current_report.inputs.buttonX && !current_report.inputs.buttonA,
            "UART parsing mutated driver context state");
 
-    SwitchInputState unchanged{};
-    unchanged.button_home = true;
-    unchanged.lx = 123;
+    ControllerState unchanged{};
+    unchanged.button_system = true;
+    unchanged.left_stick_x = 123;
     packet.back() ^= 0xffu;
     expect(!switch_pro_apply_uart_packet(packet.data(), packet.size(),
                                          unchanged),
            "invalid UART checksum was accepted");
-    expect(unchanged.button_home && unchanged.lx == 123,
+    expect(unchanged.button_system && unchanged.left_stick_x == 123,
            "failed UART parse modified its output reference");
 }
 
@@ -687,6 +723,7 @@ int main() {
     test_rumble_callbacks_and_decoders_are_isolated();
     test_grip_colors_are_isolated();
     test_lifecycle_and_invalid_instances();
+    test_protocol_neutral_trigger_threshold();
     test_uart_parser_is_pure();
     if (failures != 0) {
         std::cerr << failures << " driver context test(s) failed\n";

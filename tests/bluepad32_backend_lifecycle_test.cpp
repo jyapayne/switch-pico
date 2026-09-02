@@ -285,6 +285,13 @@ uint32_t btstack_run_loop_get_time_ms() {
 
 
 #include "../bluepad32_input_backend.cpp"
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+AdapterUsbMode test_adapter_mode = AdapterUsbMode::kXInput;
+AdapterUsbMode adapter_host_probe_mode() {
+    return test_adapter_mode;
+}
+#endif
+
 SwitchRgbColor switch_pro_get_slot_light_color(uint8_t instance) {
     static constexpr SwitchRgbColor grips[] = {
         {SWITCH_COLOR_SLOT_1_R, SWITCH_COLOR_SLOT_1_G,
@@ -355,7 +362,7 @@ void test_ready_order(bool reverse) {
                 "ready device must bind to its Bluepad index");
 
         for (int candidate = 0; candidate < kSlotCount; ++candidate) {
-            SwitchInputState snapshot{};
+            ControllerState snapshot{};
             bool expected_active = false;
             for (int ready = 0; ready <= position; ++ready) {
                 expected_active = expected_active || order[ready] == candidate;
@@ -386,7 +393,7 @@ void test_ready_order(bool reverse) {
                 "disconnecting any slot must resume connection policy");
 
         for (int candidate = 0; candidate < kSlotCount; ++candidate) {
-            SwitchInputState snapshot{};
+            ControllerState snapshot{};
             require(bluepad32_input_backend_snapshot(candidate, &snapshot) ==
                         (candidate != slot),
                     "disconnect must preserve every surviving slot");
@@ -427,10 +434,10 @@ void test_rejections() {
     collision_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
     collision_data.gamepad.buttons = BUTTON_B;
     platform_on_controller_data(&collision, &collision_data);
-    SwitchInputState snapshot{};
+    ControllerState snapshot{};
     require(bluepad32_input_backend_snapshot(0, &snapshot),
             "occupied slot must stay active");
-    require(!snapshot.button_a,
+    require(!snapshot.button_east,
             "mismatched device input must not enter the occupied slot");
 
     uni_controller_t slot_zero_data{};
@@ -438,15 +445,15 @@ void test_rejections() {
     slot_zero_data.gamepad.accel[0] = 8192;
     platform_on_controller_data(&slot_zero, &slot_zero_data);
     require(bluepad32_input_backend_snapshot(0, &snapshot) &&
-                snapshot.imu_sample_count == 3,
+                snapshot.motion_sample_count == 3,
             "valid slot input must remain observable");
     require(!bluepad32_input_backend_snapshot(4, &snapshot),
             "public snapshot must reject slot 4");
     bluepad32_input_backend_report_sent(4);
     require(bluepad32_input_backend_snapshot(0, &snapshot) &&
-                snapshot.imu_sample_count == 3,
+                snapshot.motion_sample_count == 3,
             "slot 4 acknowledgement must not consume slot 0 IMU");
-    bluepad32_input_backend_queue_rumble(4, SwitchRumbleOutput{1, 2});
+    bluepad32_input_backend_queue_rumble(4, ControllerRumbleOutput{1, 2});
     process_rumble_timer(&g_rumble_timer);
     require(slot_zero.rumble_calls == 0,
             "slot 4 rumble must not reach a valid controller");
@@ -534,39 +541,39 @@ void test_independent_lifecycle() {
         platform_on_controller_data(&devices[slot], &data[slot]);
     }
 
-    SwitchInputState states[kSlotCount]{};
+    ControllerState states[kSlotCount]{};
     for (int slot = 0; slot < kSlotCount; ++slot) {
         require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
-                    states[slot].imu_sample_count == 3,
+                    states[slot].motion_sample_count == 3,
                 "every slot must expose independent input and IMU");
     }
-    require(states[0].button_a && !states[0].button_b &&
-                !states[0].button_y && !states[0].button_x,
+    require(states[0].button_east && !states[0].button_south &&
+                !states[0].button_west && !states[0].button_north,
             "slot 0 must contain only slot 0 input");
-    require(states[1].button_b && !states[1].button_a &&
-                !states[1].button_y && !states[1].button_x,
+    require(states[1].button_south && !states[1].button_east &&
+                !states[1].button_west && !states[1].button_north,
             "slot 1 must contain only slot 1 input");
-    require(states[2].button_y && !states[2].button_a &&
-                !states[2].button_b && !states[2].button_x,
+    require(states[2].button_west && !states[2].button_east &&
+                !states[2].button_south && !states[2].button_north,
             "slot 2 must contain only slot 2 input");
-    require(states[3].button_x && !states[3].button_a &&
-                !states[3].button_b && !states[3].button_y,
+    require(states[3].button_north && !states[3].button_east &&
+                !states[3].button_south && !states[3].button_west,
             "slot 3 must contain only slot 3 input");
 
     bluepad32_input_backend_report_sent(3);
     for (int slot = 0; slot < kSlotCount; ++slot) {
         require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
-                    states[slot].imu_sample_count == (slot == 3 ? 0 : 3),
+                    states[slot].motion_sample_count == (slot == 3 ? 0 : 3),
                 "slot 3 acknowledgement must not consume slots 0-2 IMU");
     }
     for (int slot = 0; slot < 3; ++slot) {
         bluepad32_input_backend_report_sent(slot);
         require(bluepad32_input_backend_snapshot(slot, &states[slot]) &&
-                    states[slot].imu_sample_count == 0,
+                    states[slot].motion_sample_count == 0,
                 "each slot acknowledgement must consume only its own IMU");
     }
 
-    const SwitchRumbleOutput initial_rumble[kSlotCount] = {
+    const ControllerRumbleOutput initial_rumble[kSlotCount] = {
         {11, 21}, {12, 22}, {13, 23}, {14, 24}};
     for (int slot = 0; slot < kSlotCount; ++slot) {
         bluepad32_input_backend_queue_rumble(slot, initial_rumble[slot]);
@@ -577,17 +584,17 @@ void test_independent_lifecycle() {
                     devices[slot].last_low == 11 + slot &&
                     devices[slot].last_high == 21 + slot &&
                     devices[slot].last_rumble_duration_ms ==
-                        kRumbleDurationMs,
+                        host_rumble_duration_ms(),
                 "each slot rumble must reach only its indexed controller");
     }
 
-    bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{0, 0});
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{0, 0});
     process_rumble_timer(&g_rumble_timer);
     require(devices[0].rumble_calls == 2 &&
                 devices[0].last_rumble_duration_ms == 0,
             "zero XInput magnitude must stop rumble immediately");
 
-    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{55, 66});
+    bluepad32_input_backend_queue_rumble(3, ControllerRumbleOutput{55, 66});
     const uint32_t disconnected_generation =
         g_slots[3].connection_generation;
     const int starts_before_slot_three_disconnect = scan_starts;
@@ -596,21 +603,21 @@ void test_independent_lifecycle() {
                 scanning_enabled && incoming_connections,
             "slot 3 disconnect must resume scanning and incoming connections");
     require(!bluepad32_input_backend_snapshot(3, &states[3]) &&
-                !states[3].button_x && states[3].lx == 32768,
-            "slot 3 disconnect must neutralize only slot 3");
+                !states[3].button_north && states[3].left_stick_x == 0,
+            "slot 3 disconnect must publish protocol-neutral state");
     require(bluepad32_input_backend_snapshot(0, &states[0]) &&
-                states[0].button_a &&
+                states[0].button_east &&
                 bluepad32_input_backend_snapshot(1, &states[1]) &&
-                states[1].button_b &&
+                states[1].button_south &&
                 bluepad32_input_backend_snapshot(2, &states[2]) &&
-                states[2].button_y,
+                states[2].button_west,
             "slot 3 disconnect must preserve slots 0-2");
     platform_on_controller_data(&devices[0], &data[0]);
     require(bluepad32_input_backend_snapshot(0, &states[0]) &&
-                states[0].button_a,
+                states[0].button_east,
             "slot 0 input must continue while slot 3 is disconnected");
     const int slot_zero_calls_while_scanning = devices[0].rumble_calls;
-    bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{115, 116});
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{115, 116});
     tick_backend_timer(99);
     require(devices[0].rumble_calls == slot_zero_calls_while_scanning + 1 &&
                 devices[0].last_low == 115 &&
@@ -626,7 +633,7 @@ void test_independent_lifecycle() {
             "slot 3 replacement must not receive disconnected device rumble");
 
     g_slots[3].pending_rumble = {
-        3, disconnected_generation, SwitchRumbleOutput{77, 88}};
+        3, disconnected_generation, ControllerRumbleOutput{77, 88}};
     g_slots[3].rumble_pending = true;
     process_rumble_timer(&g_rumble_timer);
     require(slot_three_replacement.rumble_calls == 0,
@@ -638,21 +645,21 @@ void test_independent_lifecycle() {
     replacement_data.gamepad.accel[0] = 9000;
     platform_on_controller_data(&slot_three_replacement, &replacement_data);
     require(bluepad32_input_backend_snapshot(3, &states[3]) &&
-                states[3].button_x && states[3].imu_sample_count == 3,
+                states[3].button_north && states[3].motion_sample_count == 3,
             "replacement input and IMU must populate only slot 3");
     require(bluepad32_input_backend_snapshot(0, &states[0]) &&
-                states[0].button_a &&
+                states[0].button_east &&
                 bluepad32_input_backend_snapshot(1, &states[1]) &&
-                states[1].button_b &&
+                states[1].button_south &&
                 bluepad32_input_backend_snapshot(2, &states[2]) &&
-                states[2].button_y,
+                states[2].button_west,
             "slot 3 replacement must not disturb slots 0-2");
 
     const int survivor_calls[kSlotCount - 1] = {
         devices[0].rumble_calls,
         devices[1].rumble_calls,
         devices[2].rumble_calls};
-    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{90, 91});
+    bluepad32_input_backend_queue_rumble(3, ControllerRumbleOutput{90, 91});
     process_rumble_timer(&g_rumble_timer);
     require(slot_three_replacement.rumble_calls == 1 &&
                 slot_three_replacement.last_low == 90 &&
@@ -669,8 +676,8 @@ void test_independent_lifecycle() {
         slot_three_replacement.rumble_calls};
     for (int slot = 0; slot < kSlotCount; ++slot) {
         bluepad32_input_backend_queue_rumble(
-            slot, SwitchRumbleOutput{static_cast<uint8_t>(100 + slot),
-                                     static_cast<uint8_t>(110 + slot)});
+            slot, ControllerRumbleOutput{static_cast<uint8_t>(100 + slot),
+                                         static_cast<uint8_t>(110 + slot)});
     }
     process_rumble_timer(&g_rumble_timer);
     for (int slot = 0; slot < kSlotCount; ++slot) {
@@ -691,8 +698,8 @@ void test_independent_lifecycle() {
                     scanning_enabled && incoming_connections,
                 "disconnecting slots 0-2 must resume connection policy");
         require(!bluepad32_input_backend_snapshot(slot, &states[slot]) &&
-                    states[slot].lx == 32768,
-                "disconnect must neutralize its indexed slot");
+                    states[slot].left_stick_x == 0,
+                "disconnect must publish protocol-neutral state");
         for (int survivor = 0; survivor < kSlotCount; ++survivor) {
             if (survivor == slot) {
                 continue;
@@ -712,9 +719,9 @@ void test_independent_lifecycle() {
     const int slot_zero_calls_before_mailboxes = replacements[0].rumble_calls;
     const int slot_three_calls_before_mailboxes =
         slot_three_replacement.rumble_calls;
-    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{119, 120});
-    bluepad32_input_backend_queue_rumble(3, SwitchRumbleOutput{121, 122});
-    bluepad32_input_backend_queue_rumble(0, SwitchRumbleOutput{123, 124});
+    bluepad32_input_backend_queue_rumble(3, ControllerRumbleOutput{119, 120});
+    bluepad32_input_backend_queue_rumble(3, ControllerRumbleOutput{121, 122});
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{123, 124});
     process_rumble_timer(&g_rumble_timer);
     require(slot_three_replacement.rumble_calls ==
                     slot_three_calls_before_mailboxes + 1 &&
@@ -861,11 +868,11 @@ void test_slot_lighting() {
             "controller without RGB support did not receive its slot LED");
 }
 
-void require_south_button_mapping(const SwitchInputState& state,
+void require_south_button_mapping(const ControllerState& state,
                                   bool swapped,
                                   const char* message) {
-    require(state.button_a == swapped && state.button_b == !swapped &&
-                !state.button_x && !state.button_y,
+    require(state.button_east == swapped && state.button_south == !swapped &&
+                !state.button_north && !state.button_west,
             message);
 }
 
@@ -881,7 +888,7 @@ void test_abxy_hotkey() {
     input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
     input.gamepad.buttons = BUTTON_A;
     platform_on_controller_data(&slot_zero, &input);
-    SwitchInputState snapshot{};
+    ControllerState snapshot{};
     require(bluepad32_input_backend_snapshot(0, &snapshot),
             "slot 0 ABXY state was not published");
     require_south_button_mapping(
@@ -897,12 +904,12 @@ void test_abxy_hotkey() {
     require_south_button_mapping(
         snapshot, !kDefaultSwapAbxy,
         "hotkey did not toggle slot 0 ABXY mapping");
-    require(!snapshot.button_l && !snapshot.button_r &&
-                !snapshot.button_minus && !snapshot.button_plus,
+    require(!snapshot.button_left_shoulder && !snapshot.button_right_shoulder &&
+                !snapshot.button_select && !snapshot.button_start,
             "hotkey chord leaked into the Switch report");
 
     bluepad32_input_backend_queue_rumble(
-        0, SwitchRumbleOutput{0x11, 0x22});
+        0, ControllerRumbleOutput{0x11, 0x22});
     process_rumble_timer(&g_rumble_timer);
     require(slot_zero.rumble_calls == 1 &&
                 slot_zero.last_high == kAbxyFeedbackWeakMagnitude &&
@@ -971,9 +978,9 @@ void test_motion_hotkey() {
     input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
     input.gamepad.accel[0] = 8192;
     platform_on_controller_data(&slot_zero, &input);
-    SwitchInputState snapshot{};
+    ControllerState snapshot{};
     require(bluepad32_input_backend_snapshot(0, &snapshot) &&
-                snapshot.imu_sample_count ==
+                snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 3 : 0),
             "slot 0 did not start with configured motion state");
 
@@ -982,10 +989,10 @@ void test_motion_hotkey() {
     input.gamepad.misc_buttons = kMotionHotkeyMiscMask;
     platform_on_controller_data(&slot_zero, &input);
     require(bluepad32_input_backend_snapshot(0, &snapshot) &&
-                snapshot.imu_sample_count ==
+                snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 0 : 3) &&
-                !snapshot.dpad_up && !snapshot.button_r &&
-                !snapshot.button_plus,
+                !snapshot.dpad_up && !snapshot.button_right_shoulder &&
+                !snapshot.button_start,
             "motion chord did not toggle motion or suppress its inputs");
 
     process_rumble_timer(&g_rumble_timer);
@@ -1015,7 +1022,7 @@ void test_motion_hotkey() {
     peer_input.gamepad.accel[0] = 8192;
     platform_on_controller_data(&slot_one, &peer_input);
     require(bluepad32_input_backend_snapshot(1, &snapshot) &&
-                snapshot.imu_sample_count ==
+                snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 3 : 0),
             "slot 0 motion chord changed slot 1 motion state");
 
@@ -1027,7 +1034,7 @@ void test_motion_hotkey() {
     input.gamepad.misc_buttons = kMotionHotkeyMiscMask;
     platform_on_controller_data(&slot_zero, &input);
     require(bluepad32_input_backend_snapshot(0, &snapshot) &&
-                snapshot.imu_sample_count ==
+                snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 3 : 0),
             "released motion chord did not re-arm or restore motion");
     process_rumble_timer(&g_rumble_timer);
@@ -1042,6 +1049,76 @@ void test_motion_hotkey() {
                 !g_slots[0].motion_hotkey_latched &&
                 !g_slots[0].feedback_pending,
             "disconnect did not reset slot 0 motion hotkey state");
+}
+
+void test_protocol_neutral_analog_state() {
+    start_pairing_backend();
+    uni_hid_device_t controller = device(0);
+    platform_on_device_connected(&controller);
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+            "analog-state controller did not become ready");
+
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    input.gamepad.axis_x = -512;
+    input.gamepad.axis_y = 0;
+    input.gamepad.axis_rx = 511;
+    input.gamepad.axis_ry = -256;
+    input.gamepad.brake = 1;
+    input.gamepad.throttle = 512;
+    platform_on_controller_data(&controller, &input);
+
+    ControllerState state{};
+    require(bluepad32_input_backend_snapshot(0, &state),
+            "analog state was not published");
+    require(state.left_stick_x == INT16_MIN &&
+                state.left_stick_y == 0 &&
+                state.right_stick_x == INT16_MAX &&
+                state.right_stick_y == -16384,
+            "stick axes were not normalized to signed full range");
+    require(state.left_trigger == scale_trigger(1) &&
+                state.left_trigger > 0 &&
+                state.right_trigger == scale_trigger(512) &&
+                state.right_trigger < UINT16_MAX,
+            "analog trigger precision was discarded");
+
+    input.gamepad.brake = 0;
+    input.gamepad.throttle = 0;
+    input.gamepad.buttons =
+        BUTTON_TRIGGER_L | BUTTON_TRIGGER_R;
+    platform_on_controller_data(&controller, &input);
+    require(bluepad32_input_backend_snapshot(0, &state) &&
+                state.left_trigger == UINT16_MAX &&
+                state.right_trigger == UINT16_MAX,
+            "digital trigger buttons did not map to full analog range");
+}
+
+void test_host_rumble_mode_duration() {
+    start_pairing_backend();
+    uni_hid_device_t controller = device(0);
+    platform_on_device_connected(&controller);
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+            "rumble-mode controller did not become ready");
+
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    test_adapter_mode = AdapterUsbMode::kSwitchProbe;
+#endif
+    bluepad32_input_backend_queue_rumble(
+        0, ControllerRumbleOutput{100, 101});
+    process_rumble_timer(&g_rumble_timer);
+    require(controller.last_rumble_duration_ms ==
+                kSwitchHostRumbleDurationMs,
+            "Switch mode did not use bounded host rumble");
+
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    test_adapter_mode = AdapterUsbMode::kXInput;
+    bluepad32_input_backend_queue_rumble(
+        0, ControllerRumbleOutput{102, 103});
+    process_rumble_timer(&g_rumble_timer);
+    require(controller.last_rumble_duration_ms ==
+                kXInputHostRumbleDurationMs,
+            "XInput mode did not retain stateful host rumble");
+#endif
 }
 
 void test_clear_pairings() {
@@ -1067,7 +1144,7 @@ void test_clear_pairings() {
                 "pairing reset controller did not become ready");
     }
     bluepad32_input_backend_queue_rumble(
-        0, SwitchRumbleOutput{100, 101});
+        0, ControllerRumbleOutput{100, 101});
 
     bluepad32_input_backend_clear_pairings();
     require(g_clear_pairings_requested && delete_key_calls == 0 &&
@@ -1086,11 +1163,11 @@ void test_clear_pairings() {
     for (const BackendSlot& slot : g_slots) {
         require(slot.device == nullptr && !slot.active &&
                     !slot.rumble_pending && !slot.feedback_pending &&
-                    slot.state.lx == kStickMidpoint &&
-                    slot.state.ly == kStickMidpoint &&
-                    slot.state.rx == kStickMidpoint &&
-                    slot.state.ry == kStickMidpoint &&
-                    slot.state.imu_sample_count == 0,
+                    slot.state.left_stick_x == 0 &&
+                    slot.state.left_stick_y == 0 &&
+                    slot.state.right_stick_x == 0 &&
+                    slot.state.right_stick_y == 0 &&
+                    slot.state.motion_sample_count == 0,
                 "pairing reset must publish neutral empty slots");
     }
     require(!g_pairing_window_open && !bondable &&
@@ -1163,6 +1240,10 @@ int main(int argc, char** argv) {
         test_abxy_hotkey();
     } else if (scenario == "motion-hotkey") {
         test_motion_hotkey();
+    } else if (scenario == "analog-state") {
+        test_protocol_neutral_analog_state();
+    } else if (scenario == "rumble-mode") {
+        test_host_rumble_mode_duration();
     } else if (scenario == "clear-pairings") {
         test_clear_pairings();
     } else if (scenario == "flash-core-start") {

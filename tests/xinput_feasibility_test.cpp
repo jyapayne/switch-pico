@@ -99,8 +99,8 @@ void test_microsoft_compatible_id_descriptor() {
            "Microsoft descriptor index mismatch");
     expect(kMsCompatIdDescriptor[8] == SWITCH_PICO_HID_INSTANCE_COUNT,
            "Microsoft function count mismatch");
-    for (uint8_t instance = 0; instance < SWITCH_PICO_HID_INSTANCE_COUNT;
-         ++instance) {
+    for (uint8_t instance = 0;
+         instance < SWITCH_PICO_HID_INSTANCE_COUNT; ++instance) {
         const uint8_t *function = &kMsCompatIdDescriptor[16 + instance * 24];
         expect(function[0] == instance,
                "Microsoft descriptor interface mismatch");
@@ -113,8 +113,7 @@ void test_microsoft_compatible_id_descriptor() {
 }
 
 void test_input_report_mapping() {
-    SwitchInputState state{};
-    state.lx = state.ly = state.rx = state.ry = 32768;
+    ControllerState state{};
     auto report = XInputFeasibility::build_input_report(state);
     expect(report.report_id == 0 && report.report_size == 20,
            "neutral report header mismatch");
@@ -126,19 +125,19 @@ void test_input_report_mapping() {
            "neutral axes mismatch");
 
     state.dpad_up = true;
-    state.button_b = true;
-    state.button_a = true;
-    state.button_y = true;
-    state.button_x = true;
-    state.button_plus = true;
-    state.button_minus = true;
-    state.button_home = true;
-    state.button_zl = true;
-    state.button_zr = true;
-    state.lx = 0;
-    state.ly = 0;
-    state.rx = UINT16_MAX;
-    state.ry = UINT16_MAX;
+    state.button_south = true;
+    state.button_east = true;
+    state.button_west = true;
+    state.button_north = true;
+    state.button_start = true;
+    state.button_select = true;
+    state.button_system = true;
+    state.left_trigger = UINT16_MAX;
+    state.right_trigger = UINT16_MAX;
+    state.left_stick_x = INT16_MIN;
+    state.left_stick_y = INT16_MIN;
+    state.right_stick_x = INT16_MAX;
+    state.right_stick_y = INT16_MAX;
     report = XInputFeasibility::build_input_report(state);
     expect((report.buttons & XInputFeasibility::kDpadUp) != 0,
            "D-pad mapping missing");
@@ -148,15 +147,22 @@ void test_input_report_mapping() {
                (report.buttons & XInputFeasibility::kButtonY) != 0,
            "positional face-button mapping mismatch");
     expect(report.left_trigger == 0xff && report.right_trigger == 0xff,
-           "digital trigger mapping mismatch");
+           "full analog trigger mapping mismatch");
     expect(report.left_x == INT16_MIN && report.left_y == INT16_MAX &&
-               report.right_x == INT16_MAX && report.right_y == -INT16_MAX,
+               report.right_x == INT16_MAX &&
+               report.right_y == -INT16_MAX,
            "axis endpoint mapping mismatch");
+
+    state.left_trigger = 0x8000;
+    state.right_trigger = 0x7fff;
+    report = XInputFeasibility::build_input_report(state);
+    expect(report.left_trigger == 0x80 && report.right_trigger == 0x7f,
+           "analog trigger precision was discarded");
 }
 
 void test_rumble_report() {
     const uint8_t packet[8] = {0x00, 0x08, 0x00, 0xa5, 0x5a, 0x00, 0x00, 0x00};
-    SwitchRumbleOutput output{};
+    ControllerRumbleOutput output{};
     expect(
         XInputFeasibility::parse_rumble_report(packet, sizeof(packet), &output),
         "valid rumble report rejected");

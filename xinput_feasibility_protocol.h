@@ -2,7 +2,8 @@
 
 #include <stdint.h>
 
-#include "switch_pro_driver.h"
+#include "controller_state.h"
+#include "switch_haptics.h"
 
 namespace XInputFeasibility {
 
@@ -39,42 +40,41 @@ struct InputReport {
 
 static_assert(sizeof(InputReport) == 20);
 
-constexpr int16_t horizontal_axis(uint16_t value) {
-    return static_cast<int16_t>(static_cast<int32_t>(value) - 32768);
+constexpr int16_t invert_axis(int16_t value) {
+    return value == INT16_MIN ? INT16_MAX
+                              : static_cast<int16_t>(-value);
 }
 
-constexpr int16_t vertical_axis(uint16_t value) {
-    const int16_t horizontal = horizontal_axis(value);
-    return horizontal == INT16_MIN ? INT16_MAX
-                                   : static_cast<int16_t>(-horizontal);
-}
-
-inline InputReport build_input_report(const SwitchInputState &state) {
+inline InputReport build_input_report(const ControllerState& state) {
     InputReport report{};
     report.report_size = sizeof(report);
     report.buttons =
-        (state.dpad_up ? kDpadUp : 0) | (state.dpad_down ? kDpadDown : 0) |
+        (state.dpad_up ? kDpadUp : 0) |
+        (state.dpad_down ? kDpadDown : 0) |
         (state.dpad_left ? kDpadLeft : 0) |
-        (state.dpad_right ? kDpadRight : 0) | (state.button_plus ? kStart : 0) |
-        (state.button_minus ? kBack : 0) | (state.button_l3 ? kLeftThumb : 0) |
-        (state.button_r3 ? kRightThumb : 0) |
-        (state.button_l ? kLeftShoulder : 0) |
-        (state.button_r ? kRightShoulder : 0) |
-        (state.button_home ? kGuide : 0) |
-        // Switch labels are positional opposites of XInput labels.
-        (state.button_b ? kButtonA : 0) | (state.button_a ? kButtonB : 0) |
-        (state.button_y ? kButtonX : 0) | (state.button_x ? kButtonY : 0);
-    report.left_trigger = state.button_zl ? 0xff : 0x00;
-    report.right_trigger = state.button_zr ? 0xff : 0x00;
-    report.left_x = horizontal_axis(state.lx);
-    report.left_y = vertical_axis(state.ly);
-    report.right_x = horizontal_axis(state.rx);
-    report.right_y = vertical_axis(state.ry);
+        (state.dpad_right ? kDpadRight : 0) |
+        (state.button_start ? kStart : 0) |
+        (state.button_select ? kBack : 0) |
+        (state.button_left_stick ? kLeftThumb : 0) |
+        (state.button_right_stick ? kRightThumb : 0) |
+        (state.button_left_shoulder ? kLeftShoulder : 0) |
+        (state.button_right_shoulder ? kRightShoulder : 0) |
+        (state.button_system ? kGuide : 0) |
+        (state.button_south ? kButtonA : 0) |
+        (state.button_east ? kButtonB : 0) |
+        (state.button_west ? kButtonX : 0) |
+        (state.button_north ? kButtonY : 0);
+    report.left_trigger = controller_trigger_to_u8(state.left_trigger);
+    report.right_trigger = controller_trigger_to_u8(state.right_trigger);
+    report.left_x = state.left_stick_x;
+    report.left_y = invert_axis(state.left_stick_y);
+    report.right_x = state.right_stick_x;
+    report.right_y = invert_axis(state.right_stick_y);
     return report;
 }
 
 inline bool parse_rumble_report(const uint8_t *data, uint32_t size,
-                                SwitchRumbleOutput *output) {
+                                ControllerRumbleOutput *output) {
     if (data == nullptr || output == nullptr || size < 5 || data[0] != 0x00 ||
         data[1] != 0x08) {
         return false;

@@ -25,7 +25,6 @@
 // (~66.7Hz). Emitting the 3-frame 0x30 faster makes the console over-integrate
 // gyro (3 frames assumed 5ms apart delivered too often) => wild camera swing.
 #define SWITCH_PRO_IMU_REPORT_TIMER 15
-
 enum class SwitchImuMode : uint8_t {
     Off = 0,
     Raw = 1,
@@ -43,7 +42,7 @@ struct MotionQuaternion {
 };
 
 struct SwitchProContext {
-    SwitchInputState input_state{};
+    ControllerState input_state{};
     uint8_t report_buffer[SWITCH_PRO_ENDPOINT_SIZE]{};
     SwitchProReport switch_report{};
     uint8_t last_report_counter = 0;
@@ -65,7 +64,7 @@ struct SwitchProContext {
     uint16_t right_min_y = 0;
     uint16_t right_max_x = 0;
     uint16_t right_max_y = 0;
-    SwitchRumbleCallback rumble_callback = nullptr;
+    ControllerRumbleCallback rumble_callback = nullptr;
     SwitchHapticsDecoder rumble_decoder{};
     MotionQuaternion motion_quaternion{0.0f, 0.0f, 0.0f, 1.0f, 0, 0, 0};
 };
@@ -262,7 +261,7 @@ static void write_bits_le(uint8_t* dst, uint16_t bit_offset, uint32_t value,
 }
 
 static void integrate_motion_sample(SwitchProContext& context,
-                                    const SwitchImuSample& sample) {
+                                    const ControllerMotionSample& sample) {
     constexpr float sample_dt = 0.005f;
     constexpr float gyro_rad_per_lsb = 1.0f / 818.5f;
     MotionQuaternion& quaternion = context.motion_quaternion;
@@ -310,19 +309,21 @@ static void integrate_motion_sample(SwitchProContext& context,
 }
 
 static void fill_raw_imu_report_data(SwitchProContext& context,
-                                     const SwitchInputState& state) {
-    if (state.imu_sample_count == 0) {
+                                     const ControllerState& state) {
+    if (state.motion_sample_count == 0) {
         memset(context.switch_report.imuData, 0x00,
                sizeof(context.switch_report.imuData));
         return;
     }
     uint8_t sample_count =
-        state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
+        state.motion_sample_count > CONTROLLER_MOTION_SAMPLE_CAPACITY
+            ? CONTROLLER_MOTION_SAMPLE_CAPACITY
+            : state.motion_sample_count;
     uint8_t* dst = context.switch_report.imuData;
-    for (uint8_t i = 0; i < 3; ++i) {
-        const SwitchImuSample& sample =
-            (i < sample_count) ? state.imu_samples[i]
-                               : state.imu_samples[sample_count - 1];
+    for (uint8_t i = 0; i < CONTROLLER_MOTION_SAMPLE_CAPACITY; ++i) {
+        const ControllerMotionSample& sample =
+            (i < sample_count) ? state.motion_samples[i]
+                               : state.motion_samples[sample_count - 1];
         write_int16_le(dst + 0, sample.accel_x);
         write_int16_le(dst + 2, sample.accel_y);
         write_int16_le(dst + 4, sample.accel_z);
@@ -333,16 +334,18 @@ static void fill_raw_imu_report_data(SwitchProContext& context,
     }
 }
 
-static void fill_quaternion_imu_report_data(SwitchProContext& context,
-                                            const SwitchInputState& state,
-                                            uint32_t now_ms) {
-    if (state.imu_sample_count > 0) {
+static void fill_quaternion_imu_report_data(
+    SwitchProContext& context, const ControllerState& state,
+    uint32_t now_ms) {
+    if (state.motion_sample_count > 0) {
         uint8_t sample_count =
-            state.imu_sample_count > 3 ? 3 : state.imu_sample_count;
-        for (uint8_t i = 0; i < 3; ++i) {
-            const SwitchImuSample& sample =
-                (i < sample_count) ? state.imu_samples[i]
-                                   : state.imu_samples[sample_count - 1];
+            state.motion_sample_count > CONTROLLER_MOTION_SAMPLE_CAPACITY
+                ? CONTROLLER_MOTION_SAMPLE_CAPACITY
+                : state.motion_sample_count;
+        for (uint8_t i = 0; i < CONTROLLER_MOTION_SAMPLE_CAPACITY; ++i) {
+            const ControllerMotionSample& sample =
+                (i < sample_count) ? state.motion_samples[i]
+                                   : state.motion_samples[sample_count - 1];
             integrate_motion_sample(context, sample);
         }
     }
@@ -391,7 +394,7 @@ static void fill_quaternion_imu_report_data(SwitchProContext& context,
 }
 
 static void fill_imu_report_data(SwitchProContext& context,
-                                 const SwitchInputState& state,
+                                 const ControllerState& state,
                                  uint32_t now_ms) {
     switch (context.imu_mode) {
         case SwitchImuMode::Raw:
@@ -410,14 +413,8 @@ static void fill_imu_report_data(SwitchProContext& context,
 
 static void update_switch_report_from_state(SwitchProContext& context);
 
-static SwitchInputState make_neutral_state() {
-    SwitchInputState s{};
-    s.lx = SWITCH_PRO_JOYSTICK_MID;
-    s.ly = SWITCH_PRO_JOYSTICK_MID;
-    s.rx = SWITCH_PRO_JOYSTICK_MID;
-    s.ry = SWITCH_PRO_JOYSTICK_MID;
-    s.imu_sample_count = 0;
-    return s;
+static ControllerState make_neutral_state() {
+    return controller_neutral_state();
 }
 
 static void reset_context_runtime(SwitchProContext& context, uint32_t now,
@@ -522,7 +519,8 @@ static void forward_decoded_rumble(uint8_t instance,
         return;
     }
 
-    SwitchRumbleOutput rumble = context.rumble_decoder.decode(report + 2);
+    ControllerRumbleOutput rumble =
+        context.rumble_decoder.decode(report + 2);
     if (context.rumble_callback != nullptr) {
         context.rumble_callback(instance, rumble);
     }
@@ -734,36 +732,42 @@ static void handle_feature_report(SwitchProContext& context,
 }
 
 static void update_switch_report_from_state(SwitchProContext& context) {
-    const SwitchInputState& state = context.input_state;
+    const ControllerState& state = context.input_state;
     SwitchInputReport& inputs = context.switch_report.inputs;
     inputs.dpadUp = state.dpad_up;
     inputs.dpadDown = state.dpad_down;
     inputs.dpadLeft = state.dpad_left;
     inputs.dpadRight = state.dpad_right;
     inputs.chargingGrip = 1;
-    inputs.buttonY = state.button_y;
-    inputs.buttonX = state.button_x;
-    inputs.buttonB = state.button_b;
-    inputs.buttonA = state.button_a;
+    inputs.buttonY = state.button_west;
+    inputs.buttonX = state.button_north;
+    inputs.buttonB = state.button_south;
+    inputs.buttonA = state.button_east;
     inputs.buttonRightSR = 0;
     inputs.buttonRightSL = 0;
-    inputs.buttonR = state.button_r;
-    inputs.buttonZR = state.button_zr;
-    inputs.buttonMinus = state.button_minus;
-    inputs.buttonPlus = state.button_plus;
-    inputs.buttonThumbR = state.button_r3;
-    inputs.buttonThumbL = state.button_l3;
-    inputs.buttonHome = state.button_home;
+    inputs.buttonR = state.button_right_shoulder;
+    inputs.buttonZR =
+        state.right_trigger >= SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
+    inputs.buttonMinus = state.button_select;
+    inputs.buttonPlus = state.button_start;
+    inputs.buttonThumbR = state.button_right_stick;
+    inputs.buttonThumbL = state.button_left_stick;
+    inputs.buttonHome = state.button_system;
     inputs.buttonCapture = state.button_capture;
     inputs.buttonLeftSR = 0;
     inputs.buttonLeftSL = 0;
-    inputs.buttonL = state.button_l;
-    inputs.buttonZL = state.button_zl;
+    inputs.buttonL = state.button_left_shoulder;
+    inputs.buttonZL =
+        state.left_trigger >= SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD;
 
-    uint16_t left_x = scale16To12(state.lx);
-    uint16_t left_y = scale16To12(state.ly);
-    uint16_t right_x = scale16To12(state.rx);
-    uint16_t right_y = scale16To12(state.ry);
+    uint16_t left_x =
+        scale16To12(controller_axis_to_unsigned(state.left_stick_x));
+    uint16_t left_y =
+        scale16To12(controller_axis_to_unsigned(state.left_stick_y));
+    uint16_t right_x =
+        scale16To12(controller_axis_to_unsigned(state.right_stick_x));
+    uint16_t right_y =
+        scale16To12(controller_axis_to_unsigned(state.right_stick_y));
 
     inputs.leftStick.setX(
         std::min(std::max(left_x, context.left_min_x), context.left_max_x));
@@ -809,7 +813,7 @@ void switch_pro_init(uint8_t instance) {
                           to_ms_since_boot(get_absolute_time()), true);
 }
 
-void switch_pro_set_input(uint8_t instance, const SwitchInputState& state) {
+void switch_pro_set_input(uint8_t instance, const ControllerState& state) {
     SwitchProContext* context = context_for(instance);
     if (context != nullptr) {
         context->input_state = state;
@@ -854,7 +858,7 @@ bool switch_pro_task(uint8_t instance) {
             if (tud_hid_n_ready(instance) &&
                 send_report(instance, *context, 0, &context->switch_report,
                             sizeof(context->switch_report))) {
-                context->input_state.imu_sample_count = 0;
+                context->input_state.motion_sample_count = 0;
                 regular_report_sent = true;
             }
             context->last_report_timer = now;
@@ -878,18 +882,12 @@ bool switch_pro_task(uint8_t instance) {
 }
 
 bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
-                                  SwitchInputState& out_state) {
+                                  ControllerState& out_state) {
     if (packet == nullptr) {
         return false;
     }
     // v2 format: 0xAA + 0x02 + payload_len + payload... + checksum
-    if (length < 12) {
-        return false;
-    }
-    if (packet[0] != 0xAA) {
-        return false;
-    }
-    if (packet[1] != 0x02) {
+    if (length < 12 || packet[0] != 0xAA || packet[1] != 0x02) {
         return false;
     }
 
@@ -906,86 +904,115 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
         return false;
     }
 
-    // payload: buttons(2 LE), hat, lx, ly, rx, ry, imu_count, [imu_samples...]
+    // payload: buttons(2 LE), hat, lx, ly, rx, ry, motion_count,
+    // [motion_samples...]
     if (payload_len < 8) {
         return false;
     }
 
     SwitchProOutReport out{};
-    out.buttons = static_cast<uint16_t>(packet[3]) | (static_cast<uint16_t>(packet[4]) << 8);
+    out.buttons = static_cast<uint16_t>(packet[3]) |
+                  (static_cast<uint16_t>(packet[4]) << 8);
     out.hat = packet[5];
     out.lx = packet[6];
     out.ly = packet[7];
     out.rx = packet[8];
     out.ry = packet[9];
-    uint8_t imu_count = packet[10];
-    if (imu_count > 3) {
-        imu_count = 3;
+    uint8_t motion_count = packet[10];
+    if (motion_count > CONTROLLER_MOTION_SAMPLE_CAPACITY) {
+        motion_count = CONTROLLER_MOTION_SAMPLE_CAPACITY;
     }
 
-    uint16_t required_payload_len = static_cast<uint16_t>(8u + static_cast<uint16_t>(imu_count) * 12u);
+    uint16_t required_payload_len = static_cast<uint16_t>(
+        8u + static_cast<uint16_t>(motion_count) * 12u);
     if (payload_len < required_payload_len) {
         return false;
     }
 
-    auto expand_axis = [](uint8_t v) -> uint16_t {
-        return static_cast<uint16_t>(v) << 8 | v;
+    auto expand_axis = [](uint8_t value) -> int16_t {
+        const uint16_t expanded =
+            static_cast<uint16_t>(value) << 8 | value;
+        return controller_axis_from_unsigned(expanded);
     };
-
-    SwitchInputState state = make_neutral_state();
-    state.imu_sample_count = imu_count;
-
     auto read_int16 = [](const uint8_t* src) -> int16_t {
-        return static_cast<int16_t>(static_cast<uint16_t>(src[0]) | (static_cast<uint16_t>(src[1]) << 8));
+        return static_cast<int16_t>(
+            static_cast<uint16_t>(src[0]) |
+            (static_cast<uint16_t>(src[1]) << 8));
     };
-    for (uint8_t i = 0; i < imu_count; ++i) {
+
+    ControllerState state = make_neutral_state();
+    state.motion_sample_count = motion_count;
+    for (uint8_t i = 0; i < motion_count; ++i) {
         const uint8_t* base = &packet[11 + i * 12];
-        state.imu_samples[i].accel_x = read_int16(base + 0);
-        state.imu_samples[i].accel_y = read_int16(base + 2);
-        state.imu_samples[i].accel_z = read_int16(base + 4);
-        state.imu_samples[i].gyro_x = read_int16(base + 6);
-        state.imu_samples[i].gyro_y = read_int16(base + 8);
-        state.imu_samples[i].gyro_z = read_int16(base + 10);
+        state.motion_samples[i].accel_x = read_int16(base + 0);
+        state.motion_samples[i].accel_y = read_int16(base + 2);
+        state.motion_samples[i].accel_z = read_int16(base + 4);
+        state.motion_samples[i].gyro_x = read_int16(base + 6);
+        state.motion_samples[i].gyro_y = read_int16(base + 8);
+        state.motion_samples[i].gyro_z = read_int16(base + 10);
     }
 
     switch (out.hat) {
-        case SWITCH_PRO_HAT_UP: state.dpad_up = true; break;
-        case SWITCH_PRO_HAT_UPRIGHT: state.dpad_up = true; state.dpad_right = true; break;
-        case SWITCH_PRO_HAT_RIGHT: state.dpad_right = true; break;
-        case SWITCH_PRO_HAT_DOWNRIGHT: state.dpad_down = true; state.dpad_right = true; break;
-        case SWITCH_PRO_HAT_DOWN: state.dpad_down = true; break;
-        case SWITCH_PRO_HAT_DOWNLEFT: state.dpad_down = true; state.dpad_left = true; break;
-        case SWITCH_PRO_HAT_LEFT: state.dpad_left = true; break;
-        case SWITCH_PRO_HAT_UPLEFT: state.dpad_up = true; state.dpad_left = true; break;
-        default: break;
+        case SWITCH_PRO_HAT_UP:
+            state.dpad_up = true;
+            break;
+        case SWITCH_PRO_HAT_UPRIGHT:
+            state.dpad_up = true;
+            state.dpad_right = true;
+            break;
+        case SWITCH_PRO_HAT_RIGHT:
+            state.dpad_right = true;
+            break;
+        case SWITCH_PRO_HAT_DOWNRIGHT:
+            state.dpad_down = true;
+            state.dpad_right = true;
+            break;
+        case SWITCH_PRO_HAT_DOWN:
+            state.dpad_down = true;
+            break;
+        case SWITCH_PRO_HAT_DOWNLEFT:
+            state.dpad_down = true;
+            state.dpad_left = true;
+            break;
+        case SWITCH_PRO_HAT_LEFT:
+            state.dpad_left = true;
+            break;
+        case SWITCH_PRO_HAT_UPLEFT:
+            state.dpad_up = true;
+            state.dpad_left = true;
+            break;
+        default:
+            break;
     }
 
-    state.button_y = out.buttons & SWITCH_PRO_MASK_Y;
-    state.button_x = out.buttons & SWITCH_PRO_MASK_X;
-    state.button_b = out.buttons & SWITCH_PRO_MASK_B;
-    state.button_a = out.buttons & SWITCH_PRO_MASK_A;
-    state.button_r = out.buttons & SWITCH_PRO_MASK_R;
-    state.button_zr = out.buttons & SWITCH_PRO_MASK_ZR;
-    state.button_plus = out.buttons & SWITCH_PRO_MASK_PLUS;
-    state.button_minus = out.buttons & SWITCH_PRO_MASK_MINUS;
-    state.button_r3 = out.buttons & SWITCH_PRO_MASK_R3;
-    state.button_l3 = out.buttons & SWITCH_PRO_MASK_L3;
-    state.button_home = out.buttons & SWITCH_PRO_MASK_HOME;
-    state.button_capture = out.buttons & SWITCH_PRO_MASK_CAPTURE;
-    state.button_zl = out.buttons & SWITCH_PRO_MASK_ZL;
-    state.button_l = out.buttons & SWITCH_PRO_MASK_L;
+    state.button_west = (out.buttons & SWITCH_PRO_MASK_Y) != 0;
+    state.button_north = (out.buttons & SWITCH_PRO_MASK_X) != 0;
+    state.button_south = (out.buttons & SWITCH_PRO_MASK_B) != 0;
+    state.button_east = (out.buttons & SWITCH_PRO_MASK_A) != 0;
+    state.button_right_shoulder = (out.buttons & SWITCH_PRO_MASK_R) != 0;
+    state.right_trigger =
+        (out.buttons & SWITCH_PRO_MASK_ZR) != 0 ? UINT16_MAX : 0;
+    state.button_start = (out.buttons & SWITCH_PRO_MASK_PLUS) != 0;
+    state.button_select = (out.buttons & SWITCH_PRO_MASK_MINUS) != 0;
+    state.button_right_stick = (out.buttons & SWITCH_PRO_MASK_R3) != 0;
+    state.button_left_stick = (out.buttons & SWITCH_PRO_MASK_L3) != 0;
+    state.button_system = (out.buttons & SWITCH_PRO_MASK_HOME) != 0;
+    state.button_capture = (out.buttons & SWITCH_PRO_MASK_CAPTURE) != 0;
+    state.left_trigger =
+        (out.buttons & SWITCH_PRO_MASK_ZL) != 0 ? UINT16_MAX : 0;
+    state.button_left_shoulder = (out.buttons & SWITCH_PRO_MASK_L) != 0;
 
-    state.lx = expand_axis(out.lx);
-    state.ly = expand_axis(out.ly);
-    state.rx = expand_axis(out.rx);
-    state.ry = expand_axis(out.ry);
+    state.left_stick_x = expand_axis(out.lx);
+    state.left_stick_y = expand_axis(out.ly);
+    state.right_stick_x = expand_axis(out.rx);
+    state.right_stick_y = expand_axis(out.ry);
 
     out_state = state;
     return true;
 }
 
-void switch_pro_set_rumble_callback(uint8_t instance,
-                                    SwitchRumbleCallback callback) {
+void switch_pro_set_rumble_callback(
+    uint8_t instance, ControllerRumbleCallback callback) {
     SwitchProContext* context = context_for(instance);
     if (context != nullptr) {
         context->rumble_callback = callback;

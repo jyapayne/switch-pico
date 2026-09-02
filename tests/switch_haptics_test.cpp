@@ -8,7 +8,7 @@ namespace {
 
 int failures = 0;
 
-void expect_output(const char* scenario, SwitchRumbleOutput actual,
+void expect_output(const char* scenario, ControllerRumbleOutput actual,
                    uint8_t expected_low, uint8_t expected_high) {
     if (actual.low_frequency_magnitude == expected_low &&
         actual.high_frequency_magnitude == expected_high) {
