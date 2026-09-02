@@ -889,8 +889,10 @@ void test_abxy_hotkey() {
     require(slot_zero.rumble_calls == 1 &&
                 slot_zero.last_high == kAbxyFeedbackWeakMagnitude &&
                 slot_zero.last_low == kAbxyFeedbackStrongMagnitude &&
+                slot_zero.last_high == UINT8_MAX &&
+                slot_zero.last_low == UINT8_MAX &&
                 g_slots[0].rumble_pending,
-            "ABXY confirmation did not take priority over host rumble");
+            "ABXY confirmation was not full-strength or did not take priority");
 
     platform_on_controller_data(&slot_zero, &input);
     process_rumble_timer(&g_rumble_timer);
