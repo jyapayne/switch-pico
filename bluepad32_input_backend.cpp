@@ -92,6 +92,7 @@ enum class ConnectionStatus {
 enum class ConnectionPolicyState {
     Uninitialized,
     Open,
+    Passive,
     Paused,
     FailedClosed,
 };
@@ -631,26 +632,40 @@ void process_clear_pairings(uint32_t now_ms) {
 
 void apply_connection_policy() {
     const bool free_slot = has_free_slot();
-    if ((!free_slot &&
-         g_connection_policy_state == ConnectionPolicyState::Paused) ||
-        (free_slot &&
-         g_connection_policy_state == ConnectionPolicyState::Open)) {
+    const bool active_controller = has_active_controller();
+    const bool pairing_open =
+        pairing_window_active_at(btstack_run_loop_get_time_ms());
+    const bool active_scan =
+        free_slot && (!active_controller || pairing_open);
+    const ConnectionPolicyState desired_state =
+        !free_slot
+            ? ConnectionPolicyState::Paused
+            : (active_scan ? ConnectionPolicyState::Open
+                           : ConnectionPolicyState::Passive);
+    if (g_connection_policy_state == desired_state) {
         return;
     }
 
-    uni_bt_allow_incoming_connections(false);
+    // Classic inquiry and BLE scanning consume radio time and measurably delay
+    // active controller HID traffic. Stop them before every policy transition.
     uni_bt_stop_scanning_unsafe();
 
     if (!free_slot) {
+        uni_bt_allow_incoming_connections(false);
         g_connection_policy_state = ConnectionPolicyState::Paused;
         return;
     }
 
-    // Bluepad32's normal scan/autoconnect path handles both remembered
-    // controllers powering on and controllers in explicit pairing mode.
+    // Passive mode still accepts controller-initiated reconnects without
+    // running inquiry. Active discovery is reserved for zero-controller idle
+    // state and the explicit BOOTSEL pairing window.
     uni_bt_allow_incoming_connections(true);
-    uni_bt_start_scanning_and_autoconnect_unsafe();
-    g_connection_policy_state = ConnectionPolicyState::Open;
+    if (active_scan) {
+        uni_bt_start_scanning_and_autoconnect_unsafe();
+        g_connection_policy_state = ConnectionPolicyState::Open;
+    } else {
+        g_connection_policy_state = ConnectionPolicyState::Passive;
+    }
 }
 
 void update_status_led() {
@@ -683,7 +698,9 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
     process_clear_pairings(now_ms);
     process_pairing_snapshot_request();
-    update_pairing_window(now_ms);
+    if (update_pairing_window(now_ms)) {
+        apply_connection_policy();
+    }
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         RumbleEnvelope envelope{};
@@ -791,7 +808,8 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     if (device == nullptr) {
         return;
     }
-    if (g_connection_policy_state != ConnectionPolicyState::Open) {
+    if (g_connection_policy_state != ConnectionPolicyState::Open &&
+        g_connection_policy_state != ConnectionPolicyState::Passive) {
         uni_hid_device_disconnect(device);
         return;
     }
@@ -843,9 +861,9 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
     critical_section_exit(&g_state_lock);
 
     if (disconnected_tracked_device) {
-        // A controller can disconnect while the policy is already Open.
-        // Restart both scans so host-initiated reconnect controllers such as
-        // 8BitDo Ultimate become reachable without rebooting the Pico.
+        // Re-evaluate from scratch: resume discovery only after the final
+        // active controller disconnects; otherwise keep passive incoming
+        // reconnect support without inquiry-induced latency.
         g_connection_policy_state = ConnectionPolicyState::Uninitialized;
         recompute_connection_status();
     }

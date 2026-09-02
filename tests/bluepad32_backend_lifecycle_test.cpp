@@ -808,13 +808,23 @@ void test_pairing_window_policy() {
                 g_connection_policy_state == ConnectionPolicyState::Paused,
             "Classic and BLE pairing authentication must close at the deadline");
     platform_on_device_disconnected(&devices[3]);
+    require(g_connection_policy_state == ConnectionPolicyState::Passive &&
+                !classic_scanning_enabled && !scanning_enabled &&
+                incoming_connections,
+            "a freed slot with active controllers must remain passive");
+    require(platform_on_device_discovered(address, "controller", 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE,
+            "passive policy must reject inquiry discoveries");
+
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
     require(g_connection_policy_state == ConnectionPolicyState::Open &&
                 classic_scanning_enabled && scanning_enabled &&
                 incoming_connections,
-            "a freed slot must resume autoconnect after pairing indication expires");
+            "explicit BOOTSEL window must resume active discovery");
     require(platform_on_device_discovered(address, "controller", 0, 0) ==
                     UNI_ERROR_SUCCESS,
-            "resumed autoconnect must accept a discovered controller");
+            "pairing window discovery must accept a controller");
 }
 
 
