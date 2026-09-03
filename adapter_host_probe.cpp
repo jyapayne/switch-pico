@@ -9,6 +9,7 @@
 #endif
 
 #include "adapter_host_probe_state.h"
+#include "controller_profile_runtime.h"
 #include "hardware/structs/watchdog.h"
 #include "hardware/watchdog.h"
 #include "pico/time.h"
@@ -22,7 +23,7 @@ constexpr uint8_t kStatusRequest = 0x21;
 constexpr uint16_t kStatusIndex = 0x0005;
 uint8_t g_status_response[4]{};
 
-AdapterUsbMode g_mode = AdapterUsbMode::kSwitchProbe;
+AdapterUsbMode g_mode = AdapterUsbMode::kSwitch;
 AdapterHostProbeState g_probe;
 alarm_id_t g_reboot_alarm = 0;
 
@@ -32,6 +33,7 @@ uint32_t now_ms() {
 int64_t reboot_to_xinput(alarm_id_t alarm_id, void *user_data) {
     (void)alarm_id;
     (void)user_data;
+    controller_profile_runtime_reset();
     watchdog_hw->scratch[kModeScratchRegister] = kXInputBootMagic;
     watchdog_reboot(0, 0, 0);
     return 0;
@@ -39,16 +41,39 @@ int64_t reboot_to_xinput(alarm_id_t alarm_id, void *user_data) {
 
 } // namespace
 
-void adapter_host_probe_init() {
-    if (watchdog_hw->scratch[kModeScratchRegister] == kXInputBootMagic) {
-        watchdog_hw->scratch[kModeScratchRegister] = 0;
-        g_mode = AdapterUsbMode::kXInput;
-    } else {
-        g_mode = AdapterUsbMode::kSwitchProbe;
+void adapter_host_probe_init(AdapterRequestedMode requested_mode) {
+    const uint32_t scratch = watchdog_hw->scratch[kModeScratchRegister];
+    // Scratch is a one-boot transition token. Always consume it, including
+    // stale tokens left behind when a persistent manual mode bypasses auto.
+    watchdog_hw->scratch[kModeScratchRegister] = 0;
+
+    switch (requested_mode) {
+        case AdapterRequestedMode::kSwitch:
+            g_mode = AdapterUsbMode::kSwitch;
+            break;
+        case AdapterRequestedMode::kXInput:
+            g_mode = AdapterUsbMode::kXInput;
+            break;
+        case AdapterRequestedMode::kAuto:
+            g_mode = scratch == kXInputBootMagic
+                         ? AdapterUsbMode::kXInput
+                         : AdapterUsbMode::kSwitchProbe;
+            break;
+        case AdapterRequestedMode::kDInput:
+        case AdapterRequestedMode::kMac:
+            // Keep USB usable without treating unavailable explicit choices
+            // as Auto. Host/controller setters reject these until drivers land.
+            g_mode = AdapterUsbMode::kSwitch;
+            break;
     }
     g_probe = {};
+    g_reboot_alarm = 0;
     PROBE_LOG("[HOST PROBE] boot mode=%s\n",
-              g_mode == AdapterUsbMode::kXInput ? "XInput" : "Switch probe");
+              g_mode == AdapterUsbMode::kXInput
+                  ? "XInput"
+                  : (g_mode == AdapterUsbMode::kSwitch
+                         ? "Switch"
+                         : "Switch probe"));
 }
 
 AdapterUsbMode adapter_host_probe_mode() { return g_mode; }
@@ -105,8 +130,11 @@ bool adapter_host_probe_vendor_control(uint8_t rhport, uint8_t stage,
         return queued;
     }
 
-    return tud_control_xfer(
-        rhport, request,
-        const_cast<uint8_t *>(XInput::kMsCompatIdDescriptor),
-        sizeof(XInput::kMsCompatIdDescriptor));
+    if (g_mode == AdapterUsbMode::kXInput) {
+        return tud_control_xfer(
+            rhport, request,
+            const_cast<uint8_t *>(XInput::kMsCompatIdDescriptor),
+            sizeof(XInput::kMsCompatIdDescriptor));
+    }
+    return false;
 }

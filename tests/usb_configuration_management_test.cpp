@@ -14,6 +14,18 @@ ConfigurationServiceSnapshot current_configuration{};
 ProfileServiceListSnapshot current_profile_list{};
 ProfileServiceSelectedSnapshot current_profile_selected{};
 ProfileServiceTransactionSnapshot current_profile_transaction{};
+AdapterUsbMode current_active_mode = AdapterUsbMode::kSwitchProbe;
+ConfigurationTransactionStatus mode_set_result =
+    ConfigurationTransactionStatus::kPending;
+uint32_t mode_set_transaction_id = 0;
+AdapterRequestedMode mode_set_requested_mode = AdapterRequestedMode::kAuto;
+AdapterModeAvailability mode_set_availability{};
+AdapterModeAvailability runtime_mode_availability{};
+uint32_t mode_availability_query_count = 0;
+uint32_t mode_set_call_count = 0;
+uint32_t correlated_reboot_transaction_id = 0;
+uint32_t reboot_transaction_id = 0;
+uint32_t reboot_call_count = 0;
 bool refresh_requested = false;
 bool clear_requested = false;
 std::vector<uint8_t> control_payload;
@@ -233,6 +245,142 @@ void test_vendor_requests() {
             "request with invalid magic was accepted");
 }
 
+void test_mode_vendor_requests() {
+    using namespace UsbConfigurationManagement;
+    current_configuration.configuration.requested_mode =
+        AdapterRequestedMode::kXInput;
+    current_active_mode = AdapterUsbMode::kSwitchProbe;
+
+    tusb_control_request_t request =
+        setup_request(Operation::kInfo, TUSB_DIR_IN, kMaximumResponseSize);
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload[kResponseHeaderSize + 4] ==
+                    static_cast<uint8_t>(AdapterUsbMode::kSwitchProbe),
+            "info response did not report the active USB mode");
+
+    request = setup_request(
+        Operation::kConfigurationRead, TUSB_DIR_IN,
+        kMaximumResponseSize);
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload.size() ==
+                    kResponseHeaderSize +
+                        ADAPTER_CONFIGURATION_ENCODED_SIZE &&
+                control_payload[10] ==
+                    ADAPTER_CONFIGURATION_SCHEMA_VERSION &&
+                control_payload[kResponseHeaderSize + 2] ==
+                    static_cast<uint8_t>(AdapterRequestedMode::kXInput),
+            "configuration response did not keep requested mode separate");
+
+    std::vector<uint8_t> mode_set(5);
+    write_u32(&mode_set, 0, 0x12345678);
+    mode_set[4] =
+        static_cast<uint8_t>(AdapterRequestedMode::kXInput);
+    const std::vector<uint8_t> encoded =
+        make_request(Operation::kModeSet, mode_set);
+    require(encoded.size() == kRequestHeaderSize + 5 &&
+                encoded[5] ==
+                    static_cast<uint8_t>(Operation::kModeSet) &&
+                encoded[8] == 5 &&
+                read_u32(encoded, kRequestHeaderSize) == 0x12345678 &&
+                encoded[kRequestHeaderSize + 4] ==
+                    static_cast<uint8_t>(
+                        AdapterRequestedMode::kXInput),
+            "mode-set request envelope does not match the protocol");
+
+    mode_set_result = ConfigurationTransactionStatus::kPending;
+    perform_out(Operation::kModeSet, mode_set);
+    require(mode_set_transaction_id == 0x12345678 &&
+                mode_set_requested_mode ==
+                    AdapterRequestedMode::kXInput &&
+                mode_set_availability.switch_mode &&
+                mode_set_availability.xinput_mode &&
+                !mode_set_availability.dinput_mode &&
+                !mode_set_availability.mac_mode &&
+                mode_availability_query_count == 1,
+            "XInput mode set did not use runtime availability");
+    write_u32(&mode_set, 0, 0x12345679);
+    mode_set[4] = static_cast<uint8_t>(AdapterRequestedMode::kSwitch);
+    perform_out(Operation::kModeSet, mode_set);
+    require(mode_set_requested_mode == AdapterRequestedMode::kSwitch &&
+                mode_availability_query_count == 2,
+            "Switch mode set did not use runtime availability");
+
+    mode_set_result = ConfigurationTransactionStatus::kBusy;
+    write_u32(&mode_set, 0, 0x1234567a);
+    perform_out(Operation::kModeSet, mode_set, false);
+    mode_set_result = ConfigurationTransactionStatus::kStorageError;
+    write_u32(&mode_set, 0, 0x1234567b);
+    perform_out(Operation::kModeSet, mode_set, false);
+
+    const uint32_t calls_before_invalid = mode_set_call_count;
+    const uint32_t availability_queries_before_invalid =
+        mode_availability_query_count;
+    for (const uint32_t transaction_id : {0u, 0x80000000u}) {
+        write_u32(&mode_set, 0, transaction_id);
+        perform_out(Operation::kModeSet, mode_set, false);
+    }
+    write_u32(&mode_set, 0, 0x1234567c);
+    mode_set[4] = 0xff;
+    perform_out(Operation::kModeSet, mode_set, false);
+    require(mode_set_call_count == calls_before_invalid &&
+                mode_availability_query_count ==
+                    availability_queries_before_invalid,
+            "malformed mode request reached runtime mode selection");
+
+    mode_set_result = ConfigurationTransactionStatus::kPending;
+    for (const AdapterRequestedMode unavailable : {
+             AdapterRequestedMode::kDInput,
+             AdapterRequestedMode::kMac,
+         }) {
+        mode_set[4] = static_cast<uint8_t>(unavailable);
+        perform_out(Operation::kModeSet, mode_set, false);
+    }
+    require(mode_set_call_count == calls_before_invalid + 2 &&
+                mode_availability_query_count ==
+                    availability_queries_before_invalid + 2,
+            "unsupported mode did not use runtime availability");
+
+    request = setup_request(
+        Operation::kModeSet, TUSB_DIR_OUT, kRequestHeaderSize + 4);
+    require(!usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request),
+            "short mode-set request was accepted");
+
+    std::vector<uint8_t> reboot(4);
+    write_u32(&reboot, 0, 0x12345678);
+    const std::vector<uint8_t> encoded_reboot =
+        make_request(Operation::kReboot, reboot);
+    require(encoded_reboot.size() == kRequestHeaderSize + 4 &&
+                encoded_reboot[5] ==
+                    static_cast<uint8_t>(Operation::kReboot) &&
+                encoded_reboot[8] == 4 &&
+                read_u32(encoded_reboot, kRequestHeaderSize) ==
+                    0x12345678,
+            "reboot request envelope does not match the protocol");
+
+    correlated_reboot_transaction_id = 0x12345678;
+    perform_out(Operation::kReboot, reboot);
+    require(reboot_transaction_id == correlated_reboot_transaction_id,
+            "correlated reboot request was not dispatched");
+    write_u32(&reboot, 0, 0x12345679);
+    perform_out(Operation::kReboot, reboot, false);
+    const uint32_t reboot_calls_before_invalid = reboot_call_count;
+    for (const uint32_t transaction_id : {0u, 0x80000000u}) {
+        write_u32(&reboot, 0, transaction_id);
+        perform_out(Operation::kReboot, reboot, false);
+    }
+    request = setup_request(
+        Operation::kReboot, TUSB_DIR_OUT, kRequestHeaderSize + 5);
+    require(!usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request),
+            "oversized reboot request was accepted");
+    require(reboot_call_count == reboot_calls_before_invalid,
+            "malformed reboot transaction reached the helper");
+}
+
+
 void test_profile_vendor_requests() {
     using namespace UsbConfigurationManagement;
     ControllerIdentity expected_identity{};
@@ -448,6 +596,32 @@ ConfigurationTransactionStatus configuration_service_reset(uint32_t) {
     return ConfigurationTransactionStatus::kPending;
 }
 
+const AdapterModeAvailability& adapter_usb_mode_availability() {
+    ++mode_availability_query_count;
+    return runtime_mode_availability;
+}
+
+ConfigurationTransactionStatus configuration_service_set_mode(
+    uint32_t transaction_id, AdapterRequestedMode requested_mode,
+    const AdapterModeAvailability& availability) {
+    mode_set_transaction_id = transaction_id;
+    mode_set_requested_mode = requested_mode;
+    mode_set_availability = availability;
+    ++mode_set_call_count;
+    if (!adapter_requested_mode_available(requested_mode, availability)) {
+        return ConfigurationTransactionStatus::kUnsupportedSchema;
+    }
+    return mode_set_result;
+}
+
+AdapterUsbMode usb_output_driver_mode() { return current_active_mode; }
+
+bool adapter_reboot_for_mode_transaction(uint32_t transaction_id) {
+    reboot_transaction_id = transaction_id;
+    ++reboot_call_count;
+    return transaction_id == correlated_reboot_transaction_id;
+}
+
 ConfigurationTransactionStatus profile_service_select(
     const ControllerIdentity& identity, uint8_t selected_profile) {
     profile_identity = identity;
@@ -521,13 +695,19 @@ void bluepad32_input_backend_request_pairing_snapshot() {
     refresh_requested = true;
 }
 
-void bluepad32_input_backend_clear_pairings() {
+uint32_t bluepad32_input_backend_clear_pairings() {
     clear_requested = true;
+    return 1;
 }
 
 void bluepad32_input_backend_pairing_snapshot(
     Bluepad32PairingSnapshot* out) {
     *out = current_pairings;
+}
+
+bool adapter_host_probe_vendor_control(
+    uint8_t, uint8_t, const tusb_control_request_t*) {
+    return false;
 }
 
 bool tud_control_xfer(uint8_t, const tusb_control_request_t* request,
@@ -560,6 +740,7 @@ int main() {
     test_envelope_encoding();
     test_pairing_encoding();
     test_vendor_requests();
+    test_mode_vendor_requests();
     test_profile_vendor_requests();
     return 0;
 }

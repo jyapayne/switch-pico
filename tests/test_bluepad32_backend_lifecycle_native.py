@@ -23,7 +23,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "-DSWITCH_PICO_HID_INSTANCE_COUNT=4",
         ]
         if adapter_feasibility:
-            command.append("-DSWITCH_PICO_ADAPTER_FEASIBILITY=1")
+            command.append("-DSWITCH_PICO_USB_OUTPUT_MODES=1")
         command.extend(
             [
                 f"-I{root / 'tests' / 'bluepad32_native_stubs'}",

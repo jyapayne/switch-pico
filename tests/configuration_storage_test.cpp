@@ -78,23 +78,124 @@ ConfigurationStorageIo fake_io(FakeFlash* flash) {
 void test_schema_encoding() {
     AdapterConfiguration configuration{};
     configuration.pairing_window_seconds = 90;
+    configuration.requested_mode = AdapterRequestedMode::kXInput;
     uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
     require(adapter_configuration_encode(configuration, payload,
                                          sizeof(payload)),
-            "valid configuration did not encode");
+            "valid v2 configuration did not encode");
+    const uint8_t expected[] = {
+        90,
+        0,
+        static_cast<uint8_t>(AdapterRequestedMode::kXInput),
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
+    require(memcmp(payload, expected, sizeof(expected)) == 0,
+            "v2 configuration bytes are not canonical");
+
     AdapterConfiguration decoded{};
-    require(adapter_configuration_decode(payload, sizeof(payload),
-                                         &decoded) &&
-                decoded.pairing_window_seconds == 90,
-            "configuration did not round trip");
-    payload[2] = 1;
-    require(!adapter_configuration_decode(payload, sizeof(payload),
-                                          &decoded),
-            "nonzero reserved configuration byte was accepted");
+    require(adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
+                sizeof(payload), &decoded) &&
+                decoded.pairing_window_seconds == 90 &&
+                decoded.requested_mode == AdapterRequestedMode::kXInput,
+            "v2 configuration did not round trip");
+
+    const AdapterRequestedMode valid_modes[] = {
+        AdapterRequestedMode::kAuto,
+        AdapterRequestedMode::kSwitch,
+        AdapterRequestedMode::kXInput,
+        AdapterRequestedMode::kDInput,
+        AdapterRequestedMode::kMac,
+    };
+    for (AdapterRequestedMode mode : valid_modes) {
+        configuration.requested_mode = mode;
+        require(adapter_configuration_encode(configuration, payload,
+                                             sizeof(payload)) &&
+                    adapter_configuration_decode(
+                        ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
+                        sizeof(payload), &decoded) &&
+                    decoded.requested_mode == mode,
+                "valid requested mode did not round trip");
+    }
+
+    AdapterModeAvailability availability{};
+    require(!adapter_requested_mode_available(
+                AdapterRequestedMode::kDInput, availability) &&
+                !adapter_requested_mode_available(
+                    AdapterRequestedMode::kMac, availability),
+            "future modes were available by default");
+    availability.dinput_mode = true;
+    availability.mac_mode = true;
+    require(adapter_requested_mode_available(
+                AdapterRequestedMode::kDInput, availability) &&
+                adapter_requested_mode_available(
+                    AdapterRequestedMode::kMac, availability),
+            "availability API could not enable future modes");
+
+    const uint8_t legacy[] = {120, 0, 0, 0};
+    require(adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION, legacy,
+                sizeof(legacy), &decoded) &&
+                decoded.pairing_window_seconds == 120 &&
+                decoded.requested_mode == AdapterRequestedMode::kAuto,
+            "v1 configuration did not migrate to auto");
+    uint8_t malformed_legacy[sizeof(legacy)];
+    memcpy(malformed_legacy, legacy, sizeof(legacy));
+    malformed_legacy[3] = 1;
+    require(!adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION,
+                malformed_legacy, sizeof(malformed_legacy), &decoded),
+            "v1 nonzero reserved byte was accepted");
+    require(!adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION, legacy,
+                sizeof(legacy) - 1, &decoded),
+            "v1 record with wrong size was accepted");
+
+    for (size_t index = 3; index < sizeof(payload); ++index) {
+        uint8_t malformed[sizeof(payload)];
+        memcpy(malformed, payload, sizeof(payload));
+        malformed[index] = 1;
+        require(!adapter_configuration_decode(
+                    ADAPTER_CONFIGURATION_SCHEMA_VERSION, malformed,
+                    sizeof(malformed), &decoded),
+                "v2 nonzero reserved byte was accepted");
+    }
+    uint8_t invalid_mode[sizeof(payload)];
+    memcpy(invalid_mode, payload, sizeof(payload));
+    invalid_mode[2] = 5;
+    require(!adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_SCHEMA_VERSION, invalid_mode,
+                sizeof(invalid_mode), &decoded),
+            "out-of-range requested mode was accepted");
+    require(!adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
+                sizeof(payload) - 1, &decoded),
+            "short v2 record was accepted");
+    uint8_t oversized[ADAPTER_CONFIGURATION_ENCODED_SIZE + 1]{};
+    memcpy(oversized, payload, sizeof(payload));
+    require(!adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_SCHEMA_VERSION, oversized,
+                sizeof(oversized), &decoded),
+            "oversized v2 record was accepted");
+
     configuration.pairing_window_seconds = 9;
     require(!adapter_configuration_encode(configuration, payload,
                                           sizeof(payload)),
             "out-of-range pairing window was accepted");
+    configuration.pairing_window_seconds = 90;
+    configuration.requested_mode =
+        static_cast<AdapterRequestedMode>(5);
+    require(!adapter_configuration_encode(configuration, payload,
+                                          sizeof(payload)),
+            "out-of-range requested mode encoded");
+    configuration.requested_mode = AdapterRequestedMode::kAuto;
+    require(!adapter_configuration_encode(configuration, oversized,
+                                          sizeof(oversized)),
+            "v2 encoder accepted a noncanonical output size");
 }
 
 void test_two_copy_recovery() {
@@ -189,7 +290,8 @@ void test_transaction_validation() {
             "replacement transaction did not begin");
     require(transaction.append(8, 0, payload, 2) ==
                 ConfigurationTransactionStatus::kReceiving &&
-                transaction.append(8, 2, &payload[2], 2) ==
+                transaction.append(8, 2, &payload[2],
+                                   sizeof(payload) - 2) ==
                     ConfigurationTransactionStatus::kReceiving,
             "ordered chunks were rejected");
     require(transaction.finish(8) ==

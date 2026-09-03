@@ -30,6 +30,8 @@ static_assert(kMaximumResponseSize == 293,
 
 enum class Operation : uint8_t {
     kInfo = 0x01,
+    kModeSet = 0x02,
+    kReboot = 0x03,
     kConfigurationRead = 0x10,
     kConfigurationBegin = 0x11,
     kConfigurationChunk = 0x12,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage switch-pico persistent configuration, profiles, and pairings."""
+"""Manage switch-pico USB modes, configuration, profiles, and pairings."""
 
 from __future__ import annotations
 
@@ -28,8 +28,11 @@ MAXIMUM_RESPONSE_SIZE = 293
 MAXIMUM_CHUNK_SIZE = 40
 USB_TIMEOUT_MS = 1000
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
+HOST_TRANSACTION_ID_MASK = 0x7FFFFFFF
 
 OP_INFO = 0x01
+OP_MODE_SET = 0x02
+OP_REBOOT = 0x03
 OP_CONFIGURATION_READ = 0x10
 OP_CONFIGURATION_BEGIN = 0x11
 OP_CONFIGURATION_CHUNK = 0x12
@@ -61,10 +64,21 @@ STATUS_NAMES = {
     8: "storage failure",
 }
 
-CONFIGURATION_SCHEMA_VERSION = 1
-CONFIGURATION_SIZE = 4
+CONFIGURATION_SCHEMA_VERSION = 2
+CONFIGURATION_SIZE = 8
 PAIRING_WINDOW_SECONDS_MIN = 10
 PAIRING_WINDOW_SECONDS_MAX = 300
+REQUESTED_MODE_AUTO = 0
+REQUESTED_MODE_SWITCH = 1
+REQUESTED_MODE_XINPUT = 2
+REQUESTED_MODE_DINPUT = 3
+REQUESTED_MODE_MAC = 4
+REQUESTED_MODE_NAMES = ("auto", "switch", "xinput", "dinput", "mac")
+SELECTABLE_MODE_NAMES = REQUESTED_MODE_NAMES[:3]
+ACTIVE_MODE_SWITCH = 0
+ACTIVE_MODE_SWITCH_PROBE = 1
+ACTIVE_MODE_XINPUT = 2
+ACTIVE_MODE_NAMES = ("Switch", "Switch probe", "XInput")
 PAIRING_RECORD_SIZE = 8
 PAIRING_RECORD_CAPACITY = 16
 TRANSPORT_UNKNOWN = 0
@@ -123,6 +137,7 @@ class ConfigManagerError(RuntimeError):
 class UsbDevice(Protocol):
     bus: int | None
     address: int | None
+    port_numbers: tuple[int, ...] | None
 
     def ctrl_transfer(
         self,
@@ -154,12 +169,21 @@ class DeviceInfo:
     active_mode: int
     maximum_configuration_size: int
 
+    def mode_name(self) -> str:
+        try:
+            return ACTIVE_MODE_NAMES[self.active_mode]
+        except IndexError as exc:
+            raise ConfigManagerError(
+                f"unknown active USB mode {self.active_mode}"
+            ) from exc
+
 
 @dataclass(frozen=True)
 class AdapterConfiguration:
     pairing_window_seconds: int
     generation: int
     crc: int
+    requested_mode: int = REQUESTED_MODE_AUTO
 
 
 @dataclass(frozen=True)
@@ -1168,6 +1192,10 @@ def _crc32(payload: bytes) -> int:
     return zlib.crc32(payload) & 0xFFFFFFFF
 
 
+def _host_transaction_id() -> int:
+    return (secrets.randbits(31) & HOST_TRANSACTION_ID_MASK) or 1
+
+
 def encode_request(operation: int, payload: bytes = b"") -> bytes:
     if len(payload) + REQUEST_HEADER_SIZE > MAXIMUM_REQUEST_SIZE:
         raise ConfigManagerError("management request exceeds EP0 limit")
@@ -1267,8 +1295,11 @@ def _control_out(
 def read_info(device: UsbDevice) -> DeviceInfo:
     envelope = _control_in(device, OP_INFO)
     _raise_status(envelope)
-    if len(envelope.payload) != 8:
+    if len(envelope.payload) != 8 or envelope.payload[5] != 0:
         raise ConfigManagerError("invalid device-info payload")
+    active_mode = envelope.payload[4]
+    if active_mode >= len(ACTIVE_MODE_NAMES):
+        raise ConfigManagerError(f"unknown active USB mode {active_mode}")
     return DeviceInfo(
         firmware_version=(
             envelope.payload[0],
@@ -1276,7 +1307,7 @@ def read_info(device: UsbDevice) -> DeviceInfo:
             envelope.payload[2],
         ),
         board=envelope.payload[3],
-        active_mode=envelope.payload[4],
+        active_mode=active_mode,
         maximum_configuration_size=struct.unpack_from(
             "<H", envelope.payload, 6
         )[0],
@@ -1289,20 +1320,26 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
     if (
         envelope.schema_version != CONFIGURATION_SCHEMA_VERSION
         or len(envelope.payload) != CONFIGURATION_SIZE
-        or envelope.payload[2:] != b"\x00\x00"
+        or envelope.payload[3:] != bytes(5)
     ):
         raise ConfigManagerError("unsupported configuration object")
     pairing_window_seconds = struct.unpack_from("<H", envelope.payload)[0]
+    requested_mode = envelope.payload[2]
     if not (
         PAIRING_WINDOW_SECONDS_MIN
         <= pairing_window_seconds
         <= PAIRING_WINDOW_SECONDS_MAX
     ):
         raise ConfigManagerError("invalid stored pairing-window duration")
+    if requested_mode >= len(REQUESTED_MODE_NAMES):
+        raise ConfigManagerError(
+            f"invalid stored requested USB mode {requested_mode}"
+        )
     return AdapterConfiguration(
         pairing_window_seconds=pairing_window_seconds,
         generation=envelope.generation,
         crc=envelope.payload_crc,
+        requested_mode=requested_mode,
     )
 
 
@@ -1340,8 +1377,17 @@ def write_configuration(
         raise ConfigManagerError(
             "pairing window must be between 10 and 300 seconds"
         )
-    payload = struct.pack("<Hxx", configuration.pairing_window_seconds)
-    transaction_id = secrets.randbits(32) or 1
+    if (
+        type(configuration.requested_mode) is not int
+        or not 0 <= configuration.requested_mode < len(REQUESTED_MODE_NAMES)
+    ):
+        raise ConfigManagerError("invalid requested USB mode")
+    payload = struct.pack(
+        "<HB5x",
+        configuration.pairing_window_seconds,
+        configuration.requested_mode,
+    )
+    transaction_id = _host_transaction_id()
     _control_out(
         device,
         OP_CONFIGURATION_BEGIN,
@@ -1367,11 +1413,46 @@ def write_configuration(
 
 
 def reset_configuration(device: UsbDevice, timeout: float) -> TransactionStatus:
-    transaction_id = secrets.randbits(32) or 1
+    transaction_id = _host_transaction_id()
     _control_out(
         device, OP_CONFIGURATION_RESET, struct.pack("<I", transaction_id)
     )
     return _wait_for_transaction(device, transaction_id, timeout)
+
+
+def set_mode(
+    device: UsbDevice, requested_mode: int, timeout: float
+) -> TransactionStatus:
+    if type(requested_mode) is not int or requested_mode not in (
+        REQUESTED_MODE_AUTO,
+        REQUESTED_MODE_SWITCH,
+        REQUESTED_MODE_XINPUT,
+    ):
+        raise ConfigManagerError("requested USB mode is not available")
+    transaction_id = _host_transaction_id()
+    _control_out(
+        device,
+        OP_MODE_SET,
+        struct.pack("<IB", transaction_id, requested_mode),
+    )
+    return _wait_for_transaction(device, transaction_id, timeout)
+
+
+def request_reboot(device: UsbDevice, transaction_id: int) -> None:
+    _require_int(
+        transaction_id, "transaction ID", 1, HOST_TRANSACTION_ID_MASK
+    )
+    _control_out(device, OP_REBOOT, struct.pack("<I", transaction_id))
+
+
+def _mode_is_active(requested_mode: int, active_mode: int) -> bool:
+    if requested_mode == REQUESTED_MODE_AUTO:
+        return active_mode in (ACTIVE_MODE_SWITCH_PROBE, ACTIVE_MODE_XINPUT)
+    if requested_mode == REQUESTED_MODE_SWITCH:
+        return active_mode == ACTIVE_MODE_SWITCH
+    if requested_mode == REQUESTED_MODE_XINPUT:
+        return active_mode == ACTIVE_MODE_XINPUT
+    return False
 
 
 def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
@@ -1683,6 +1764,220 @@ def find_pico(
     raise ConfigManagerError("no USB-connected switch-pico firmware found")
 
 
+_UsbPhysicalLocation = tuple[int, tuple[int, ...]]
+_UsbEnumerationIdentity = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _ReenumerationSnapshot:
+    previous_device: UsbDevice
+    previous_bus: int | None
+    previous_address: int | None
+    selected_location: _UsbPhysicalLocation | None
+    other_locations: frozenset[_UsbPhysicalLocation]
+    other_enumerations: frozenset[_UsbEnumerationIdentity]
+
+
+def _physical_location(device: UsbDevice) -> _UsbPhysicalLocation | None:
+    bus = getattr(device, "bus", None)
+    try:
+        port_numbers = getattr(device, "port_numbers", None)
+    except (AttributeError, NotImplementedError):
+        return None
+    if bus is None or port_numbers is None:
+        return None
+    ports = tuple(port_numbers)
+    if not ports:
+        return None
+    return bus, ports
+
+
+def _enumeration_identity(
+    device: UsbDevice,
+) -> _UsbEnumerationIdentity | None:
+    bus = getattr(device, "bus", None)
+    address = getattr(device, "address", None)
+    if bus is None or address is None:
+        return None
+    return bus, address
+
+
+def _capture_reenumeration_snapshot(
+    previous_device: UsbDevice,
+) -> _ReenumerationSnapshot:
+    previous_bus = getattr(previous_device, "bus", None)
+    previous_address = getattr(previous_device, "address", None)
+    previous_enumeration = _enumeration_identity(previous_device)
+    selected_location = _physical_location(previous_device)
+    other_locations: set[_UsbPhysicalLocation] = set()
+    other_enumerations: set[_UsbEnumerationIdentity] = set()
+    other_count = 0
+    for device in _candidate_devices():
+        enumeration = _enumeration_identity(device)
+        location = _physical_location(device)
+        if (
+            device is previous_device
+            or (
+                previous_enumeration is not None
+                and enumeration == previous_enumeration
+            )
+            or (
+                selected_location is not None
+                and location == selected_location
+            )
+        ):
+            continue
+        other_count += 1
+        if location is not None:
+            other_locations.add(location)
+        if enumeration is not None:
+            other_enumerations.add(enumeration)
+
+    if selected_location is None and other_count:
+        raise ConfigManagerError(
+            "USB port topology is unavailable; cannot safely reboot while "
+            "multiple switch-pico adapters are connected"
+        )
+    return _ReenumerationSnapshot(
+        previous_device,
+        previous_bus,
+        previous_address,
+        selected_location,
+        frozenset(other_locations),
+        frozenset(other_enumerations),
+    )
+
+
+def _is_previous_enumeration(
+    device: UsbDevice, snapshot: _ReenumerationSnapshot
+) -> bool:
+    if device is snapshot.previous_device:
+        return True
+    identity = _enumeration_identity(device)
+    return (
+        identity is not None
+        and snapshot.previous_bus is not None
+        and snapshot.previous_address is not None
+        and identity == (snapshot.previous_bus, snapshot.previous_address)
+    )
+
+
+def _is_reenumeration_candidate(
+    device: UsbDevice, snapshot: _ReenumerationSnapshot
+) -> bool:
+    location = _physical_location(device)
+    enumeration = _enumeration_identity(device)
+    if location is not None:
+        if location in snapshot.other_locations:
+            return False
+    elif enumeration is not None and enumeration in snapshot.other_enumerations:
+        return False
+
+    if snapshot.selected_location is not None:
+        return location == snapshot.selected_location
+    return (
+        snapshot.previous_bus is None
+        or getattr(device, "bus", None) == snapshot.previous_bus
+    )
+
+
+def _wait_for_reenumeration(
+    snapshot: _ReenumerationSnapshot, timeout: float
+) -> UsbDevice:
+    deadline = time.monotonic() + timeout
+    disappeared = False
+    failures: list[Exception] = []
+    while True:
+        candidates = list(_candidate_devices())
+        if not disappeared and not any(
+            _is_previous_enumeration(device, snapshot)
+            for device in candidates
+        ):
+            disappeared = True
+        if disappeared:
+            matches: list[UsbDevice] = []
+            for device in candidates:
+                if not _is_reenumeration_candidate(device, snapshot):
+                    continue
+                try:
+                    _ = read_info(device)
+                except (ConfigManagerError, usb.core.USBError) as exc:
+                    failures.append(exc)
+                    continue
+                matches.append(device)
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                locations = ", ".join(
+                    f"{device.bus}:{device.address}" for device in matches
+                )
+                if snapshot.selected_location is None:
+                    raise ConfigManagerError(
+                        "USB port topology is unavailable; multiple "
+                        "switch-pico devices make reboot identity ambiguous "
+                        f"({locations})"
+                    )
+                raise ConfigManagerError(
+                    "multiple switch-pico devices re-enumerated on the "
+                    f"selected USB port ({locations})"
+                )
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if not disappeared:
+        raise ConfigManagerError(
+            "Pico did not disappear from USB after the reboot request"
+        )
+    if failures:
+        raise ConfigManagerError(
+            "Pico re-enumerated on the selected USB port, but did not accept "
+            f"the management request; last error: {failures[-1]}"
+        ) from failures[-1]
+    if snapshot.selected_location is not None:
+        raise ConfigManagerError(
+            "Pico did not re-enumerate on its original physical USB port "
+            "after reboot"
+        )
+    raise ConfigManagerError("Pico did not re-enumerate after reboot")
+
+
+def configure_mode(
+    device: UsbDevice, requested_mode: int, timeout: float
+) -> tuple[UsbDevice, bool]:
+    if type(requested_mode) is not int or requested_mode not in (
+        REQUESTED_MODE_AUTO,
+        REQUESTED_MODE_SWITCH,
+        REQUESTED_MODE_XINPUT,
+    ):
+        raise ConfigManagerError("requested USB mode is not available")
+    before_info = read_info(device)
+    before_configuration = read_configuration(device)
+    if (
+        before_configuration.requested_mode == requested_mode
+        and _mode_is_active(requested_mode, before_info.active_mode)
+    ):
+        return device, False
+    reenumeration_snapshot = _capture_reenumeration_snapshot(device)
+
+    transaction = set_mode(device, requested_mode, timeout)
+    request_reboot(device, transaction.transaction_id)
+    reenumerated = _wait_for_reenumeration(
+        reenumeration_snapshot, timeout
+    )
+    after_info = read_info(reenumerated)
+    after_configuration = read_configuration(reenumerated)
+    if after_configuration.requested_mode != requested_mode:
+        raise ConfigManagerError(
+            "requested USB mode was not stored after reboot"
+        )
+    if not _mode_is_active(requested_mode, after_info.active_mode):
+        raise ConfigManagerError(
+            f"device activated {after_info.mode_name()} instead of "
+            f"{REQUESTED_MODE_NAMES[requested_mode]}"
+        )
+    return reenumerated, True
+
+
 def _print_pairings(snapshot: PairingSnapshot) -> None:
     if not snapshot.records:
         print("No stored pairings.")
@@ -1780,8 +2075,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switch-pico-config",
         description=(
-            "Manage switch-pico persistent configuration, profiles, "
-            "and pairings."
+            "Manage switch-pico USB modes, persistent configuration, "
+            "profiles, and pairings."
         ),
     )
     parser.add_argument("--bus", type=int, help="USB bus number")
@@ -1797,6 +2092,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="show firmware and configuration status")
+    mode = commands.add_parser("mode", help="select the persistent USB mode")
+    mode.add_argument("mode", choices=SELECTABLE_MODE_NAMES)
 
     config = commands.add_parser("config", help="read or change configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
@@ -1900,21 +2197,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             info = read_info(device)
             configuration = read_configuration(device)
             version = ".".join(str(part) for part in info.firmware_version)
-            mode = "XInput" if info.active_mode else "Switch"
             print(f"Firmware: {version}")
             print(f"Board: Pico 2 W ({info.board})")
-            print(f"Active USB mode: {mode}")
+            print(
+                "Requested USB mode: "
+                f"{REQUESTED_MODE_NAMES[configuration.requested_mode]}"
+            )
+            print(f"Active USB mode: {info.mode_name()}")
             print(f"Configuration generation: {configuration.generation}")
             print(f"Configuration CRC: {configuration.crc:08x}")
             print(
                 "Pairing window: "
                 f"{configuration.pairing_window_seconds} seconds"
             )
+        elif args.command == "mode":
+            requested_mode = REQUESTED_MODE_NAMES.index(args.mode)
+            _, changed = configure_mode(device, requested_mode, args.timeout)
+            if changed:
+                print(f"USB mode changed to {args.mode}.")
+            else:
+                print(f"USB mode is already {args.mode}.")
         elif args.command == "config":
             if args.config_command == "show":
                 configuration = read_configuration(device)
                 print(
                     f"pairing_window_seconds={configuration.pairing_window_seconds}"
+                )
+                print(
+                    "requested_mode="
+                    f"{REQUESTED_MODE_NAMES[configuration.requested_mode]}"
                 )
                 print(f"generation={configuration.generation}")
                 print(f"crc={configuration.crc:08x}")
@@ -1926,6 +2237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         pairing_window_seconds=args.pairing_window_seconds,
                         generation=before.generation,
                         crc=before.crc,
+                        requested_mode=before.requested_mode,
                     ),
                     args.timeout,
                 )

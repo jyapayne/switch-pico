@@ -289,6 +289,7 @@ void expect_usb_string(uint8_t index, const char* expected,
 }
 
 void test_switch_boundary_dispatch() {
+
     reset_usb_harness();
     usb_output_driver_init(AdapterUsbMode::kSwitchProbe);
     expect(usb_output_driver_mode() == AdapterUsbMode::kSwitchProbe &&
@@ -372,6 +373,19 @@ void test_switch_boundary_dispatch() {
            "host probe did not observe the Microsoft OS string");
     expect(!tud_control_request_cb(0, nullptr),
            "generic control routing claimed an unhandled request");
+}
+void test_manual_switch_selection() {
+    reset_usb_harness();
+    usb_output_driver_init(AdapterUsbMode::kSwitch);
+    expect(usb_output_driver_mode() == AdapterUsbMode::kSwitch &&
+               std::strcmp(usb_output_driver_mode_name(), "Switch") == 0,
+           "manual Switch mode was not frozen separately from probe mode");
+    expect(std::memcmp(tud_descriptor_device_cb(),
+                       switch_pro_device_descriptor,
+                       sizeof(switch_pro_device_descriptor)) == 0,
+           "manual Switch did not use the production Switch descriptor");
+    expect(tud_descriptor_string_cb(0xee, 0x0409) == nullptr,
+           "manual Switch exposed the automatic Windows probe string");
 }
 
 void open_xinput_interfaces(usbd_class_driver_t const* driver) {
@@ -671,6 +685,7 @@ int main() {
     test_rumble_report();
     test_host_probe_sequence();
     test_switch_boundary_dispatch();
+    test_manual_switch_selection();
     test_xinput_boundary_dispatch();
     test_vendor_control_boundary();
     return failures == 0 ? 0 : 1;

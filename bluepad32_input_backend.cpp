@@ -14,7 +14,7 @@
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 #include <uni.h>
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
 #include "adapter_usb_mode.h"
 #endif
 
@@ -170,12 +170,14 @@ critical_section_t g_state_lock;
 BackendSlot g_slots[kSlotCount];
 BleIdentityMapping g_ble_identity_mappings[kSlotCount]{};
 
-// These acknowledgement generations and the pairing request producer are only
-// used by Core 0. The request is transferred under the cross-core state lock.
+// These acknowledgement generations and request producers are only used by
+// Core 0. Requests are transferred under the cross-core state lock.
 uint32_t g_consumed_generation[kSlotCount]{};
 uint32_t g_last_snapshot_generation[kSlotCount]{};
 bool g_pairing_window_requested = false;
-bool g_clear_pairings_requested = false;
+uint32_t g_clear_pairings_requested_token = 0;
+uint32_t g_clear_pairings_in_progress_token = 0;
+uint32_t g_next_clear_pairings_request_token = 1;
 bool g_pairing_snapshot_requested = false;
 bool g_initialized = false;
 bool g_started = false;
@@ -198,7 +200,7 @@ bool g_status_led_on = false;
 Bluepad32PairingSnapshot g_pairing_snapshot{};
 
 uint16_t host_rumble_duration_ms() {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
         return kXInputHostRumbleDurationMs;
     }
@@ -1074,6 +1076,8 @@ void refresh_pairing_snapshot() {
 
     critical_section_enter_blocking(&g_state_lock);
     snapshot.generation = g_pairing_snapshot.generation + 1;
+    snapshot.completed_clear_pairings_token =
+        g_pairing_snapshot.completed_clear_pairings_token;
     g_pairing_snapshot = snapshot;
     g_pairing_snapshot_requested = false;
     critical_section_exit(&g_state_lock);
@@ -1093,9 +1097,13 @@ void apply_connection_policy();
 void process_clear_pairings(uint32_t now_ms) {
     uni_hid_device_t* devices[kSlotCount]{};
     critical_section_enter_blocking(&g_state_lock);
-    const bool requested = g_clear_pairings_requested;
-    g_clear_pairings_requested = false;
-    if (requested) {
+    const uint32_t request_token =
+        g_clear_pairings_requested_token;
+    if (request_token != 0) {
+        g_clear_pairings_requested_token = 0;
+        g_clear_pairings_in_progress_token = request_token;
+    }
+    if (request_token != 0) {
         g_pairing_window_requested = false;
         for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
             BackendSlot& slot = g_slots[slot_index];
@@ -1113,7 +1121,7 @@ void process_clear_pairings(uint32_t now_ms) {
         }
     }
     critical_section_exit(&g_state_lock);
-    if (!requested) {
+    if (request_token == 0) {
         return;
     }
     for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
@@ -1136,6 +1144,11 @@ void process_clear_pairings(uint32_t now_ms) {
     g_pairing_reset_feedback_deadline_ms =
         now_ms + kPairingResetFeedbackDurationMs;
     apply_connection_policy();
+    critical_section_enter_blocking(&g_state_lock);
+    g_pairing_snapshot.completed_clear_pairings_token =
+        request_token;
+    g_clear_pairings_in_progress_token = 0;
+    critical_section_exit(&g_state_lock);
 }
 
 
@@ -1734,7 +1747,9 @@ void bluepad32_input_backend_init() {
     g_pairing_snapshot = {};
     g_pairing_snapshot.status =
         Bluepad32PairingSnapshotStatus::kPending;
-    g_clear_pairings_requested = false;
+    g_clear_pairings_requested_token = 0;
+    g_clear_pairings_in_progress_token = 0;
+    g_next_clear_pairings_request_token = 1;
     g_connection_status = ConnectionStatus::Initializing;
     g_connection_policy_state = ConnectionPolicyState::Uninitialized;
     g_pairing_window_deadline_ms = 0;
@@ -1773,16 +1788,26 @@ void bluepad32_input_backend_open_pairing_window() {
     g_pairing_window_requested = true;
     critical_section_exit(&g_state_lock);
 }
-void bluepad32_input_backend_clear_pairings() {
+uint32_t bluepad32_input_backend_clear_pairings() {
     if (!g_initialized) {
         bluepad32_input_backend_init();
     }
 
     critical_section_enter_blocking(&g_state_lock);
-    g_clear_pairings_requested = true;
-    g_pairing_snapshot.status =
-        Bluepad32PairingSnapshotStatus::kPending;
+    uint32_t request_token = g_clear_pairings_requested_token;
+    if (request_token == 0) {
+        request_token = g_clear_pairings_in_progress_token;
+    }
+    if (request_token == 0) {
+        request_token = g_next_clear_pairings_request_token;
+        g_next_clear_pairings_request_token =
+            request_token == UINT32_MAX ? 1 : request_token + 1;
+        g_clear_pairings_requested_token = request_token;
+        g_pairing_snapshot.status =
+            Bluepad32PairingSnapshotStatus::kPending;
+    }
     critical_section_exit(&g_state_lock);
+    return request_token;
 }
 
 void bluepad32_input_backend_request_pairing_snapshot() {

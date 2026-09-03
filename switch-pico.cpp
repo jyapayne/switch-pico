@@ -7,12 +7,10 @@
 #ifndef SWITCH_PICO_BLUEPAD32
 #include "hardware/uart.h"
 #else
+#include "adapter_mode_controller.h"
 #include "bluepad32_input_backend.h"
-#include "controller_profile_runtime.h"
 #include "bootsel_pairing_button.h"
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-#include "adapter_host_probe.h"
-#endif
+#include "controller_profile_runtime.h"
 #endif
 
 #ifdef SWITCH_PICO_LOG
@@ -191,14 +189,9 @@ static void log_usb_state() {
         const bool ready = usb_output_driver_is_ready(instance);
         if (ready != g_last_ready[instance]) {
             g_last_ready[instance] = ready;
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
             LOG_PRINTF("[%s %u] driver %s\n",
                        usb_output_driver_name(), instance,
                        ready ? "ready" : "not ready");
-#else
-            LOG_PRINTF("[SWITCH %u] driver %s\n", instance,
-                       ready ? "ready (handshake OK)" : "not ready");
-#endif
         }
     }
 #else
@@ -218,19 +211,12 @@ int main() {
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_init();
     controller_profile_runtime_reset();
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-    adapter_host_probe_init();
-#endif
+    adapter_mode_controller_initialize_usb();
 #else
     init_uart_input();
-#endif
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-    usb_output_driver_init(adapter_host_probe_mode());
-#else
-    usb_output_driver_init(AdapterUsbMode::kSwitchProbe);
-#endif
-
+    usb_output_driver_init(AdapterUsbMode::kSwitch);
     tusb_init();
+#endif
 #ifdef SWITCH_PICO_BLUEPAD32
     for (uint8_t instance = 0;
          instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
@@ -253,12 +239,8 @@ int main() {
 
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_start();
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-    LOG_PRINTF("[BOOT] adapter feasibility mode=%s\n",
+    LOG_PRINTF("[BOOT] adapter mode=%s\n",
                usb_output_driver_mode_name());
-#else
-    LOG_PRINTF("[BOOT] switch-pico starting (Bluepad32 wireless @ 115200)\n");
-#endif
 #else
     LOG_PRINTF("[BOOT] switch-pico starting (UART0 log @ 115200)\n");
     LOG_PRINTF("[INFO] UART1 pins TX=%d RX=%d baud=%d\n",
@@ -274,7 +256,7 @@ int main() {
                 bluepad32_input_backend_open_pairing_window();
                 break;
             case BootselPairingButtonEvent::kClearPairings:
-                bluepad32_input_backend_clear_pairings();
+                adapter_mode_controller_begin_recovery();
                 break;
             case BootselPairingButtonEvent::kNone:
                 break;
@@ -286,6 +268,11 @@ int main() {
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
             Bluepad32SlotSnapshot snapshot{};
             bluepad32_input_backend_snapshot(instance, &snapshot);
+            adapter_mode_controller_process_input(
+                instance, snapshot.active,
+                snapshot.connection_generation,
+                &snapshot.pre_hotkey_button_mask, now_ms,
+                &snapshot.state);
             const ControllerProfileTransformResult transformed =
                 controller_profile_runtime_transform(
                     instance, snapshot, now_ms, output_mode);
@@ -318,6 +305,7 @@ int main() {
                 bluepad32_input_backend_report_sent(instance);
             }
         }
+        adapter_mode_controller_task(now_ms);
 #else
         bool new_data = poll_uart_frames();  // Pull controller state from UART1
         (void)new_data;

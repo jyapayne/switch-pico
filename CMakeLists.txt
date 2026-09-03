@@ -100,6 +100,8 @@ add_executable(switch-pico
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE
             bluepad32_input_backend.cpp
+            adapter_host_probe.cpp
+            adapter_mode_controller.cpp
             controller_identity.cpp
             controller_profile.cpp
             controller_profile_transform.cpp
@@ -115,19 +117,12 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             configuration_service.cpp
             pico_configuration_storage.cpp
             usb_configuration_management.cpp
+            xinput_driver.cpp
     )
-    if(SWITCH_PICO_ADAPTER_FEASIBILITY)
-        target_sources(switch-pico PRIVATE
-                adapter_host_probe.cpp
-                xinput_driver.cpp
-        )
-        target_compile_definitions(switch-pico PRIVATE
-                SWITCH_PICO_ADAPTER_FEASIBILITY=1
-        )
-    endif()
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
+            SWITCH_PICO_USB_OUTPUT_MODES=1
             PICO_FLASH_ASSUME_CORE1_SAFE=0
     )
 else()
@@ -162,9 +157,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             pico_multicore
             pico_flash
     )
-    if(SWITCH_PICO_ADAPTER_FEASIBILITY)
-        target_link_libraries(switch-pico hardware_watchdog)
-    endif()
+    target_link_libraries(switch-pico hardware_watchdog)
 endif()
 
 if (SWITCH_PICO_LOG)

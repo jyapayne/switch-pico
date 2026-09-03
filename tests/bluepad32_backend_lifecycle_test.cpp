@@ -48,6 +48,12 @@ int device_disconnect_calls = 0;
 uni_hid_device_t* last_disconnected_device = nullptr;
 uni_hid_device_t* lookup_devices[8]{};
 size_t lookup_device_count = 0;
+uint32_t expected_pending_clear_token = 0;
+uint32_t repeated_in_progress_clear_token = 0;
+bool repeat_clear_during_disconnect = false;
+void require_clear_completion_pending();
+void require_clear_snapshot_published();
+void request_repeated_clear_during_disconnect();
 gap_connection_type_t gap_connection_types[256]{};
 
 struct CoreStopped {};
@@ -129,8 +135,9 @@ uni_hid_device_t* uni_hid_device_get_instance_for_connection_handle(
     }
     return nullptr;
 }
-
 void uni_hid_device_disconnect(uni_hid_device_t* device) {
+    require_clear_completion_pending();
+    request_repeated_clear_during_disconnect();
     ++device_disconnect_calls;
     last_disconnected_device = device;
 }
@@ -165,6 +172,8 @@ void uni_bt_le_scan_stop() {
 }
 
 void uni_bt_start_scanning_and_autoconnect_unsafe() {
+    require_clear_completion_pending();
+    require_clear_snapshot_published();
     uni_bt_bredr_scan_start();
     uni_bt_le_scan_start();
 }
@@ -174,6 +183,7 @@ void uni_bt_stop_scanning_unsafe() {
     uni_bt_le_scan_stop();
 }
 void uni_bt_del_keys_unsafe() {
+    require_clear_completion_pending();
     ++delete_key_calls;
     classic_bond_count = 0;
     ble_bond_count = 0;
@@ -434,6 +444,30 @@ uint32_t btstack_run_loop_get_time_ms() {
 
 #include "../controller_identity.cpp"
 #include "../bluepad32_input_backend.cpp"
+namespace {
+void require_clear_completion_pending() {
+    if (expected_pending_clear_token != 0) {
+        require(!bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, expected_pending_clear_token),
+                "pairing clear token completed before Core1 work finished");
+    }
+}
+void require_clear_snapshot_published() {
+    if (expected_pending_clear_token != 0) {
+        require(g_pairing_snapshot.status ==
+                        Bluepad32PairingSnapshotStatus::kReady &&
+                    g_pairing_snapshot.record_count == 0,
+                "pairing clear policy ran before empty snapshot publication");
+    }
+}
+void request_repeated_clear_during_disconnect() {
+    if (repeat_clear_during_disconnect) {
+        repeat_clear_during_disconnect = false;
+        repeated_in_progress_clear_token =
+            bluepad32_input_backend_clear_pairings();
+    }
+}
+}  // namespace
 ControllerIdentity observed_profile_identities[8]{};
 size_t observed_profile_identity_count = 0;
 void configuration_service_prepare() {}
@@ -470,7 +504,7 @@ void configuration_service_snapshot(ConfigurationServiceSnapshot* output) {
     output->configuration.pairing_window_seconds =
         ADAPTER_PAIRING_WINDOW_SECONDS_DEFAULT;
 }
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
 AdapterUsbMode test_adapter_mode = AdapterUsbMode::kXInput;
 AdapterUsbMode adapter_host_probe_mode() {
     return test_adapter_mode;
@@ -1811,7 +1845,7 @@ void test_stateful_host_rumble_restore() {
         generations[slot] = snapshot.connection_generation;
     }
 
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     test_adapter_mode = AdapterUsbMode::kXInput;
     const ControllerRumbleOutput desired[kSlotCount] = {
         {0x11, 0x21}, {0x12, 0x22}, {0x13, 0x23}, {0x14, 0x24}};
@@ -2075,7 +2109,7 @@ void test_host_rumble_mode_duration() {
     require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
             "rumble-mode controller did not become ready");
 
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     test_adapter_mode = AdapterUsbMode::kSwitchProbe;
 #endif
     bluepad32_input_backend_queue_rumble(
@@ -2085,7 +2119,7 @@ void test_host_rumble_mode_duration() {
                 kSwitchHostRumbleDurationMs,
             "Switch mode did not use bounded host rumble");
 
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     test_adapter_mode = AdapterUsbMode::kXInput;
     bluepad32_input_backend_queue_rumble(
         0, ControllerRumbleOutput{102, 103});
@@ -2111,8 +2145,12 @@ void test_clear_pairings() {
                 g_pairing_snapshot.records[1].transport ==
                     Bluepad32PairingTransport::kBle,
             "initial pairing snapshot must enumerate Classic and BLE bonds");
+    require(!bluepad32_input_backend_clear_pairings_completed(
+                g_pairing_snapshot, 0),
+            "zero pairing-clear token must never be a valid completion query");
     const uint32_t snapshot_generation =
         g_pairing_snapshot.generation;
+    g_next_clear_pairings_request_token = UINT32_MAX;
     uni_hid_device_t devices[2] = {device(0), device(1)};
     for (uni_hid_device_t& controller : devices) {
         require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
@@ -2121,20 +2159,41 @@ void test_clear_pairings() {
     bluepad32_input_backend_queue_rumble(
         0, ControllerRumbleOutput{100, 101});
 
-    bluepad32_input_backend_clear_pairings();
-    require(g_clear_pairings_requested && delete_key_calls == 0 &&
-                device_disconnect_calls == 0,
-            "Core0 pairing reset request must wait for Core1");
+    const uint32_t clear_token =
+        bluepad32_input_backend_clear_pairings();
+    const uint32_t repeated_token =
+        bluepad32_input_backend_clear_pairings();
+    expected_pending_clear_token = clear_token;
+    repeat_clear_during_disconnect = true;
+    g_connection_policy_state =
+        ConnectionPolicyState::Uninitialized;
+    require(clear_token == UINT32_MAX &&
+                repeated_token == clear_token &&
+                g_clear_pairings_requested_token == clear_token &&
+                g_pairing_snapshot.completed_clear_pairings_token == 0 &&
+                !bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, clear_token) &&
+                delete_key_calls == 0 && device_disconnect_calls == 0,
+            "Core0 repeated pending clear calls must share one nonzero token, "
+            "remain incomplete, and defer the operation to Core1");
     process_rumble_timer(&g_rumble_timer);
 
+    require(repeated_in_progress_clear_token == clear_token,
+            "clear repeated during Core1 work did not share its token");
     require(delete_key_calls == 1 && device_disconnect_calls == 2,
             "pairing reset must delete bonds and disconnect every session");
     require(g_pairing_snapshot.status ==
                     Bluepad32PairingSnapshotStatus::kReady &&
                 g_pairing_snapshot.record_count == 0 &&
                 g_pairing_snapshot.generation ==
-                    snapshot_generation + 1,
-            "pairing reset must publish an empty refreshed snapshot");
+                    snapshot_generation + 1 &&
+                g_pairing_snapshot.completed_clear_pairings_token ==
+                    clear_token &&
+                bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, clear_token),
+            "pairing reset must publish its completion token with an empty "
+            "refreshed snapshot after policy update");
+    expected_pending_clear_token = 0;
     for (const BackendSlot& slot : g_slots) {
         require(slot.device == nullptr && !slot.active &&
                     !slot.rumble_pending && !slot.feedback_pending &&
@@ -2156,8 +2215,56 @@ void test_clear_pairings() {
     require(!observed_status_led_on,
             "pairing reset confirmation must use the rapid blink pattern");
     process_rumble_timer(&g_rumble_timer);
-    require(delete_key_calls == 1 && device_disconnect_calls == 2,
+    require(delete_key_calls == 1 && device_disconnect_calls == 2 &&
+                g_pairing_snapshot.completed_clear_pairings_token ==
+                    clear_token,
             "pairing reset request must execute only once");
+
+    const uint32_t completed_generation =
+        g_pairing_snapshot.generation;
+    bluepad32_input_backend_request_pairing_snapshot();
+    require(g_pairing_snapshot.status ==
+                    Bluepad32PairingSnapshotStatus::kPending &&
+                bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, clear_token),
+            "unrelated refresh revoked an already completed clear");
+    process_rumble_timer(&g_rumble_timer);
+    require(g_pairing_snapshot.generation ==
+                    completed_generation + 1 &&
+                g_pairing_snapshot.completed_clear_pairings_token ==
+                    clear_token &&
+                bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, clear_token),
+            "ordinary pairing refresh fabricated or revoked clear completion");
+
+    const uint32_t refreshed_generation =
+        g_pairing_snapshot.generation;
+    const uint32_t wrapped_token =
+        bluepad32_input_backend_clear_pairings();
+    require(wrapped_token == 1 &&
+                g_pairing_snapshot.status ==
+                    Bluepad32PairingSnapshotStatus::kPending &&
+                g_pairing_snapshot.completed_clear_pairings_token ==
+                    clear_token &&
+                !bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, wrapped_token) &&
+                bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, clear_token),
+            "UINT32_MAX-to-1 wrap reused the prior completion or revoked it");
+    expected_pending_clear_token = wrapped_token;
+    process_rumble_timer(&g_rumble_timer);
+    expected_pending_clear_token = 0;
+    require(delete_key_calls == 2 && device_disconnect_calls == 2 &&
+                g_pairing_snapshot.generation ==
+                    refreshed_generation + 1 &&
+                g_pairing_snapshot.completed_clear_pairings_token ==
+                    wrapped_token &&
+                bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, wrapped_token) &&
+                bluepad32_input_backend_clear_pairings_completed(
+                    g_pairing_snapshot, clear_token),
+            "wrapped clear completion did not acknowledge both itself and "
+            "the earlier pre-wrap request exactly once");
 }
 
 void test_configuration_timer_rearms_before_storage_work() {

@@ -3,10 +3,11 @@
 #include <string.h>
 
 #include "adapter_configuration.h"
-#include "tusb.h"
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
 #include "adapter_host_probe.h"
-#endif
+#include "adapter_reboot.h"
+#include "adapter_usb_mode.h"
+#include "tusb.h"
+#include "usb_output_driver.h"
 
 namespace UsbConfigurationManagement {
 namespace {
@@ -74,6 +75,10 @@ Status profile_service_status(const ProfileServiceMetadata& metadata) {
 
 bool valid_out_size(Operation operation, size_t size) {
     switch (operation) {
+        case Operation::kModeSet:
+            return size == kRequestHeaderSize + 5;
+        case Operation::kReboot:
+            return size == kRequestHeaderSize + 4;
         case Operation::kConfigurationBegin:
             return size == kRequestHeaderSize + 12;
         case Operation::kProfileBegin:
@@ -147,11 +152,7 @@ size_t encode_transaction(uint8_t* output, size_t output_size) {
 size_t encode_info(uint8_t* output, size_t output_size) {
     uint8_t payload[8] = {
         0, 2, 0, 2,
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-        adapter_host_probe_mode() == AdapterUsbMode::kXInput ? 1u : 0u,
-#else
-        0,
-#endif
+        static_cast<uint8_t>(usb_output_driver_mode()),
         0,
         static_cast<uint8_t>(CONFIGURATION_STORAGE_MAX_PAYLOAD_SIZE),
         static_cast<uint8_t>(
@@ -329,6 +330,41 @@ bool process_out_request() {
 
     const uint8_t* payload = request.payload;
     switch (request.operation) {
+        case Operation::kModeSet: {
+            const uint32_t transaction_id =
+                static_cast<uint32_t>(payload[0]) |
+                (static_cast<uint32_t>(payload[1]) << 8) |
+                (static_cast<uint32_t>(payload[2]) << 16) |
+                (static_cast<uint32_t>(payload[3]) << 24);
+            const AdapterRequestedMode requested_mode =
+                static_cast<AdapterRequestedMode>(payload[4]);
+            if (transaction_id == 0 ||
+                (transaction_id &
+                 CONFIGURATION_SERVICE_INTERNAL_TRANSACTION_ID_MASK) != 0 ||
+                !adapter_requested_mode_valid(requested_mode)) {
+                return false;
+            }
+            const ConfigurationTransactionStatus status =
+                configuration_service_set_mode(
+                    transaction_id, requested_mode,
+                    adapter_usb_mode_availability());
+            return status == ConfigurationTransactionStatus::kPending ||
+                   status == ConfigurationTransactionStatus::kCommitted ||
+                   status == ConfigurationTransactionStatus::kUnchanged;
+        }
+        case Operation::kReboot: {
+            const uint32_t transaction_id =
+                static_cast<uint32_t>(payload[0]) |
+                (static_cast<uint32_t>(payload[1]) << 8) |
+                (static_cast<uint32_t>(payload[2]) << 16) |
+                (static_cast<uint32_t>(payload[3]) << 24);
+            if (transaction_id == 0 ||
+                (transaction_id &
+                 CONFIGURATION_SERVICE_INTERNAL_TRANSACTION_ID_MASK) != 0) {
+                return false;
+            }
+            return adapter_reboot_for_mode_transaction(transaction_id);
+        }
         case Operation::kConfigurationBegin:
             configuration_service_begin(
                 static_cast<uint32_t>(payload[0]) |
@@ -482,11 +518,9 @@ bool process_out_request() {
 bool usb_configuration_management_vendor_control(
     uint8_t rhport, uint8_t stage,
     tusb_control_request_t const* request) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
     if (adapter_host_probe_vendor_control(rhport, stage, request)) {
         return true;
     }
-#endif
     using namespace UsbConfigurationManagement;
     if (request == nullptr ||
         request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR ||

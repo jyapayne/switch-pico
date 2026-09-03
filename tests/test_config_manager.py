@@ -36,15 +36,23 @@ def make_response(
 class FakeDevice:
     bus = 1
     address = 7
+    port_numbers = (1,)
 
     def __init__(self) -> None:
-        self.configuration = struct.pack("<Hxx", 60)
+        self.configuration = struct.pack(
+            "<HB5x", 60, config_manager.REQUESTED_MODE_AUTO
+        )
         self.configuration_generation = 3
+        self.active_mode = config_manager.ACTIVE_MODE_SWITCH_PROBE
         self.transaction_id = 0
         self.transaction_payload = bytearray()
         self.transaction_expected_size = 0
         self.transaction_expected_crc = 0
         self.transaction_status = config_manager.STATUS_OK
+        self.pending_requested_mode: int | None = None
+        self.mode_pending_reads = 0
+        self.fail_mode_status: int | None = None
+        self.reboot_transaction_ids: list[int] = []
         self.records = [
             (
                 config_manager.TRANSPORT_CLASSIC,
@@ -93,6 +101,7 @@ class FakeDevice:
         self.fail_profile_commit_status: int | None = None
         self.bad_profile_response_crc = False
         self.requests: list[int] = []
+        self.out_requests: list[tuple[int, bytes, bytes]] = []
         self.profile_chunk_sizes: list[int] = []
         self.pending_profile_mutation: tuple[int, bytes, int] | None = None
         self.profile_transaction_pending_reads = 0
@@ -198,7 +207,19 @@ class FakeDevice:
         if bm_request_type == 0xC0:
             if request == config_manager.OP_INFO:
                 return make_response(
-                    request, bytes([0, 2, 0, 2, 0, 0, 0, 2])
+                    request,
+                    bytes(
+                        [
+                            0,
+                            2,
+                            0,
+                            2,
+                            self.active_mode,
+                            0,
+                            0,
+                            2,
+                        ]
+                    ),
                 )
             if request == config_manager.OP_CONFIGURATION_READ:
                 return make_response(
@@ -208,6 +229,29 @@ class FakeDevice:
                     generation=self.configuration_generation,
                 )
             if request == config_manager.OP_TRANSACTION_STATUS:
+                if (
+                    self.transaction_status == config_manager.STATUS_PENDING
+                    and self.pending_requested_mode is not None
+                ):
+                    if self.mode_pending_reads:
+                        self.mode_pending_reads -= 1
+                    else:
+                        self.transaction_status = (
+                            self.fail_mode_status
+                            if self.fail_mode_status is not None
+                            else config_manager.STATUS_OK
+                        )
+                        if self.transaction_status == config_manager.STATUS_OK:
+                            pairing_window = struct.unpack_from(
+                                "<H", self.configuration
+                            )[0]
+                            self.configuration = struct.pack(
+                                "<HB5x",
+                                pairing_window,
+                                self.pending_requested_mode,
+                            )
+                            self.configuration_generation += 1
+                        self.pending_requested_mode = None
                 return make_response(
                     request,
                     self._transaction_payload(),
@@ -270,6 +314,7 @@ class FakeDevice:
         assert struct.unpack_from("<I", encoded, 12)[0] == (
             zlib.crc32(payload) & 0xFFFFFFFF
         )
+        self.out_requests.append((request, payload, encoded))
         if request == config_manager.OP_CONFIGURATION_BEGIN:
             (
                 self.transaction_id,
@@ -277,6 +322,9 @@ class FakeDevice:
                 self.transaction_expected_size,
                 self.transaction_expected_crc,
             ) = struct.unpack("<IHHI", payload)
+            assert 0 < self.transaction_id <= (
+                config_manager.HOST_TRANSACTION_ID_MASK
+            )
             self.transaction_payload = bytearray()
             self.transaction_status = config_manager.STATUS_PENDING
         elif request == config_manager.OP_CONFIGURATION_CHUNK:
@@ -297,7 +345,12 @@ class FakeDevice:
             self.transaction_status = config_manager.STATUS_OK
         elif request == config_manager.OP_CONFIGURATION_RESET:
             self.transaction_id = struct.unpack("<I", payload)[0]
-            self.configuration = struct.pack("<Hxx", 60)
+            assert 0 < self.transaction_id <= (
+                config_manager.HOST_TRANSACTION_ID_MASK
+            )
+            self.configuration = struct.pack(
+                "<HB5x", 60, config_manager.REQUESTED_MODE_AUTO
+            )
             self.configuration_generation += 1
             self.transaction_payload = bytearray(self.configuration)
             self.transaction_expected_size = len(self.configuration)
@@ -305,6 +358,27 @@ class FakeDevice:
                 zlib.crc32(self.configuration) & 0xFFFFFFFF
             )
             self.transaction_status = config_manager.STATUS_OK
+        elif request == config_manager.OP_MODE_SET:
+            assert len(payload) == 5
+            self.transaction_id, requested_mode = struct.unpack("<IB", payload)
+            assert 0 < self.transaction_id <= 0x7FFFFFFF
+            assert requested_mode in (
+                config_manager.REQUESTED_MODE_AUTO,
+                config_manager.REQUESTED_MODE_SWITCH,
+                config_manager.REQUESTED_MODE_XINPUT,
+            )
+            self.transaction_payload = bytearray()
+            self.transaction_expected_size = 0
+            self.transaction_expected_crc = 0
+            self.transaction_status = config_manager.STATUS_PENDING
+            self.pending_requested_mode = requested_mode
+            self.mode_pending_reads = 1
+        elif request == config_manager.OP_REBOOT:
+            assert len(payload) == 4
+            reboot_transaction_id = struct.unpack("<I", payload)[0]
+            assert reboot_transaction_id == self.transaction_id
+            assert self.transaction_status == config_manager.STATUS_OK
+            self.reboot_transaction_ids.append(reboot_transaction_id)
         elif request == config_manager.OP_PAIRING_REFRESH:
             self.pairing_generation += 1
         elif request == config_manager.OP_PAIRING_CLEAR:
@@ -465,16 +539,431 @@ def test_configuration_transaction_and_reset() -> None:
     device = FakeDevice()
     before = config_manager.read_configuration(device)
     assert before.pairing_window_seconds == 60
+    assert before.requested_mode == config_manager.REQUESTED_MODE_AUTO
     status = config_manager.write_configuration(
         device,
-        config_manager.AdapterConfiguration(90, before.generation, before.crc),
+        config_manager.AdapterConfiguration(
+            90,
+            before.generation,
+            before.crc,
+            config_manager.REQUESTED_MODE_XINPUT,
+        ),
         1.0,
     )
     assert status.stored_generation == 4
-    assert config_manager.read_configuration(device).pairing_window_seconds == 90
+    stored = config_manager.read_configuration(device)
+    assert stored.pairing_window_seconds == 90
+    assert stored.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+    assert device.configuration == struct.pack(
+        "<HB5x", 90, config_manager.REQUESTED_MODE_XINPUT
+    )
     reset = config_manager.reset_configuration(device, 1.0)
     assert reset.stored_generation == 5
-    assert config_manager.read_configuration(device).pairing_window_seconds == 60
+    reset_configuration = config_manager.read_configuration(device)
+    assert reset_configuration.pairing_window_seconds == 60
+    assert (
+        reset_configuration.requested_mode
+        == config_manager.REQUESTED_MODE_AUTO
+    )
+
+
+def test_configuration_transaction_ids_stay_in_host_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    generated_values = iter((0xFFFFFFFF, 0x80000000, 0xFEDCBA98))
+    requested_bits: list[int] = []
+
+    def randbits(bits: int) -> int:
+        requested_bits.append(bits)
+        return next(generated_values)
+
+    monkeypatch.setattr(config_manager.secrets, "randbits", randbits)
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+    before = config_manager.read_configuration(device)
+    config_manager.write_configuration(
+        device,
+        config_manager.AdapterConfiguration(
+            90,
+            before.generation,
+            before.crc,
+            config_manager.REQUESTED_MODE_AUTO,
+        ),
+        1.0,
+    )
+    config_manager.reset_configuration(device, 1.0)
+    config_manager.set_mode(
+        device, config_manager.REQUESTED_MODE_SWITCH, 1.0
+    )
+
+    transaction_ids = [
+        struct.unpack_from("<I", payload)[0]
+        for operation, payload, _ in device.out_requests
+        if operation
+        in (
+            config_manager.OP_CONFIGURATION_BEGIN,
+            config_manager.OP_CONFIGURATION_RESET,
+            config_manager.OP_MODE_SET,
+        )
+    ]
+    assert requested_bits == [31, 31, 31]
+    assert transaction_ids == [0x7FFFFFFF, 1, 0x7EDCBA98]
+    assert all(
+        transaction_id & ~config_manager.HOST_TRANSACTION_ID_MASK == 0
+        for transaction_id in transaction_ids
+    )
+
+
+def test_mode_envelopes_and_host_side_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        config_manager.secrets, "randbits", lambda _bits: 0x12345678
+    )
+
+    status = config_manager.set_mode(
+        device, config_manager.REQUESTED_MODE_XINPUT, 1.0
+    )
+
+    mode_payload = struct.pack(
+        "<IB", 0x12345678, config_manager.REQUESTED_MODE_XINPUT
+    )
+    operation, payload, encoded = device.out_requests[0]
+    assert operation == config_manager.OP_MODE_SET
+    assert payload == mode_payload
+    assert encoded == config_manager.encode_request(
+        config_manager.OP_MODE_SET, mode_payload
+    )
+    assert status.transaction_id == 0x12345678
+
+    config_manager.request_reboot(device, status.transaction_id)
+    operation, payload, encoded = device.out_requests[-1]
+    reboot_payload = struct.pack("<I", 0x12345678)
+    assert operation == config_manager.OP_REBOOT
+    assert payload == reboot_payload
+    assert encoded == config_manager.encode_request(
+        config_manager.OP_REBOOT, reboot_payload
+    )
+
+    for transaction_id in (0, 0x80000000, True):
+        with pytest.raises(config_manager.ConfigManagerError):
+            config_manager.request_reboot(device, transaction_id)
+    for mode in (
+        config_manager.REQUESTED_MODE_DINPUT,
+        config_manager.REQUESTED_MODE_MAC,
+        0xFF,
+        True,
+    ):
+        with pytest.raises(
+            config_manager.ConfigManagerError, match="not available"
+        ):
+            config_manager.set_mode(device, mode, 1.0)
+
+
+@pytest.mark.parametrize(
+    ("failure_status", "message"),
+    (
+        (7, "device busy"),
+        (8, "storage failure"),
+    ),
+)
+def test_mode_set_propagates_busy_and_commit_errors_without_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_status: int,
+    message: str,
+) -> None:
+    device = FakeDevice()
+    device.fail_mode_status = failure_status
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(config_manager.ConfigManagerError, match=message):
+        config_manager.configure_mode(
+            device, config_manager.REQUESTED_MODE_SWITCH, 1.0
+        )
+
+    assert config_manager.OP_REBOOT not in device.requests
+
+
+def test_mode_transaction_must_correlate_before_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WrongTransactionDevice(FakeDevice):
+        def _transaction_payload(self) -> bytes:
+            payload = bytearray(super()._transaction_payload())
+            struct.pack_into("<I", payload, 0, self.transaction_id + 1)
+            return bytes(payload)
+
+    device = WrongTransactionDevice()
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        config_manager.ConfigManagerError,
+        match="different transaction",
+    ):
+        config_manager.configure_mode(
+            device, config_manager.REQUESTED_MODE_SWITCH, 1.0
+        )
+
+    assert config_manager.OP_REBOOT not in device.requests
+
+
+@pytest.mark.parametrize(
+    ("requested_mode", "active_mode"),
+    (
+        (
+            config_manager.REQUESTED_MODE_AUTO,
+            config_manager.ACTIVE_MODE_SWITCH_PROBE,
+        ),
+        (
+            config_manager.REQUESTED_MODE_AUTO,
+            config_manager.ACTIVE_MODE_XINPUT,
+        ),
+        (
+            config_manager.REQUESTED_MODE_SWITCH,
+            config_manager.ACTIVE_MODE_SWITCH,
+        ),
+        (
+            config_manager.REQUESTED_MODE_XINPUT,
+            config_manager.ACTIVE_MODE_XINPUT,
+        ),
+    ),
+)
+def test_mode_noop_accepts_only_mode_appropriate_active_state(
+    requested_mode: int, active_mode: int
+) -> None:
+    device = FakeDevice()
+    device.configuration = struct.pack("<HB5x", 60, requested_mode)
+    device.active_mode = active_mode
+
+    same_device, changed = config_manager.configure_mode(
+        device, requested_mode, 1.0
+    )
+
+    assert same_device is device
+    assert not changed
+    assert device.out_requests == []
+
+
+@pytest.mark.parametrize(
+    ("requested_mode", "active_mode"),
+    (
+        (
+            config_manager.REQUESTED_MODE_AUTO,
+            config_manager.ACTIVE_MODE_SWITCH_PROBE,
+        ),
+        (
+            config_manager.REQUESTED_MODE_AUTO,
+            config_manager.ACTIVE_MODE_XINPUT,
+        ),
+        (
+            config_manager.REQUESTED_MODE_SWITCH,
+            config_manager.ACTIVE_MODE_SWITCH,
+        ),
+        (
+            config_manager.REQUESTED_MODE_XINPUT,
+            config_manager.ACTIVE_MODE_XINPUT,
+        ),
+    ),
+)
+def test_mode_change_waits_for_disappearance_and_reenumeration(
+    monkeypatch: pytest.MonkeyPatch,
+    requested_mode: int,
+    active_mode: int,
+) -> None:
+    previous = FakeDevice()
+    if requested_mode == config_manager.REQUESTED_MODE_AUTO:
+        previous.configuration = struct.pack(
+            "<HB5x", 60, config_manager.REQUESTED_MODE_SWITCH
+        )
+        previous.active_mode = config_manager.ACTIVE_MODE_SWITCH
+    reenumerated = FakeDevice()
+    reenumerated.address = 8
+    reenumerated.configuration = struct.pack("<HB5x", 60, requested_mode)
+    reenumerated.active_mode = active_mode
+    scans = iter(((previous,), (), (reenumerated,)))
+    monkeypatch.setattr(
+        config_manager,
+        "_candidate_devices",
+        lambda: next(scans, (reenumerated,)),
+    )
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+
+    result, changed = config_manager.configure_mode(
+        previous, requested_mode, 1.0
+    )
+
+    assert result is reenumerated
+    assert changed
+    assert previous.reboot_transaction_ids == [previous.transaction_id]
+    assert [
+        operation
+        for operation, _, _ in previous.out_requests
+        if operation in (config_manager.OP_MODE_SET, config_manager.OP_REBOOT)
+    ] == [config_manager.OP_MODE_SET, config_manager.OP_REBOOT]
+
+
+def test_mode_reenumeration_tracks_same_port_among_adapters_on_one_bus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = FakeDevice()
+    previous.port_numbers = (2, 1)
+    other = FakeDevice()
+    other.address = 8
+    other.port_numbers = (2, 2)
+    replacement = FakeDevice()
+    replacement.address = 9
+    replacement.port_numbers = previous.port_numbers
+    replacement.configuration = struct.pack(
+        "<HB5x", 60, config_manager.REQUESTED_MODE_SWITCH
+    )
+    replacement.active_mode = config_manager.ACTIVE_MODE_SWITCH
+    scans = iter(
+        (
+            (previous, other),
+            (other,),
+            (other, replacement),
+        )
+    )
+    monkeypatch.setattr(
+        config_manager,
+        "_candidate_devices",
+        lambda: next(scans, (other, replacement)),
+    )
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+
+    result, changed = config_manager.configure_mode(
+        previous, config_manager.REQUESTED_MODE_SWITCH, 1.0
+    )
+
+    assert result is replacement
+    assert changed
+    assert replacement.address != previous.address
+    assert replacement.port_numbers == previous.port_numbers
+    assert other.requests == []
+
+
+def test_mode_reboot_fails_when_missing_topology_is_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = FakeDevice()
+    previous.port_numbers = None
+    other = FakeDevice()
+    other.address = 8
+    other.port_numbers = None
+    monkeypatch.setattr(
+        config_manager,
+        "_candidate_devices",
+        lambda: (previous, other),
+    )
+
+    with pytest.raises(
+        config_manager.ConfigManagerError,
+        match="topology is unavailable.*multiple",
+    ):
+        config_manager.configure_mode(
+            previous, config_manager.REQUESTED_MODE_SWITCH, 1.0
+        )
+
+    assert previous.out_requests == []
+    assert other.out_requests == []
+
+
+@pytest.mark.parametrize(
+    ("stored_mode", "active_mode", "message"),
+    (
+        (
+            config_manager.REQUESTED_MODE_SWITCH,
+            config_manager.ACTIVE_MODE_SWITCH_PROBE,
+            "activated",
+        ),
+        (
+            config_manager.REQUESTED_MODE_AUTO,
+            config_manager.ACTIVE_MODE_SWITCH,
+            "was not stored",
+        ),
+    ),
+)
+def test_mode_verifies_requested_and_active_state_after_reenumeration(
+    monkeypatch: pytest.MonkeyPatch,
+    stored_mode: int,
+    active_mode: int,
+    message: str,
+) -> None:
+    previous = FakeDevice()
+    reenumerated = FakeDevice()
+    reenumerated.address = 8
+    reenumerated.configuration = struct.pack("<HB5x", 60, stored_mode)
+    reenumerated.active_mode = active_mode
+    scans = iter(((previous,), (), (reenumerated,)))
+    monkeypatch.setattr(
+        config_manager,
+        "_candidate_devices",
+        lambda: next(scans, (reenumerated,)),
+    )
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(config_manager.ConfigManagerError, match=message):
+        config_manager.configure_mode(
+            previous, config_manager.REQUESTED_MODE_SWITCH, 1.0
+        )
+
+
+def test_reenumeration_reports_missing_disappearance_and_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    monkeypatch.setattr(
+        config_manager, "_candidate_devices", lambda: (device,)
+    )
+    with pytest.raises(
+        config_manager.ConfigManagerError, match="did not disappear"
+    ):
+        snapshot = config_manager._capture_reenumeration_snapshot(device)
+        config_manager._wait_for_reenumeration(snapshot, 0)
+
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: ())
+    with pytest.raises(
+        config_manager.ConfigManagerError, match="did not re-enumerate"
+    ):
+        snapshot = config_manager._capture_reenumeration_snapshot(device)
+        config_manager._wait_for_reenumeration(snapshot, 0)
+
+
+def test_requested_and_active_mode_response_validation() -> None:
+    device = FakeDevice()
+    device.configuration = struct.pack(
+        "<HB5x", 60, config_manager.REQUESTED_MODE_DINPUT
+    )
+    assert (
+        config_manager.read_configuration(device).requested_mode
+        == config_manager.REQUESTED_MODE_DINPUT
+    )
+    assert (
+        config_manager.read_info(device).active_mode
+        == config_manager.ACTIVE_MODE_SWITCH_PROBE
+    )
+
+    device.configuration = struct.pack("<HB5x", 60, 0xFF)
+    with pytest.raises(
+        config_manager.ConfigManagerError, match="invalid stored requested"
+    ):
+        config_manager.read_configuration(device)
+    device.configuration = (
+        struct.pack("<HB5x", 60, config_manager.REQUESTED_MODE_AUTO)[:-1]
+        + b"\x01"
+    )
+    with pytest.raises(
+        config_manager.ConfigManagerError,
+        match="unsupported configuration object",
+    ):
+        config_manager.read_configuration(device)
+    device.active_mode = 0xFF
+    with pytest.raises(
+        config_manager.ConfigManagerError, match="unknown active USB mode"
+    ):
+        config_manager.read_info(device)
 
 
 def test_identity_and_profile_binary_json_round_trip() -> None:
@@ -710,6 +1199,7 @@ def test_profile_reset_and_activate_wait_for_correlated_transactions(
     device.profiles[profile_key] = custom_profile().to_bytes()
 
     reset = config_manager.reset_profile(device, identity, 2, 1.0)
+
 
     assert reset.transaction_id == device.profile_transaction_id == 1
     assert reset.status == config_manager.STATUS_OK
@@ -981,6 +1471,8 @@ def test_status_and_pairing_commands(
     output = capsys.readouterr().out
     assert "Firmware: 0.2.0" in output
     assert "Pairing window: 60 seconds" in output
+    assert "Requested USB mode: auto" in output
+    assert "Active USB mode: Switch probe" in output
 
     assert config_manager.main(["pairings", "list"]) == 0
     output = capsys.readouterr().out
@@ -991,6 +1483,95 @@ def test_status_and_pairing_commands(
     assert "requires --yes" in capsys.readouterr().err
     assert config_manager.main(["pairings", "clear", "--yes"]) == 0
     assert capsys.readouterr().out == "Cleared 2 stored pairing(s).\n"
+
+
+def test_config_cli_preserves_requested_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = FakeDevice()
+    device.configuration = struct.pack(
+        "<HB5x", 60, config_manager.REQUESTED_MODE_XINPUT
+    )
+    device.active_mode = config_manager.ACTIVE_MODE_XINPUT
+    monkeypatch.setattr(
+        config_manager, "_candidate_devices", lambda: (device,)
+    )
+
+    assert (
+        config_manager.main(
+            ["config", "set", "--pairing-window-seconds", "90"]
+        )
+        == 0
+    )
+    assert struct.unpack("<HB5x", device.configuration) == (
+        90,
+        config_manager.REQUESTED_MODE_XINPUT,
+    )
+    assert "Stored configuration generation" in capsys.readouterr().out
+    assert config_manager.main(["config", "show"]) == 0
+    output = capsys.readouterr().out
+    assert "pairing_window_seconds=90" in output
+    assert "requested_mode=xinput" in output
+
+
+def test_mode_cli_changes_then_noops(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    previous = FakeDevice()
+    reenumerated = FakeDevice()
+    reenumerated.address = 8
+    reenumerated.configuration = struct.pack(
+        "<HB5x", 60, config_manager.REQUESTED_MODE_XINPUT
+    )
+    reenumerated.active_mode = config_manager.ACTIVE_MODE_XINPUT
+    scans = iter(
+        ((previous,), (previous,), (), (reenumerated,))
+    )
+    monkeypatch.setattr(
+        config_manager,
+        "_candidate_devices",
+        lambda: next(scans, (reenumerated,)),
+    )
+    monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
+
+    assert config_manager.main(["mode", "xinput"]) == 0
+    assert capsys.readouterr().out == "USB mode changed to xinput.\n"
+    assert previous.reboot_transaction_ids == [previous.transaction_id]
+
+    monkeypatch.setattr(
+        config_manager, "_candidate_devices", lambda: (reenumerated,)
+    )
+    assert config_manager.main(["mode", "xinput"]) == 0
+    assert capsys.readouterr().out == "USB mode is already xinput.\n"
+    assert reenumerated.out_requests == []
+
+
+def test_mode_parser_rejects_unimplemented_modes() -> None:
+    for mode in ("dinput", "mac"):
+        with pytest.raises(SystemExit):
+            config_manager.build_parser().parse_args(["mode", mode])
+
+
+def test_candidate_discovery_checks_switch_and_xinput_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookups: list[tuple[int, int]] = []
+
+    def find(**arguments: object) -> tuple[object, ...]:
+        lookups.append(
+            (
+                int(arguments["idVendor"]),
+                int(arguments["idProduct"]),
+            )
+        )
+        return ()
+
+    monkeypatch.setattr(config_manager.usb.core, "find", find)
+
+    assert list(config_manager._candidate_devices()) == []
+    assert tuple(lookups) == config_manager.USB_IDENTITIES
 
 
 def test_find_requires_selector_for_multiple_picos(

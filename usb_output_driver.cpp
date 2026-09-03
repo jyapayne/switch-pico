@@ -12,7 +12,7 @@
 #include "usb_configuration_management.h"
 #endif
 
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
 #include "adapter_host_probe.h"
 #include "xinput_descriptors.h"
 #include "xinput_driver.h"
@@ -26,11 +26,11 @@
 
 namespace {
 
-AdapterUsbMode g_mode = AdapterUsbMode::kSwitchProbe;
+AdapterUsbMode g_mode = AdapterUsbMode::kSwitch;
 uint16_t g_string_descriptor[32]{};
 
 bool xinput_selected() {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     return g_mode == AdapterUsbMode::kXInput;
 #else
     return false;
@@ -40,16 +40,16 @@ bool xinput_selected() {
 }  // namespace
 
 void usb_output_driver_init(AdapterUsbMode mode) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     g_mode = mode;
 #else
     (void)mode;
-    g_mode = AdapterUsbMode::kSwitchProbe;
+    g_mode = AdapterUsbMode::kSwitch;
 #endif
 
     for (uint8_t instance = 0;
          instance < SWITCH_PICO_HID_INSTANCE_COUNT; ++instance) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
         if (xinput_selected()) {
             xinput_init(instance);
         } else
@@ -61,7 +61,15 @@ void usb_output_driver_init(AdapterUsbMode mode) {
 }
 
 const char* usb_output_driver_mode_name() {
-    return xinput_selected() ? "XInput" : "Switch probe";
+    switch (g_mode) {
+        case AdapterUsbMode::kSwitch:
+            return "Switch";
+        case AdapterUsbMode::kSwitchProbe:
+            return "Switch probe";
+        case AdapterUsbMode::kXInput:
+            return "XInput";
+    }
+    return "Switch";
 }
 
 AdapterUsbMode usb_output_driver_mode() {
@@ -76,7 +84,7 @@ void usb_output_driver_set_input(uint8_t instance,
                                  const ControllerState& state,
                                  uint16_t left_trigger_threshold,
                                  uint16_t right_trigger_threshold) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         xinput_set_input(instance, state);
         return;
@@ -87,7 +95,7 @@ void usb_output_driver_set_input(uint8_t instance,
 }
 
 bool usb_output_driver_task(uint8_t instance) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         return xinput_task(instance);
     }
@@ -96,7 +104,7 @@ bool usb_output_driver_task(uint8_t instance) {
 }
 
 bool usb_output_driver_is_ready(uint8_t instance) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         return xinput_is_ready(instance);
     }
@@ -106,7 +114,7 @@ bool usb_output_driver_is_ready(uint8_t instance) {
 
 void usb_output_driver_set_rumble_callback(
     uint8_t instance, ControllerRumbleCallback callback) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         xinput_set_rumble_callback(instance, callback);
         return;
@@ -151,19 +159,20 @@ extern "C" uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
 }
 
 extern "C" uint8_t const* tud_descriptor_device_cb() {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         return XInput::kDeviceDescriptor;
     }
-    return XInput::kSwitchProbeDeviceDescriptor;
-#else
-    return switch_pro_device_descriptor;
+    if (g_mode == AdapterUsbMode::kSwitchProbe) {
+        return XInput::kSwitchProbeDeviceDescriptor;
+    }
 #endif
+    return switch_pro_device_descriptor;
 }
 
 extern "C" uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
     (void)index;
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         return XInput::kConfigurationDescriptor;
     }
@@ -175,9 +184,9 @@ extern "C" uint16_t const* tud_descriptor_string_cb(uint8_t index,
                                                      uint16_t langid) {
     (void)langid;
 
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     adapter_host_probe_note_string_descriptor(index);
-    if (index == 0xee) {
+    if (index == 0xee && g_mode != AdapterUsbMode::kSwitch) {
         static constexpr char kSignature[] = "MSFT100";
         for (uint8_t i = 0; i < sizeof(kSignature) - 1; ++i) {
             g_string_descriptor[1 + i] = kSignature[i];
@@ -195,7 +204,7 @@ extern "C" uint16_t const* tud_descriptor_string_cb(uint8_t index,
         character_count = 1;
     } else {
         const uint8_t* string = nullptr;
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
         static const uint8_t kManufacturer[] = "Switch Pico";
         static const uint8_t kProduct[] = "XInput Feasibility";
         static const uint8_t kSerial[] = "XINPUT-PROTOTYPE";
@@ -279,7 +288,7 @@ extern "C" usbd_class_driver_t const* usbd_app_driver_get_cb(
     if (driver_count == nullptr) {
         return nullptr;
     }
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         *driver_count = 1;
         return xinput_class_driver();

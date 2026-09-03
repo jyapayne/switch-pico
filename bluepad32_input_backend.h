@@ -29,11 +29,29 @@ struct Bluepad32PairingRecord {
 
 struct Bluepad32PairingSnapshot {
     uint32_t generation;
+    // Unchanged by ordinary refreshes; published only after all clear work.
+    uint32_t completed_clear_pairings_token;
     Bluepad32PairingSnapshotStatus status;
     uint8_t record_count;
     bool overflow;
     Bluepad32PairingRecord records[BLUEPAD32_PAIRING_RECORD_CAPACITY];
 };
+// Clear tokens form a bounded serial number space over every nonzero uint32_t.
+// A completion at most half that space ahead of a request also acknowledges
+// the request, including across the UINT32_MAX-to-1 wrap.
+constexpr bool bluepad32_input_backend_clear_pairings_completed(
+    const Bluepad32PairingSnapshot& snapshot, uint32_t request_token) {
+    const uint32_t completed_token =
+        snapshot.completed_clear_pairings_token;
+    if (request_token == 0 || completed_token == 0) {
+        return false;
+    }
+    const uint32_t forward_distance =
+        completed_token >= request_token
+            ? completed_token - request_token
+            : (UINT32_MAX - request_token) + completed_token;
+    return forward_distance <= UINT32_MAX / 2u;
+}
 struct Bluepad32SlotSnapshot {
     bool active;
     uint32_t connection_generation;
@@ -49,7 +67,9 @@ struct Bluepad32SlotSnapshot {
 void bluepad32_input_backend_init();
 void bluepad32_input_backend_start();
 void bluepad32_input_backend_open_pairing_window();
-void bluepad32_input_backend_clear_pairings();
+// Repeated calls coalesce until Core 1 completes the operation and return the
+// same nonzero token.
+uint32_t bluepad32_input_backend_clear_pairings();
 void bluepad32_input_backend_snapshot(uint8_t slot,
                                       Bluepad32SlotSnapshot* out);
 void bluepad32_input_backend_request_pairing_snapshot();

@@ -33,7 +33,7 @@ def test_usb_output_driver_contracts(tmp_path: Path) -> None:
                     "-Werror",
                     "-pedantic",
                     f"-DSWITCH_PICO_HID_INSTANCE_COUNT={instance_count}",
-                    "-DSWITCH_PICO_ADAPTER_FEASIBILITY=1",
+                    "-DSWITCH_PICO_USB_OUTPUT_MODES=1",
                     *backend_definitions,
                     f"-I{root / 'tests' / 'native_stubs'}",
                     f"-I{root}",
