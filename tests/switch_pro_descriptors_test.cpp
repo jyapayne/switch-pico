@@ -1,6 +1,5 @@
-#include "switch_pro_descriptors.h"
-#include "tusb_config.h"
-
+#include "usb/switch/switch_pro_descriptors.h"
+#include "platform/pico/tusb_config.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>

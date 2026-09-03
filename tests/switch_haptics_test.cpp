@@ -1,5 +1,4 @@
-#include "switch_haptics.h"
-
+#include "usb/switch/switch_haptics.h"
 #include <array>
 #include <cstdint>
 #include <iostream>

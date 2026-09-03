@@ -1,7 +1,6 @@
-#include "adapter_configuration.h"
-#include "configuration_storage.h"
-#include "configuration_transaction.h"
-
+#include "configuration/adapter_configuration.h"
+#include "configuration/configuration_storage.h"
+#include "configuration/configuration_transaction.h"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>

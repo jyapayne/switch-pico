@@ -89,36 +89,37 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     )
 endif()
 
-# Add executable. Default name is the project name, version 0.1
+# Firmware sources live under one include root and are grouped by responsibility.
+set(SWITCH_PICO_SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/src/firmware)
 
 add_executable(switch-pico
-        switch-pico.cpp
-        switch_pro_driver.cpp
-        usb_output_driver.cpp
-        switch_haptics.cpp
+        ${SWITCH_PICO_SOURCE_DIR}/main.cpp
+        ${SWITCH_PICO_SOURCE_DIR}/usb/usb_output_driver.cpp
+        ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_pro_driver.cpp
+        ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_haptics.cpp
 )
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE
-            bluepad32_input_backend.cpp
-            adapter_host_probe.cpp
-            adapter_mode_controller.cpp
-            controller_identity.cpp
-            controller_profile.cpp
-            controller_profile_transform.cpp
-            controller_synthetic_input.cpp
-            controller_profile_runtime.cpp
-            profile_storage.cpp
-            profile_service.cpp
-            pico_profile_storage.cpp
-            bootsel_pairing_button.cpp
-            adapter_configuration.cpp
-            configuration_storage.cpp
-            configuration_transaction.cpp
-            configuration_service.cpp
-            pico_configuration_storage.cpp
-            usb_configuration_management.cpp
-            xinput_driver.cpp
-            generic_hid_driver.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/adapter/adapter_host_probe.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/adapter/adapter_mode_controller.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/configuration/adapter_configuration.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/configuration/configuration_service.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/configuration/configuration_storage.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/configuration/configuration_transaction.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/core/controller_identity.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/input/bluepad32_input_backend.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/platform/pico/bootsel_pairing_button.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/platform/pico/pico_configuration_storage.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/platform/pico/pico_profile_storage.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/profile/controller_profile.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/profile/controller_profile_runtime.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/profile/controller_profile_transform.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/profile/controller_synthetic_input.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/profile/profile_service.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/profile/profile_storage.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/usb/generic_hid/generic_hid_driver.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/usb/usb_configuration_management.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/usb/xinput/xinput_driver.cpp
     )
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
@@ -166,9 +167,11 @@ if (SWITCH_PICO_LOG)
     target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_LOG=1)
 endif()
 
-# Add the standard include files to the build
+# Internal includes are rooted at src/firmware. TinyUSB discovers tusb_config.h
+# through the Pico platform directory.
 target_include_directories(switch-pico PRIVATE
-        ${CMAKE_CURRENT_LIST_DIR}
+        ${SWITCH_PICO_SOURCE_DIR}
+        ${SWITCH_PICO_SOURCE_DIR}/platform/pico
 )
 
 pico_add_extra_outputs(switch-pico)

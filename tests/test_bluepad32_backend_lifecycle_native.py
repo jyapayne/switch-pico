@@ -27,7 +27,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         command.extend(
             [
                 f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
-                f"-I{root}",
+                f"-I{root / 'src' / 'firmware'}",
                 str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
                 "-o",
                 str(executable),

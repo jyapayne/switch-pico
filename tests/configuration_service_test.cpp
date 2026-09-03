@@ -1,8 +1,7 @@
-#include "adapter_configuration.h"
-#include "configuration_service.h"
-#include "configuration_storage.h"
-#include "pico_configuration_storage.h"
-
+#include "configuration/adapter_configuration.h"
+#include "configuration/configuration_service.h"
+#include "configuration/configuration_storage.h"
+#include "platform/pico/pico_configuration_storage.h"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>

@@ -3,10 +3,30 @@
 Raspberry Pi Pico firmware that emulates one or more Switch Pro controllers over USB. Input can come from the SDL3-to-UART computer bridge or, on Pico 2 W, directly from Bluetooth controllers through Bluepad32.
 
 ## What you get
-- **Firmware** (`switch-pico.cpp` + `switch_pro_driver.*`): acts as a Switch Pro controller (one on standard Pico, four on Pico 2 W AIO), accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
+- **Firmware** (`src/firmware/`): acts as a Switch Pro controller (one on standard Pico, four on Pico 2 W AIO), accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL3 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
-- **Color configuration** (`controller_color_config.h`): compile-time RGB colors for emulated controller grips and supported Bluetooth controller LEDs.
+- **Color configuration** (`src/firmware/platform/pico/controller_color_config.h`): compile-time RGB colors for emulated controller grips and supported Bluetooth controller LEDs.
 - **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts four concurrent Bluetooth controllers and sends their controls, calibrated motion, rumble, and slot identity through four separate Switch Pro USB interfaces without a computer.
+
+## Source layout
+
+Firmware code has one include root, `src/firmware`, with responsibility-based
+modules:
+
+| Path | Responsibility |
+|---|---|
+| `src/firmware/main.cpp` | Firmware entry point and backend orchestration |
+| `src/firmware/adapter/` | USB mode selection, host probing, and managed reboot |
+| `src/firmware/configuration/` | Persistent adapter configuration and transactions |
+| `src/firmware/core/` | Shared controller identity, color, and input-state types |
+| `src/firmware/input/` | Bluepad32 controller input backend and hotkeys |
+| `src/firmware/platform/pico/` | Pico flash/BOOTSEL integrations and compile-time board configuration |
+| `src/firmware/profile/` | Controller profiles, transforms, storage, and runtime |
+| `src/firmware/usb/` | USB output boundary, management protocol, and per-protocol drivers |
+
+Internal includes are rooted at `src/firmware`, for example
+`#include "profile/controller_profile.h"`. Host-side Python remains in
+`src/switch_pico_bridge/`; native firmware tests remain in `tests/`.
 
 ## Quick start
 1. Flash the Pico with `firmware/switch-pico.uf2` (or build your own) using BOOTSEL drag-and-drop (see “Manual UF2 flashing” below).
@@ -162,7 +182,7 @@ Each AIO slot has one color shared by its emulated Switch Pro grips and its phys
 3. Yellow `#F6C945`
 4. Green `#2ECC71`
 
-When a controller becomes ready, RGB-capable devices such as DualSense and DualShock 4 receive a darker, more saturated RGB value derived automatically from the slot's Switch grip color. Controllers without an RGB light use player indicator 1, 2, 3, or 4 when Bluepad32 exposes player-LED control. Devices without either capability are left unchanged. Edit only the four grip colors in `controller_color_config.h`; rebuilding automatically recalibrates their lightbar colors.
+When a controller becomes ready, RGB-capable devices such as DualSense and DualShock 4 receive a darker, more saturated RGB value derived automatically from the slot's Switch grip color. Controllers without an RGB light use player indicator 1, 2, 3, or 4 when Bluepad32 exposes player-LED control. Devices without either capability are left unchanged. Edit only the four grip colors in `src/firmware/platform/pico/controller_color_config.h`; rebuilding automatically recalibrates their lightbar colors.
 
 ### Controller capabilities
 
@@ -352,7 +372,7 @@ python3 build.py --grip-color FF00AA
 ```
 
 Both options update all four slot definitions in
-`controller_color_config.h` before building. With no color option, the
+`src/firmware/platform/pico/controller_color_config.h` before building. With no color option, the
 per-slot blue/red/yellow/green palette is left unchanged. Run
 `python3 build.py --help` to see the available command-line options.
 
@@ -547,7 +567,7 @@ Keep `SwitchImuMode` as a three-state value. Never acknowledge mode 2 and then e
 
 #### Mode-2 implementation
 
-`switch_pro_driver.cpp` implements this in `integrate_motion_sample()` and `fill_quaternion_imu_report_data()`:
+`src/firmware/usb/switch/switch_pro_driver.cpp` implements this in `integrate_motion_sample()` and `fill_quaternion_imu_report_data()`:
 
 1. Reset quaternion state to `(0, 0, 0, 1)` when transitioning into mode 2.
 2. Integrate each report's three gyro samples at 5 ms per sample. The Nintendo quaternion axes use sensor `Y, X, Z`, not `X, Y, Z`.

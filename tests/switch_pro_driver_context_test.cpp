@@ -1,6 +1,6 @@
-#include "switch_pro_driver.h"
-#include "usb_output_driver.h"
-#include "controller_color_config.h"
+#include "usb/switch/switch_pro_driver.h"
+#include "usb/usb_output_driver.h"
+#include "platform/pico/controller_color_config.h"
 #include "tusb.h"
 #include "pico/time.h"
 

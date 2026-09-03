@@ -1,5 +1,4 @@
-#include "bootsel_pairing_button.h"
-
+#include "platform/pico/bootsel_pairing_button.h"
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>

@@ -1,5 +1,4 @@
-#include "adapter_host_probe.h"
-
+#include "adapter/adapter_host_probe.h"
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -7,7 +6,7 @@
 
 #include "hardware/structs/watchdog.h"
 #include "pico/time.h"
-#include "xinput_descriptors.h"
+#include "usb/xinput/xinput_descriptors.h"
 
 namespace {
 

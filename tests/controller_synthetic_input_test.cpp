@@ -1,5 +1,4 @@
-#include "controller_synthetic_input.h"
-
+#include "profile/controller_synthetic_input.h"
 #include <array>
 #include <cstdlib>
 #include <cstring>

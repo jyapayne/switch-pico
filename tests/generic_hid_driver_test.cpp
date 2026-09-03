@@ -1,7 +1,5 @@
-#include "generic_hid_driver.h"
-
-#include "generic_hid_descriptors.h"
-
+#include "usb/generic_hid/generic_hid_driver.h"
+#include "usb/generic_hid/generic_hid_descriptors.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>

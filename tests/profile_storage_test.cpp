@@ -1,7 +1,7 @@
-#include "controller_identity.h"
-#include "controller_profile.h"
-#include "profile_storage.h"
-#include "tests/controller_profile_legacy_fixtures.h"
+#include "core/controller_identity.h"
+#include "profile/controller_profile.h"
+#include "profile/profile_storage.h"
+#include "controller_profile_legacy_fixtures.h"
 
 #include <cstdlib>
 #include <cstring>

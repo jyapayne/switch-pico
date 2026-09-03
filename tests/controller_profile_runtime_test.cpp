@@ -1,9 +1,7 @@
-#include "controller_profile_runtime.h"
-
-#include "controller_identity.h"
-#include "controller_profile.h"
-#include "profile_service.h"
-
+#include "profile/controller_profile_runtime.h"
+#include "core/controller_identity.h"
+#include "profile/controller_profile.h"
+#include "profile/profile_service.h"
 #include <array>
 #include <cstdlib>
 #include <cstring>

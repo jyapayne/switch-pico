@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CONFIG_FILE = SCRIPT_DIR / "controller_color_config.h"
+FIRMWARE_SOURCE_DIR = SCRIPT_DIR / "src" / "firmware"
+CONFIG_FILE = FIRMWARE_SOURCE_DIR / "platform" / "pico" / "controller_color_config.h"
 BUILD_DIR = SCRIPT_DIR / "build"
 AIO_BUILD_DIR = SCRIPT_DIR / "build-aio"
 FEASIBILITY_BUILD_DIR = SCRIPT_DIR / "build-feasibility"
@@ -265,7 +266,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Build and flash the project, optionally setting grip colors.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Default behavior leaves controller_color_config.h unchanged.",
+        epilog=f"Default behavior leaves {CONFIG_FILE.relative_to(SCRIPT_DIR)} unchanged.",
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(

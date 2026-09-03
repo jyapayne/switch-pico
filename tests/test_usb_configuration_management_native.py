@@ -19,7 +19,7 @@ def test_usb_configuration_management_native(tmp_path: Path) -> None:
             "-Werror",
             "-pedantic",
             f"-I{root / 'tests' / 'usb_management_native_stubs'}",
-            f"-I{root}",
+            f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "usb_configuration_management_test.cpp"),
             "-o",
             str(executable),

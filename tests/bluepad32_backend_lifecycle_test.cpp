@@ -4,7 +4,7 @@
 #include <string>
 
 #include <uni.h>
-#include "../controller_color_config.h"
+#include "platform/pico/controller_color_config.h"
 
 namespace {
 
@@ -442,8 +442,9 @@ uint32_t btstack_run_loop_get_time_ms() {
 }
 
 
-#include "../controller_identity.cpp"
-#include "../bluepad32_input_backend.cpp"
+#include "core/controller_identity.cpp"
+#include "input/bluepad32_input_backend.cpp"
+
 namespace {
 void require_clear_completion_pending() {
     if (expected_pending_clear_token != 0) {

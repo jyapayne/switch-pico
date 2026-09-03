@@ -1,12 +1,11 @@
-#include "usb_configuration_management.h"
-
+#include "usb/usb_configuration_management.h"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <vector>
 
 #include <tusb.h>
-#include "usb_output_driver.h"
+#include "usb/usb_output_driver.h"
 
 namespace {
 
@@ -788,10 +787,10 @@ bool tud_control_status(uint8_t, const tusb_control_request_t*) {
     return true;
 }
 
-#include "../adapter_configuration.cpp"
-#include "../controller_identity.cpp"
-#include "../controller_profile.cpp"
-#include "../usb_configuration_management.cpp"
+#include "configuration/adapter_configuration.cpp"
+#include "core/controller_identity.cpp"
+#include "profile/controller_profile.cpp"
+#include "usb/usb_configuration_management.cpp"
 
 int main() {
     current_configuration.state = ConfigurationServiceState::kReady;

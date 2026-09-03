@@ -1,7 +1,6 @@
-#include "controller_identity.h"
-#include "controller_profile.h"
-#include "controller_profile_transform.h"
-
+#include "core/controller_identity.h"
+#include "profile/controller_profile.h"
+#include "profile/controller_profile_transform.h"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>

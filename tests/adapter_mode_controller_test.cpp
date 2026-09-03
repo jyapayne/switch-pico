@@ -1,16 +1,15 @@
-#include "adapter_mode_controller.h"
-
+#include "adapter/adapter_mode_controller.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
 
-#include "adapter_configuration.h"
-#include "adapter_reboot.h"
-#include "bluepad32_input_backend.h"
-#include "configuration_service.h"
-#include "controller_profile.h"
+#include "configuration/adapter_configuration.h"
+#include "adapter/adapter_reboot.h"
+#include "input/bluepad32_input_backend.h"
+#include "configuration/configuration_service.h"
+#include "profile/controller_profile.h"
 
 namespace {
 

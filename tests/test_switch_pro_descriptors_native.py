@@ -25,7 +25,7 @@ def compile_descriptor_test(
         command.append(f"-DSWITCH_PICO_HID_INSTANCE_COUNT={configured_count}")
     command.extend(
         [
-            f"-I{root}",
+            f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "switch_pro_descriptors_test.cpp"),
             "-o",
             str(output),

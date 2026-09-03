@@ -32,7 +32,7 @@ def compile_cpp(
         command.append(f"-I{root / 'tests' / 'native_stubs'}")
     command.extend(
         [
-            f"-I{root}",
+            f"-I{root / 'src' / 'firmware'}",
             *[str(source) for source in sources],
             "-o",
             str(output),
@@ -98,7 +98,7 @@ def test_generic_hid_driver_contexts(tmp_path: Path) -> None:
         host_compiler(),
         executable,
         [
-            root / "generic_hid_driver.cpp",
+            root / "src" / "firmware" / "usb" / "generic_hid" / "generic_hid_driver.cpp",
             root / "tests" / "generic_hid_driver_test.cpp",
         ],
         ["SWITCH_PICO_HID_INSTANCE_COUNT=4"],

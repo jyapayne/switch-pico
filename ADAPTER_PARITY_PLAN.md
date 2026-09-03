@@ -427,7 +427,7 @@ with the current identity.
 
 #### 4A — Output-driver boundary and production XInput
 
-- replace `SWITCH_PICO_ADAPTER_FEASIBILITY` branches in `switch-pico.cpp` with
+- replace `SWITCH_PICO_ADAPTER_FEASIBILITY` branches in `src/firmware/main.cpp` with
   one fixed static driver interface: descriptors, init/reset, input, task,
   readiness/capabilities, and host output
 - keep the Phase 3 profile/runtime transform exactly once before serialization

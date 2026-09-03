@@ -4,17 +4,17 @@
 #include <cstring>
 #include <iostream>
 
-#include "adapter_host_probe_state.h"
-#include "generic_hid_descriptors.h"
-#include "generic_hid_driver.h"
-#include "xinput_descriptors.h"
-#include "xinput_protocol.h"
+#include "adapter/adapter_host_probe_state.h"
+#include "usb/generic_hid/generic_hid_descriptors.h"
+#include "usb/generic_hid/generic_hid_driver.h"
+#include "usb/xinput/xinput_descriptors.h"
+#include "usb/xinput/xinput_protocol.h"
 #include "device/usbd_pvt.h"
 #include "pico/time.h"
-#include "switch_pro_driver.h"
+#include "usb/switch/switch_pro_driver.h"
 #include "tusb.h"
-#include "usb_output_driver.h"
-#include "xinput_driver.h"
+#include "usb/usb_output_driver.h"
+#include "usb/xinput/xinput_driver.h"
 
 namespace {
 

@@ -1,9 +1,8 @@
-#include "controller_identity.h"
-#include "controller_profile.h"
-#include "pico_profile_storage.h"
-#include "profile_service.h"
-#include "profile_storage.h"
-
+#include "core/controller_identity.h"
+#include "profile/controller_profile.h"
+#include "platform/pico/pico_profile_storage.h"
+#include "profile/profile_service.h"
+#include "profile/profile_storage.h"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
