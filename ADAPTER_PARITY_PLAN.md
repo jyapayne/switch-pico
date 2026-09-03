@@ -417,40 +417,64 @@ Completion evidence:
 
 ### Phase 4 — Production USB output modes
 
-Implement in this order:
+This is shorter than Phase 3 because Switch and XInput already work, but it is
+not a small change: USB descriptors are fixed before `tusb_init()`, mode changes
+require a persisted reboot, and DInput/Mac need real-host qualification.
 
-1. Existing Switch driver behind the output-driver boundary.
-2. Production XInput based on the verified feasibility implementation.
-3. DInput generic HID.
-4. Mac-compatible HID.
+Release blocker: replace development identity `CAFE:4010` with an appropriate
+project VID/PID before calling XInput production-ready. Development can continue
+with the current identity.
 
-Controller-count policy: Switch, XInput, DInput, and Mac target four
-independent interfaces.
+#### 4A — Output-driver boundary and production XInput
 
-Mode selection:
+- replace `SWITCH_PICO_ADAPTER_FEASIBILITY` branches in `switch-pico.cpp` with
+  one fixed static driver interface: descriptors, init/reset, input, task,
+  readiness/capabilities, and host output
+- keep the Phase 3 profile/runtime transform exactly once before serialization
+- move the verified four-slot XInput implementation out of feasibility naming
+- preserve current Switch descriptors, handshake, motion, and rumble bit-for-bit
 
-- persistent PC command
-- controller chord held for three seconds
-- mode-specific LED and rumble acknowledgement
-- `auto` mode for the verified Windows/Switch path
-- physical recovery gesture to a known mode
+Gate: descriptor/report golden tests plus current Switch hardware and Windows
+four-slot XInput regression. No mode-selection work lands before this boundary
+is behavior-equivalent.
 
-Before release:
+#### 4B — Persistent mode selection and recovery
 
-- replace `CAFE:4010` with an appropriate project VID/PID
-- repeat Windows XUSB binding and four-slot tests
-- verify no phantom active controller remains after the probe transition
-- verify cold power on Switch does not trigger the Windows path
+- extend `AdapterConfiguration` with `auto`, `switch`, `xinput`, `dinput`, and
+  `mac`; migrate the existing schema without losing profiles or bonds
+- add `switch-pico-config mode MODE`
+- select one descriptor family before `tusb_init()`; a changed mode commits,
+  cancels synthetic state, acknowledges, and watchdog-reboots
+- keep the verified Windows/Switch probe only for `auto`
+- add a distinct three-second controller chord for mode cycling
+- make the existing destructive ten-second BOOTSEL reset also restore `auto`,
+  providing physical recovery from a bad manual mode
 
-Acceptance per mode:
+Gate: persistence, power-cycle, interrupted-write, reboot-loop, recovery, and
+no-phantom-controller tests on Switch and Windows.
 
-- descriptor golden tests
-- report serialization tests
-- output/rumble tests
-- real target enumeration
-- buttons, D-pad, sticks, triggers, and menu controls
-- disconnect/reconnect
-- multi-controller isolation where applicable
+#### 4C — Generic HID outputs
+
+- implement four-interface DInput generic HID first
+- capture DInput rumble requirements before promising force feedback; Windows
+  HID PID force feedback is not a free consequence of a gamepad descriptor
+- research whether the same standards-compliant HID report is sufficient on
+  macOS; share the driver when hardware proves it, otherwise add only the
+  descriptor/report differences required by macOS
+- do not duplicate profile transforms inside either output driver
+
+Gate: descriptor/report/output tests, then real Windows DInput and macOS
+enumeration, controls, reconnect, and four-controller isolation. Any unavailable
+Mac hardware remains an explicit qualification blocker, not an inferred pass.
+
+Final acceptance:
+
+- cold Switch boot never enters the Windows path
+- Windows `auto` reaches four XInput slots without phantom devices
+- manual modes survive power cycles and recover through BOOTSEL reset
+- profiles, macros, Turbo, motion, and per-slot rumble remain isolated in every
+  supported mode
+- each mode passes real-target enumeration and complete input checks
 
 ### Phase 5 — Controller compatibility
 
