@@ -56,26 +56,29 @@ pico_sdk_init()
 
 # Configure BLUEPAD32 input backend if selected
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
-    # Ensure Python3 is available and execute patch preparation
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    
+
     set(BLUEPAD32_PREP_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/tools/prepare_bluepad32.py)
+    set(BLUEPAD32_SOURCE ${CMAKE_CURRENT_LIST_DIR}/external/bluepad32)
+    set(BLUEPAD32_PATCH ${CMAKE_CURRENT_LIST_DIR}/patches/bluepad32-sdl3-imu.patch)
+    set(BLUEPAD32_ROOT ${CMAKE_CURRENT_BINARY_DIR}/_deps/bluepad32-src)
     execute_process(
         COMMAND ${Python3_EXECUTABLE} ${BLUEPAD32_PREP_SCRIPT}
+                --bluepad32 ${BLUEPAD32_SOURCE}
+                --patch ${BLUEPAD32_PATCH}
+                --output ${BLUEPAD32_ROOT}
         WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
         RESULT_VARIABLE BLUEPAD32_PREP_RESULT
         OUTPUT_VARIABLE BLUEPAD32_PREP_OUTPUT
         ERROR_VARIABLE BLUEPAD32_PREP_ERROR
     )
-    
+
     if(NOT BLUEPAD32_PREP_RESULT EQUAL 0)
         message(FATAL_ERROR
-            "Failed to prepare Bluepad32: Patch application or validation failed. "
+            "Failed to prepare isolated Bluepad32 source. "
             "Details: ${BLUEPAD32_PREP_ERROR}")
     endif()
-    
-    # Configure Bluepad32 include paths and subdirectory
-    set(BLUEPAD32_ROOT ${CMAKE_CURRENT_LIST_DIR}/external/bluepad32)
+
     set(BTSTACK_ROOT ${PICO_SDK_PATH}/lib/btstack)
     include_directories(
             ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config

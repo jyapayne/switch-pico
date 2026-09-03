@@ -366,7 +366,6 @@ def build(
     firmware_uf2_path,
 ):
     if aio or adapter_feasibility:
-        run_cmd([sys.executable, str(SCRIPT_DIR / "tools" / "prepare_bluepad32.py")])
         definitions = [
             "-DSWITCH_PICO_LOG=OFF",
             "-DPICO_BOARD=pico2_w",

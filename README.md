@@ -64,7 +64,7 @@ This uses an isolated `build-aio/` CMake cache and publishes:
 
 The default `python3 build.py` command and `firmware/switch-pico.*` artifacts remain the UART/Pico build. The AIO build requires `PICO_BOARD=pico2_w`; it is not interchangeable with the original non-wireless Pico firmware.
 
-Both `build.py --aio` and direct AIO CMake configuration apply `patches/bluepad32-sdl3-imu.patch` idempotently before compiling Bluepad32. The patch makes supported motion controllers use SDL3-equivalent axes and fixed-point units before conversion to Nintendo samples. It intentionally leaves the dependency worktree dirty; the committed submodule revision remains Bluepad32 4.2.0.
+Both `build.py --aio` and direct AIO CMake configuration copy the pinned Bluepad32 source into the active build directory and apply `patches/bluepad32-sdl3-imu.patch` there before compiling. The patch makes supported motion controllers use SDL3-equivalent axes and fixed-point units before conversion to Nintendo samples. The `external/bluepad32` submodule remains pristine; patch or source-revision drift fails configuration.
 
 ### Pairing up to four controllers
 
