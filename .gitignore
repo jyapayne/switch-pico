@@ -9,3 +9,8 @@ debug
 hid-nintendo.c
 __pycache__
 !.vscode/*
+.omo/*
+.slim/*
+pytest-*/*
+build-*/*
+.ignore
