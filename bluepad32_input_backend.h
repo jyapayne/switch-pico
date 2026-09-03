@@ -62,6 +62,20 @@ struct Bluepad32SlotSnapshot {
     ControllerState state;
 };
 
+struct Bluepad32BackendDiagnostics {
+    uint32_t initialization_stage;
+    uint32_t rumble_timer_ticks;
+    uint32_t configuration_timer_ticks;
+    uint32_t controller_reports;
+    uint32_t host_rumble_requests;
+    uint32_t local_feedback_requests;
+    uint32_t rumble_dispatches;
+    uint8_t active_slots;
+    uint8_t rumble_capable_slots;
+    uint8_t feedback_pending_slots;
+    uint8_t rumble_pending_slots;
+};
+
 
 
 void bluepad32_input_backend_init();
@@ -75,6 +89,8 @@ void bluepad32_input_backend_snapshot(uint8_t slot,
 void bluepad32_input_backend_request_pairing_snapshot();
 void bluepad32_input_backend_pairing_snapshot(
     Bluepad32PairingSnapshot* out);
+void bluepad32_input_backend_diagnostics(
+    Bluepad32BackendDiagnostics* out);
 void bluepad32_input_backend_report_sent(uint8_t slot);
 void bluepad32_input_backend_queue_rumble(
     uint8_t slot, const ControllerRumbleOutput& rumble);

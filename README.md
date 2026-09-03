@@ -91,9 +91,15 @@ Connect the Pico 2 W to the PC while the AIO firmware is running normally; do no
 
 ```sh
 uv run switch-pico-config status
+uv run switch-pico-config diagnostics
 uv run switch-pico-config config show
 uv run switch-pico-config config set --pairing-window-seconds 90
 uv run switch-pico-config config reset --yes
+uv run switch-pico-config mode auto
+uv run switch-pico-config mode switch
+uv run switch-pico-config mode xinput
+uv run switch-pico-config mode dinput
+uv run switch-pico-config mode mac
 uv run switch-pico-config profiles list
 uv run switch-pico-config profiles export 1 profile.json --identity 0
 uv run switch-pico-config profiles import 2 profile.json --identity 0
@@ -105,9 +111,20 @@ uv run switch-pico-config pairings clear --yes
 
 Adapter configuration records use version, size, generation, and CRC fields in two dedicated flash sectors. Profiles use a separate two-bank atomic store before the adapter and Bluepad32 bond regions. Profile writes are chunked, verified before the new bank is committed, recover the previous generation after interruption or corruption, skip unchanged data, and are rate-limited.
 
+Output mode is selected before TinyUSB starts and never changes while mounted. A mode command atomically stores the selection, resets synthetic input, reboots, follows the same physical USB port through re-enumeration, and verifies requested versus active mode. `auto` uses the verified Switch probe → Windows XInput transition; manual modes bypass probing. The controller chord **L + R + Select + Start + System** held for three seconds cycles `auto → switch → xinput → dinput → mac → auto`. The destructive ten-second BOOTSEL pairing reset also restores `auto` before reboot, providing physical recovery.
+
+Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `CAFE:4021` (Mac). DInput and Mac expose four input-only generic HID interfaces and no rumble. Mac uses X/Y/Z/Rx sticks plus Simulation Brake/Accelerator triggers. Switch reports input, rumble, and motion capability; XInput reports input and rumble.
+
 `profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns four persistent profiles and one active index. Exported JSON contains direct logical button mappings, independent stick and trigger calibration/curves, digital trigger thresholds, weak/strong rumble scales, a profile-switching chord, one bounded eight-step macro, and per-button Turbo modes. Profile numbers shown to users are `1` through `4`; `--identity` uses the zero-based index from `profiles list`.
 
 `pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses. `pairings clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
+
+`diagnostics` reports Bluetooth initialization stage, real BTstack timer
+callbacks, controller report traffic, host/local rumble requests and
+dispatches, active/rumble-capable slot counts, and pending feedback. The AIO
+build bounds each CYW43 HCI drain to 16 packets so continuous multi-controller
+traffic returns to BTstack timers instead of starving rumble stop/refresh,
+configuration, pairing, and profile work.
 
 ### Per-controller profiles
 
@@ -195,6 +212,7 @@ Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry 
 - No NFC/amiibo/IR support.
 - Rumble is best-effort: the UART build depends on SDL3 haptics; the AIO build depends on the connected controller's Bluepad32 rumble implementation.
 - The UART firmware requires a host computer running the bridge. The Pico 2 W AIO firmware does not; it hosts controllers over Bluetooth, not USB.
+- In XInput output mode, Home/System is carried in the raw XUSB Guide bit `0x0400`, and Capture is carried in the de-facto Share/reserved bit `0x0800` used by modern open XUSB stacks. The standard Microsoft XInput headers define neither Guide nor Share for `XINPUT_GAMEPAD.wButtons`, so `XInputGetState` does not expose either button portably. Guide may be reserved or intercepted by the OS, while Share/Capture support depends on the installed driver or consumers such as GameInput and Steam; qualify the intended controller, driver, and application on real Windows hardware.
 
 ## Uses
 - **Remote couch co-op**: friends connect via Parsec while the host streams the Switch via a low-latency capture device (e.g., Magewell Pro Capture) and runs the bridge (see setup below).
@@ -468,6 +486,7 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 
 ### Linux tips
 - You may need udev permissions for `/dev/ttyUSB*`/`/dev/ttyACM*` (add user to `dialout`/`uucp` or use `udev` rules).
+- For the development XInput/DInput/Mac identities, install `udev/99-switch-pico.rules` into `/etc/udev/rules.d/`, reload udev, and reconnect the Pico so `switch-pico-config` can access endpoint zero without root.
 
 ## IMU / Motion Controls
 

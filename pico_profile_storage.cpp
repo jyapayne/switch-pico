@@ -18,6 +18,7 @@ constexpr uint32_t kConfigurationStorageOffset =
     PICO_FLASH_BANK_STORAGE_OFFSET - kConfigurationStorageSize;
 constexpr uint32_t kProfileStorageOffset =
     kConfigurationStorageOffset - PROFILE_STORAGE_TOTAL_SIZE;
+constexpr uint32_t kFlashSafeExecuteTimeoutMs = 5000;
 
 static_assert(FLASH_SECTOR_SIZE == PROFILE_STORAGE_SECTOR_SIZE,
               "profile storage sector size does not match Pico flash");
@@ -132,7 +133,7 @@ bool replace_storage_bank(void*, uint8_t bank,
     };
     return flash_safe_execute(
                perform_flash_bank_replacement, &replacement,
-               UINT32_MAX) == PICO_OK &&
+               kFlashSafeExecuteTimeoutMs) == PICO_OK &&
            replacement.replaced;
 }
 

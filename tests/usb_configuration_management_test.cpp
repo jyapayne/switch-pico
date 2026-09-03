@@ -32,6 +32,7 @@ uint32_t reboot_transaction_id = 0;
 uint32_t reboot_call_count = 0;
 bool refresh_requested = false;
 bool clear_requested = false;
+Bluepad32BackendDiagnostics current_diagnostics{};
 std::vector<uint8_t> control_payload;
 std::vector<uint8_t> next_out_payload;
 uint32_t begin_transaction_id = 0;
@@ -199,6 +200,23 @@ void test_vendor_requests() {
                     static_cast<uint8_t>(Operation::kPairingRead) &&
                 control_payload[12] == 7,
             "pairing read did not use the versioned envelope");
+
+    current_diagnostics = {
+        6, 1200, 120, 5000, 8, 2, 10, 2, 2, 1, 1,
+    };
+    request = setup_request(
+        Operation::kRuntimeDiagnostics, TUSB_DIR_IN,
+        kMaximumResponseSize);
+    require(
+        usb_configuration_management_vendor_control(
+            0, CONTROL_STAGE_SETUP, &request) &&
+            control_payload[5] ==
+                static_cast<uint8_t>(Operation::kRuntimeDiagnostics) &&
+            read_u32(control_payload, kResponseHeaderSize) == 6 &&
+            read_u32(control_payload, kResponseHeaderSize + 4) == 1200 &&
+            control_payload[kResponseHeaderSize + 28] == 2 &&
+            control_payload[kResponseHeaderSize + 31] == 1,
+        "runtime diagnostics did not expose backend counters");
 
     perform_out(Operation::kPairingRefresh, {});
     require(refresh_requested,
@@ -731,6 +749,11 @@ uint32_t bluepad32_input_backend_clear_pairings() {
 void bluepad32_input_backend_pairing_snapshot(
     Bluepad32PairingSnapshot* out) {
     *out = current_pairings;
+}
+
+void bluepad32_input_backend_diagnostics(
+    Bluepad32BackendDiagnostics* out) {
+    *out = current_diagnostics;
 }
 
 bool adapter_host_probe_vendor_control(

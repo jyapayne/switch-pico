@@ -172,6 +172,39 @@ void test_input_report_mapping() {
                report.right_y == 0,
            "neutral axes mismatch");
 
+    ControllerState system_only{};
+    system_only.button_system = true;
+    const auto system_report = XInput::build_input_report(system_only);
+    const std::array<uint8_t, sizeof(XInput::InputReport)> system_golden{
+        0x00, 0x14, 0x00, 0x04};
+    expect(std::memcmp(&system_report, system_golden.data(),
+                       system_golden.size()) == 0 &&
+               system_report.buttons == XInput::kGuide,
+           "system button did not serialize as the Guide bit");
+
+    ControllerState capture_only{};
+    capture_only.button_capture = true;
+    const auto capture_report = XInput::build_input_report(capture_only);
+    const std::array<uint8_t, sizeof(XInput::InputReport)> capture_golden{
+        0x00, 0x14, 0x00, 0x08};
+    expect(std::memcmp(&capture_report, capture_golden.data(),
+                       capture_golden.size()) == 0 &&
+               capture_report.buttons == XInput::kShare,
+           "capture button did not serialize as the Share bit");
+
+    ControllerState system_and_capture{};
+    system_and_capture.button_system = true;
+    system_and_capture.button_capture = true;
+    const auto combined_report =
+        XInput::build_input_report(system_and_capture);
+    const std::array<uint8_t, sizeof(XInput::InputReport)> combined_golden{
+        0x00, 0x14, 0x00, 0x0c};
+    expect(std::memcmp(&combined_report, combined_golden.data(),
+                       combined_golden.size()) == 0 &&
+               combined_report.buttons ==
+                   static_cast<uint16_t>(XInput::kGuide | XInput::kShare),
+           "Guide and Share bits collided in the serialized report");
+
     state.dpad_up = true;
     state.button_south = true;
     state.button_east = true;
@@ -470,6 +503,8 @@ void test_xinput_boundary_dispatch() {
         ControllerState state{};
         state.button_south = (instance & 1u) == 0;
         state.button_north = (instance & 1u) != 0;
+        state.button_system = true;
+        state.button_capture = true;
         state.left_trigger =
             static_cast<uint16_t>(0x1000u * (instance + 1u));
         state.right_trigger =
@@ -490,6 +525,9 @@ void test_xinput_boundary_dispatch() {
                    std::memcmp(input_endpoint.last_transfer.data(),
                                &expected, sizeof(expected)) == 0,
                "XInput boundary changed an input report");
+        expect((read_le16(input_endpoint.last_transfer.data() + 2) &
+                0x0c00u) == 0x0c00u,
+               "XInput boundary dropped Guide or Share from wButtons");
     }
     expect(!usb_output_driver_task(kInvalidInstance),
            "XInput task accepted an invalid instance");

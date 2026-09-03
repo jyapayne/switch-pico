@@ -67,20 +67,20 @@ The Bluetooth, UART, Switch, and XInput paths now share `ControllerState`:
 |---|---|---|
 | Bluetooth Classic and BLE | Complete | Bluepad32 supports both transports; bonds persist across reboot. |
 | Pairing gate, reconnect, list, and clear | Complete | Physical BOOTSEL flow and `switch-pico-config pairings` use the versioned management protocol. |
-| Four concurrent controllers | Complete for Switch mode | Four independent USB interfaces and Bluetooth slots are implemented. |
+| Four concurrent controllers | Complete for current output modes | Switch, XInput, DInput, and Mac expose four isolated interfaces; current host-specific limits remain qualification items. |
 | Switch input | Complete | Buttons, sticks, lifecycle, colors, and per-slot isolation are hardware-tested. |
 | Switch motion | Complete for supported parsers | DualSense, Switch-family, Wii accelerometer, PS Move, and compatible 8BitDo modes are normalized. |
 | Switch rumble | Complete for tested controllers | DualSense and 8BitDo Ultimate Bluetooth are hardware-tested; Ultimate requires enable, fixed LRA frequencies, and refresh. |
 | 8BitDo Ultimate reconnect | Complete | Bond preservation, scan restart, and four-second supervision timeout are implemented. |
-| XInput descriptors and reports | Feasibility complete | Four-interface prototype works on Windows and is covered by native descriptor/report tests. |
-| Automatic Windows/Switch selection | Feasibility complete | Windows enumeration fix is in `db4a860`; real Windows transition and rumble were reported working. |
-| Windows feasibility test | Complete | `tools/Test-AdapterFeasibility.ps1` checks transition, PnP health, four XInput slots, controls, and rumble isolation. |
+| XInput descriptors and reports | Complete with development identity | Production-neutral XInput driver and reconnect-safe XUSB binding pass four-slot Windows hardware tests; replace `CAFE:4010` before release. |
+| Automatic Windows/Switch selection | Complete | `auto` preserves the verified Switch probe → XInput reboot and manual modes bypass probing. |
+| Windows output tests | Complete for XInput and DInput | Real Windows passed four XInput slots with controls/rumble isolation and four DInput interfaces with complete input. |
 | Protocol-neutral controller state | Complete | `ControllerState` is shared by Bluetooth, UART, Switch, and XInput paths; analog trigger precision is retained. |
 | Persistent configuration protocol | Complete | Adapter settings and identity-keyed profiles use separate two-copy CRC/generation stores with bounded transactions and recovery. |
 | Production USB VID/PID | Missing | Prototype uses `CAFE:4010`; obtain an appropriate project VID/PID and repeat Windows binding tests. |
-| DInput output | Missing | Add generic HID descriptor and report driver. |
-| Mac output mode | Missing | Capture/define compatible descriptor and report semantics. |
-| Manual output-mode selection | Missing | Add persistent PC command and controller chord. |
+| DInput output | Complete, input-only | Four generic HID interfaces pass Linux and Windows controls; USB HID does not provide generic rumble. |
+| Mac output mode | Complete, input-only | Four generic HID interfaces pass real macOS sticks, buttons, D-pad, and independent analog DualSense triggers. |
+| Manual output-mode selection | Complete | Persistent PC command and three-second controller chord select auto/Switch/XInput/DInput/Mac; ten-second BOOTSEL reset restores auto. |
 | General button remapping | Complete | Sixteen positional logical inputs map directly to supported logical outputs per profile. |
 | Stick sensitivity | Complete | Per-stick center calibration, inner deadzone, outer saturation, fixed-point curve, and inversion run before every output serializer. |
 | Trigger ranges | Complete for current outputs | Per-trigger deadzone, saturation, curve, and digital threshold preserve analog XInput values and configured Switch thresholds. |
@@ -415,7 +415,7 @@ Completion evidence:
   profile commits, button remapping, stick tuning, 15 Hz Turbo, a releasing
   macro, and transient profile-to-slot LED restoration
 
-### Phase 4 — Production USB output modes
+### Phase 4 — Production USB output modes — Complete
 
 This is shorter than Phase 3 because Switch and XInput already work, but it is
 not a small change: USB descriptors are fixed before `tusb_init()`, mode changes
@@ -477,6 +477,36 @@ Final acceptance:
 - profiles, macros, Turbo, motion, and per-slot rumble remain isolated in every
   supported mode
 - each mode passes real-target enumeration and complete input checks
+
+Completion evidence:
+
+- all TinyUSB callbacks are centralized in one static output-driver boundary;
+  Switch, XInput, DInput, and Mac serializers consume the same Phase 3 output
+- adapter configuration schema v2 migrates v1 to `auto`; selection is loaded
+  before `tusb_init()`, persists across power cycles, and reboots only after a
+  correlated atomic commit
+- physical recovery reserves configuration ownership, clears pairings with an
+  exact monotonic completion token, restores `auto`, and avoids stale reboots
+- XInput was promoted from feasibility naming and its Windows XUSB binding was
+  fixed for reconnect; real Windows passed four slots, controls, analog
+  triggers, and rumble isolation
+- real Windows DInput passed four interfaces, buttons, D-pad, both sticks,
+  independent triggers, and reconnect; generic HID intentionally has no rumble
+- real macOS passed four interfaces, both sticks, buttons, D-pad, and
+  independent analog DualSense triggers under project identity `CAFE:4021`
+- DualSense/DS4 analog brake/throttle now outrank simultaneous digital trigger
+  bits; digital-only controllers retain full-scale fallback
+- XInput carries Home as Guide `0x0400` and Capture as de-facto Share `0x0800`;
+  standard `XInputGetState` does not expose either portably
+- the CYW43 HCI drain is bounded to 16 packets per poll so continuous
+  multi-controller traffic cannot starve application or controller-parser
+  timers; live diagnostics expose timer, report, queue, and dispatch counters
+- hardware verified that DualSense and 8BitDo rumble both start and stop under
+  two-controller traffic, with timer counters continuing to advance
+- the final cold Switch boot passed controls, motion, profiles, and rumble in
+  `auto` / Switch-probe mode
+- 107 tests passed; UART, AIO, and feasibility artifacts linked and published
+- release remains blocked on an appropriate production project VID/PID
 
 ### Phase 5 — Controller compatibility
 
@@ -576,7 +606,7 @@ Do not mark a host/controller combination complete from descriptor inspection or
 
 ## Next action
 
-Begin Phase 4 by placing the existing Switch and verified XInput
-implementations behind one production output-driver boundary. Preserve the
-Phase 3 transform/runtime seam before serialization, then add DInput and
-Mac-compatible HID in that order.
+Complete the final cold Switch regression with requested mode `auto`, then
+begin Phase 5 model-level controller qualification. Before release, replace the
+three `CAFE` development identities with an appropriate project VID/PID and
+repeat Windows/macOS binding tests.

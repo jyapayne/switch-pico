@@ -199,6 +199,13 @@ uint16_t g_status_led_tick = 0;
 bool g_pairing_window_open = false;
 bool g_status_led_on = false;
 Bluepad32PairingSnapshot g_pairing_snapshot{};
+uint32_t g_initialization_stage = 0;
+uint32_t g_rumble_timer_ticks = 0;
+uint32_t g_configuration_timer_ticks = 0;
+uint32_t g_controller_reports = 0;
+uint32_t g_host_rumble_requests = 0;
+uint32_t g_local_feedback_requests = 0;
+uint32_t g_rumble_dispatches = 0;
 
 uint16_t host_rumble_duration_ms() {
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
@@ -817,6 +824,7 @@ void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
     slot.pending_feedback = {
         slot.connection_generation, duration_ms, weak_magnitude,
         strong_magnitude};
+    __atomic_add_fetch(&g_local_feedback_requests, 1, __ATOMIC_RELAXED);
 }
 void reset_slot_hotkeys(BackendSlot& slot) {
     slot.motion_enabled = kDefaultMotionEnabled;
@@ -1265,6 +1273,8 @@ void update_status_led() {
 }
 
 void process_configuration_timer(btstack_timer_source_t* timer) {
+    __atomic_add_fetch(
+        &g_configuration_timer_ticks, 1, __ATOMIC_RELAXED);
     btstack_run_loop_set_timer(timer, kConfigurationPollIntervalMs);
     btstack_run_loop_add_timer(timer);
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
@@ -1273,6 +1283,7 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
 }
 
 void process_rumble_timer(btstack_timer_source_t* timer) {
+    __atomic_add_fetch(&g_rumble_timer_ticks, 1, __ATOMIC_RELAXED);
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
 
     process_clear_pairings(now_ms);
@@ -1446,16 +1457,22 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         }
         if (profile_rumble_dispatch && device != nullptr &&
             device->report_parser.play_dual_rumble != nullptr) {
+            __atomic_add_fetch(
+                &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
             device->report_parser.play_dual_rumble(
                 device, 0, kProfileFeedbackPhaseDurationMs,
                 kProfileFeedbackWeakMagnitude,
                 kProfileFeedbackStrongMagnitude);
         } else if (feedback_dispatch) {
+            __atomic_add_fetch(
+                &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
             device->report_parser.play_dual_rumble(
                 device, 0, feedback.duration_ms,
                 feedback.weak_magnitude, feedback.strong_magnitude);
         } else if (host_dispatch &&
                    device->report_parser.play_dual_rumble != nullptr) {
+            __atomic_add_fetch(
+                &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
             const bool stop =
                 envelope.rumble.low_frequency_magnitude == 0 &&
                 envelope.rumble.high_frequency_magnitude == 0;
@@ -1503,6 +1520,7 @@ void platform_on_init_complete() {
     btstack_run_loop_set_timer(
         &g_configuration_timer, kConfigurationPollIntervalMs);
     btstack_run_loop_add_timer(&g_configuration_timer);
+    __atomic_store_n(&g_initialization_stage, 6, __ATOMIC_RELEASE);
     recompute_connection_status();
 }
 
@@ -1649,6 +1667,7 @@ void platform_on_controller_data(uni_hid_device_t* device,
         controller->klass != UNI_CONTROLLER_CLASS_GAMEPAD) {
         return;
     }
+    __atomic_add_fetch(&g_controller_reports, 1, __ATOMIC_RELAXED);
 
     uni_gamepad_t gamepad = controller->gamepad;
     const uint16_t pre_hotkey_button_mask =
@@ -1707,11 +1726,14 @@ uni_platform* get_platform() {
     if (!flash_safe_execute_core_init()) {
         halt_wireless_backend();
     }
+    __atomic_store_n(&g_initialization_stage, 2, __ATOMIC_RELEASE);
     configuration_service_initialize_on_storage_core();
     profile_service_initialize_on_storage_core();
+    __atomic_store_n(&g_initialization_stage, 3, __ATOMIC_RELEASE);
     if (cyw43_arch_init() != 0) {
         halt_wireless_backend();
     }
+    __atomic_store_n(&g_initialization_stage, 4, __ATOMIC_RELEASE);
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
     g_status_led_on = true;
 
@@ -1719,6 +1741,7 @@ uni_platform* get_platform() {
     if (uni_init(0, nullptr) != 0) {
         halt_wireless_backend();
     }
+    __atomic_store_n(&g_initialization_stage, 5, __ATOMIC_RELEASE);
 
     btstack_run_loop_execute();
     while (true) {
@@ -1763,6 +1786,13 @@ void bluepad32_input_backend_init() {
     g_pairing_reset_feedback_deadline_ms = 0;
     g_pairing_window_open = false;
     g_initialized = true;
+    __atomic_store_n(&g_initialization_stage, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_rumble_timer_ticks, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_configuration_timer_ticks, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_controller_reports, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_host_rumble_requests, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_local_feedback_requests, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_rumble_dispatches, 0, __ATOMIC_RELAXED);
 }
 
 void bluepad32_input_backend_start() {
@@ -1842,6 +1872,47 @@ void bluepad32_input_backend_pairing_snapshot(
 }
 
 
+void bluepad32_input_backend_diagnostics(
+    Bluepad32BackendDiagnostics* out) {
+    if (out == nullptr) {
+        return;
+    }
+    *out = {};
+    out->initialization_stage =
+        __atomic_load_n(&g_initialization_stage, __ATOMIC_ACQUIRE);
+    out->rumble_timer_ticks =
+        __atomic_load_n(&g_rumble_timer_ticks, __ATOMIC_RELAXED);
+    out->configuration_timer_ticks =
+        __atomic_load_n(&g_configuration_timer_ticks, __ATOMIC_RELAXED);
+    out->controller_reports =
+        __atomic_load_n(&g_controller_reports, __ATOMIC_RELAXED);
+    out->host_rumble_requests =
+        __atomic_load_n(&g_host_rumble_requests, __ATOMIC_RELAXED);
+    out->local_feedback_requests =
+        __atomic_load_n(&g_local_feedback_requests, __ATOMIC_RELAXED);
+    out->rumble_dispatches =
+        __atomic_load_n(&g_rumble_dispatches, __ATOMIC_RELAXED);
+
+    critical_section_enter_blocking(&g_state_lock);
+    for (const BackendSlot& slot : g_slots) {
+        if (slot.active) {
+            ++out->active_slots;
+        }
+        if (slot.active && slot.device != nullptr &&
+            slot.device->report_parser.play_dual_rumble != nullptr) {
+            ++out->rumble_capable_slots;
+        }
+        if (slot.feedback_pending || slot.profile_feedback.active ||
+            slot.pending_profile_feedback_count != 0) {
+            ++out->feedback_pending_slots;
+        }
+        if (slot.rumble_pending) {
+            ++out->rumble_pending_slots;
+        }
+    }
+    critical_section_exit(&g_state_lock);
+}
+
 void bluepad32_input_backend_snapshot(uint8_t slot_index,
                                       Bluepad32SlotSnapshot* out) {
     if (out == nullptr) {
@@ -1891,6 +1962,8 @@ void bluepad32_input_backend_queue_rumble(
             duration_ms};
         slot.pending_rumble = envelope;
         slot.rumble_pending = true;
+        __atomic_add_fetch(
+            &g_host_rumble_requests, 1, __ATOMIC_RELAXED);
         if (duration_ms == kXInputHostRumbleDurationMs) {
             slot.retained_host_rumble = envelope;
             slot.retained_host_rumble_valid = true;

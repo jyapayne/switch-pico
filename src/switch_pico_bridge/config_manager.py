@@ -47,6 +47,7 @@ OP_TRANSACTION_STATUS = 0x15
 OP_PAIRING_READ = 0x20
 OP_PAIRING_REFRESH = 0x21
 OP_PAIRING_CLEAR = 0x22
+OP_RUNTIME_DIAGNOSTICS = 0x23
 OP_PROFILE_LIST = 0x30
 OP_PROFILE_SELECT = 0x31
 OP_PROFILE_READ = 0x32
@@ -204,6 +205,20 @@ class DeviceInfo:
         names = self.capability_names()
         return "input only" if names == ("input",) else ", ".join(names)
 
+
+@dataclass(frozen=True)
+class RuntimeDiagnostics:
+    initialization_stage: int
+    rumble_timer_ticks: int
+    configuration_timer_ticks: int
+    controller_reports: int
+    host_rumble_requests: int
+    local_feedback_requests: int
+    rumble_dispatches: int
+    active_slots: int
+    rumble_capable_slots: int
+    feedback_pending_slots: int
+    rumble_pending_slots: int
 
 @dataclass(frozen=True)
 class AdapterConfiguration:
@@ -1350,6 +1365,20 @@ def read_info(device: UsbDevice) -> DeviceInfo:
         )[0],
     )
 
+def read_runtime_diagnostics(device: UsbDevice) -> RuntimeDiagnostics:
+    envelope = _control_in(device, OP_RUNTIME_DIAGNOSTICS)
+    _raise_status(envelope)
+    if len(envelope.payload) != 32:
+        raise ConfigManagerError("invalid runtime-diagnostics payload")
+    counters = struct.unpack_from("<7I", envelope.payload)
+    return RuntimeDiagnostics(
+        *counters,
+        active_slots=envelope.payload[28],
+        rumble_capable_slots=envelope.payload[29],
+        feedback_pending_slots=envelope.payload[30],
+        rumble_pending_slots=envelope.payload[31],
+    )
+
 
 def read_configuration(device: UsbDevice) -> AdapterConfiguration:
     envelope = _control_in(device, OP_CONFIGURATION_READ)
@@ -1631,7 +1660,7 @@ def write_profile(
     if not isinstance(profile, ControllerProfile):
         raise ConfigManagerError("profile must be a ControllerProfile")
     payload = profile.to_bytes()
-    transaction_id = secrets.randbits(32) or 1
+    transaction_id = _host_transaction_id()
     begin = (
         struct.pack("<I", transaction_id)
         + identity.to_bytes()
@@ -1666,7 +1695,7 @@ def reset_profile(
     if profile_index is not None:
         _validate_profile_index(profile_index)
         wire_index = profile_index
-    transaction_id = secrets.randbits(32) or 1
+    transaction_id = _host_transaction_id()
     _control_out(
         device,
         OP_PROFILE_RESET,
@@ -1684,7 +1713,7 @@ def activate_profile(
     timeout: float,
 ) -> TransactionStatus:
     _validate_profile_index(profile_index)
-    transaction_id = secrets.randbits(32) or 1
+    transaction_id = _host_transaction_id()
     _control_out(
         device,
         OP_PROFILE_ACTIVATE,
@@ -2137,6 +2166,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="show firmware and configuration status")
+    commands.add_parser(
+        "diagnostics", help="show live Bluetooth and rumble pipeline counters"
+    )
     mode = commands.add_parser("mode", help="select the persistent USB mode")
     mode.add_argument("mode", choices=SELECTABLE_MODE_NAMES)
 
@@ -2255,6 +2287,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 "Pairing window: "
                 f"{configuration.pairing_window_seconds} seconds"
+            )
+        elif args.command == "diagnostics":
+            diagnostics = read_runtime_diagnostics(device)
+            print(f"Initialization stage: {diagnostics.initialization_stage}")
+            print(f"Rumble timer ticks: {diagnostics.rumble_timer_ticks}")
+            print(
+                "Configuration timer ticks: "
+                f"{diagnostics.configuration_timer_ticks}"
+            )
+            print(f"Controller reports: {diagnostics.controller_reports}")
+            print(
+                "Host rumble requests: "
+                f"{diagnostics.host_rumble_requests}"
+            )
+            print(
+                "Local feedback requests: "
+                f"{diagnostics.local_feedback_requests}"
+            )
+            print(f"Rumble dispatches: {diagnostics.rumble_dispatches}")
+            print(f"Active slots: {diagnostics.active_slots}")
+            print(
+                "Rumble-capable slots: "
+                f"{diagnostics.rumble_capable_slots}"
+            )
+            print(
+                "Feedback-pending slots: "
+                f"{diagnostics.feedback_pending_slots}"
+            )
+            print(
+                "Rumble-pending slots: "
+                f"{diagnostics.rumble_pending_slots}"
             )
         elif args.command == "mode":
             requested_mode = REQUESTED_MODE_NAMES.index(args.mode)

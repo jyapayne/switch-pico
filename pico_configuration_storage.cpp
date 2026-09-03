@@ -15,6 +15,7 @@ constexpr size_t kConfigurationStorageSize =
     CONFIGURATION_STORAGE_COPY_COUNT * FLASH_SECTOR_SIZE;
 constexpr uint32_t kConfigurationStorageOffset =
     PICO_FLASH_BANK_STORAGE_OFFSET - kConfigurationStorageSize;
+constexpr uint32_t kFlashSafeExecuteTimeoutMs = 5000;
 
 static_assert(PICO_FLASH_BANK_STORAGE_OFFSET >= kConfigurationStorageSize,
               "configuration storage offset underflows flash");
@@ -77,7 +78,7 @@ bool erase_storage(void*, uint8_t copy) {
         nullptr,
     };
     return flash_safe_execute(perform_flash_mutation, &mutation,
-                              UINT32_MAX) == PICO_OK;
+                              kFlashSafeExecuteTimeoutMs) == PICO_OK;
 }
 
 bool program_storage(void*, uint8_t copy, size_t offset,
@@ -94,7 +95,7 @@ bool program_storage(void*, uint8_t copy, size_t offset,
         data,
     };
     return flash_safe_execute(perform_flash_mutation, &mutation,
-                              UINT32_MAX) == PICO_OK;
+                              kFlashSafeExecuteTimeoutMs) == PICO_OK;
 }
 
 }  // namespace

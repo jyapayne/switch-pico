@@ -41,6 +41,7 @@ enum class Operation : uint8_t {
     kPairingRead = 0x20,
     kPairingRefresh = 0x21,
     kPairingClear = 0x22,
+    kRuntimeDiagnostics = 0x23,
     kProfileList = 0x30,
     kProfileSelect = 0x31,
     kProfileRead = 0x32,

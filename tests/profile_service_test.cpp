@@ -143,7 +143,22 @@ void test_pending_commands_are_not_decoded_as_profile_writes() {
                 active.profile_index == 0,
             "profile write did not publish one coherent generation");
 
-    constexpr uint32_t kResetTransactionId = 0xa5a55a5a;
+    constexpr uint32_t kReservedInternalTransactionId = 0x80000019u;
+    require(
+        profile_service_begin(
+            kReservedInternalTransactionId, identity, kProfileIndex,
+            CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
+            profile_storage_crc32(encoded, sizeof(encoded))) ==
+            ConfigurationTransactionStatus::kMalformed &&
+            profile_service_reset(kReservedInternalTransactionId, identity,
+                                  kProfileIndex) ==
+                ConfigurationTransactionStatus::kMalformed &&
+            profile_service_activate(kReservedInternalTransactionId, identity,
+                                     kProfileIndex) ==
+                ConfigurationTransactionStatus::kMalformed,
+        "host profile mutations admitted the internal transaction namespace");
+
+    constexpr uint32_t kResetTransactionId = 0x25a55a5a;
     require(profile_service_reset(kResetTransactionId, identity,
                                   kProfileIndex) ==
                 ConfigurationTransactionStatus::kPending,
@@ -233,6 +248,17 @@ void test_host_and_controller_mutations_are_serialized() {
                 snapshot.transaction.status ==
                     ConfigurationTransactionStatus::kReceiving,
             "busy controller activation replaced the host transaction");
+    require(
+        profile_service_append(kInternalTransactionId, 0, encoded,
+                               sizeof(encoded)) ==
+                ConfigurationTransactionStatus::kMalformed &&
+            profile_service_commit(kInternalTransactionId) ==
+                ConfigurationTransactionStatus::kMalformed &&
+            transaction_snapshot().transaction.transaction_id ==
+                kHostTransactionId &&
+            transaction_snapshot().transaction.status ==
+                ConfigurationTransactionStatus::kReceiving,
+        "reserved internal IDs corrupted a receiving host transaction");
 
     require(profile_service_append(
                 kHostTransactionId, 0, encoded, sizeof(encoded)) ==

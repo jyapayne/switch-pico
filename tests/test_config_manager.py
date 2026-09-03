@@ -226,6 +226,12 @@ class FakeDevice:
                         ]
                     ),
                 )
+            if request == config_manager.OP_RUNTIME_DIAGNOSTICS:
+                return make_response(
+                    request,
+                    struct.pack("<7I4B", 6, 1200, 120, 5000, 8, 2, 10,
+                                2, 2, 1, 1),
+                )
             if request == config_manager.OP_CONFIGURATION_READ:
                 return make_response(
                     request,
@@ -1010,6 +1016,20 @@ def test_requested_and_active_mode_response_validation() -> None:
         "rumble",
         "motion",
     )
+    diagnostics = config_manager.read_runtime_diagnostics(device)
+    assert diagnostics == config_manager.RuntimeDiagnostics(
+        initialization_stage=6,
+        rumble_timer_ticks=1200,
+        configuration_timer_ticks=120,
+        controller_reports=5000,
+        host_rumble_requests=8,
+        local_feedback_requests=2,
+        rumble_dispatches=10,
+        active_slots=2,
+        rumble_capable_slots=2,
+        feedback_pending_slots=1,
+        rumble_pending_slots=1,
+    )
 
     device.configuration = struct.pack("<HB5x", 60, 0xFF)
     with pytest.raises(
@@ -1267,7 +1287,7 @@ def test_profile_reset_and_activate_wait_for_correlated_transactions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = FakeDevice()
-    generated_ids = iter((0, 0xA5A55A5A))
+    generated_ids = iter((0, 0xFFFFFFFF))
     monkeypatch.setattr(
         config_manager.secrets, "randbits", lambda _bits: next(generated_ids)
     )
@@ -1296,13 +1316,13 @@ def test_profile_reset_and_activate_wait_for_correlated_transactions(
     assert (
         activated.transaction_id
         == device.profile_transaction_id
-        == 0xA5A55A5A
+        == config_manager.HOST_TRANSACTION_ID_MASK
     )
     assert activated.status == config_manager.STATUS_OK
     assert activated.stored_generation == 9
     assert device.profile_status_responses == [
-        (0xA5A55A5A, config_manager.STATUS_PENDING),
-        (0xA5A55A5A, config_manager.STATUS_OK),
+        (config_manager.HOST_TRANSACTION_ID_MASK, config_manager.STATUS_PENDING),
+        (config_manager.HOST_TRANSACTION_ID_MASK, config_manager.STATUS_OK),
     ]
     assert device.active_profiles[identity.to_bytes()] == 3
 

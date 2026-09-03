@@ -162,6 +162,26 @@ size_t encode_info(uint8_t* output, size_t output_size) {
                            payload, sizeof(payload), output, output_size);
 }
 
+size_t encode_runtime_diagnostics(uint8_t* output, size_t output_size) {
+    Bluepad32BackendDiagnostics diagnostics{};
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    uint8_t payload[32]{};
+    write_u32(&payload[0], diagnostics.initialization_stage);
+    write_u32(&payload[4], diagnostics.rumble_timer_ticks);
+    write_u32(&payload[8], diagnostics.configuration_timer_ticks);
+    write_u32(&payload[12], diagnostics.controller_reports);
+    write_u32(&payload[16], diagnostics.host_rumble_requests);
+    write_u32(&payload[20], diagnostics.local_feedback_requests);
+    write_u32(&payload[24], diagnostics.rumble_dispatches);
+    payload[28] = diagnostics.active_slots;
+    payload[29] = diagnostics.rumble_capable_slots;
+    payload[30] = diagnostics.feedback_pending_slots;
+    payload[31] = diagnostics.rumble_pending_slots;
+    return encode_response(Operation::kRuntimeDiagnostics, Status::kOk,
+                           0, 0, 0, payload, sizeof(payload), output,
+                           output_size);
+}
+
 }  // namespace
 
 bool decode_request(Operation setup_operation, const uint8_t* input,
@@ -581,6 +601,10 @@ bool usb_configuration_management_vendor_control(
                 snapshot, response, sizeof(response));
             break;
         }
+        case Operation::kRuntimeDiagnostics:
+            response_size =
+                encode_runtime_diagnostics(response, sizeof(response));
+            break;
         case Operation::kProfileList: {
             ProfileServiceListSnapshot snapshot{};
             profile_service_list_snapshot(&snapshot);

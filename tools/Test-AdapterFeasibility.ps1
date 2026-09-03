@@ -247,6 +247,7 @@ if (-not $SkipInteractive) {
         Write-Host ""
         Write-Host ("For {0} seconds, exercise physical controller slot {1}:" -f $InputTestSeconds, ($index + 1)) -ForegroundColor Yellow
         Write-Host "  D-pad, face buttons, both shoulders, both triggers, and both sticks."
+        Write-Host "  Also press Home/Guide and Capture/Share to observe their raw, non-portable XUSB bits."
         [void](Read-Host "Press Enter to start capture")
 
         $before = Get-XInputState -Index $index
@@ -261,6 +262,10 @@ if (-not $SkipInteractive) {
             LeftStick = $false
             RightStick = $false
         }
+        $observedRawSystemButtons = [ordered]@{
+            GuideBit0x0400 = $false
+            ShareBit0x0800 = $false
+        }
         $captureDeadline = (Get-Date).AddSeconds($InputTestSeconds)
         while ((Get-Date) -lt $captureDeadline) {
             $after = Get-XInputState -Index $index
@@ -270,6 +275,8 @@ if (-not $SkipInteractive) {
             if (($after.Buttons -band 0x000F) -ne 0) { $observedControls.DPad = $true }
             if (($after.Buttons -band 0xF000) -ne 0) { $observedControls.FaceButtons = $true }
             if (($after.Buttons -band 0x0300) -ne 0) { $observedControls.Shoulders = $true }
+            if (($after.Buttons -band 0x0400) -ne 0) { $observedRawSystemButtons.GuideBit0x0400 = $true }
+            if (($after.Buttons -band 0x0800) -ne 0) { $observedRawSystemButtons.ShareBit0x0800 = $true }
             if ($after.LeftTrigger -gt 0) { $observedControls.LeftTrigger = $true }
             if ($after.RightTrigger -gt 0) { $observedControls.RightTrigger = $true }
             if ([math]::Abs([int]$after.LeftThumbX) -gt 8000 -or
@@ -295,10 +302,13 @@ if (-not $SkipInteractive) {
             LastPacket = $before.PacketNumber
             Observed = $observedControls
             Missing = $missingControls
+            RawSystemButtonBits = $observedRawSystemButtons
         }
         Add-Result -Name ("XInput slot {0} complete input" -f ($index + 1)) `
             -Passed $inputPassed `
             -Detail ("samples={0}, packet={1}, missing=[{2}]" -f $samples, $before.PacketNumber, ($missingControls -join ", "))
+        Write-Host ("  Raw wButtons observations (not portable XInput qualification): Guide 0x0400={0}, Share 0x0800={1}" -f `
+            $observedRawSystemButtons.GuideBit0x0400, $observedRawSystemButtons.ShareBit0x0800) -ForegroundColor DarkCyan
     }
 
     for ($index = 0; $index -lt $ExpectedActiveControllers; $index++) {

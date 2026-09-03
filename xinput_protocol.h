@@ -18,6 +18,7 @@ constexpr uint16_t kRightThumb = 0x0080;
 constexpr uint16_t kLeftShoulder = 0x0100;
 constexpr uint16_t kRightShoulder = 0x0200;
 constexpr uint16_t kGuide = 0x0400;
+constexpr uint16_t kShare = 0x0800;
 constexpr uint16_t kButtonA = 0x1000;
 constexpr uint16_t kButtonB = 0x2000;
 constexpr uint16_t kButtonX = 0x4000;
@@ -60,6 +61,7 @@ inline InputReport build_input_report(const ControllerState& state) {
         (state.button_left_shoulder ? kLeftShoulder : 0) |
         (state.button_right_shoulder ? kRightShoulder : 0) |
         (state.button_system ? kGuide : 0) |
+        (state.button_capture ? kShare : 0) |
         (state.button_south ? kButtonA : 0) |
         (state.button_east ? kButtonB : 0) |
         (state.button_west ? kButtonX : 0) |

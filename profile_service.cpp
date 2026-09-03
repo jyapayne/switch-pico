@@ -9,6 +9,7 @@
 namespace {
 
 constexpr uint32_t kMinimumCommitIntervalMs = 1000;
+constexpr uint32_t kInternalTransactionIdMask = 0x80000000u;
 
 enum class PendingCommandType : uint8_t {
     kNone = 0,
@@ -406,7 +407,9 @@ ConfigurationTransactionStatus profile_service_begin(
     g_transaction.snapshot.transaction_id = transaction_id;
     g_transaction.identity = identity;
     g_transaction.profile_index = profile_index;
-    if (transaction_id == 0 || !valid_identity(identity) ||
+    if (transaction_id == 0 ||
+        (transaction_id & kInternalTransactionIdMask) != 0 ||
+        !valid_identity(identity) ||
         profile_index >= CONTROLLER_PROFILE_COUNT || payload_size == 0) {
         g_transaction.snapshot.status =
             ConfigurationTransactionStatus::kMalformed;
@@ -435,6 +438,9 @@ ConfigurationTransactionStatus profile_service_begin(
 ConfigurationTransactionStatus profile_service_append(
     uint32_t transaction_id, size_t offset, const uint8_t* data,
     size_t size) {
+    if ((transaction_id & kInternalTransactionIdMask) != 0) {
+        return ConfigurationTransactionStatus::kMalformed;
+    }
     critical_section_enter_blocking(&g_lock);
     if (g_transaction.snapshot.status !=
         ConfigurationTransactionStatus::kReceiving) {
@@ -461,6 +467,9 @@ ConfigurationTransactionStatus profile_service_append(
 
 ConfigurationTransactionStatus profile_service_commit(
     uint32_t transaction_id) {
+    if ((transaction_id & kInternalTransactionIdMask) != 0) {
+        return ConfigurationTransactionStatus::kMalformed;
+    }
     critical_section_enter_blocking(&g_lock);
     if (g_transaction.snapshot.status !=
             ConfigurationTransactionStatus::kReceiving ||
@@ -510,7 +519,9 @@ ConfigurationTransactionStatus profile_service_reset(
     g_transaction.snapshot.transaction_id = transaction_id;
     g_transaction.identity = identity;
     g_transaction.profile_index = profile_index;
-    if (transaction_id == 0 || !valid_identity(identity) ||
+    if (transaction_id == 0 ||
+        (transaction_id & kInternalTransactionIdMask) != 0 ||
+        !valid_identity(identity) ||
         (profile_index != CONTROLLER_PROFILE_ALL &&
          profile_index >= CONTROLLER_PROFILE_COUNT)) {
         g_transaction.snapshot.status =
@@ -547,7 +558,9 @@ ConfigurationTransactionStatus profile_service_activate(
     g_transaction.snapshot.transaction_id = transaction_id;
     g_transaction.identity = identity;
     g_transaction.profile_index = profile_index;
-    if (transaction_id == 0 || !valid_identity(identity) ||
+    if (transaction_id == 0 ||
+        (transaction_id & kInternalTransactionIdMask) != 0 ||
+        !valid_identity(identity) ||
         profile_index >= CONTROLLER_PROFILE_COUNT) {
         g_transaction.snapshot.status =
             ConfigurationTransactionStatus::kMalformed;
@@ -579,7 +592,7 @@ ConfigurationTransactionStatus profile_service_activate_internal(
         critical_section_exit(&g_lock);
         return ConfigurationTransactionStatus::kBusy;
     }
-    if ((transaction_id & 0x80000000u) == 0 ||
+    if ((transaction_id & kInternalTransactionIdMask) == 0 ||
         !valid_identity(identity) ||
         profile_index >= CONTROLLER_PROFILE_COUNT) {
         critical_section_exit(&g_lock);
