@@ -101,15 +101,28 @@ void adapter_host_probe_note_string_descriptor(uint8_t index) {
 
 bool adapter_host_probe_vendor_control(uint8_t rhport, uint8_t stage,
                                        tusb_control_request_t const *request) {
-    if (stage != CONTROL_STAGE_SETUP || request == nullptr ||
+    if (request == nullptr ||
         request->bmRequestType_bit.direction != TUSB_DIR_IN ||
         request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR ||
         request->bmRequestType_bit.recipient != TUSB_REQ_RCPT_DEVICE) {
         return false;
     }
+    const bool status_request =
+        request->bRequest == kStatusRequest &&
+        request->wIndex == kStatusIndex;
+    const bool compatible_id_request =
+        request->bRequest == XInput::kMsVendorRequest &&
+        request->wIndex == XInput::kMsCompatIdIndex &&
+        (g_mode == AdapterUsbMode::kSwitchProbe ||
+         g_mode == AdapterUsbMode::kXInput);
+    if (!status_request && !compatible_id_request) {
+        return false;
+    }
+    if (stage != CONTROL_STAGE_SETUP) {
+        return true;
+    }
 
-    if (request->bRequest == kStatusRequest &&
-        request->wIndex == kStatusIndex) {
+    if (status_request) {
         const uint32_t current_time = now_ms();
         g_status_response[0] =
             g_mode == AdapterUsbMode::kXInput ? 1 : 0;
@@ -121,10 +134,6 @@ bool adapter_host_probe_vendor_control(uint8_t rhport, uint8_t stage,
                                 sizeof(g_status_response));
     }
 
-    if (request->bRequest != XInput::kMsVendorRequest ||
-        request->wIndex != XInput::kMsCompatIdIndex) {
-        return false;
-    }
 
     if (g_mode == AdapterUsbMode::kSwitchProbe) {
         g_probe.note_ms_compat_id_request(now_ms());

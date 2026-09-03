@@ -146,9 +146,12 @@ void test_microsoft_compatible_id_descriptor() {
            "Microsoft function count mismatch");
     for (uint8_t instance = 0;
          instance < SWITCH_PICO_HID_INSTANCE_COUNT; ++instance) {
-        const uint8_t *function = &kMsCompatIdDescriptor[16 + instance * 24];
+        const uint8_t* function =
+            &kMsCompatIdDescriptor[16 + instance * 24];
         expect(function[0] == instance,
                "Microsoft descriptor interface mismatch");
+        expect(function[1] == 1,
+               "XUSB function must own exactly one interface");
         expect(std::memcmp(&function[2], "XUSB10", 6) == 0,
                "XUSB10 compatible ID missing");
     }

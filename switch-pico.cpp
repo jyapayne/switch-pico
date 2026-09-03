@@ -181,6 +181,11 @@ static void log_usb_state() {
     if (mounted != g_last_mounted) {
         g_last_mounted = mounted;
         LOG_PRINTF("[USB] %s\n", mounted ? "mounted" : "unmounted");
+#ifdef SWITCH_PICO_BLUEPAD32
+        if (!mounted) {
+            adapter_mode_controller_on_usb_unmounted();
+        }
+#endif
     }
 
 #ifdef SWITCH_PICO_BLUEPAD32

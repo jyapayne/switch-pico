@@ -115,6 +115,12 @@ void test_manual_modes_bypass_and_consume_probe_state() {
                             control_length) == 0 &&
                 alarm_count == 0,
             "manual XInput did not serve XInput descriptors without probing");
+    require(adapter_host_probe_vendor_control(
+                0, CONTROL_STAGE_DATA, &request) &&
+                adapter_host_probe_vendor_control(
+                    0, CONTROL_STAGE_ACK, &request) &&
+                control_count == 1,
+            "manual XInput did not retain the compatible-ID transfer");
 
     reset_harness(kXInputBootMagic);
     adapter_host_probe_init(AdapterRequestedMode::kDInput);
@@ -154,6 +160,12 @@ void test_probe_transition_resets_before_watchdog() {
                 alarm_count == 1 && pending_alarm_delay_ms == 100 &&
                 reboot_count == 0,
             "auto probe did not queue the exact delayed transition");
+    require(adapter_host_probe_vendor_control(
+                0, CONTROL_STAGE_DATA, &request) &&
+                adapter_host_probe_vendor_control(
+                    0, CONTROL_STAGE_ACK, &request) &&
+                control_count == 1 && alarm_count == 1,
+            "auto probe did not retain the compatible-ID transfer");
 
     pending_alarm(1, pending_alarm_user_data);
     require(reset_count == 1 && reboot_count == 1 &&

@@ -532,6 +532,27 @@ void test_failed_recovery_never_reboots() {
             "or failed recovery acknowledged, released ownership, or retried");
 }
 
+void test_auto_xinput_disconnect_reboots_to_probe() {
+    reset_harness(AdapterRequestedMode::kAuto);
+    probed_active_mode = AdapterUsbMode::kXInput;
+    adapter_mode_controller_on_usb_unmounted();
+    adapter_mode_controller_on_usb_unmounted();
+    require(runtime_reset_count == 1 && reboot_count == 1,
+            "Auto XInput unmount did not schedule exactly one probe reboot");
+
+    reset_harness(AdapterRequestedMode::kXInput);
+    probed_active_mode = AdapterUsbMode::kXInput;
+    adapter_mode_controller_on_usb_unmounted();
+    require(runtime_reset_count == 0 && reboot_count == 0,
+            "manual XInput mode rebooted after USB unmount");
+
+    reset_harness(AdapterRequestedMode::kAuto);
+    probed_active_mode = AdapterUsbMode::kSwitchProbe;
+    adapter_mode_controller_on_usb_unmounted();
+    require(runtime_reset_count == 0 && reboot_count == 0,
+            "Auto Switch probe rebooted after USB unmount");
+}
+
 }  // namespace
 
 void configuration_service_initialize_pre_usb() {
@@ -659,5 +680,6 @@ int main() {
     test_configuration_failure_and_correlated_reboot();
     test_recovery_auto_wins_host_mode_interleaving();
     test_failed_recovery_never_reboots();
+    test_auto_xinput_disconnect_reboots_to_probe();
     return 0;
 }

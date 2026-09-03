@@ -63,7 +63,7 @@ bool valid_identity(const ControllerIdentity& identity) {
 }
 
 void refresh_list_locked() {
-    g_list = {};
+    g_list = ProfileServiceListSnapshot{};
     g_list.metadata = g_metadata;
     g_list.count = 1;
     g_list.rows[0].identity = controller_identity_global();
@@ -183,7 +183,7 @@ void profile_service_prepare() {
     critical_section_init(&g_lock);
     g_metadata = {};
     __atomic_store_n(&g_published_generation, 0, __ATOMIC_RELAXED);
-    g_list = {};
+    g_list = ProfileServiceListSnapshot{};
     g_selected = {};
     g_active_profiles[0] = {};
     g_active_profile_count = 0;

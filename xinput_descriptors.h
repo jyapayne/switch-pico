@@ -15,7 +15,7 @@ namespace XInput {
 
 constexpr uint16_t kDevelopmentVendorId = 0xcafe;
 constexpr uint16_t kDevelopmentProductId = 0x4010;
-constexpr uint16_t kDevelopmentDeviceRevision = 0x0101;
+constexpr uint16_t kDevelopmentDeviceRevision = 0x0105;
 constexpr uint8_t kInterfaceDescriptorSize = 39;
 constexpr uint16_t kConfigurationDescriptorSize =
     9 + SWITCH_PICO_HID_INSTANCE_COUNT * kInterfaceDescriptorSize;

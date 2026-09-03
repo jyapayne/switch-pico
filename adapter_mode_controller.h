@@ -16,6 +16,11 @@ constexpr uint16_t ADAPTER_MODE_CHORD_BUTTON_MASK =
 void adapter_mode_controller_initialize_usb();
 AdapterRequestedMode adapter_mode_controller_requested_mode();
 
+// Auto mode's XInput selection is valid for one USB attachment. Reboot to the
+// Switch probe after it unmounts so the next host attachment is detected
+// afresh. Persistent manual XInput mode is intentionally unaffected.
+void adapter_mode_controller_on_usb_unmounted();
+
 // Observes the physical pre-hotkey mask and removes the mode chord from both
 // that mask and the state before profile processing. Slot state is isolated by
 // connection generation and all time comparisons are uint32-wrap safe.

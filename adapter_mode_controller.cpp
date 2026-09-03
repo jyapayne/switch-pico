@@ -312,6 +312,13 @@ AdapterRequestedMode adapter_mode_controller_requested_mode() {
     return g_requested_mode;
 }
 
+void adapter_mode_controller_on_usb_unmounted() {
+    if (g_requested_mode == AdapterRequestedMode::kAuto &&
+        adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
+        reboot_now();
+    }
+}
+
 void adapter_mode_controller_process_input(
     uint8_t slot_index, bool active, uint32_t connection_generation,
     uint16_t* pre_hotkey_button_mask, uint32_t now_ms,
