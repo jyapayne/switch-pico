@@ -25,6 +25,7 @@ Official feature references:
 - DualShock 3 support is explicitly out of scope.
 - Proprietary 2.4 GHz controllers are out of scope; Bluetooth Classic and BLE controllers are in scope.
 - Do not impersonate 8BitDo or Microsoft USB identities in a release build.
+- PlayStation Classic and Mega Drive output modes are explicitly out of scope.
 
 The official adapter also does not support the following, so they are not parity requirements:
 
@@ -79,8 +80,6 @@ The Bluetooth, UART, Switch, and XInput paths now share `ControllerState`:
 | Production USB VID/PID | Missing | Prototype uses `CAFE:4010`; obtain an appropriate project VID/PID and repeat Windows binding tests. |
 | DInput output | Missing | Add generic HID descriptor and report driver. |
 | Mac output mode | Missing | Capture/define compatible descriptor and report semantics. |
-| PlayStation Classic mode | Missing | Add strict one-controller legacy descriptor/report mode. |
-| Mega Drive mode | Missing | Add strict one-controller legacy descriptor/report mode. |
 | Manual output-mode selection | Missing | Add persistent PC command and controller chord. |
 | General button remapping | Complete | Sixteen positional logical inputs map directly to supported logical outputs per profile. |
 | Stick sensitivity | Complete | Per-stick center calibration, inner deadzone, outer saturation, fixed-point curve, and inversion run before every output serializer. |
@@ -424,14 +423,9 @@ Implement in this order:
 2. Production XInput based on the verified feasibility implementation.
 3. DInput generic HID.
 4. Mac-compatible HID.
-5. PlayStation Classic.
-6. Mega Drive.
 
-Controller-count policy:
-
-- Switch, XInput, DInput, and Mac: target four independent interfaces.
-- PlayStation Classic and Mega Drive: expose one slot initially for strict compatibility.
-- Expand legacy modes only after real hosts accept a composite device.
+Controller-count policy: Switch, XInput, DInput, and Mac target four
+independent interfaces.
 
 Mode selection:
 
@@ -532,9 +526,6 @@ Final host matrix:
 - Steam Deck/SteamOS
 - Linux/Raspberry Pi
 - Android TV
-- PlayStation Classic
-- Retrofreak or documented compatible equivalent
-- Mega Drive target hardware or the same compatibility environment used by the official mode
 
 ## Verification strategy
 
@@ -561,5 +552,5 @@ Do not mark a host/controller combination complete from descriptor inspection or
 
 Begin Phase 4 by placing the existing Switch and verified XInput
 implementations behind one production output-driver boundary. Preserve the
-Phase 3 transform/runtime seam before serialization, then add DInput, Mac,
-PlayStation Classic, and Mega Drive descriptors in the documented order.
+Phase 3 transform/runtime seam before serialization, then add DInput and
+Mac-compatible HID in that order.
