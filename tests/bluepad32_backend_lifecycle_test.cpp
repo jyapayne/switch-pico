@@ -40,12 +40,15 @@ int ble_bond_count = 0;
 bool flash_core_init_result = true;
 int flash_core_init_calls = 0;
 int core1_launch_calls = 0;
+bool expect_configuration_timer_prearmed = false;
+uint32_t expected_configuration_timer_add_count = 0;
 int cyw43_init_calls = 0;
 int uni_init_calls = 0;
 int device_disconnect_calls = 0;
 uni_hid_device_t* last_disconnected_device = nullptr;
 uni_hid_device_t* lookup_devices[8]{};
 size_t lookup_device_count = 0;
+gap_connection_type_t gap_connection_types[256]{};
 
 struct CoreStopped {};
 
@@ -90,6 +93,12 @@ uni_hid_device_t device(
     result.vendor_id = static_cast<uint16_t>(0x1000 + idx);
     result.product_id = static_cast<uint16_t>(0x2000 + idx);
     result.report_parser.play_dual_rumble = play_rumble;
+    gap_connection_types[result.conn.handle] =
+        protocol == UNI_BT_CONN_PROTOCOL_BR_EDR
+            ? GAP_CONNECTION_ACL
+            : protocol == UNI_BT_CONN_PROTOCOL_BLE
+                  ? GAP_CONNECTION_LE
+                  : GAP_CONNECTION_INVALID;
     return result;
 }
 
@@ -168,6 +177,15 @@ void uni_bt_del_keys_unsafe() {
     ++delete_key_calls;
     classic_bond_count = 0;
     ble_bond_count = 0;
+}
+
+gap_connection_type_t gap_get_connection_type(
+    hci_con_handle_t connection_handle) {
+    return connection_handle <
+                   sizeof(gap_connection_types) /
+                       sizeof(gap_connection_types[0])
+               ? gap_connection_types[connection_handle]
+               : GAP_CONNECTION_INVALID;
 }
 
 int gap_link_key_iterator_init(btstack_link_key_iterator_t* iterator) {
@@ -420,10 +438,22 @@ ControllerIdentity observed_profile_identities[8]{};
 size_t observed_profile_identity_count = 0;
 void configuration_service_prepare() {}
 void configuration_service_initialize_on_storage_core() {}
-void configuration_service_task_on_storage_core(uint32_t) {}
+void configuration_service_task_on_storage_core(uint32_t) {
+    if (expect_configuration_timer_prearmed) {
+        require(g_configuration_timer.add_count ==
+                    expected_configuration_timer_add_count,
+                "configuration work ran before its timer was rearmed");
+    }
+}
 void profile_service_prepare() {}
 void profile_service_initialize_on_storage_core() {}
-void profile_service_task_on_storage_core(uint32_t) {}
+void profile_service_task_on_storage_core(uint32_t) {
+    if (expect_configuration_timer_prearmed) {
+        require(g_configuration_timer.add_count ==
+                    expected_configuration_timer_add_count,
+                "profile work ran before its timer was rearmed");
+    }
+}
 bool profile_service_observe_identity_on_storage_core(
     const ControllerIdentity& identity) {
     require(observed_profile_identity_count <
@@ -736,6 +766,19 @@ void test_independent_lifecycle() {
     test_identity_encoding_contract();
     start_pairing_backend();
 
+    uni_hid_device_t invalid_transport =
+        device(6, true, UNI_BT_CONN_PROTOCOL_BLE);
+    invalid_transport.conn.handle = 0xffff;
+    require(controller_identity_is_global(
+                identity_for_device(&invalid_transport)),
+            "invalid GAP handles must remain on the global identity");
+    uni_hid_device_t sco_transport =
+        device(7, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    gap_connection_types[sco_transport.conn.handle] = GAP_CONNECTION_SCO;
+    require(controller_identity_is_global(
+                identity_for_device(&sco_transport)),
+            "SCO links must remain on the global identity");
+
     uni_hid_device_t aborted = device(0);
     const uint32_t aborted_generation = g_slots[0].connection_generation;
     platform_on_device_connected(&aborted);
@@ -765,10 +808,14 @@ void test_independent_lifecycle() {
             "pre-ready disconnect must restart Classic and BLE scans");
 
     uni_hid_device_t devices[kSlotCount] = {
-        device(0, true, UNI_BT_CONN_PROTOCOL_BR_EDR),
-        device(1, true, UNI_BT_CONN_PROTOCOL_BLE),
-        device(2, true, UNI_BT_CONN_PROTOCOL_BLE),
-        device(3, true, UNI_BT_CONN_PROTOCOL_BLE)};
+        device(0, true, UNI_BT_CONN_PROTOCOL_NONE),
+        device(1, true, UNI_BT_CONN_PROTOCOL_BR_EDR),
+        device(2, true, UNI_BT_CONN_PROTOCOL_NONE),
+        device(3, true, UNI_BT_CONN_PROTOCOL_BR_EDR)};
+    gap_connection_types[devices[0].conn.handle] = GAP_CONNECTION_ACL;
+    gap_connection_types[devices[1].conn.handle] = GAP_CONNECTION_LE;
+    gap_connection_types[devices[2].conn.handle] = GAP_CONNECTION_LE;
+    gap_connection_types[devices[3].conn.handle] = GAP_CONNECTION_LE;
     const bd_addr_t classic_address =
         {0x10, 0x11, 0x12, 0x13, 0x14, 0x15};
     const bd_addr_t resolved_connection_address =
@@ -785,6 +832,18 @@ void test_independent_lifecycle() {
            sizeof(created_connection_address));
     memcpy(devices[3].conn.btaddr, reencrypted_connection_address,
            sizeof(reencrypted_connection_address));
+    require(
+        devices[0].conn.protocol == UNI_BT_CONN_PROTOCOL_NONE &&
+            gap_get_connection_type(devices[0].conn.handle) ==
+                GAP_CONNECTION_ACL &&
+            devices[1].conn.protocol == UNI_BT_CONN_PROTOCOL_BR_EDR &&
+            gap_get_connection_type(devices[1].conn.handle) ==
+                GAP_CONNECTION_LE &&
+            devices[2].conn.protocol == UNI_BT_CONN_PROTOCOL_NONE &&
+            gap_get_connection_type(devices[2].conn.handle) ==
+                GAP_CONNECTION_LE,
+        "identity fixtures must expose authoritative GAP transports over "
+        "missing or stale cached protocols");
     const bd_addr_t resolved_address =
         {0x20, 0x21, 0x22, 0x23, 0x24, 0x25};
     const bd_addr_t reencrypted_address =
@@ -878,6 +937,18 @@ void test_independent_lifecycle() {
                     observed_profile_identities[2],
                     lifecycle_snapshots[0].identity),
             "only stable ready identities must be enrolled for profiles");
+    size_t classic_identity_observations = 0;
+    for (size_t index = 0; index < observed_profile_identity_count;
+         ++index) {
+        if (controller_identity_equal(
+                observed_profile_identities[index],
+                lifecycle_snapshots[0].identity)) {
+            ++classic_identity_observations;
+        }
+    }
+    require(classic_identity_observations == 1,
+            "active GAP ACL with no cached protocol must enroll its stable "
+            "Classic identity exactly once");
     require(baseline_connection_generations[0] ==
                 first_pending_generation + 1 &&
                 baseline_connection_generations[1] ==
@@ -1021,6 +1092,15 @@ void test_independent_lifecycle() {
         device(3, true, UNI_BT_CONN_PROTOCOL_BLE);
     memcpy(slot_three_replacement.conn.btaddr,
            devices[3].conn.btaddr, sizeof(devices[3].conn.btaddr));
+    require(
+        slot_three_replacement.conn.handle == devices[3].conn.handle &&
+            gap_get_connection_type(slot_three_replacement.conn.handle) ==
+                GAP_CONNECTION_LE &&
+            memcmp(slot_three_replacement.conn.btaddr,
+                   devices[3].conn.btaddr, sizeof(devices[3].conn.btaddr)) ==
+                0,
+        "replacement isolation fixture must reuse the active BLE handle "
+        "and address");
     require(platform_on_device_ready(&slot_three_replacement) ==
                 UNI_ERROR_SUCCESS,
             "slot 3 replacement must bind to the freed indexed slot");
@@ -1319,7 +1399,7 @@ void test_profile_feedback_scheduler() {
         generations[slot] = snapshot.connection_generation;
         require(devices[slot].rumble_calls == 0 &&
                     !g_slots[slot].profile_feedback.active &&
-                    !g_slots[slot].profile_feedback_pending,
+                    g_slots[slot].pending_profile_feedback_count == 0,
                 "initial controller/profile load scheduled confirmation feedback");
         bluepad32_input_backend_queue_profile_feedback(
             slot, generations[slot], static_cast<uint8_t>(slot + 1u),
@@ -1404,6 +1484,12 @@ void test_profile_feedback_scheduler() {
             "four-pulse confirmation did not release host rumble at 600 ms");
 
     const int slot_zero_lightbar_calls = devices[0].lightbar_calls;
+    const int slot_one_player_led_calls_before_slot_zero =
+        devices[1].player_led_calls;
+    const int slot_two_lightbar_calls_before_slot_zero =
+        devices[2].lightbar_calls;
+    const int slot_three_player_led_calls_before_slot_zero =
+        devices[3].player_led_calls;
     bluepad32_input_backend_queue_profile_feedback(
         0, generations[0], 2,
         ControllerProfileConfirmationPolicy::kNone);
@@ -1436,7 +1522,8 @@ void test_profile_feedback_scheduler() {
                     kProfileLightbarPalette[1].blue &&
                 observed_status_led_on &&
                 g_slots[0].rumble_pending,
-            "LED policy did not set persistent profile color and first onboard blink");
+            "LED policy did not set transient profile color and first "
+            "onboard blink");
     now_ms = 875;
     process_rumble_timer(&g_rumble_timer);
     require(!observed_status_led_on &&
@@ -1453,10 +1540,24 @@ void test_profile_feedback_scheduler() {
             "host rumble interrupted the final onboard off phase");
     now_ms = 1100;
     process_rumble_timer(&g_rumble_timer);
+    const SwitchRgbColor slot_zero_color =
+        switch_pro_get_slot_light_color(0);
     require(devices[0].rumble_calls == 4 &&
                 devices[0].last_high == 0x42 &&
-                !g_slots[0].rumble_pending,
-            "LED-only sequence did not release deferred host rumble");
+                !g_slots[0].rumble_pending &&
+                devices[0].lightbar_calls ==
+                    slot_zero_lightbar_calls + 2 &&
+                devices[0].lightbar_red == slot_zero_color.red &&
+                devices[0].lightbar_green == slot_zero_color.green &&
+                devices[0].lightbar_blue == slot_zero_color.blue &&
+                devices[1].player_led_calls ==
+                    slot_one_player_led_calls_before_slot_zero &&
+                devices[2].lightbar_calls ==
+                    slot_two_lightbar_calls_before_slot_zero &&
+                devices[3].player_led_calls ==
+                    slot_three_player_led_calls_before_slot_zero,
+            "LED-only sequence did not restore its slot color in "
+            "isolation after the final gap");
 
     const int slot_one_player_led_calls =
         devices[1].player_led_calls;
@@ -1482,13 +1583,22 @@ void test_profile_feedback_scheduler() {
                              kXInputHostRumbleDurationMs
                          ? 7
                          : 6) &&
-                !g_slots[1].profile_feedback.active,
-            "combined three-pulse sequence did not terminate");
+                !g_slots[1].profile_feedback.active &&
+                devices[1].player_led_calls ==
+                    slot_one_player_led_calls + 2 &&
+                devices[1].player_leds == (1u << 1u),
+            "combined three-pulse sequence did not terminate and "
+            "restore slot player lighting");
 
     const int old_rumble_calls = devices[2].rumble_calls;
     bluepad32_input_backend_queue_profile_feedback(
         2, generations[2], 4,
         ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    bluepad32_input_backend_queue_profile_feedback(
+        2, generations[2], 1,
+        ControllerProfileConfirmationPolicy::kLed);
+    require(g_slots[2].pending_profile_feedback_count == 2,
+            "two queued profile events did not fill the bounded FIFO");
     platform_on_device_disconnected(&devices[2]);
     uni_hid_device_t replacement = device(2);
     replacement.report_parser.set_lightbar_color = set_lightbar;
@@ -1501,7 +1611,7 @@ void test_profile_feedback_scheduler() {
                 replacement.rumble_calls == 0 &&
                 replacement.lightbar_calls == 1 &&
                 !g_slots[2].profile_feedback.active &&
-                !g_slots[2].profile_feedback_pending,
+                g_slots[2].pending_profile_feedback_count == 0,
             "slot replacement accepted stale queued profile feedback");
     bluepad32_input_backend_queue_profile_feedback(
         2, generations[2], 4,
@@ -1534,8 +1644,12 @@ void test_profile_feedback_scheduler() {
     process_rumble_timer(&g_rumble_timer);
     require(!g_slots[3].profile_feedback.active &&
                 devices[3].rumble_calls ==
-                    slot_three_rumble_calls,
-            "one-blink LED-only profile indication did not terminate cleanly");
+                    slot_three_rumble_calls &&
+                devices[3].player_led_calls ==
+                    slot_three_player_led_calls + 2 &&
+                devices[3].player_leds == (1u << 3u),
+            "one-blink LED-only profile indication did not restore "
+            "slot lighting cleanly");
 
     bluepad32_input_backend_queue_profile_feedback(
         3, generations[3], 4,
@@ -1543,7 +1657,7 @@ void test_profile_feedback_scheduler() {
     now_ms = 2000;
     process_rumble_timer(&g_rumble_timer);
     require(devices[3].player_leds == 0x0f,
-            "profile 4 did not persist four player LEDs");
+            "profile 4 player count was not shown during its sequence");
     for (uint8_t pulse = 1; pulse <= 4; ++pulse) {
         require(observed_status_led_on &&
                     g_slots[3].profile_feedback.on &&
@@ -1565,8 +1679,122 @@ void test_profile_feedback_scheduler() {
     process_rumble_timer(&g_rumble_timer);
     require(!g_slots[3].profile_feedback.active &&
                 devices[3].rumble_calls ==
-                    slot_three_rumble_calls,
-            "four-blink LED-only profile indication did not terminate");
+                    slot_three_rumble_calls &&
+                devices[3].player_led_calls ==
+                    slot_three_player_led_calls + 4 &&
+                devices[3].player_leds == (1u << 3u),
+            "four-blink LED-only profile indication did not restore "
+            "slot lighting");
+
+    Bluepad32SlotSnapshot replacement_snapshot{};
+    bluepad32_input_backend_snapshot(2, &replacement_snapshot);
+    const int replacement_lightbar_calls = replacement.lightbar_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        2, replacement_snapshot.connection_generation, 1,
+        ControllerProfileConfirmationPolicy::kLed);
+    now_ms = 2700;
+    process_rumble_timer(&g_rumble_timer);
+    require(replacement.lightbar_calls ==
+                    replacement_lightbar_calls + 1,
+            "current-generation profile lighting was not applied");
+    now_ms = 2775;
+    process_rumble_timer(&g_rumble_timer);
+    platform_on_device_disconnected(&replacement);
+    uni_hid_device_t second_replacement = device(2);
+    second_replacement.report_parser.set_lightbar_color =
+        set_lightbar;
+    require(platform_on_device_ready(&second_replacement) ==
+                UNI_ERROR_SUCCESS &&
+                second_replacement.lightbar_calls == 1,
+            "second replacement did not receive steady slot lighting");
+    now_ms = 2850;
+    process_rumble_timer(&g_rumble_timer);
+    require(second_replacement.lightbar_calls == 1 &&
+                replacement.lightbar_calls ==
+                    replacement_lightbar_calls + 1 &&
+                !g_slots[2].profile_feedback.active,
+            "stale final-gap restore touched a replacement connection");
+
+    const int fifo_lightbar_calls = devices[0].lightbar_calls;
+    const int fifo_rumble_calls = devices[0].rumble_calls;
+    const int isolated_slot_one_lighting =
+        devices[1].player_led_calls;
+    const int isolated_slot_two_lighting =
+        second_replacement.lightbar_calls;
+    const int isolated_slot_three_lighting =
+        devices[3].player_led_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        0, generations[0], 1,
+        ControllerProfileConfirmationPolicy::kLed);
+    bluepad32_input_backend_queue_profile_feedback(
+        0, generations[0], 2,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    require(g_slots[0].pending_profile_feedback_count == 2,
+            "initial and switched profile events were not queued");
+
+    now_ms = 3000;
+    process_rumble_timer(&g_rumble_timer);
+    require(g_slots[0].profile_feedback.active &&
+                g_slots[0].profile_feedback.pulse_count == 1 &&
+                !g_slots[0].profile_feedback.rumble_enabled &&
+                g_slots[0].pending_profile_feedback_count == 1 &&
+                devices[0].rumble_calls == fifo_rumble_calls &&
+                devices[0].lightbar_calls ==
+                    fifo_lightbar_calls + 1 &&
+                devices[0].lightbar_red ==
+                    kProfileLightbarPalette[0].red,
+            "LED-only initial event did not run first from the FIFO");
+
+    now_ms = 3075;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 3150;
+    process_rumble_timer(&g_rumble_timer);
+    require(g_slots[0].profile_feedback.active &&
+                g_slots[0].profile_feedback.pulse_count == 2 &&
+                g_slots[0].profile_feedback.rumble_enabled &&
+                g_slots[0].pending_profile_feedback_count == 0 &&
+                devices[0].rumble_calls == fifo_rumble_calls + 1 &&
+                devices[0].lightbar_calls ==
+                    fifo_lightbar_calls + 3 &&
+                devices[0].lightbar_red ==
+                    kProfileLightbarPalette[1].red,
+            "switched profile event did not follow initial indication "
+            "after its final gap");
+
+    now_ms = 3225;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 3300;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 3375;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 3450;
+    process_rumble_timer(&g_rumble_timer);
+    const SwitchRgbColor final_slot_zero_color =
+        switch_pro_get_slot_light_color(0);
+    const bool stateful_host_rumble =
+        host_rumble_duration_ms() == kXInputHostRumbleDurationMs;
+    require(!g_slots[0].profile_feedback.active &&
+                devices[0].rumble_calls ==
+                    fifo_rumble_calls +
+                        (stateful_host_rumble ? 3 : 2) &&
+                (!stateful_host_rumble ||
+                 (devices[0].last_high == 0x42 &&
+                  devices[0].last_low == 0x32)) &&
+                devices[0].lightbar_calls ==
+                    fifo_lightbar_calls + 4 &&
+                devices[0].lightbar_red ==
+                    final_slot_zero_color.red &&
+                devices[0].lightbar_green ==
+                    final_slot_zero_color.green &&
+                devices[0].lightbar_blue ==
+                    final_slot_zero_color.blue &&
+                devices[1].player_led_calls ==
+                    isolated_slot_one_lighting &&
+                second_replacement.lightbar_calls ==
+                    isolated_slot_two_lighting &&
+                devices[3].player_led_calls ==
+                    isolated_slot_three_lighting,
+            "ordered profile FIFO did not restore or remain slot-local");
 }
 
 void test_stateful_host_rumble_restore() {
@@ -1932,6 +2160,19 @@ void test_clear_pairings() {
             "pairing reset request must execute only once");
 }
 
+void test_configuration_timer_rearms_before_storage_work() {
+    const uint32_t adds_before = g_configuration_timer.add_count;
+    expected_configuration_timer_add_count = adds_before + 1;
+    expect_configuration_timer_prearmed = true;
+    process_configuration_timer(&g_configuration_timer);
+    expect_configuration_timer_prearmed = false;
+    require(g_configuration_timer.add_count ==
+                    expected_configuration_timer_add_count &&
+                g_configuration_timer.timeout_ms ==
+                    kConfigurationPollIntervalMs,
+            "configuration timer did not remain recurring");
+}
+
 void test_flash_core_start_contract() {
     bluepad32_input_backend_init();
     flash_core_init_result = false;
@@ -1997,6 +2238,8 @@ int main(int argc, char** argv) {
         test_host_rumble_mode_duration();
     } else if (scenario == "clear-pairings") {
         test_clear_pairings();
+    } else if (scenario == "configuration-timer") {
+        test_configuration_timer_rearms_before_storage_work();
     } else if (scenario == "flash-core-start") {
         test_flash_core_start_contract();
     } else if (scenario == "flash-core-failure") {

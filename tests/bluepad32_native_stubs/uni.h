@@ -21,6 +21,13 @@ enum hci_link_type_t {
     HCI_LINK_TYPE_ACL = 1,
 };
 
+enum gap_connection_type_t {
+    GAP_CONNECTION_INVALID,
+    GAP_CONNECTION_ACL,
+    GAP_CONNECTION_SCO,
+    GAP_CONNECTION_LE,
+};
+
 struct btstack_link_key_iterator_t {
     int index;
 };
@@ -174,6 +181,8 @@ void uni_bt_bredr_scan_stop();
 void uni_bt_le_scan_start();
 void uni_bt_le_scan_stop();
 void uni_bt_del_keys_unsafe();
+gap_connection_type_t gap_get_connection_type(
+    hci_con_handle_t connection_handle);
 int gap_link_key_iterator_init(btstack_link_key_iterator_t* iterator);
 int gap_link_key_iterator_get_next(
     btstack_link_key_iterator_t* iterator, bd_addr_t address,

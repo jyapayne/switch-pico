@@ -77,13 +77,14 @@ bool ProfileStorage::initialize(const ProfileStorageIo& io,
                                 ControllerProfileDatabase* database) {
     io_ = io;
     snapshot_ = {};
-    initialized_ = database != nullptr && io_.read != nullptr &&
-                   io_.erase_sector != nullptr && io_.program != nullptr &&
-                   io_.bank_size >= PROFILE_STORAGE_BANK_SIZE &&
-                   io_.sector_size == PROFILE_STORAGE_SECTOR_SIZE &&
-                   io_.page_size == PROFILE_STORAGE_PAGE_SIZE &&
-                   io_.bank_size % io_.sector_size == 0 &&
-                   io_.sector_size % io_.page_size == 0;
+    initialized_ =
+        database != nullptr && io_.read != nullptr &&
+        io_.replace_bank != nullptr &&
+        io_.bank_size >= PROFILE_STORAGE_BANK_SIZE &&
+        io_.sector_size == PROFILE_STORAGE_SECTOR_SIZE &&
+        io_.page_size == PROFILE_STORAGE_PAGE_SIZE &&
+        io_.bank_size % io_.sector_size == 0 &&
+        io_.sector_size % io_.page_size == 0;
     if (!initialized_) {
         return false;
     }
@@ -120,102 +121,46 @@ bool ProfileStorage::initialize(const ProfileStorageIo& io,
 }
 
 ProfileStorageResult ProfileStorage::commit(
-    const ControllerProfileDatabase& database) {
-    if (!initialized_ || !controller_profile_database_validate(database)) {
+    const ControllerProfileDatabase& database,
+    uint8_t* encoded_database, size_t encoded_database_size) {
+    if (!initialized_ || !controller_profile_database_validate(database) ||
+        encoded_database == nullptr ||
+        encoded_database_size < CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
+        !controller_profile_database_encode_range(
+            database, 0, encoded_database,
+            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE)) {
         return ProfileStorageResult::kInvalidArgument;
     }
-    if (snapshot_.valid && payload_matches(snapshot_.active_bank, database)) {
+    if (snapshot_.valid &&
+        payload_matches_encoded(
+            snapshot_.active_bank, encoded_database,
+            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE)) {
         return ProfileStorageResult::kUnchanged;
     }
 
-    uint8_t page[PROFILE_STORAGE_PAGE_SIZE]{};
-    uint32_t crc = 0xffffffffu;
-    for (size_t offset = 0;
-         offset < CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE;
-         offset += sizeof(page)) {
-        const size_t size =
-            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset < sizeof(page)
-                ? CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset
-                : sizeof(page);
-        if (!controller_profile_database_encode_range(database, offset,
-                                                      page, size)) {
-            return ProfileStorageResult::kInvalidArgument;
-        }
-        crc = crc32_update(crc, page, size);
-    }
-    crc = ~crc;
-
-    const uint8_t target_bank = snapshot_.valid
-                                    ? snapshot_.active_bank ^ 1u
-                                    : 0;
-    for (size_t offset = 0; offset < PROFILE_STORAGE_BANK_SIZE;
-         offset += PROFILE_STORAGE_SECTOR_SIZE) {
-        if (!io_.erase_sector(io_.context, target_bank, offset)) {
-            return ProfileStorageResult::kIoError;
-        }
-    }
-
-    for (size_t offset = 0;
-         offset < CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE;
-         offset += sizeof(page)) {
-        memset(page, 0, sizeof(page));
-        const size_t size =
-            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset < sizeof(page)
-                ? CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset
-                : sizeof(page);
-        if (!controller_profile_database_encode_range(database, offset,
-                                                      page, size) ||
-            !io_.program(io_.context, target_bank,
-                         PROFILE_STORAGE_RECORD_HEADER_SIZE + offset,
-                         page, sizeof(page))) {
-            return ProfileStorageResult::kIoError;
-        }
-    }
-
-    uint8_t stored_page[PROFILE_STORAGE_PAGE_SIZE]{};
-    uint32_t stored_crc = 0xffffffffu;
-    bool stored_payload_matches = true;
-    for (size_t offset = 0;
-         offset < CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE;
-         offset += sizeof(stored_page)) {
-        const size_t size =
-            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset <
-                    sizeof(stored_page)
-                ? CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset
-                : sizeof(stored_page);
-        if (!io_.read(io_.context, target_bank,
-                      PROFILE_STORAGE_RECORD_HEADER_SIZE + offset,
-                      stored_page, size)) {
-            return ProfileStorageResult::kIoError;
-        }
-        if (!controller_profile_database_encode_range(database, offset,
-                                                      page, size)) {
-            return ProfileStorageResult::kInvalidArgument;
-        }
-        for (size_t index = 0; index < size; ++index) {
-            stored_payload_matches &=
-                stored_page[index] == page[index];
-        }
-        stored_crc = crc32_update(stored_crc, stored_page, size);
-    }
-    if (!stored_payload_matches || ~stored_crc != crc) {
-        return ProfileStorageResult::kIoError;
-    }
-
-    memset(page, 0, sizeof(page));
-    memcpy(page, kRecordMagic, sizeof(kRecordMagic));
-    storage_write_u16(&page[4], kRecordFormatVersion);
-    storage_write_u16(&page[6],
-                      CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION);
+    const uint32_t crc = profile_storage_crc32(
+        encoded_database, CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE);
+    const uint8_t target_bank =
+        snapshot_.valid ? snapshot_.active_bank ^ 1u : 0;
     const uint32_t generation =
         snapshot_.valid ? snapshot_.generation + 1u : 1u;
-    storage_write_u32(&page[8], generation);
-    storage_write_u32(&page[12],
-                      CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE);
-    storage_write_u32(&page[16], crc);
-    storage_write_u32(&page[kHeaderCrcOffset],
-              profile_storage_crc32(page, kHeaderCrcOffset));
-    if (!io_.program(io_.context, target_bank, 0, page, sizeof(page))) {
+    uint8_t header[PROFILE_STORAGE_RECORD_HEADER_SIZE]{};
+    memcpy(header, kRecordMagic, sizeof(kRecordMagic));
+    storage_write_u16(&header[4], kRecordFormatVersion);
+    storage_write_u16(
+        &header[6], CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION);
+    storage_write_u32(&header[8], generation);
+    storage_write_u32(
+        &header[12], CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE);
+    storage_write_u32(&header[16], crc);
+    storage_write_u32(
+        &header[kHeaderCrcOffset],
+        profile_storage_crc32(header, kHeaderCrcOffset));
+
+    if (!io_.replace_bank(
+            io_.context, target_bank, encoded_database,
+            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE, header,
+            sizeof(header))) {
         return ProfileStorageResult::kIoError;
     }
 
@@ -231,7 +176,7 @@ const ProfileStorageSnapshot& ProfileStorage::snapshot() const {
 }
 
 bool ProfileStorage::read_header(uint8_t bank, BankHeader* output) const {
-    uint8_t header[kHeaderFieldsSize]{};
+    uint8_t header[PROFILE_STORAGE_RECORD_HEADER_SIZE]{};
     if (bank >= PROFILE_STORAGE_BANK_COUNT || output == nullptr ||
         !io_.read(io_.context, bank, 0, header, sizeof(header)) ||
         memcmp(header, kRecordMagic, sizeof(kRecordMagic)) != 0 ||
@@ -245,6 +190,12 @@ bool ProfileStorage::read_header(uint8_t bank, BankHeader* output) const {
         profile_storage_crc32(header, kHeaderCrcOffset) !=
             storage_read_u32(&header[kHeaderCrcOffset])) {
         return false;
+    }
+    for (size_t offset = kHeaderFieldsSize;
+         offset < sizeof(header); ++offset) {
+        if (header[offset] != 0) {
+            return false;
+        }
     }
     output->generation = storage_read_u32(&header[8]);
     output->payload_crc = storage_read_u32(&header[16]);
@@ -279,23 +230,21 @@ bool ProfileStorage::decode_bank(
                                               database);
 }
 
-bool ProfileStorage::payload_matches(
-    uint8_t bank, const ControllerProfileDatabase& database) const {
+bool ProfileStorage::payload_matches_encoded(
+    uint8_t bank, const uint8_t* payload,
+    size_t payload_size) const {
     uint8_t stored[PROFILE_STORAGE_PAGE_SIZE]{};
-    uint8_t encoded[PROFILE_STORAGE_PAGE_SIZE]{};
-    for (size_t offset = 0;
-         offset < CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE;
+    for (size_t offset = 0; offset < payload_size;
          offset += sizeof(stored)) {
         const size_t size =
-            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset < sizeof(stored)
-                ? CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE - offset
+            payload_size - offset < sizeof(stored)
+                ? payload_size - offset
                 : sizeof(stored);
-        if (!io_.read(io_.context, bank,
-                      PROFILE_STORAGE_RECORD_HEADER_SIZE + offset,
-                      stored, size) ||
-            !controller_profile_database_encode_range(database, offset,
-                                                      encoded, size) ||
-            memcmp(stored, encoded, size) != 0) {
+        if (!io_.read(
+                io_.context, bank,
+                PROFILE_STORAGE_RECORD_HEADER_SIZE + offset,
+                stored, size) ||
+            memcmp(stored, &payload[offset], size) != 0) {
             return false;
         }
     }

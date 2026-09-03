@@ -27,6 +27,7 @@ MAXIMUM_REQUEST_SIZE = 64
 MAXIMUM_RESPONSE_SIZE = 293
 MAXIMUM_CHUNK_SIZE = 40
 USB_TIMEOUT_MS = 1000
+DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
 
 OP_INFO = 0x01
 OP_CONFIGURATION_READ = 0x10
@@ -1788,8 +1789,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=3.0,
-        help="operation timeout in seconds (default: 3)",
+        default=DEFAULT_OPERATION_TIMEOUT_SECONDS,
+        help=(
+            "operation timeout in seconds "
+            f"(default: {DEFAULT_OPERATION_TIMEOUT_SECONDS:g})"
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="show firmware and configuration status")

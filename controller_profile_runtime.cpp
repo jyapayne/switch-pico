@@ -27,6 +27,10 @@ struct ControllerProfileRuntimeContext {
     uint32_t switching_transaction_id = 0;
     bool profile_change_pending = false;
     ControllerProfileRuntimeProfileChangeEvent pending_profile_change{};
+    bool initial_profile_indication_resolved = false;
+    bool initial_profile_indication_pending = false;
+    ControllerProfileRuntimeProfileChangeEvent
+        pending_initial_profile_indication{};
 };
 
 ControllerProfileRuntimeContext
@@ -98,6 +102,9 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
         context->switching_transaction_id = 0;
         context->profile_change_pending = false;
         context->pending_profile_change = {};
+        context->initial_profile_indication_resolved = false;
+        context->initial_profile_indication_pending = false;
+        context->pending_initial_profile_indication = {};
     }
 
     controller_synthetic_input_cancel(&context->synthetic,
@@ -111,6 +118,21 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
     context->active_profile_index = snapshot.valid ? snapshot.profile_index : 0;
     context->profile_snapshot_valid = snapshot.valid;
     context->profile = snapshot.valid ? snapshot.profile : g_default_profile;
+    if (!context->initial_profile_indication_resolved && snapshot.valid) {
+        context->initial_profile_indication_resolved = true;
+        const uint8_t policy = static_cast<uint8_t>(
+            controller_profile_confirmation_policy(context->profile));
+        if ((policy & static_cast<uint8_t>(
+                          ControllerProfileConfirmationPolicy::kLed)) != 0) {
+            context->pending_initial_profile_indication = {
+                connection_generation,
+                context->database_generation,
+                static_cast<uint8_t>(context->active_profile_index + 1u),
+                ControllerProfileConfirmationPolicy::kLed,
+            };
+            context->initial_profile_indication_pending = true;
+        }
+    }
     if (context->switching_chord_held &&
         !context->switching_activation_requested) {
         context->switching_target_profile_index =
@@ -271,6 +293,26 @@ ControllerProfileTransformResult controller_profile_runtime_transform(
     }
     return controller_synthetic_input_apply(
         &context->synthetic, consumed_input, context->profile, now_ms);
+}
+
+bool controller_profile_runtime_take_initial_profile_indication(
+    uint8_t slot, ControllerProfileRuntimeProfileChangeEvent* output) {
+    if (output == nullptr) {
+        return false;
+    }
+    *output = {};
+    if (slot >= CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT) {
+        return false;
+    }
+
+    ControllerProfileRuntimeContext& context = g_contexts[slot];
+    if (!context.initial_profile_indication_pending) {
+        return false;
+    }
+    *output = context.pending_initial_profile_indication;
+    context.initial_profile_indication_pending = false;
+    context.pending_initial_profile_indication = {};
+    return true;
 }
 
 bool controller_profile_runtime_take_profile_change(

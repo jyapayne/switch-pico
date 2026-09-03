@@ -49,6 +49,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "analog-state",
             "rumble-mode",
             "clear-pairings",
+            "configuration-timer",
             "flash-core-start",
             "flash-core-failure",
         ):

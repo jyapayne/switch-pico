@@ -35,6 +35,232 @@ MACROS = tuple(
     for component in ("R", "G", "B")
 )
 
+CMAKE_CACHE_PATHS = tuple(
+    build_dir / "CMakeCache.txt"
+    for build_dir in (BUILD_DIR, AIO_BUILD_DIR, FEASIBILITY_BUILD_DIR)
+)
+TOOLCHAIN_COMPILER = (
+    "arm-none-eabi-gcc.exe" if os.name == "nt" else "arm-none-eabi-gcc"
+)
+
+
+class BuildEnvironmentError(RuntimeError):
+    """A required Pico build dependency could not be resolved."""
+
+
+def parse_cmake_cache(cache_path):
+    """Return the simple key/value entries from an existing CMake cache."""
+    cache_path = Path(cache_path)
+    try:
+        lines = cache_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return {}
+
+    entries = {}
+    for line in lines:
+        if not line or line.startswith(("//", "#")) or "=" not in line:
+            continue
+        key_and_type, value = line.split("=", 1)
+        key = key_and_type.split(":", 1)[0]
+        if key:
+            entries[key] = value
+    return entries
+
+
+def _cache_path(value, cache_path):
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = cache_path.parent / path
+    return path
+
+
+def _versioned_candidates(parent):
+    try:
+        return sorted(
+            (path for path in parent.iterdir() if path.is_dir()),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+    except OSError:
+        return []
+
+
+def _sdk_fallback_candidates():
+    yield ("project-local install", BUILD_DIR / "_deps" / "pico_sdk-src")
+    pico_sdk_home = Path.home() / ".pico-sdk" / "sdk"
+    for path in _versioned_candidates(pico_sdk_home):
+        yield ("user Pico SDK install", path)
+    yield ("user Pico SDK install", Path.home() / "pico" / "pico-sdk")
+    yield ("user Pico SDK install", Path.home() / "pico-sdk")
+    yield ("system Pico SDK install", Path("/opt/pico-sdk"))
+    yield ("system Pico SDK install", Path("/usr/local/pico-sdk"))
+    yield ("system Pico SDK install", Path("/usr/share/pico-sdk"))
+
+
+def _toolchain_fallback_candidates():
+    yield ("project-local install", BUILD_DIR / "toolchain")
+    pico_toolchain_home = Path.home() / ".pico-sdk" / "toolchain"
+    for path in _versioned_candidates(pico_toolchain_home):
+        yield ("user Pico toolchain install", path)
+    yield (
+        "user Pico toolchain install",
+        Path.home() / "pico" / "arm-none-eabi-gcc",
+    )
+    yield ("user Pico toolchain install", Path.home() / "arm-none-eabi-gcc")
+    yield ("system Pico toolchain install", Path("/opt/arm-none-eabi-gcc"))
+    yield (
+        "system Pico toolchain install",
+        Path("/usr/local/arm-none-eabi-gcc"),
+    )
+
+
+def _valid_sdk(path):
+    return (path / "pico_sdk_init.cmake").is_file()
+
+
+def _valid_toolchain(path):
+    return (path / "bin" / TOOLCHAIN_COMPILER).is_file()
+
+
+def _first_valid_candidate(candidates, validator):
+    for source, candidate in candidates:
+        path = Path(candidate).expanduser()
+        if validator(path):
+            return path, source
+    return None, None
+
+
+def _cache_candidates(cache_paths, variables):
+    for cache_path in cache_paths:
+        cache_path = Path(cache_path)
+        entries = parse_cmake_cache(cache_path)
+        for variable, compiler_path in variables:
+            value = entries.get(variable)
+            if not value:
+                continue
+            path = _cache_path(value, cache_path)
+            if compiler_path:
+                path = path.parent.parent
+            yield (f"cache {cache_path}", path)
+
+
+def _explicit_path(environ, variable, validator, expected):
+    if variable not in environ:
+        return None
+    value = environ[variable]
+    if not value:
+        raise BuildEnvironmentError(f"{variable} is set but empty.")
+    path = Path(value).expanduser()
+    if not validator(path):
+        raise BuildEnvironmentError(
+            f"{variable} is set to {path}, but {expected} was not found."
+        )
+    return path
+
+
+def configure_pico_environment(
+    *,
+    environ=None,
+    cache_paths=None,
+    sdk_candidates=None,
+    toolchain_candidates=None,
+    which=None,
+):
+    """Resolve Pico dependencies and apply auto-detected environment values."""
+    environ = os.environ if environ is None else environ
+    cache_paths = CMAKE_CACHE_PATHS if cache_paths is None else cache_paths
+
+    which = shutil.which if which is None else which
+    explicit_sdk = _explicit_path(
+        environ,
+        "PICO_SDK_PATH",
+        _valid_sdk,
+        "pico_sdk_init.cmake",
+    )
+    explicit_toolchain = _explicit_path(
+        environ,
+        "PICO_TOOLCHAIN_PATH",
+        _valid_toolchain,
+        f"bin/{TOOLCHAIN_COMPILER}",
+    )
+
+    sdk_path = explicit_sdk
+    sdk_source = None
+    if sdk_path is None:
+        sdk_path, sdk_source = _first_valid_candidate(
+            _cache_candidates(
+                cache_paths,
+                (("PICO_SDK_PATH", False),),
+            ),
+            _valid_sdk,
+        )
+        if sdk_path is None:
+            sdk_path, sdk_source = _first_valid_candidate(
+                (
+                    _sdk_fallback_candidates()
+                    if sdk_candidates is None
+                    else sdk_candidates
+                ),
+                _valid_sdk,
+            )
+
+    compiler_on_path = which(
+        TOOLCHAIN_COMPILER,
+        path=environ.get("PATH", ""),
+    )
+    toolchain_path = explicit_toolchain
+    toolchain_source = None
+    if toolchain_path is None and compiler_on_path is None:
+        toolchain_path, toolchain_source = _first_valid_candidate(
+            _cache_candidates(
+                cache_paths,
+                (
+                    ("PICO_TOOLCHAIN_PATH", False),
+                    ("CMAKE_C_COMPILER", True),
+                    ("PICO_COMPILER_CC", True),
+                ),
+            ),
+            _valid_toolchain,
+        )
+        if toolchain_path is None:
+            toolchain_path, toolchain_source = _first_valid_candidate(
+                (
+                    _toolchain_fallback_candidates()
+                    if toolchain_candidates is None
+                    else toolchain_candidates
+                ),
+                _valid_toolchain,
+            )
+
+    missing = []
+    if sdk_path is None:
+        missing.append("Pico SDK (set PICO_SDK_PATH)")
+    if toolchain_path is None and compiler_on_path is None:
+        missing.append(
+            "Arm GNU toolchain "
+            "(set PICO_TOOLCHAIN_PATH or add arm-none-eabi-gcc to PATH)"
+        )
+    if missing:
+        raise BuildEnvironmentError(
+            "Missing build prerequisite(s): " + "; ".join(missing) + "."
+        )
+
+    updates = {}
+    detected = []
+    if explicit_sdk is None:
+        updates["PICO_SDK_PATH"] = str(sdk_path)
+        detected.append(("PICO_SDK_PATH", sdk_path, sdk_source))
+    if explicit_toolchain is None and compiler_on_path is None:
+        updates["PICO_TOOLCHAIN_PATH"] = str(toolchain_path)
+        detected.append(
+            ("PICO_TOOLCHAIN_PATH", toolchain_path, toolchain_source)
+        )
+
+    environ.update(updates)
+    for variable, path, source in detected:
+        print(f"Auto-detected {variable}={path} ({source})")
+    return updates
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Build and flash the project, optionally setting grip colors.",
@@ -197,6 +423,12 @@ def flash(elf_path, allow_elf_override):
 
 def main():
     args = parse_args()
+    try:
+        configure_pico_environment()
+    except BuildEnvironmentError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        sys.exit(1)
+
     color = None
 
     if args.random_grip_color:

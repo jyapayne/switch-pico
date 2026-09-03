@@ -50,6 +50,8 @@ uint8_t g_active_profile_count = 0;
 ProfileTransaction g_transaction;
 PendingCommand g_command;
 PendingCommand g_internal_activation;
+alignas(4) uint8_t
+    g_encoded_database[CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE]{};
 bool g_identity_dirty = false;
 bool g_has_committed = false;
 uint32_t g_last_commit_ms = 0;
@@ -309,7 +311,8 @@ void profile_service_task_on_storage_core(uint32_t now_ms) {
         return;
     }
 
-    const ProfileStorageResult storage_result = g_storage.commit(g_database);
+    const ProfileStorageResult storage_result = g_storage.commit(
+        g_database, g_encoded_database, sizeof(g_encoded_database));
     ConfigurationTransactionStatus status =
         ConfigurationTransactionStatus::kStorageError;
     if (storage_result == ProfileStorageResult::kOk) {

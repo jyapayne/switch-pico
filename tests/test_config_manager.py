@@ -658,6 +658,15 @@ def test_trigger_threshold_uses_transformed_output_domain() -> None:
             )
 
 
+def test_default_timeout_covers_batched_profile_commit() -> None:
+    args = config_manager.build_parser().parse_args(["profiles", "list"])
+    assert (
+        args.timeout
+        == config_manager.DEFAULT_OPERATION_TIMEOUT_SECONDS
+        == 15.0
+    )
+
+
 def test_profile_list_select_read_and_chunked_commit() -> None:
     device = FakeDevice()
     entries = config_manager.list_profiles(device)

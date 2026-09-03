@@ -85,7 +85,7 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Pairing window expires**: new authentication and active discovery stop while a controller is active; remembered controllers may still initiate reconnects.
 - **Clear all pairings**: hold BOOTSEL continuously for 10 seconds, through the initial double blink, until the rapid confirmation blink starts. All controllers are disconnected and must be paired again.
 
-### Managing configuration and pairings from a PC
+### Managing configuration, profiles, and pairings from a PC
 
 Connect the Pico 2 W to the PC while the AIO firmware is running normally; do not enter the ROM BOOTSEL drive. `switch-pico-config` uses versioned private vendor requests on USB endpoint 0, so it does not add an interface or depend on Linux `hidraw` nodes.
 
@@ -94,25 +94,34 @@ uv run switch-pico-config status
 uv run switch-pico-config config show
 uv run switch-pico-config config set --pairing-window-seconds 90
 uv run switch-pico-config config reset --yes
+uv run switch-pico-config profiles list
+uv run switch-pico-config profiles export 1 profile.json --identity 0
+uv run switch-pico-config profiles import 2 profile.json --identity 0
+uv run switch-pico-config profiles activate 2 --identity 0
+uv run switch-pico-config profiles reset all --identity 0 --yes
 uv run switch-pico-config pairings list
 uv run switch-pico-config pairings clear --yes
 ```
 
-Configuration records use version, size, generation, and CRC fields. Writes are chunked and atomically committed between two dedicated flash sectors; interrupted or corrupt writes fall back to the previous valid generation. Those sectors do not overlap Bluepad32's separate bond store. Rewriting identical configuration does not consume a flash write, and successful writes are rate-limited.
+Adapter configuration records use version, size, generation, and CRC fields in two dedicated flash sectors. Profiles use a separate two-bank atomic store before the adapter and Bluepad32 bond regions. Profile writes are chunked, verified before the new bank is committed, recover the previous generation after interruption or corruption, skip unchanged data, and are rate-limited.
+
+`profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns four persistent profiles and one active index. Exported JSON contains direct logical button mappings, independent stick and trigger calibration/curves, digital trigger thresholds, weak/strong rumble scales, a profile-switching chord, one bounded eight-step macro, and per-button Turbo modes. Profile numbers shown to users are `1` through `4`; `--identity` uses the zero-based index from `profiles list`.
 
 `pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses. `pairings clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
 
-### Per-controller ABXY layout
+### Per-controller profiles
 
-Each connected AIO controller can toggle its own ABXY layout by pressing **L + R + Select + Start** together. On DualSense, use **L1 + R1 + Create + Options**. The controller gives one short rumble when the toggle is accepted; release the chord before toggling again.
+The default profile-switching chord is **L + R + Select + Start**. On DualSense, use **L1 + R1 + Create + Options**. A profile can replace this chord with any nonzero logical-button mask; a stored zero selects the default chord.
 
-- **Standard**: south→B, east→A, west→Y, north→X.
-- **Swapped**: south→A, east→B, west→X, north→Y.
-- The chord is consumed locally and is not forwarded to the Switch.
-- Other controller slots are unaffected.
-- Layout returns to the configured default after disconnect or reboot.
+- The chord cycles persistent profiles `1 → 2 → 3 → 4 → 1`.
+- Chord buttons are consumed locally and are not forwarded to the host.
+- The new profile applies only after its atomic flash commit completes.
+- Confirmation uses one to four 75 ms pulses matching the active profile number.
+- The profile policy independently enables rumble and LED feedback.
+- On connection and profile changes, RGB/player LEDs briefly show the active profile color/count, then return to the persistent USB slot color/player number.
+- Each controller identity and each of the four active USB slots remain isolated.
 
-Edit `controller_hotkey_config.h` to change the chord, default layout, or confirmation pulse.
+Profile input processing is deterministic: physical input is mapped and tuned first, Turbo or Auto Burst gates configured buttons second, and active macro overrides apply last. Turbo runs at 15 activations per second while held. Auto Burst starts on one press and stops on a second press or the configured macro-cancel button. Macros contain at most eight state steps plus an explicit end and are cancelled on disconnect, profile/output-mode change, configured cancellation, or adapter configuration reset.
 
 ### Per-controller motion toggle
 
@@ -271,13 +280,21 @@ Filters you can use:
 - When testing on a PC before plugging into a Switch, you can verify activity with the lightweight `switch_pico_bridge.switch_pico_uart` helper or the Windows "Game Controllers" panel.
 
 ## Building and flashing firmware
-Prereqs: Pico SDK + CMake toolchain set up.
+Prereqs: Pico SDK, Arm GNU toolchain, CMake, and `picotool`.
 
 ### Using `build.py`
 
 `build.py` configures CMake, builds the firmware, checks that both output formats
 were created, copies the release artifacts into `firmware/`, and flashes the ELF
 with `picotool`.
+
+`build.py` automatically locates the Pico SDK and Arm GNU toolchain from valid
+existing `build/`, `build-aio/`, or `build-feasibility/` CMake caches, then from
+project-local `build/_deps/pico_sdk-src` and `build/toolchain` installs, and
+finally from conventional user and system locations. A compiler already on
+`PATH` is used without setting a toolchain override. Explicit `PICO_SDK_PATH`
+and `PICO_TOOLCHAIN_PATH` values always take precedence; an invalid explicit
+path is reported instead of silently falling back.
 
 Before running it:
 
@@ -316,16 +333,19 @@ If the tools or artifacts are in non-default locations, use these environment
 variables:
 
 ```sh
+PICO_SDK_PATH=/path/to/pico-sdk \
+PICO_TOOLCHAIN_PATH=/path/to/arm-none-eabi-toolchain \
 PICOTOOL_PATH=/path/to/picotool \
 ELF_PATH=/path/to/switch-pico.elf \
 UF2_PATH=/path/to/switch-pico.uf2 \
 python3 build.py
 ```
 
-`PICOTOOL_PATH` selects the flashing tool, `ELF_PATH` selects the ELF that is
-checked and flashed, and `UF2_PATH` selects the UF2 that is checked after the
-build. Their defaults are `picotool` from `PATH`, `build/switch-pico.elf`, and
-`build/switch-pico.uf2`, respectively.
+`PICO_SDK_PATH` and `PICO_TOOLCHAIN_PATH` explicitly select the SDK and
+cross-compiler installations. `PICOTOOL_PATH` selects the flashing tool,
+`ELF_PATH` selects the ELF that is checked and flashed, and `UF2_PATH` selects
+the UF2 that is checked after the build. Their defaults are `picotool` from
+`PATH`, `build/switch-pico.elf`, and `build/switch-pico.uf2`, respectively.
 
 ### Manual build
 ```sh

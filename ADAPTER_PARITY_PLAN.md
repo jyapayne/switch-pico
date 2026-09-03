@@ -75,21 +75,21 @@ The Bluetooth, UART, Switch, and XInput paths now share `ControllerState`:
 | Automatic Windows/Switch selection | Feasibility complete | Windows enumeration fix is in `db4a860`; real Windows transition and rumble were reported working. |
 | Windows feasibility test | Complete | `tools/Test-AdapterFeasibility.ps1` checks transition, PnP health, four XInput slots, controls, and rumble isolation. |
 | Protocol-neutral controller state | Complete | `ControllerState` is shared by Bluetooth, UART, Switch, and XInput paths; analog trigger precision is retained. |
-| Persistent configuration protocol | Core complete | Two-copy CRC-validated flash storage, chunked transactions, generation recovery, and PC read/write/reset are hardware-tested. |
+| Persistent configuration protocol | Complete | Adapter settings and identity-keyed profiles use separate two-copy CRC/generation stores with bounded transactions and recovery. |
 | Production USB VID/PID | Missing | Prototype uses `CAFE:4010`; obtain an appropriate project VID/PID and repeat Windows binding tests. |
 | DInput output | Missing | Add generic HID descriptor and report driver. |
 | Mac output mode | Missing | Capture/define compatible descriptor and report semantics. |
 | PlayStation Classic mode | Missing | Add strict one-controller legacy descriptor/report mode. |
 | Mega Drive mode | Missing | Add strict one-controller legacy descriptor/report mode. |
 | Manual output-mode selection | Missing | Add persistent PC command and controller chord. |
-| General button remapping | Partial | Only per-controller ABXY swap exists. |
-| Stick sensitivity | Missing in AIO | Add inner deadzone, outer saturation, curve, inversion, and center calibration. |
-| Trigger ranges | Partial | Full analog values are preserved; profile-configurable lower/upper range, curve, and digital threshold remain. |
-| Vibration intensity | Missing as configuration | Transport works; add per-profile weak/strong scaling. |
-| Macros | Missing | Add a bounded deterministic macro engine. |
-| Turbo and Auto Burst | Missing | Add exact 15 Hz behavior and cancellation rules. |
-| Persistent profiles | Missing | Hotkey state currently resets on disconnect/reboot. |
-| Profile switching | Missing | Add controller chord, USB command, rumble, and LED confirmation. |
+| General button remapping | Complete | Sixteen positional logical inputs map directly to supported logical outputs per profile. |
+| Stick sensitivity | Complete | Per-stick center calibration, inner deadzone, outer saturation, fixed-point curve, and inversion run before every output serializer. |
+| Trigger ranges | Complete for current outputs | Per-trigger deadzone, saturation, curve, and digital threshold preserve analog XInput values and configured Switch thresholds. |
+| Vibration intensity | Complete | Independent weak/strong profile scales apply to host rumble; local confirmation policy remains separate. |
+| Macros | Complete | One bounded eight-step deterministic macro per profile supports buttons, D-pad, sticks, triggers, waits, and explicit end. |
+| Turbo and Auto Burst | Complete | Fixed-point phase accumulation produces 15 activations per second with deterministic cancellation. |
+| Persistent profiles | Complete | Global fallback plus sixteen stable identities each store four fixed 256-byte profiles in a two-bank atomic database. |
+| Profile switching | Complete | PC commands and a configurable controller chord persist selection with isolated rumble/onboard/transient controller LED confirmation. |
 | Firmware updater | Partial | UF2 updating works; version query and guided reboot/install tool are missing. |
 | Switch 2 | Unverified | Requires real-hardware qualification. |
 | Windows/SteamOS/Linux/Android compatibility | Partial | Windows XInput feasibility passed; other host/output combinations need qualification. |
@@ -322,7 +322,7 @@ Core completion evidence:
   and feasibility firmware reflash, after which reset stored the 60-second
   default as generation 2
 
-### Phase 3 — Mapping, tuning, profiles, and macros
+### Phase 3 — Mapping, tuning, profiles, and macros — Complete
 
 Use four profile slots per stable controller identity. Resolve identity from Bluetooth transport, identity address, VID, and PID; use a global default when stable identity is unavailable.
 
@@ -392,6 +392,29 @@ Acceptance:
 - Physical input plus macro plus Turbo precedence is deterministic.
 - No synthetic input remains stuck after any cancellation path.
 - Four controllers can use different profiles simultaneously.
+
+Completion evidence:
+
+- strict 256-byte profile schema and 17,696-byte fixed database support four
+  profiles for the global fallback and each of sixteen stable identities
+- profile and adapter stores remain separate from each other and BTstack bonds;
+  profile commits use one flash-safe batched inactive-bank replacement
+- schema-v1 profile databases migrate inherited trigger defaults to schema v2
+  without losing custom thresholds, identities, active profiles, or other data
+- direct mapping, stick/trigger fixed-point transforms, Switch thresholds,
+  XInput analog values, rumble scaling, macros, Turbo, Auto Burst, and all
+  cancellation paths have deterministic native coverage
+- the AIO backend uses BTstack GAP connection type for stable Classic/BLE
+  identity, not the stale cached Bluepad protocol field
+- profile switching is serialized against host writes, applies only after
+  commit, and uses generation-safe per-slot feedback
+- profile colors/player counts are transient on connect/switch and restore the
+  persistent USB slot indication after the final 75 ms gap
+- 70 tests passed; UART, AIO, and feasibility variants linked and published
+- hardware verified separate 8BitDo `057e:2009` and DualSense `054c:0ce6`
+  identities, isolated active profiles and feedback, persistent 2.2-second
+  profile commits, button remapping, stick tuning, 15 Hz Turbo, a releasing
+  macro, and transient profile-to-slot LED restoration
 
 ### Phase 4 — Production USB output modes
 
@@ -536,8 +559,7 @@ Do not mark a host/controller combination complete from descriptor inspection or
 
 ## Next action
 
-Begin Phase 3 now that the storage and USB transaction boundary is proven.
-Define the fixed-capacity profile schema first, then add mapping and tuning
-transforms before macros or Turbo. Wire profile list/import/export/activate
-commands through the Phase 2 transaction protocol only after each profile
-field has runtime semantics and deterministic tests.
+Begin Phase 4 by placing the existing Switch and verified XInput
+implementations behind one production output-driver boundary. Preserve the
+Phase 3 transform/runtime seam before serialization, then add DInput, Mac,
+PlayStation Classic, and Mega Drive descriptors in the documented order.

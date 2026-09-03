@@ -37,20 +37,57 @@ static_assert(PICO_FLASH_BANK_STORAGE_OFFSET +
                   PICO_FLASH_SIZE_BYTES,
               "BTstack storage exceeds flash");
 
-struct FlashMutation {
-    bool erase;
-    uint32_t offset;
-    const uint8_t* data;
+struct FlashBankReplacement {
+    uint8_t bank;
+    const uint8_t* payload;
+    size_t payload_size;
+    const uint8_t* header;
+    bool replaced;
 };
 
-void perform_flash_mutation(void* context) {
-    const auto* mutation = static_cast<const FlashMutation*>(context);
-    if (mutation->erase) {
-        flash_range_erase(mutation->offset, FLASH_SECTOR_SIZE);
-    } else {
-        flash_range_program(mutation->offset, mutation->data,
-                            FLASH_PAGE_SIZE);
+void perform_flash_bank_replacement(void* context) {
+    auto* replacement =
+        static_cast<FlashBankReplacement*>(context);
+    replacement->replaced = false;
+    const uint32_t bank_offset =
+        kProfileStorageOffset +
+        replacement->bank * PROFILE_STORAGE_BANK_SIZE;
+
+    for (size_t offset = 0; offset < PROFILE_STORAGE_BANK_SIZE;
+         offset += FLASH_SECTOR_SIZE) {
+        flash_range_erase(bank_offset + offset, FLASH_SECTOR_SIZE);
     }
+
+    uint8_t final_page[FLASH_PAGE_SIZE]{};
+    for (size_t offset = 0; offset < replacement->payload_size;
+         offset += FLASH_PAGE_SIZE) {
+        const size_t remaining =
+            replacement->payload_size - offset;
+        const uint8_t* page = &replacement->payload[offset];
+        if (remaining < FLASH_PAGE_SIZE) {
+            memcpy(final_page, page, remaining);
+            page = final_page;
+        }
+        flash_range_program(
+            bank_offset + PROFILE_STORAGE_RECORD_HEADER_SIZE + offset,
+            page, FLASH_PAGE_SIZE);
+    }
+
+    const auto* stored_payload = reinterpret_cast<const uint8_t*>(
+        XIP_BASE + bank_offset +
+        PROFILE_STORAGE_RECORD_HEADER_SIZE);
+    if (memcmp(stored_payload, replacement->payload,
+               replacement->payload_size) != 0) {
+        return;
+    }
+
+    flash_range_program(bank_offset, replacement->header,
+                        PROFILE_STORAGE_RECORD_HEADER_SIZE);
+    const auto* stored_header = reinterpret_cast<const uint8_t*>(
+        XIP_BASE + bank_offset);
+    replacement->replaced =
+        memcmp(stored_header, replacement->header,
+               PROFILE_STORAGE_RECORD_HEADER_SIZE) == 0;
 }
 
 bool storage_region_available() {
@@ -74,41 +111,29 @@ bool read_storage(void*, uint8_t bank, size_t offset, uint8_t* output,
     return true;
 }
 
-bool erase_storage_sector(void*, uint8_t bank, size_t offset) {
-    if (bank >= PROFILE_STORAGE_BANK_COUNT ||
-        offset % FLASH_SECTOR_SIZE != 0 ||
-        offset > PROFILE_STORAGE_BANK_SIZE ||
-        FLASH_SECTOR_SIZE > PROFILE_STORAGE_BANK_SIZE - offset ||
+bool replace_storage_bank(void*, uint8_t bank,
+                          const uint8_t* payload,
+                          size_t payload_size,
+                          const uint8_t* header,
+                          size_t header_size) {
+    if (bank >= PROFILE_STORAGE_BANK_COUNT || payload == nullptr ||
+        header == nullptr ||
+        payload_size != CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
+        header_size != PROFILE_STORAGE_RECORD_HEADER_SIZE ||
         !storage_region_available()) {
         return false;
     }
-    FlashMutation mutation{
-        true,
-        static_cast<uint32_t>(
-            kProfileStorageOffset + bank * PROFILE_STORAGE_BANK_SIZE + offset),
-        nullptr,
-    };
-    return flash_safe_execute(perform_flash_mutation, &mutation,
-                              UINT32_MAX) == PICO_OK;
-}
-
-bool program_storage(void*, uint8_t bank, size_t offset,
-                     const uint8_t* data, size_t size) {
-    if (bank >= PROFILE_STORAGE_BANK_COUNT || data == nullptr ||
-        size != FLASH_PAGE_SIZE || offset % FLASH_PAGE_SIZE != 0 ||
-        offset > PROFILE_STORAGE_BANK_SIZE ||
-        size > PROFILE_STORAGE_BANK_SIZE - offset ||
-        !storage_region_available()) {
-        return false;
-    }
-    FlashMutation mutation{
+    FlashBankReplacement replacement{
+        bank,
+        payload,
+        payload_size,
+        header,
         false,
-        static_cast<uint32_t>(
-            kProfileStorageOffset + bank * PROFILE_STORAGE_BANK_SIZE + offset),
-        data,
     };
-    return flash_safe_execute(perform_flash_mutation, &mutation,
-                              UINT32_MAX) == PICO_OK;
+    return flash_safe_execute(
+               perform_flash_bank_replacement, &replacement,
+               UINT32_MAX) == PICO_OK &&
+           replacement.replaced;
 }
 
 }  // namespace
@@ -120,7 +145,6 @@ ProfileStorageIo pico_profile_storage_io() {
         FLASH_SECTOR_SIZE,
         FLASH_PAGE_SIZE,
         read_storage,
-        erase_storage_sector,
-        program_storage,
+        replace_storage_bank,
     };
 }

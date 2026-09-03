@@ -12,6 +12,7 @@ namespace {
 
 struct FakeFlash {
     uint8_t bytes[PROFILE_STORAGE_BANK_COUNT][PROFILE_STORAGE_BANK_SIZE];
+    int bank_replacements = 0;
 };
 
 FakeFlash flash{};
@@ -35,33 +36,27 @@ bool fake_read(void* context, uint8_t bank, size_t offset,
     return true;
 }
 
-bool fake_erase_sector(void* context, uint8_t bank, size_t offset) {
+bool fake_replace_bank(void* context, uint8_t bank,
+                       const uint8_t* payload, size_t payload_size,
+                       const uint8_t* header, size_t header_size) {
     auto* storage = static_cast<FakeFlash*>(context);
-    if (bank >= PROFILE_STORAGE_BANK_COUNT ||
-        offset % PROFILE_STORAGE_SECTOR_SIZE != 0 ||
-        offset > PROFILE_STORAGE_BANK_SIZE ||
-        PROFILE_STORAGE_SECTOR_SIZE > PROFILE_STORAGE_BANK_SIZE - offset) {
+    if (bank >= PROFILE_STORAGE_BANK_COUNT || payload == nullptr ||
+        header == nullptr ||
+        payload_size != CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
+        header_size != PROFILE_STORAGE_RECORD_HEADER_SIZE) {
         return false;
     }
-    memset(&storage->bytes[bank][offset], 0xff,
-           PROFILE_STORAGE_SECTOR_SIZE);
-    return true;
-}
-
-bool fake_program(void* context, uint8_t bank, size_t offset,
-                  const uint8_t* data, size_t size) {
-    auto* storage = static_cast<FakeFlash*>(context);
-    if (bank >= PROFILE_STORAGE_BANK_COUNT || data == nullptr ||
-        size != PROFILE_STORAGE_PAGE_SIZE ||
-        offset % PROFILE_STORAGE_PAGE_SIZE != 0 ||
-        offset > PROFILE_STORAGE_BANK_SIZE ||
-        size > PROFILE_STORAGE_BANK_SIZE - offset) {
-        return false;
-    }
-    for (size_t index = 0; index < size; ++index) {
-        storage->bytes[bank][offset + index] &= data[index];
-    }
-    return true;
+    ++storage->bank_replacements;
+    memset(storage->bytes[bank], 0xff, PROFILE_STORAGE_BANK_SIZE);
+    memcpy(
+        &storage->bytes[bank][PROFILE_STORAGE_RECORD_HEADER_SIZE],
+        payload, payload_size);
+    memcpy(storage->bytes[bank], header, header_size);
+    return memcmp(
+               &storage->bytes[bank][
+                   PROFILE_STORAGE_RECORD_HEADER_SIZE],
+               payload, payload_size) == 0 &&
+           memcmp(storage->bytes[bank], header, header_size) == 0;
 }
 
 ProfileStorageIo fake_io() {
@@ -71,8 +66,7 @@ ProfileStorageIo fake_io() {
         PROFILE_STORAGE_SECTOR_SIZE,
         PROFILE_STORAGE_PAGE_SIZE,
         fake_read,
-        fake_erase_sector,
-        fake_program,
+        fake_replace_bank,
     };
 }
 
@@ -305,6 +299,105 @@ void test_host_and_controller_mutations_are_serialized() {
             "controller activation did not publish while preserving host-visible status");
 }
 
+void test_completed_write_then_dirty_identity_activation() {
+    const int replacements_before = flash.bank_replacements;
+    const ControllerIdentity global = controller_identity_global();
+    constexpr uint8_t kWrittenProfileIndex = 1;
+    ControllerProfile customized =
+        controller_profile_default(global, kWrittenProfileIndex);
+    customized.strong_rumble_scale = 31;
+    customized.weak_rumble_scale = 47;
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(customized, encoded, sizeof(encoded)),
+            "sequential mutation fixture profile did not encode");
+
+    constexpr uint32_t kWriteTransactionId = 0x31415926;
+    require(profile_service_begin(
+                kWriteTransactionId, global, kWrittenProfileIndex,
+                CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
+                profile_storage_crc32(encoded, sizeof(encoded))) ==
+                ConfigurationTransactionStatus::kReceiving &&
+                profile_service_append(kWriteTransactionId, 0, encoded,
+                                       sizeof(encoded)) ==
+                    ConfigurationTransactionStatus::kReceiving &&
+                profile_service_commit(kWriteTransactionId) ==
+                    ConfigurationTransactionStatus::kPending,
+            "sequential profile write did not reach pending");
+    profile_service_task_on_storage_core(6000);
+    const ProfileServiceTransactionSnapshot written =
+        transaction_snapshot();
+    require(written.transaction.transaction_id == kWriteTransactionId &&
+                written.transaction.status ==
+                    ConfigurationTransactionStatus::kCommitted &&
+                flash.bank_replacements == replacements_before + 1,
+            "completed write lost correlation or used multiple bank replacements");
+
+    ControllerIdentity connected{};
+    connected.stable = true;
+    connected.transport = ControllerTransport::kClassic;
+    connected.address[0] = 0x10;
+    connected.address[1] = 0x20;
+    connected.address[2] = 0x30;
+    connected.address[3] = 0x40;
+    connected.address[4] = 0x50;
+    connected.address[5] = 0x60;
+    connected.vendor_id = 0x1234;
+    connected.product_id = 0xabcd;
+    require(profile_service_observe_identity_on_storage_core(connected),
+            "connected identity did not enter the dirty database");
+
+    constexpr uint32_t kActivateTransactionId = 0x27182818;
+    constexpr uint8_t kActivatedProfileIndex = 2;
+    require(profile_service_activate(
+                kActivateTransactionId, connected,
+                kActivatedProfileIndex) ==
+                ConfigurationTransactionStatus::kPending,
+            "activation after completed write did not reach pending");
+    const ProfileServiceTransactionSnapshot pending =
+        transaction_snapshot();
+    require(pending.transaction.transaction_id ==
+                    kActivateTransactionId &&
+                pending.transaction.status ==
+                    ConfigurationTransactionStatus::kPending &&
+                pending.transaction.stored_generation == 0 &&
+                pending.transaction.stored_crc == 0,
+            "pending activation was not correlated to its own transaction");
+
+    profile_service_task_on_storage_core(7000);
+    const ProfileServiceTransactionSnapshot activated =
+        transaction_snapshot();
+    require(activated.transaction.transaction_id ==
+                    kActivateTransactionId &&
+                activated.transaction.status ==
+                    ConfigurationTransactionStatus::kCommitted &&
+                activated.transaction.stored_generation ==
+                    written.transaction.stored_generation + 1 &&
+                flash.bank_replacements == replacements_before + 2,
+            "activation did not complete as one next correlated bank replacement");
+
+    const ControllerProfileDatabase recovered = reload_database(
+        activated, activated.transaction.stored_generation);
+    const ControllerProfileDatabaseEntry* connected_entry =
+        controller_profile_database_find(recovered, connected);
+    require(connected_entry != nullptr &&
+                connected_entry->active_profile ==
+                    kActivatedProfileIndex &&
+                recovered.fallback_profiles[kWrittenProfileIndex]
+                        .strong_rumble_scale ==
+                    customized.strong_rumble_scale &&
+                recovered.fallback_profiles[kWrittenProfileIndex]
+                        .weak_rumble_scale ==
+                    customized.weak_rumble_scale,
+            "activation did not atomically persist the dirty identity and prior write");
+    const ProfileServiceActiveProfileSnapshot active =
+        active_profile_snapshot(connected);
+    require(active.valid &&
+                active.metadata.generation ==
+                    activated.transaction.stored_generation &&
+                active.profile_index == kActivatedProfileIndex,
+            "completed activation did not publish the dirty identity");
+}
+
 }  // namespace
 
 ProfileStorageIo pico_profile_storage_io() {
@@ -314,5 +407,6 @@ ProfileStorageIo pico_profile_storage_io() {
 int main() {
     test_pending_commands_are_not_decoded_as_profile_writes();
     test_host_and_controller_mutations_are_serialized();
+    test_completed_write_then_dirty_identity_activation();
     return 0;
 }

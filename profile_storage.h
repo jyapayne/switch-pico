@@ -37,10 +37,11 @@ struct ProfileStorageIo {
     size_t page_size = 0;
     bool (*read)(void* context, uint8_t bank, size_t offset,
                  uint8_t* output, size_t size) = nullptr;
-    bool (*erase_sector)(void* context, uint8_t bank,
-                         size_t offset) = nullptr;
-    bool (*program)(void* context, uint8_t bank, size_t offset,
-                    const uint8_t* data, size_t size) = nullptr;
+    // Replaces one bank and verifies the payload before publishing the
+    // complete header page.
+    bool (*replace_bank)(void* context, uint8_t bank,
+                         const uint8_t* payload, size_t payload_size,
+                         const uint8_t* header, size_t header_size) = nullptr;
 };
 
 struct ProfileStorageSnapshot {
@@ -56,7 +57,10 @@ class ProfileStorage {
 public:
     bool initialize(const ProfileStorageIo& io,
                     ControllerProfileDatabase* database);
-    ProfileStorageResult commit(const ControllerProfileDatabase& database);
+    ProfileStorageResult commit(
+        const ControllerProfileDatabase& database,
+        uint8_t* encoded_database,
+        size_t encoded_database_size);
     const ProfileStorageSnapshot& snapshot() const;
 
 private:
@@ -69,8 +73,9 @@ private:
     bool validate_payload(uint8_t bank, uint32_t expected_crc) const;
     bool decode_bank(uint8_t bank,
                      ControllerProfileDatabase* database) const;
-    bool payload_matches(uint8_t bank,
-                         const ControllerProfileDatabase& database) const;
+    bool payload_matches_encoded(uint8_t bank,
+                                 const uint8_t* payload,
+                                 size_t payload_size) const;
 
     ProfileStorageIo io_{};
     ProfileStorageSnapshot snapshot_{};

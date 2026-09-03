@@ -14,14 +14,17 @@ struct FakeFlash {
     int successful_programs = 0;
     int fail_after_programs = -1;
     bool corrupt_next_program = false;
+    int corrupt_header_padding_offset = -1;
     bool fail_reads_after_header_program = false;
     bool header_programmed = false;
     int erase_count = 0;
+    int bank_replacements = 0;
 };
 
 FakeFlash flash{};
 ControllerProfileDatabase database{};
 ControllerProfileDatabase recovered_database{};
+uint8_t encoded_database[CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE]{};
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -35,9 +38,11 @@ void erase_all() {
     flash.successful_programs = 0;
     flash.fail_after_programs = -1;
     flash.corrupt_next_program = false;
+    flash.corrupt_header_padding_offset = -1;
     flash.fail_reads_after_header_program = false;
     flash.header_programmed = false;
     flash.erase_count = 0;
+    flash.bank_replacements = 0;
 }
 
 bool fake_read(void* context, uint8_t bank, size_t offset,
@@ -56,47 +61,68 @@ bool fake_read(void* context, uint8_t bank, size_t offset,
     return true;
 }
 
-bool fake_erase_sector(void* context, uint8_t bank, size_t offset) {
+bool fake_replace_bank(void* context, uint8_t bank,
+                       const uint8_t* payload, size_t payload_size,
+                       const uint8_t* header, size_t header_size) {
     auto* storage = static_cast<FakeFlash*>(context);
-    if (bank >= PROFILE_STORAGE_BANK_COUNT ||
-        offset % PROFILE_STORAGE_SECTOR_SIZE != 0 ||
-        offset > PROFILE_STORAGE_BANK_SIZE ||
-        PROFILE_STORAGE_SECTOR_SIZE >
-            PROFILE_STORAGE_BANK_SIZE - offset) {
+    if (bank >= PROFILE_STORAGE_BANK_COUNT || payload == nullptr ||
+        header == nullptr ||
+        payload_size != CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
+        header_size != PROFILE_STORAGE_RECORD_HEADER_SIZE) {
         return false;
     }
-    ++storage->erase_count;
-    memset(&storage->bytes[bank][offset], 0xff,
-           PROFILE_STORAGE_SECTOR_SIZE);
-    return true;
-}
 
-bool fake_program(void* context, uint8_t bank, size_t offset,
-                  const uint8_t* data, size_t size) {
-    auto* storage = static_cast<FakeFlash*>(context);
-    if (bank >= PROFILE_STORAGE_BANK_COUNT || data == nullptr ||
-        size != PROFILE_STORAGE_PAGE_SIZE ||
-        offset % PROFILE_STORAGE_PAGE_SIZE != 0 ||
-        offset > PROFILE_STORAGE_BANK_SIZE ||
-        size > PROFILE_STORAGE_BANK_SIZE - offset) {
+    ++storage->bank_replacements;
+    memset(storage->bytes[bank], 0xff, PROFILE_STORAGE_BANK_SIZE);
+    storage->erase_count +=
+        static_cast<int>(PROFILE_STORAGE_SECTORS_PER_BANK);
+
+    uint8_t final_page[PROFILE_STORAGE_PAGE_SIZE]{};
+    for (size_t offset = 0; offset < payload_size;
+         offset += PROFILE_STORAGE_PAGE_SIZE) {
+        if (storage->fail_after_programs >= 0 &&
+            storage->successful_programs >=
+                storage->fail_after_programs) {
+            return false;
+        }
+        const size_t remaining = payload_size - offset;
+        const uint8_t* page = &payload[offset];
+        if (remaining < PROFILE_STORAGE_PAGE_SIZE) {
+            memcpy(final_page, page, remaining);
+            page = final_page;
+        }
+        memcpy(
+            &storage->bytes[bank][
+                PROFILE_STORAGE_RECORD_HEADER_SIZE + offset],
+            page, PROFILE_STORAGE_PAGE_SIZE);
+        if (storage->corrupt_next_program) {
+            storage->bytes[bank][
+                PROFILE_STORAGE_RECORD_HEADER_SIZE + offset] ^= 1;
+            storage->corrupt_next_program = false;
+        }
+        ++storage->successful_programs;
+    }
+    if (memcmp(
+            &storage->bytes[bank][PROFILE_STORAGE_RECORD_HEADER_SIZE],
+            payload, payload_size) != 0) {
         return false;
     }
     if (storage->fail_after_programs >= 0 &&
         storage->successful_programs >= storage->fail_after_programs) {
         return false;
     }
-    for (size_t index = 0; index < size; ++index) {
-        storage->bytes[bank][offset + index] &= data[index];
-    }
-    if (storage->corrupt_next_program) {
-        storage->bytes[bank][offset] ^= 1;
-        storage->corrupt_next_program = false;
-    }
-    if (offset == 0) {
-        storage->header_programmed = true;
-    }
+
+    memcpy(storage->bytes[bank], header, header_size);
+    storage->header_programmed = true;
     ++storage->successful_programs;
-    return true;
+    if (storage->corrupt_header_padding_offset >= 24 &&
+        static_cast<size_t>(
+            storage->corrupt_header_padding_offset) < header_size) {
+        storage->bytes[bank][
+            static_cast<size_t>(
+                storage->corrupt_header_padding_offset)] ^= 1;
+    }
+    return memcmp(storage->bytes[bank], header, header_size) == 0;
 }
 
 ProfileStorageIo fake_io() {
@@ -106,8 +132,7 @@ ProfileStorageIo fake_io() {
         PROFILE_STORAGE_SECTOR_SIZE,
         PROFILE_STORAGE_PAGE_SIZE,
         fake_read,
-        fake_erase_sector,
-        fake_program,
+        fake_replace_bank,
     };
 }
 
@@ -196,6 +221,15 @@ void install_legacy_database_bank_fixture() {
     fixture_write_u32(&record[20], profile_storage_crc32(record, 20));
 }
 
+void test_initialize_requires_batch_replacement() {
+    erase_all();
+    ProfileStorageIo io = fake_io();
+    io.replace_bank = nullptr;
+    ProfileStorage storage;
+    require(!storage.initialize(io, &database),
+            "profile storage initialized without bank replacement");
+}
+
 void test_two_bank_recovery() {
     erase_all();
     controller_profile_database_default(&database);
@@ -203,16 +237,22 @@ void test_two_bank_recovery() {
     require(storage.initialize(fake_io(), &database) &&
                 !storage.snapshot().valid,
             "erased profile storage did not initialize empty");
-    require(storage.commit(database) == ProfileStorageResult::kOk &&
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk &&
                 storage.snapshot().generation == 1,
             "first profile database did not commit");
     const int programs_after_first = flash.successful_programs;
-    require(storage.commit(database) == ProfileStorageResult::kUnchanged &&
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                    ProfileStorageResult::kUnchanged &&
                 flash.successful_programs == programs_after_first,
             "unchanged profile database consumed flash writes");
 
     database.fallback_profiles[0].button_map[0] = 1;
-    require(storage.commit(database) == ProfileStorageResult::kOk &&
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk &&
                 storage.snapshot().generation == 2,
             "second profile database generation did not commit");
     ProfileStorage reloaded;
@@ -235,11 +275,15 @@ void test_interrupted_commit_retains_previous_bank() {
     controller_profile_database_default(&database);
     ProfileStorage storage;
     require(storage.initialize(fake_io(), &database) &&
-                storage.commit(database) == ProfileStorageResult::kOk,
+                storage.commit(database, encoded_database,
+                               sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk,
             "interruption baseline did not commit");
     database.fallback_profiles[1].button_map[2] = 3;
     flash.fail_after_programs = flash.successful_programs + 1;
-    require(storage.commit(database) == ProfileStorageResult::kIoError,
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                ProfileStorageResult::kIoError,
             "interrupted profile write reported success");
 
     flash.fail_after_programs = -1;
@@ -255,13 +299,17 @@ void test_successful_header_program_is_commit_point() {
     controller_profile_database_default(&database);
     ProfileStorage storage;
     require(storage.initialize(fake_io(), &database) &&
-                storage.commit(database) == ProfileStorageResult::kOk,
+                storage.commit(database, encoded_database,
+                               sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk,
             "commit-point baseline did not commit");
 
     database.fallback_profiles[1].strong_rumble_scale = 17;
     flash.header_programmed = false;
     flash.fail_reads_after_header_program = true;
-    require(storage.commit(database) == ProfileStorageResult::kOk &&
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk &&
                 storage.snapshot().generation == 2,
             "successful header program was rolled back by a later read");
 
@@ -279,7 +327,9 @@ void test_payload_corruption_prevents_header_publication() {
     controller_profile_database_default(&database);
     ProfileStorage storage;
     require(storage.initialize(fake_io(), &database) &&
-                storage.commit(database) == ProfileStorageResult::kOk,
+                storage.commit(database, encoded_database,
+                               sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk,
             "corruption baseline did not commit");
     const ProfileStorageSnapshot previous = storage.snapshot();
     const uint8_t target_bank = previous.active_bank ^ 1u;
@@ -291,7 +341,9 @@ void test_payload_corruption_prevents_header_publication() {
 
     database.fallback_profiles[1].button_map[2] = 3;
     flash.corrupt_next_program = true;
-    require(storage.commit(database) == ProfileStorageResult::kIoError &&
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                    ProfileStorageResult::kIoError &&
                 flash.successful_programs ==
                     programs_before_corruption + kPayloadProgramCount,
             "corrupt payload programming reached the header program");
@@ -312,6 +364,115 @@ void test_payload_corruption_prevents_header_publication() {
                 recovered.snapshot().active_bank == previous.active_bank &&
                 recovered_database.fallback_profiles[1].button_map[2] == 2,
             "headerless corrupt payload was recovered");
+}
+
+void test_batched_bank_replacement_is_one_atomic_operation() {
+    erase_all();
+    controller_profile_database_default(&database);
+    ProfileStorage storage;
+    constexpr int kPayloadProgramCount =
+        (CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE +
+         PROFILE_STORAGE_PAGE_SIZE - 1) /
+        PROFILE_STORAGE_PAGE_SIZE;
+    require(storage.initialize(fake_io(), &database) &&
+                storage.commit(database, encoded_database,
+                               sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk &&
+                flash.bank_replacements == 1 &&
+                flash.erase_count == static_cast<int>(
+                    PROFILE_STORAGE_SECTORS_PER_BANK) &&
+                flash.successful_programs ==
+                    kPayloadProgramCount + 1,
+            "batched commit did not replace one bank in one operation");
+
+    const ProfileStorageSnapshot previous = storage.snapshot();
+    const uint8_t target_bank = previous.active_bank ^ 1u;
+    const int programs_before_corruption = flash.successful_programs;
+    database.fallback_profiles[1].button_map[2] = 3;
+    flash.corrupt_next_program = true;
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                    ProfileStorageResult::kIoError &&
+                flash.bank_replacements == 2 &&
+                flash.successful_programs ==
+                    programs_before_corruption +
+                        kPayloadProgramCount,
+            "corrupt batched payload reached header publication");
+    for (size_t index = 0; index < PROFILE_STORAGE_RECORD_HEADER_SIZE;
+         ++index) {
+        require(flash.bytes[target_bank][index] == 0xff,
+                "failed batched replacement published a header");
+    }
+    require(storage.snapshot().generation == previous.generation &&
+                storage.snapshot().payload_crc ==
+                    previous.payload_crc &&
+                storage.snapshot().active_bank ==
+                    previous.active_bank,
+            "failed batched replacement changed the committed snapshot");
+
+    ProfileStorage recovered;
+    require(recovered.initialize(fake_io(), &recovered_database) &&
+                recovered.snapshot().generation ==
+                    previous.generation &&
+                recovered.snapshot().active_bank ==
+                    previous.active_bank &&
+                recovered_database.fallback_profiles[1]
+                        .button_map[2] == 2,
+            "headerless batched payload replaced the prior bank");
+}
+
+void test_header_padding_corruption_fails_commit_and_recovery() {
+    erase_all();
+    controller_profile_database_default(&database);
+    ProfileStorage storage;
+    require(storage.initialize(fake_io(), &database) &&
+                storage.commit(database, encoded_database,
+                               sizeof(encoded_database)) ==
+                    ProfileStorageResult::kOk,
+            "header padding baseline did not commit");
+
+    const ProfileStorageSnapshot previous = storage.snapshot();
+    const uint8_t previous_scale =
+        database.fallback_profiles[1].strong_rumble_scale;
+    database.fallback_profiles[1].strong_rumble_scale = 17;
+    for (size_t offset = 24;
+         offset < PROFILE_STORAGE_RECORD_HEADER_SIZE; ++offset) {
+        flash.corrupt_header_padding_offset =
+            static_cast<int>(offset);
+        require(storage.commit(database, encoded_database,
+                               sizeof(encoded_database)) ==
+                    ProfileStorageResult::kIoError,
+                "corrupt header padding did not fail the commit");
+
+        ProfileStorage recovered;
+        require(recovered.initialize(fake_io(), &recovered_database) &&
+                    recovered.snapshot().generation ==
+                        previous.generation &&
+                    recovered.snapshot().active_bank ==
+                        previous.active_bank &&
+                    recovered_database.fallback_profiles[1]
+                            .strong_rumble_scale == previous_scale,
+                "corrupt header padding was accepted on recovery");
+    }
+
+    flash.corrupt_header_padding_offset = -1;
+    require(storage.commit(database, encoded_database,
+                           sizeof(encoded_database)) ==
+                ProfileStorageResult::kOk,
+            "valid full header page did not commit");
+    for (size_t offset = 24;
+         offset < PROFILE_STORAGE_RECORD_HEADER_SIZE; ++offset) {
+        require(
+            flash.bytes[storage.snapshot().active_bank][offset] == 0,
+            "valid committed header contained nonzero padding");
+    }
+    ProfileStorage recovered;
+    require(recovered.initialize(fake_io(), &recovered_database) &&
+                recovered.snapshot().generation ==
+                    previous.generation + 1u &&
+                recovered_database.fallback_profiles[1]
+                        .strong_rumble_scale == 17,
+            "valid full header page was rejected on recovery");
 }
 
 void test_legacy_database_bank_migration() {
@@ -395,7 +556,8 @@ void test_legacy_database_bank_migration() {
             "legacy entry raw trigger ranges were not preserved");
 
     recovered_database.fallback_profiles[2].weak_rumble_scale = 17;
-    require(storage.commit(recovered_database) ==
+    require(storage.commit(recovered_database, encoded_database,
+                           sizeof(encoded_database)) ==
                     ProfileStorageResult::kOk &&
                 storage.snapshot().active_bank == 0 &&
                 storage.snapshot().generation == 42,
@@ -485,9 +647,12 @@ void test_legacy_database_bank_migration() {
 }  // namespace
 int main() {
     test_two_bank_recovery();
+    test_initialize_requires_batch_replacement();
     test_interrupted_commit_retains_previous_bank();
     test_successful_header_program_is_commit_point();
     test_payload_corruption_prevents_header_publication();
+    test_batched_bank_replacement_is_one_atomic_operation();
+    test_header_padding_corruption_fails_commit_and_recovery();
     test_legacy_database_bank_migration();
     return 0;
 }

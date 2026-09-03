@@ -43,6 +43,10 @@ constexpr uint8_t kAllBlePairingMethods =
 constexpr uint16_t kProfileFeedbackPhaseDurationMs = 75;
 constexpr uint8_t kProfileFeedbackWeakMagnitude = UINT8_MAX;
 constexpr uint8_t kProfileFeedbackStrongMagnitude = UINT8_MAX;
+// One initial indication can be followed by one committed switch before the
+// Core 1 timer drains the queue. Profile commits are rate-limited well beyond
+// the longest feedback sequence.
+constexpr uint8_t kProfileFeedbackQueueCapacity = 2;
 constexpr SwitchRgbColor kProfileLightbarPalette[CONTROLLER_PROFILE_COUNT] = {
     {0x00, 0x55, 0xff},
     {0x00, 0xcc, 0x66},
@@ -152,12 +156,13 @@ struct BackendSlot {
     bool motion_hotkey_latched;
     bool feedback_pending;
     uint32_t feedback_until_ms;
-    bool profile_feedback_pending;
+    uint8_t pending_profile_feedback_count;
     RumbleEnvelope pending_rumble;
     bool retained_host_rumble_valid;
     RumbleEnvelope retained_host_rumble;
     FeedbackEnvelope pending_feedback;
-    ProfileFeedbackEnvelope pending_profile_feedback;
+    ProfileFeedbackEnvelope
+        pending_profile_feedback[kProfileFeedbackQueueCapacity];
     ProfileFeedbackSequence profile_feedback;
 };
 
@@ -298,23 +303,29 @@ ControllerIdentity identity_for_device(const uni_hid_device_t* device) {
     if (device == nullptr) {
         return controller_identity_global();
     }
-    if (device->conn.protocol == UNI_BT_CONN_PROTOCOL_BR_EDR) {
-        ControllerIdentity identity{};
-        identity.stable = true;
-        identity.transport = ControllerTransport::kClassic;
-        identity.address_type = BD_ADDR_TYPE_UNKNOWN;
-        memcpy(identity.address, device->conn.btaddr,
-               sizeof(identity.address));
-        identity.vendor_id = device->vendor_id;
-        identity.product_id = device->product_id;
-        return identity;
-    }
-    if (device->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE) {
-        const BleIdentityMapping* mapping = find_ble_identity_mapping(
-            device->conn.handle, device->conn.btaddr);
-        if (mapping != nullptr) {
-            return make_ble_identity(*mapping, device);
+    switch (gap_get_connection_type(device->conn.handle)) {
+        case GAP_CONNECTION_ACL: {
+            ControllerIdentity identity{};
+            identity.stable = true;
+            identity.transport = ControllerTransport::kClassic;
+            identity.address_type = BD_ADDR_TYPE_UNKNOWN;
+            memcpy(identity.address, device->conn.btaddr,
+                   sizeof(identity.address));
+            identity.vendor_id = device->vendor_id;
+            identity.product_id = device->product_id;
+            return identity;
         }
+        case GAP_CONNECTION_LE: {
+            const BleIdentityMapping* mapping = find_ble_identity_mapping(
+                device->conn.handle, device->conn.btaddr);
+            if (mapping != nullptr) {
+                return make_ble_identity(*mapping, device);
+            }
+            break;
+        }
+        case GAP_CONNECTION_INVALID:
+        case GAP_CONNECTION_SCO:
+            break;
     }
     return controller_identity_global();
 }
@@ -325,7 +336,8 @@ void publish_ble_identity(const BleIdentityMapping& mapping) {
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
         if (slot.device != nullptr &&
-            slot.device->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE &&
+            gap_get_connection_type(slot.device->conn.handle) ==
+                GAP_CONNECTION_LE &&
             slot.device->conn.handle == mapping.connection_handle &&
             addresses_equal(slot.device->conn.btaddr,
                             mapping.connection_address)) {
@@ -374,7 +386,8 @@ void clear_ble_identity_for_handle(hci_con_handle_t connection_handle) {
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
         if (slot.device != nullptr &&
-            slot.device->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE &&
+            gap_get_connection_type(slot.device->conn.handle) ==
+                GAP_CONNECTION_LE &&
             slot.device->conn.handle == connection_handle) {
             slot.identity = controller_identity_global();
         }
@@ -383,8 +396,7 @@ void clear_ble_identity_for_handle(hci_con_handle_t connection_handle) {
 }
 
 void clear_ble_identity_for_device(const uni_hid_device_t* device) {
-    if (device == nullptr ||
-        device->conn.protocol != UNI_BT_CONN_PROTOCOL_BLE) {
+    if (device == nullptr) {
         return;
     }
     for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
@@ -452,6 +464,19 @@ void apply_profile_lighting(
     }
 }
 
+bool lighting_target_is_current(
+    uint8_t slot_index, uint32_t connection_generation,
+    const uni_hid_device_t* device) {
+    critical_section_enter_blocking(&g_state_lock);
+    const bool current =
+        slot_index < kSlotCount && g_slots[slot_index].active &&
+        g_slots[slot_index].device == device &&
+        g_slots[slot_index].connection_generation ==
+            connection_generation;
+    critical_section_exit(&g_state_lock);
+    return current;
+}
+
 
 
 ConnectionStatus compute_connection_status() {
@@ -498,8 +523,11 @@ void publish_all_neutral() {
         slot.retained_host_rumble = {};
         slot.feedback_pending = false;
         slot.feedback_until_ms = 0;
-        slot.profile_feedback_pending = false;
-        slot.pending_profile_feedback = {};
+        slot.pending_profile_feedback_count = 0;
+        for (ProfileFeedbackEnvelope& feedback :
+             slot.pending_profile_feedback) {
+            feedback = {};
+        }
         slot.profile_feedback = {};
         ++slot.state_generation;
         ++slot.connection_generation;
@@ -790,8 +818,11 @@ void reset_slot_hotkeys(BackendSlot& slot) {
     slot.feedback_pending = false;
     slot.feedback_until_ms = 0;
     slot.pending_feedback = {};
-    slot.profile_feedback_pending = false;
-    slot.pending_profile_feedback = {};
+    slot.pending_profile_feedback_count = 0;
+    for (ProfileFeedbackEnvelope& feedback :
+         slot.pending_profile_feedback) {
+        feedback = {};
+    }
     slot.profile_feedback = {};
     slot.retained_host_rumble_valid = false;
     slot.retained_host_rumble = {};
@@ -1216,11 +1247,11 @@ void update_status_led() {
 }
 
 void process_configuration_timer(btstack_timer_source_t* timer) {
+    btstack_run_loop_set_timer(timer, kConfigurationPollIntervalMs);
+    btstack_run_loop_add_timer(timer);
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
     configuration_service_task_on_storage_core(now_ms);
     profile_service_task_on_storage_core(now_ms);
-    btstack_run_loop_set_timer(timer, kConfigurationPollIntervalMs);
-    btstack_run_loop_add_timer(timer);
 }
 
 void process_rumble_timer(btstack_timer_source_t* timer) {
@@ -1239,7 +1270,10 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         FeedbackEnvelope feedback{};
         ProfileFeedbackEnvelope profile_feedback{};
         uni_hid_device_t* device = nullptr;
+        uni_hid_device_t* profile_lighting_device = nullptr;
+        uint32_t profile_lighting_generation = 0;
         bool profile_lighting_dispatch = false;
+        bool profile_lighting_restore = false;
         bool profile_rumble_dispatch = false;
         bool feedback_dispatch = false;
         bool host_dispatch = false;
@@ -1266,6 +1300,10 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             slot.profile_feedback.active;
         const bool completed_feedback_had_rumble =
             slot.profile_feedback.rumble_enabled;
+        const bool completed_feedback_had_led =
+            slot.profile_feedback.led_enabled;
+        const uint32_t completed_feedback_generation =
+            slot.profile_feedback.connection_generation;
         profile_rumble_dispatch =
             advance_profile_feedback(&slot.profile_feedback, now_ms);
         if (profile_feedback_was_active &&
@@ -1275,6 +1313,17 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             slot.pending_rumble = slot.retained_host_rumble;
             slot.rumble_pending = true;
         }
+        if (profile_feedback_was_active &&
+            !slot.profile_feedback.active &&
+            completed_feedback_had_led && slot.active &&
+            slot.device != nullptr &&
+            completed_feedback_generation ==
+                slot.connection_generation) {
+            profile_lighting_device = slot.device;
+            profile_lighting_generation =
+                completed_feedback_generation;
+            profile_lighting_restore = true;
+        }
         if (profile_rumble_dispatch) {
             device = slot.device;
         }
@@ -1282,9 +1331,15 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         const bool feedback_active =
             static_cast<int32_t>(now_ms - slot.feedback_until_ms) < 0;
         if (!slot.profile_feedback.active && !feedback_active &&
-            slot.profile_feedback_pending) {
-            profile_feedback = slot.pending_profile_feedback;
-            slot.profile_feedback_pending = false;
+            slot.pending_profile_feedback_count != 0) {
+            profile_feedback = slot.pending_profile_feedback[0];
+            if (slot.pending_profile_feedback_count == 2) {
+                slot.pending_profile_feedback[0] =
+                    slot.pending_profile_feedback[1];
+            }
+            --slot.pending_profile_feedback_count;
+            slot.pending_profile_feedback[
+                slot.pending_profile_feedback_count] = {};
             const uint8_t policy =
                 static_cast<uint8_t>(profile_feedback.policy);
             if (slot.active && slot.device != nullptr &&
@@ -1311,6 +1366,9 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
                                       kLed)) != 0,
                 };
                 device = slot.device;
+                profile_lighting_device = slot.device;
+                profile_lighting_generation =
+                    slot.profile_feedback.connection_generation;
                 profile_lighting_dispatch =
                     slot.profile_feedback.led_enabled;
                 profile_rumble_dispatch =
@@ -1353,9 +1411,20 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         }
         critical_section_exit(&g_state_lock);
 
-        if (profile_lighting_dispatch) {
+        if (profile_lighting_restore &&
+            lighting_target_is_current(
+                slot_index, profile_lighting_generation,
+                profile_lighting_device)) {
+            apply_slot_lighting(slot_index,
+                                profile_lighting_device);
+        }
+        if (profile_lighting_dispatch &&
+            lighting_target_is_current(
+                slot_index, profile_lighting_generation,
+                profile_lighting_device)) {
             apply_profile_lighting(
-                profile_feedback.active_profile_number, device);
+                profile_feedback.active_profile_number,
+                profile_lighting_device);
         }
         if (profile_rumble_dispatch && device != nullptr &&
             device->report_parser.play_dual_rumble != nullptr) {
@@ -1515,6 +1584,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
 
     bool occupied_mismatch = false;
     bool became_active = false;
+    uint32_t lighting_generation = 0;
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     occupied_mismatch = slot.device != nullptr && slot.device != device;
@@ -1528,6 +1598,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
             reset_slot_hotkeys(slot);
             ++slot.state_generation;
             became_active = true;
+            lighting_generation = slot.connection_generation;
         }
     }
     critical_section_exit(&g_state_lock);
@@ -1536,7 +1607,12 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         return UNI_ERROR_NO_SLOTS;
     }
     if (became_active) {
-        apply_slot_lighting(static_cast<uint8_t>(slot_index), device);
+        if (lighting_target_is_current(
+                static_cast<uint8_t>(slot_index),
+                lighting_generation, device)) {
+            apply_slot_lighting(
+                static_cast<uint8_t>(slot_index), device);
+        }
         if (connection_identity.stable) {
             profile_service_observe_identity_on_storage_core(
                 connection_identity);
@@ -1812,9 +1888,16 @@ void bluepad32_input_backend_queue_profile_feedback(
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device != nullptr &&
         slot.connection_generation == connection_generation) {
-        slot.pending_profile_feedback = {
+        const ProfileFeedbackEnvelope feedback{
             connection_generation, active_profile_number, policy};
-        slot.profile_feedback_pending = true;
+        if (slot.pending_profile_feedback_count <
+            kProfileFeedbackQueueCapacity) {
+            slot.pending_profile_feedback[
+                slot.pending_profile_feedback_count++] = feedback;
+        } else {
+            slot.pending_profile_feedback[
+                kProfileFeedbackQueueCapacity - 1u] = feedback;
+        }
     }
     critical_section_exit(&g_state_lock);
 }

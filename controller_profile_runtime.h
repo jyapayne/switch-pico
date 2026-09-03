@@ -27,6 +27,12 @@ struct ControllerProfileRuntimeProfileChangeEvent {
         ControllerProfileConfirmationPolicy::kNone;
 };
 
+// Take the one-shot LED-only indication for the first committed profile
+// resolved on a connection. Identity promotion and database refresh do not
+// publish it again.
+bool controller_profile_runtime_take_initial_profile_indication(
+    uint8_t slot, ControllerProfileRuntimeProfileChangeEvent* output);
+
 struct ControllerProfileRuntimeLocalConfirmation {
     ControllerRumbleOutput rumble{};
     ControllerProfileConfirmationPolicy policy =

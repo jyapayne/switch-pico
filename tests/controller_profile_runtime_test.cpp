@@ -109,6 +109,15 @@ ControllerProfileRuntimeProfileChangeEvent take_profile_change(
     return event;
 }
 
+ControllerProfileRuntimeProfileChangeEvent
+take_initial_profile_indication(uint8_t slot, bool* available) {
+    ControllerProfileRuntimeProfileChangeEvent event{};
+    *available =
+        controller_profile_runtime_take_initial_profile_indication(
+            slot, &event);
+    return event;
+}
+
 constexpr uint16_t logical_button_bit(
     ControllerProfileLogicalButton button) {
     return static_cast<uint16_t>(
@@ -283,6 +292,101 @@ void test_analog_thresholds_rumble_and_local_confirmation() {
                 confirmation.policy ==
                     ControllerProfileConfirmationPolicy::kLed,
             "local confirmation was scaled or lost its profile policy");
+}
+
+void test_initial_profile_indication_once_per_connection() {
+    prepare_profiles();
+    std::array<Bluepad32SlotSnapshot,
+               CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT>
+        snapshots{};
+    for (uint8_t slot = 0;
+         slot < CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT; ++slot) {
+        rows[slot].active_profile = slot;
+        rows[slot].profiles[slot].confirmation_policy =
+            ControllerProfileConfirmationPolicy::kRumbleAndLed;
+        snapshots[slot] = make_snapshot(slot);
+        (void)runtime_transform(slot, snapshots[slot]);
+    }
+
+    constexpr uint8_t kTakeOrder[CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT] = {
+        2, 0, 3, 1};
+    for (const uint8_t slot : kTakeOrder) {
+        bool available = false;
+        const ControllerProfileRuntimeProfileChangeEvent event =
+            take_initial_profile_indication(slot, &available);
+        require(available &&
+                    event.connection_generation == 1 &&
+                    event.database_generation == database_generation &&
+                    event.active_profile_number == slot + 1u &&
+                    event.policy ==
+                        ControllerProfileConfirmationPolicy::kLed,
+                "initial profile 1..4 indication was not isolated, "
+                "LED-only, or generation-bound");
+        (void)take_initial_profile_indication(slot, &available);
+        require(!available,
+                "initial profile indication repeated without a new "
+                "connection");
+        (void)take_profile_change(slot, &available);
+        require(!available,
+                "initial profile resolution published switch feedback");
+    }
+
+    ++database_generation;
+    for (uint8_t slot = 0;
+         slot < CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT; ++slot) {
+        (void)runtime_transform(slot, snapshots[slot]);
+        bool available = true;
+        (void)take_initial_profile_indication(slot, &available);
+        require(!available,
+                "database refresh repeated initial profile indication");
+    }
+
+    rows[2].identity = controller_identity_global();
+    snapshots[0].identity = controller_identity_global();
+    snapshots[0].connection_generation = 2;
+    (void)runtime_transform(0, snapshots[0]);
+    bool available = false;
+    const ControllerProfileRuntimeProfileChangeEvent unresolved_event =
+        take_initial_profile_indication(0, &available);
+    require(available &&
+                unresolved_event.connection_generation == 2 &&
+                unresolved_event.active_profile_number == 3,
+            "first committed unresolved-identity profile was not "
+            "indicated");
+
+    snapshots[0].identity = rows[1].identity;
+    (void)runtime_transform(0, snapshots[0]);
+    (void)take_initial_profile_indication(0, &available);
+    require(!available,
+            "identity promotion repeated initial profile indication");
+
+    snapshots[0].connection_generation = 3;
+    (void)runtime_transform(0, snapshots[0]);
+    const ControllerProfileRuntimeProfileChangeEvent reconnect_event =
+        take_initial_profile_indication(0, &available);
+    require(available &&
+                reconnect_event.connection_generation == 3 &&
+                reconnect_event.active_profile_number == 2 &&
+                reconnect_event.policy ==
+                    ControllerProfileConfirmationPolicy::kLed,
+            "true reconnection did not publish one fresh LED-only "
+            "profile indication");
+
+    rows[1].profiles[1].confirmation_policy =
+        ControllerProfileConfirmationPolicy::kRumble;
+    snapshots[1].connection_generation = 2;
+    (void)runtime_transform(1, snapshots[1]);
+    (void)take_initial_profile_indication(1, &available);
+    require(!available,
+            "rumble-only initial policy disturbed controller feedback");
+
+    rows[3].profiles[3].confirmation_policy =
+        ControllerProfileConfirmationPolicy::kNone;
+    snapshots[3].connection_generation = 2;
+    (void)runtime_transform(3, snapshots[3]);
+    (void)take_initial_profile_indication(3, &available);
+    require(!available,
+            "disabled initial policy disturbed controller feedback");
 }
 
 void test_default_switching_retry_commit_and_feedback() {
@@ -782,6 +886,7 @@ int main() {
     test_four_slot_cache_and_unchanged_generation();
     test_activation_disconnect_and_default_preservation();
     test_analog_thresholds_rumble_and_local_confirmation();
+    test_initial_profile_indication_once_per_connection();
     test_default_switching_retry_commit_and_feedback();
     test_identity_promotion_preserves_held_switching();
     test_switching_uses_pre_hotkey_buttons_only();
