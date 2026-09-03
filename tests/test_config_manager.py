@@ -44,6 +44,11 @@ class FakeDevice:
         )
         self.configuration_generation = 3
         self.active_mode = config_manager.ACTIVE_MODE_SWITCH_PROBE
+        self.capabilities = (
+            config_manager.CAPABILITY_INPUT
+            | config_manager.CAPABILITY_RUMBLE
+            | config_manager.CAPABILITY_MOTION
+        )
         self.transaction_id = 0
         self.transaction_payload = bytearray()
         self.transaction_expected_size = 0
@@ -215,7 +220,7 @@ class FakeDevice:
                             0,
                             2,
                             self.active_mode,
-                            0,
+                            self.capabilities,
                             0,
                             2,
                         ]
@@ -366,6 +371,8 @@ class FakeDevice:
                 config_manager.REQUESTED_MODE_AUTO,
                 config_manager.REQUESTED_MODE_SWITCH,
                 config_manager.REQUESTED_MODE_XINPUT,
+                config_manager.REQUESTED_MODE_DINPUT,
+                config_manager.REQUESTED_MODE_MAC,
             )
             self.transaction_payload = bytearray()
             self.transaction_expected_size = 0
@@ -650,16 +657,19 @@ def test_mode_envelopes_and_host_side_validation(
     for transaction_id in (0, 0x80000000, True):
         with pytest.raises(config_manager.ConfigManagerError):
             config_manager.request_reboot(device, transaction_id)
-    for mode in (
-        config_manager.REQUESTED_MODE_DINPUT,
-        config_manager.REQUESTED_MODE_MAC,
-        0xFF,
-        True,
-    ):
+    for mode in (0xFF, True):
         with pytest.raises(
             config_manager.ConfigManagerError, match="not available"
         ):
             config_manager.set_mode(device, mode, 1.0)
+
+    for mode in (
+        config_manager.REQUESTED_MODE_DINPUT,
+        config_manager.REQUESTED_MODE_MAC,
+    ):
+        status = config_manager.set_mode(device, mode, 1.0)
+        assert status.status == config_manager.STATUS_OK
+        assert device.pending_requested_mode is None
 
 
 @pytest.mark.parametrize(
@@ -728,6 +738,14 @@ def test_mode_transaction_must_correlate_before_reboot(
             config_manager.REQUESTED_MODE_XINPUT,
             config_manager.ACTIVE_MODE_XINPUT,
         ),
+        (
+            config_manager.REQUESTED_MODE_DINPUT,
+            config_manager.ACTIVE_MODE_DINPUT,
+        ),
+        (
+            config_manager.REQUESTED_MODE_MAC,
+            config_manager.ACTIVE_MODE_MAC,
+        ),
     ),
 )
 def test_mode_noop_accepts_only_mode_appropriate_active_state(
@@ -736,6 +754,16 @@ def test_mode_noop_accepts_only_mode_appropriate_active_state(
     device = FakeDevice()
     device.configuration = struct.pack("<HB5x", 60, requested_mode)
     device.active_mode = active_mode
+    if active_mode in (
+        config_manager.ACTIVE_MODE_DINPUT,
+        config_manager.ACTIVE_MODE_MAC,
+    ):
+        device.capabilities = config_manager.CAPABILITY_INPUT
+    elif active_mode == config_manager.ACTIVE_MODE_XINPUT:
+        device.capabilities = (
+            config_manager.CAPABILITY_INPUT |
+            config_manager.CAPABILITY_RUMBLE
+        )
 
     same_device, changed = config_manager.configure_mode(
         device, requested_mode, 1.0
@@ -765,6 +793,14 @@ def test_mode_noop_accepts_only_mode_appropriate_active_state(
             config_manager.REQUESTED_MODE_XINPUT,
             config_manager.ACTIVE_MODE_XINPUT,
         ),
+        (
+            config_manager.REQUESTED_MODE_DINPUT,
+            config_manager.ACTIVE_MODE_DINPUT,
+        ),
+        (
+            config_manager.REQUESTED_MODE_MAC,
+            config_manager.ACTIVE_MODE_MAC,
+        ),
     ),
 )
 def test_mode_change_waits_for_disappearance_and_reenumeration(
@@ -782,6 +818,16 @@ def test_mode_change_waits_for_disappearance_and_reenumeration(
     reenumerated.address = 8
     reenumerated.configuration = struct.pack("<HB5x", 60, requested_mode)
     reenumerated.active_mode = active_mode
+    if active_mode in (
+        config_manager.ACTIVE_MODE_DINPUT,
+        config_manager.ACTIVE_MODE_MAC,
+    ):
+        reenumerated.capabilities = config_manager.CAPABILITY_INPUT
+    elif active_mode == config_manager.ACTIVE_MODE_XINPUT:
+        reenumerated.capabilities = (
+            config_manager.CAPABILITY_INPUT |
+            config_manager.CAPABILITY_RUMBLE
+        )
     scans = iter(((previous,), (), (reenumerated,)))
     monkeypatch.setattr(
         config_manager,
@@ -871,22 +917,37 @@ def test_mode_reboot_fails_when_missing_topology_is_ambiguous(
 
 
 @pytest.mark.parametrize(
-    ("stored_mode", "active_mode", "message"),
+    ("requested_mode", "stored_mode", "active_mode", "message"),
     (
         (
+            config_manager.REQUESTED_MODE_SWITCH,
             config_manager.REQUESTED_MODE_SWITCH,
             config_manager.ACTIVE_MODE_SWITCH_PROBE,
             "activated",
         ),
         (
+            config_manager.REQUESTED_MODE_SWITCH,
             config_manager.REQUESTED_MODE_AUTO,
             config_manager.ACTIVE_MODE_SWITCH,
+            "was not stored",
+        ),
+        (
+            config_manager.REQUESTED_MODE_DINPUT,
+            config_manager.REQUESTED_MODE_DINPUT,
+            config_manager.ACTIVE_MODE_MAC,
+            "activated",
+        ),
+        (
+            config_manager.REQUESTED_MODE_MAC,
+            config_manager.REQUESTED_MODE_DINPUT,
+            config_manager.ACTIVE_MODE_MAC,
             "was not stored",
         ),
     ),
 )
 def test_mode_verifies_requested_and_active_state_after_reenumeration(
     monkeypatch: pytest.MonkeyPatch,
+    requested_mode: int,
     stored_mode: int,
     active_mode: int,
     message: str,
@@ -906,7 +967,7 @@ def test_mode_verifies_requested_and_active_state_after_reenumeration(
 
     with pytest.raises(config_manager.ConfigManagerError, match=message):
         config_manager.configure_mode(
-            previous, config_manager.REQUESTED_MODE_SWITCH, 1.0
+            previous, requested_mode, 1.0
         )
 
 
@@ -944,6 +1005,11 @@ def test_requested_and_active_mode_response_validation() -> None:
         config_manager.read_info(device).active_mode
         == config_manager.ACTIVE_MODE_SWITCH_PROBE
     )
+    assert config_manager.read_info(device).capability_names() == (
+        "input",
+        "rumble",
+        "motion",
+    )
 
     device.configuration = struct.pack("<HB5x", 60, 0xFF)
     with pytest.raises(
@@ -962,6 +1028,17 @@ def test_requested_and_active_mode_response_validation() -> None:
     device.active_mode = 0xFF
     with pytest.raises(
         config_manager.ConfigManagerError, match="unknown active USB mode"
+    ):
+        config_manager.read_info(device)
+    device.active_mode = config_manager.ACTIVE_MODE_DINPUT
+    device.capabilities = 0x80
+    with pytest.raises(
+        config_manager.ConfigManagerError, match="unknown device capability"
+    ):
+        config_manager.read_info(device)
+    device.capabilities = config_manager.CAPABILITY_RUMBLE
+    with pytest.raises(
+        config_manager.ConfigManagerError, match="omit required input"
     ):
         config_manager.read_info(device)
 
@@ -1473,6 +1550,19 @@ def test_status_and_pairing_commands(
     assert "Pairing window: 60 seconds" in output
     assert "Requested USB mode: auto" in output
     assert "Active USB mode: Switch probe" in output
+    assert "Mode capabilities: input, rumble, motion" in output
+
+    device.configuration = struct.pack(
+        "<HB5x", 60, config_manager.REQUESTED_MODE_DINPUT
+    )
+    device.active_mode = config_manager.ACTIVE_MODE_DINPUT
+    device.capabilities = config_manager.CAPABILITY_INPUT
+    assert config_manager.main(["status"]) == 0
+    generic_output = capsys.readouterr().out
+    assert "Requested USB mode: dinput" in generic_output
+    assert "Active USB mode: DInput" in generic_output
+    assert "Mode capabilities: input only\n" in generic_output
+    assert "rumble" not in generic_output.lower()
 
     assert config_manager.main(["pairings", "list"]) == 0
     output = capsys.readouterr().out
@@ -1515,17 +1605,46 @@ def test_config_cli_preserves_requested_mode(
     assert "requested_mode=xinput" in output
 
 
+@pytest.mark.parametrize(
+    ("mode_name", "requested_mode", "active_mode", "capabilities"),
+    (
+        (
+            "xinput",
+            config_manager.REQUESTED_MODE_XINPUT,
+            config_manager.ACTIVE_MODE_XINPUT,
+            config_manager.CAPABILITY_INPUT |
+            config_manager.CAPABILITY_RUMBLE,
+        ),
+        (
+            "dinput",
+            config_manager.REQUESTED_MODE_DINPUT,
+            config_manager.ACTIVE_MODE_DINPUT,
+            config_manager.CAPABILITY_INPUT,
+        ),
+        (
+            "mac",
+            config_manager.REQUESTED_MODE_MAC,
+            config_manager.ACTIVE_MODE_MAC,
+            config_manager.CAPABILITY_INPUT,
+        ),
+    ),
+)
 def test_mode_cli_changes_then_noops(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    mode_name: str,
+    requested_mode: int,
+    active_mode: int,
+    capabilities: int,
 ) -> None:
     previous = FakeDevice()
     reenumerated = FakeDevice()
     reenumerated.address = 8
     reenumerated.configuration = struct.pack(
-        "<HB5x", 60, config_manager.REQUESTED_MODE_XINPUT
+        "<HB5x", 60, requested_mode
     )
-    reenumerated.active_mode = config_manager.ACTIVE_MODE_XINPUT
+    reenumerated.active_mode = active_mode
+    reenumerated.capabilities = capabilities
     scans = iter(
         ((previous,), (previous,), (), (reenumerated,))
     )
@@ -1536,28 +1655,35 @@ def test_mode_cli_changes_then_noops(
     )
     monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
 
-    assert config_manager.main(["mode", "xinput"]) == 0
-    assert capsys.readouterr().out == "USB mode changed to xinput.\n"
+    assert config_manager.main(["mode", mode_name]) == 0
+    assert capsys.readouterr().out == f"USB mode changed to {mode_name}.\n"
     assert previous.reboot_transaction_ids == [previous.transaction_id]
 
     monkeypatch.setattr(
         config_manager, "_candidate_devices", lambda: (reenumerated,)
     )
-    assert config_manager.main(["mode", "xinput"]) == 0
-    assert capsys.readouterr().out == "USB mode is already xinput.\n"
+    assert config_manager.main(["mode", mode_name]) == 0
+    assert capsys.readouterr().out == f"USB mode is already {mode_name}.\n"
     assert reenumerated.out_requests == []
 
 
-def test_mode_parser_rejects_unimplemented_modes() -> None:
-    for mode in ("dinput", "mac"):
-        with pytest.raises(SystemExit):
-            config_manager.build_parser().parse_args(["mode", mode])
+def test_mode_parser_accepts_all_implemented_modes() -> None:
+    for mode in config_manager.REQUESTED_MODE_NAMES:
+        args = config_manager.build_parser().parse_args(["mode", mode])
+        assert args.mode == mode
 
 
-def test_candidate_discovery_checks_switch_and_xinput_identities(
+def test_candidate_discovery_checks_all_usb_identities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     lookups: list[tuple[int, int]] = []
+
+    assert config_manager.USB_IDENTITIES == (
+        (0x057E, 0x2009),
+        (0xCAFE, 0x4010),
+        (0xCAFE, 0x4020),
+        (0xCAFE, 0x4021),
+    )
 
     def find(**arguments: object) -> tuple[object, ...]:
         lookups.append(

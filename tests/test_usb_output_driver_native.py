@@ -40,6 +40,7 @@ def test_usb_output_driver_contracts(tmp_path: Path) -> None:
                     str(root / "tests" / "usb_output_driver_test.cpp"),
                     str(root / "switch_pro_driver.cpp"),
                     str(root / "usb_output_driver.cpp"),
+                    str(root / "generic_hid_driver.cpp"),
                     str(root / "xinput_driver.cpp"),
                     str(root / "switch_haptics.cpp"),
                     "-o",

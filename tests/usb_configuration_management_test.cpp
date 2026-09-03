@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <tusb.h>
+#include "usb_output_driver.h"
 
 namespace {
 
@@ -15,12 +16,15 @@ ProfileServiceListSnapshot current_profile_list{};
 ProfileServiceSelectedSnapshot current_profile_selected{};
 ProfileServiceTransactionSnapshot current_profile_transaction{};
 AdapterUsbMode current_active_mode = AdapterUsbMode::kSwitchProbe;
+uint8_t current_capabilities =
+    USB_OUTPUT_CAPABILITY_INPUT | USB_OUTPUT_CAPABILITY_RUMBLE |
+    USB_OUTPUT_CAPABILITY_MOTION;
 ConfigurationTransactionStatus mode_set_result =
     ConfigurationTransactionStatus::kPending;
 uint32_t mode_set_transaction_id = 0;
 AdapterRequestedMode mode_set_requested_mode = AdapterRequestedMode::kAuto;
 AdapterModeAvailability mode_set_availability{};
-AdapterModeAvailability runtime_mode_availability{};
+AdapterModeAvailability runtime_mode_availability{true, true, true, true};
 uint32_t mode_availability_query_count = 0;
 uint32_t mode_set_call_count = 0;
 uint32_t correlated_reboot_transaction_id = 0;
@@ -256,8 +260,24 @@ void test_mode_vendor_requests() {
     require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload[kResponseHeaderSize + 4] ==
-                    static_cast<uint8_t>(AdapterUsbMode::kSwitchProbe),
-            "info response did not report the active USB mode");
+                    static_cast<uint8_t>(AdapterUsbMode::kSwitchProbe) &&
+                control_payload[kResponseHeaderSize + 5] ==
+                    current_capabilities,
+            "info response did not report active mode capabilities");
+
+    current_active_mode = AdapterUsbMode::kDInput;
+    current_capabilities = USB_OUTPUT_CAPABILITY_INPUT;
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload[kResponseHeaderSize + 4] ==
+                    static_cast<uint8_t>(AdapterUsbMode::kDInput) &&
+                control_payload[kResponseHeaderSize + 5] ==
+                    USB_OUTPUT_CAPABILITY_INPUT,
+            "generic info response promised unsupported output capabilities");
+    current_active_mode = AdapterUsbMode::kSwitchProbe;
+    current_capabilities =
+        USB_OUTPUT_CAPABILITY_INPUT | USB_OUTPUT_CAPABILITY_RUMBLE |
+        USB_OUTPUT_CAPABILITY_MOTION;
 
     request = setup_request(
         Operation::kConfigurationRead, TUSB_DIR_IN,
@@ -296,8 +316,8 @@ void test_mode_vendor_requests() {
                     AdapterRequestedMode::kXInput &&
                 mode_set_availability.switch_mode &&
                 mode_set_availability.xinput_mode &&
-                !mode_set_availability.dinput_mode &&
-                !mode_set_availability.mac_mode &&
+                mode_set_availability.dinput_mode &&
+                mode_set_availability.mac_mode &&
                 mode_availability_query_count == 1,
             "XInput mode set did not use runtime availability");
     write_u32(&mode_set, 0, 0x12345679);
@@ -330,17 +350,22 @@ void test_mode_vendor_requests() {
             "malformed mode request reached runtime mode selection");
 
     mode_set_result = ConfigurationTransactionStatus::kPending;
-    for (const AdapterRequestedMode unavailable : {
+    for (const AdapterRequestedMode generic_mode : {
              AdapterRequestedMode::kDInput,
              AdapterRequestedMode::kMac,
          }) {
-        mode_set[4] = static_cast<uint8_t>(unavailable);
-        perform_out(Operation::kModeSet, mode_set, false);
+        write_u32(&mode_set, 0,
+                  0x12345680u +
+                      static_cast<uint8_t>(generic_mode));
+        mode_set[4] = static_cast<uint8_t>(generic_mode);
+        perform_out(Operation::kModeSet, mode_set);
+        require(mode_set_requested_mode == generic_mode,
+                "generic mode request was not dispatched");
     }
     require(mode_set_call_count == calls_before_invalid + 2 &&
                 mode_availability_query_count ==
                     availability_queries_before_invalid + 2,
-            "unsupported mode did not use runtime availability");
+            "generic modes did not use runtime availability");
 
     request = setup_request(
         Operation::kModeSet, TUSB_DIR_OUT, kRequestHeaderSize + 4);
@@ -615,6 +640,9 @@ ConfigurationTransactionStatus configuration_service_set_mode(
 }
 
 AdapterUsbMode usb_output_driver_mode() { return current_active_mode; }
+uint8_t usb_output_driver_capabilities() {
+    return current_capabilities;
+}
 
 bool adapter_reboot_for_mode_transaction(uint32_t transaction_id) {
     reboot_transaction_id = transaction_id;

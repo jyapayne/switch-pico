@@ -20,6 +20,8 @@ enum class AdapterUsbMode : uint8_t {
     kSwitch = 0,
     kSwitchProbe = 1,
     kXInput = 2,
+    kDInput = 3,
+    kMac = 4,
 };
 
 // Availability of USB mode implementations in this firmware build. All mode

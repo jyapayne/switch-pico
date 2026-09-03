@@ -5,6 +5,8 @@
 #include <iostream>
 
 #include "adapter_host_probe_state.h"
+#include "generic_hid_descriptors.h"
+#include "generic_hid_driver.h"
 #include "xinput_descriptors.h"
 #include "xinput_protocol.h"
 #include "device/usbd_pvt.h"
@@ -297,6 +299,11 @@ void test_switch_boundary_dispatch() {
                std::strcmp(usb_output_driver_mode_name(),
                            "Switch probe") == 0,
            "Switch boundary mode was not frozen");
+    expect(usb_output_driver_capabilities() ==
+               (USB_OUTPUT_CAPABILITY_INPUT |
+                USB_OUTPUT_CAPABILITY_RUMBLE |
+                USB_OUTPUT_CAPABILITY_MOTION),
+           "Switch probe capabilities were not rumble plus motion");
     expect(std::memcmp(tud_descriptor_device_cb(),
                        XInput::kSwitchProbeDeviceDescriptor,
                        sizeof(XInput::kSwitchProbeDeviceDescriptor)) == 0,
@@ -386,6 +393,11 @@ void test_manual_switch_selection() {
            "manual Switch did not use the production Switch descriptor");
     expect(tud_descriptor_string_cb(0xee, 0x0409) == nullptr,
            "manual Switch exposed the automatic Windows probe string");
+    expect(usb_output_driver_capabilities() ==
+               (USB_OUTPUT_CAPABILITY_INPUT |
+                USB_OUTPUT_CAPABILITY_RUMBLE |
+                USB_OUTPUT_CAPABILITY_MOTION),
+           "manual Switch capabilities lost rumble or motion");
 }
 
 void open_xinput_interfaces(usbd_class_driver_t const* driver) {
@@ -415,6 +427,12 @@ void test_xinput_boundary_dispatch() {
                std::strcmp(usb_output_driver_name(), "XINPUT") == 0 &&
                std::strcmp(usb_output_driver_mode_name(), "XInput") == 0,
            "XInput boundary mode was not frozen");
+    expect(usb_output_driver_capabilities() ==
+               (USB_OUTPUT_CAPABILITY_INPUT |
+                USB_OUTPUT_CAPABILITY_RUMBLE) &&
+               (usb_output_driver_capabilities() &
+                USB_OUTPUT_CAPABILITY_MOTION) == 0,
+           "XInput capabilities did not report rumble without motion");
     expect(std::memcmp(tud_descriptor_device_cb(),
                        XInput::kDeviceDescriptor,
                        sizeof(XInput::kDeviceDescriptor)) == 0,
@@ -538,6 +556,135 @@ void test_xinput_boundary_dispatch() {
                       "XInput development product string changed");
     expect_usb_string(3, "XINPUT-PROTOTYPE",
                       "XInput development serial string changed");
+}
+
+void test_generic_boundary_dispatch(
+    AdapterUsbMode mode, const uint8_t* expected_device_descriptor,
+    const char* expected_driver_name, const char* expected_mode_name,
+    const char* expected_product, const char* expected_serial) {
+    reset_usb_harness();
+    usb_output_driver_init(mode);
+
+    expect(usb_output_driver_mode() == mode &&
+               std::strcmp(usb_output_driver_name(),
+                           expected_driver_name) == 0 &&
+               std::strcmp(usb_output_driver_mode_name(),
+                           expected_mode_name) == 0,
+           "generic boundary mode was not frozen");
+    expect(usb_output_driver_capabilities() ==
+               USB_OUTPUT_CAPABILITY_INPUT &&
+               (usb_output_driver_capabilities() &
+                USB_OUTPUT_CAPABILITY_RUMBLE) == 0 &&
+               (usb_output_driver_capabilities() &
+                USB_OUTPUT_CAPABILITY_MOTION) == 0,
+           "generic mode promised rumble or motion capability");
+    const uint8_t* device_descriptor = tud_descriptor_device_cb();
+    expect(device_descriptor != nullptr &&
+               std::memcmp(device_descriptor, expected_device_descriptor,
+                           sizeof(GenericHid::kDInputDeviceDescriptor)) == 0,
+           "generic device descriptor was not selected");
+    const uint8_t* configuration_descriptor =
+        tud_descriptor_configuration_cb(0);
+    expect(configuration_descriptor != nullptr &&
+               std::memcmp(configuration_descriptor,
+                           GenericHid::kConfigurationDescriptor,
+                           GenericHid::kConfigurationDescriptorSize) == 0,
+           "generic configuration descriptor was not selected");
+    const uint8_t* report_descriptor =
+        tud_hid_descriptor_report_cb(0);
+    expect(report_descriptor != nullptr &&
+               std::memcmp(report_descriptor,
+                           GenericHid::kReportDescriptor,
+                           sizeof(GenericHid::kReportDescriptor)) == 0 &&
+               tud_hid_descriptor_report_cb(kInvalidInstance) == nullptr,
+           "generic report descriptor routing was incorrect");
+
+    uint8_t driver_count = 0xff;
+    expect(usbd_app_driver_get_cb(&driver_count) == nullptr &&
+               driver_count == 0,
+           "generic mode registered the XInput custom class");
+    expect(tud_descriptor_string_cb(0xee, 0x0409) == nullptr,
+           "generic mode exposed the XInput Microsoft OS string");
+    expect_usb_string(1, GenericHid::kManufacturerString,
+                      "generic manufacturer string changed");
+    expect_usb_string(2, expected_product,
+                      "generic product string changed");
+    expect_usb_string(3, expected_serial,
+                      "generic serial string changed");
+
+    std::array<GenericHid::InputReport, kInstanceCount> expected_reports{};
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        ControllerState state{};
+        state.left_stick_x =
+            static_cast<int16_t>(INT16_MIN + instance);
+        state.right_stick_y =
+            static_cast<int16_t>(INT16_MAX - instance);
+        state.left_trigger =
+            static_cast<uint16_t>(0x1111u * (instance + 1u));
+        state.button_south = (instance & 1u) == 0;
+        state.button_north = (instance & 1u) != 0;
+        usb_output_driver_set_input(instance, state, 1, 2);
+        expected_reports[instance] =
+            GenericHid::build_input_report(state);
+    }
+
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        std::array<uint8_t, GenericHid::kReportSize> report{};
+        expect(tud_hid_get_report_cb(
+                   instance, 0, HID_REPORT_TYPE_INPUT, report.data(),
+                   report.size()) == GenericHid::kReportSize &&
+                   std::memcmp(report.data(),
+                               expected_reports[instance].data,
+                               report.size()) == 0,
+               "generic GET_REPORT crossed instance state");
+        expect(usb_output_driver_is_ready(instance) &&
+                   usb_output_driver_task(instance),
+               "generic readiness/task helper was not dispatched");
+    }
+    std::array<uint8_t, GenericHid::kReportSize> invalid_report{};
+    expect(tud_hid_get_report_cb(
+               kInvalidInstance, 0, HID_REPORT_TYPE_INPUT,
+               invalid_report.data(), invalid_report.size()) == 0 &&
+               !usb_output_driver_is_ready(kInvalidInstance) &&
+               !usb_output_driver_task(kInvalidInstance),
+           "generic callbacks accepted an invalid instance");
+    expect(tud_hid_get_report_cb(
+               0, 0, HID_REPORT_TYPE_OUTPUT, invalid_report.data(),
+               invalid_report.size()) == 0 &&
+               tud_hid_get_report_cb(
+                   0, 1, HID_REPORT_TYPE_INPUT, invalid_report.data(),
+                   invalid_report.size()) == 0,
+           "generic boundary accepted output or report-ID GET_REPORT");
+
+    switch_pro_set_rumble_callback(0,
+                                   inactive_switch_rumble_callback);
+    usb_output_driver_set_rumble_callback(0, xinput_rumble_callback);
+    std::array<uint8_t, 10> output{};
+    output[0] = REPORT_OUTPUT_10;
+    tud_hid_report_received_cb(0, 0, output.data(), output.size());
+    tud_hid_set_report_cb(0, REPORT_OUTPUT_10, HID_REPORT_TYPE_OUTPUT,
+                          output.data() + 1, output.size() - 1);
+    expect(switch_inactive_rumble_count == 0 &&
+               xinput_rumble_events[0].count == 0,
+           "generic input-only mode handled an output report");
+
+    tud_mount_cb();
+    tud_umount_cb();
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        expect(usb_output_driver_is_ready(instance),
+               "generic lifecycle callback disturbed active state");
+    }
+}
+
+void test_generic_modes_boundary_dispatch() {
+    test_generic_boundary_dispatch(
+        AdapterUsbMode::kDInput, GenericHid::kDInputDeviceDescriptor,
+        "DINPUT", "DInput", GenericHid::kDInputProductString,
+        GenericHid::kDInputSerialString);
+    test_generic_boundary_dispatch(
+        AdapterUsbMode::kMac, GenericHid::kMacDeviceDescriptor,
+        "MAC", "Mac", GenericHid::kMacProductString,
+        GenericHid::kMacSerialString);
 }
 
 void test_vendor_control_boundary() {
@@ -687,6 +834,7 @@ int main() {
     test_switch_boundary_dispatch();
     test_manual_switch_selection();
     test_xinput_boundary_dispatch();
+    test_generic_modes_boundary_dispatch();
     test_vendor_control_boundary();
     return failures == 0 ? 0 : 1;
 }

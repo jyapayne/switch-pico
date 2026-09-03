@@ -1,5 +1,5 @@
-// TinyUSB configuration for one to four Switch Pro style HID interfaces.
-// Each interface uses independent 64-byte interrupt IN and OUT endpoints.
+// Switch Pro interfaces use independent 64-byte interrupt IN and OUT endpoints;
+// generic HID interfaces use input-only 15-byte reports/endpoints.
 #ifndef _TUSB_CONFIG_H_
 #define _TUSB_CONFIG_H_
 
@@ -36,7 +36,7 @@ extern "C" {
 #define CFG_TUD_MSC 0
 #define CFG_TUD_MIDI 0
 #define CFG_TUD_VENDOR 0
-// Always enable TinyUSB debug at level 2; LOG_PRINTF controls user-facing logs.
+// TinyUSB debug is disabled by default (CFG_TUSB_DEBUG=0); LOG_PRINTF controls user-facing logs.
 #ifdef CFG_TUSB_DEBUG
 #undef CFG_TUSB_DEBUG
 #endif

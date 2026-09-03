@@ -17,7 +17,12 @@ from typing import Any, Protocol, cast
 
 import usb.core
 
-USB_IDENTITIES = ((0x057E, 0x2009), (0xCAFE, 0x4010))
+USB_IDENTITIES = (
+    (0x057E, 0x2009),
+    (0xCAFE, 0x4010),
+    (0xCAFE, 0x4020),
+    (0xCAFE, 0x4021),
+)
 REQUEST_VALUE = 0x5350
 REQUEST_INDEX = 0x0001
 PROTOCOL_VERSION = 1
@@ -74,11 +79,18 @@ REQUESTED_MODE_XINPUT = 2
 REQUESTED_MODE_DINPUT = 3
 REQUESTED_MODE_MAC = 4
 REQUESTED_MODE_NAMES = ("auto", "switch", "xinput", "dinput", "mac")
-SELECTABLE_MODE_NAMES = REQUESTED_MODE_NAMES[:3]
+SELECTABLE_MODE_NAMES = REQUESTED_MODE_NAMES
 ACTIVE_MODE_SWITCH = 0
 ACTIVE_MODE_SWITCH_PROBE = 1
 ACTIVE_MODE_XINPUT = 2
-ACTIVE_MODE_NAMES = ("Switch", "Switch probe", "XInput")
+ACTIVE_MODE_DINPUT = 3
+ACTIVE_MODE_MAC = 4
+ACTIVE_MODE_NAMES = ("Switch", "Switch probe", "XInput", "DInput", "Mac")
+# USB management info byte 5 capability flags.
+CAPABILITY_INPUT = 1 << 0
+CAPABILITY_RUMBLE = 1 << 1
+CAPABILITY_MOTION = 1 << 2
+CAPABILITY_MASK = CAPABILITY_INPUT | CAPABILITY_RUMBLE | CAPABILITY_MOTION
 PAIRING_RECORD_SIZE = 8
 PAIRING_RECORD_CAPACITY = 16
 TRANSPORT_UNKNOWN = 0
@@ -167,6 +179,7 @@ class DeviceInfo:
     firmware_version: tuple[int, int, int]
     board: int
     active_mode: int
+    capabilities: int
     maximum_configuration_size: int
 
     def mode_name(self) -> str:
@@ -176,6 +189,20 @@ class DeviceInfo:
             raise ConfigManagerError(
                 f"unknown active USB mode {self.active_mode}"
             ) from exc
+
+    def capability_names(self) -> tuple[str, ...]:
+        if self.capabilities == 0:
+            return ("unreported",)
+        names = ["input"]
+        if self.capabilities & CAPABILITY_RUMBLE:
+            names.append("rumble")
+        if self.capabilities & CAPABILITY_MOTION:
+            names.append("motion")
+        return tuple(names)
+
+    def capability_summary(self) -> str:
+        names = self.capability_names()
+        return "input only" if names == ("input",) else ", ".join(names)
 
 
 @dataclass(frozen=True)
@@ -1295,11 +1322,20 @@ def _control_out(
 def read_info(device: UsbDevice) -> DeviceInfo:
     envelope = _control_in(device, OP_INFO)
     _raise_status(envelope)
-    if len(envelope.payload) != 8 or envelope.payload[5] != 0:
+    if len(envelope.payload) != 8:
         raise ConfigManagerError("invalid device-info payload")
     active_mode = envelope.payload[4]
+    capabilities = envelope.payload[5]
     if active_mode >= len(ACTIVE_MODE_NAMES):
         raise ConfigManagerError(f"unknown active USB mode {active_mode}")
+    if capabilities & ~CAPABILITY_MASK:
+        raise ConfigManagerError(
+            f"unknown device capability flags 0x{capabilities:02x}"
+        )
+    if capabilities != 0 and not capabilities & CAPABILITY_INPUT:
+        raise ConfigManagerError(
+            "device capability flags omit required input support"
+        )
     return DeviceInfo(
         firmware_version=(
             envelope.payload[0],
@@ -1308,6 +1344,7 @@ def read_info(device: UsbDevice) -> DeviceInfo:
         ),
         board=envelope.payload[3],
         active_mode=active_mode,
+        capabilities=capabilities,
         maximum_configuration_size=struct.unpack_from(
             "<H", envelope.payload, 6
         )[0],
@@ -1427,6 +1464,8 @@ def set_mode(
         REQUESTED_MODE_AUTO,
         REQUESTED_MODE_SWITCH,
         REQUESTED_MODE_XINPUT,
+        REQUESTED_MODE_DINPUT,
+        REQUESTED_MODE_MAC,
     ):
         raise ConfigManagerError("requested USB mode is not available")
     transaction_id = _host_transaction_id()
@@ -1452,6 +1491,10 @@ def _mode_is_active(requested_mode: int, active_mode: int) -> bool:
         return active_mode == ACTIVE_MODE_SWITCH
     if requested_mode == REQUESTED_MODE_XINPUT:
         return active_mode == ACTIVE_MODE_XINPUT
+    if requested_mode == REQUESTED_MODE_DINPUT:
+        return active_mode == ACTIVE_MODE_DINPUT
+    if requested_mode == REQUESTED_MODE_MAC:
+        return active_mode == ACTIVE_MODE_MAC
     return False
 
 
@@ -1948,6 +1991,8 @@ def configure_mode(
         REQUESTED_MODE_AUTO,
         REQUESTED_MODE_SWITCH,
         REQUESTED_MODE_XINPUT,
+        REQUESTED_MODE_DINPUT,
+        REQUESTED_MODE_MAC,
     ):
         raise ConfigManagerError("requested USB mode is not available")
     before_info = read_info(device)
@@ -2204,6 +2249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{REQUESTED_MODE_NAMES[configuration.requested_mode]}"
             )
             print(f"Active USB mode: {info.mode_name()}")
+            print(f"Mode capabilities: {info.capability_summary()}")
             print(f"Configuration generation: {configuration.generation}")
             print(f"Configuration CRC: {configuration.crc:08x}")
             print(

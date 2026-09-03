@@ -153,7 +153,7 @@ size_t encode_info(uint8_t* output, size_t output_size) {
     uint8_t payload[8] = {
         0, 2, 0, 2,
         static_cast<uint8_t>(usb_output_driver_mode()),
-        0,
+        usb_output_driver_capabilities(),
         static_cast<uint8_t>(CONFIGURATION_STORAGE_MAX_PAYLOAD_SIZE),
         static_cast<uint8_t>(
             CONFIGURATION_STORAGE_MAX_PAYLOAD_SIZE >> 8),

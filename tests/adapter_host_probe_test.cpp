@@ -118,9 +118,25 @@ void test_manual_modes_bypass_and_consume_probe_state() {
 
     reset_harness(kXInputBootMagic);
     adapter_host_probe_init(AdapterRequestedMode::kDInput);
-    require(adapter_host_probe_mode() == AdapterUsbMode::kSwitch &&
+    require(adapter_host_probe_mode() == AdapterUsbMode::kDInput &&
                 watchdog_registers.scratch[0] == 0 && alarm_count == 0,
-            "unavailable DInput was selected or treated as Auto");
+            "manual DInput did not bypass and consume stale auto scratch");
+    adapter_host_probe_note_string_descriptor(0xee);
+    require(!adapter_host_probe_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_count == 0 && alarm_count == 0,
+            "manual DInput entered the XInput probe path");
+
+    reset_harness(kXInputBootMagic);
+    adapter_host_probe_init(AdapterRequestedMode::kMac);
+    require(adapter_host_probe_mode() == AdapterUsbMode::kMac &&
+                watchdog_registers.scratch[0] == 0 && alarm_count == 0,
+            "manual Mac did not bypass and consume stale auto scratch");
+    adapter_host_probe_note_string_descriptor(0xee);
+    require(!adapter_host_probe_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_count == 0 && alarm_count == 0,
+            "manual Mac entered the XInput probe path");
 }
 
 void test_probe_transition_resets_before_watchdog() {

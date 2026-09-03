@@ -54,26 +54,40 @@ void adapter_host_probe_init(AdapterRequestedMode requested_mode) {
         case AdapterRequestedMode::kXInput:
             g_mode = AdapterUsbMode::kXInput;
             break;
+        case AdapterRequestedMode::kDInput:
+            g_mode = AdapterUsbMode::kDInput;
+            break;
+        case AdapterRequestedMode::kMac:
+            g_mode = AdapterUsbMode::kMac;
+            break;
         case AdapterRequestedMode::kAuto:
             g_mode = scratch == kXInputBootMagic
                          ? AdapterUsbMode::kXInput
                          : AdapterUsbMode::kSwitchProbe;
             break;
-        case AdapterRequestedMode::kDInput:
-        case AdapterRequestedMode::kMac:
-            // Keep USB usable without treating unavailable explicit choices
-            // as Auto. Host/controller setters reject these until drivers land.
-            g_mode = AdapterUsbMode::kSwitch;
-            break;
     }
     g_probe = {};
     g_reboot_alarm = 0;
-    PROBE_LOG("[HOST PROBE] boot mode=%s\n",
-              g_mode == AdapterUsbMode::kXInput
-                  ? "XInput"
-                  : (g_mode == AdapterUsbMode::kSwitch
-                         ? "Switch"
-                         : "Switch probe"));
+#ifdef SWITCH_PICO_LOG
+    const char* mode_name = "Switch probe";
+    switch (g_mode) {
+        case AdapterUsbMode::kSwitch:
+            mode_name = "Switch";
+            break;
+        case AdapterUsbMode::kSwitchProbe:
+            break;
+        case AdapterUsbMode::kXInput:
+            mode_name = "XInput";
+            break;
+        case AdapterUsbMode::kDInput:
+            mode_name = "DInput";
+            break;
+        case AdapterUsbMode::kMac:
+            mode_name = "Mac";
+            break;
+    }
+    PROBE_LOG("[HOST PROBE] boot mode=%s\n", mode_name);
+#endif
 }
 
 AdapterUsbMode adapter_host_probe_mode() { return g_mode; }

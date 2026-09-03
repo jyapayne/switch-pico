@@ -110,14 +110,17 @@ AdapterRequestedMode next_mode(AdapterRequestedMode mode) {
         case AdapterRequestedMode::kSwitch:
             return AdapterRequestedMode::kXInput;
         case AdapterRequestedMode::kXInput:
+            return AdapterRequestedMode::kDInput;
         case AdapterRequestedMode::kDInput:
+            return AdapterRequestedMode::kMac;
         case AdapterRequestedMode::kMac:
             return AdapterRequestedMode::kAuto;
     }
     return AdapterRequestedMode::kAuto;
 }
 
-uint8_t feedback_pulse_count(AdapterRequestedMode mode) {
+// Profile numbers select both a bounded pulse count and the existing color.
+uint8_t feedback_profile_number(AdapterRequestedMode mode) {
     switch (mode) {
         case AdapterRequestedMode::kAuto:
             return 1;
@@ -127,9 +130,18 @@ uint8_t feedback_pulse_count(AdapterRequestedMode mode) {
             return 3;
         case AdapterRequestedMode::kDInput:
         case AdapterRequestedMode::kMac:
-            return 1;
+            return 4;
     }
     return 1;
+}
+
+// Mac reuses the fourth bounded pulse/color identity but is LED-only, making
+// its confirmation tuple distinct from DInput without exceeding profile bounds.
+ControllerProfileConfirmationPolicy feedback_policy(
+    AdapterRequestedMode mode) {
+    return mode == AdapterRequestedMode::kMac
+               ? ControllerProfileConfirmationPolicy::kLed
+               : ControllerProfileConfirmationPolicy::kRumbleAndLed;
 }
 
 void clear_mode_chord(ControllerState* state) {
@@ -210,12 +222,14 @@ void finish_successful_mode_write(uint32_t now_ms) {
     }
 
     controller_profile_runtime_reset();
-    const uint8_t pulses = feedback_pulse_count(g_operation.target_mode);
+    const uint8_t feedback_profile =
+        feedback_profile_number(g_operation.target_mode);
     bluepad32_input_backend_queue_profile_feedback(
-        g_operation.slot, g_operation.connection_generation, pulses,
-        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+        g_operation.slot, g_operation.connection_generation,
+        feedback_profile, feedback_policy(g_operation.target_mode));
     g_operation.feedback_deadline_ms =
-        now_ms + static_cast<uint32_t>(pulses) * 2u * kFeedbackPhaseMs +
+        now_ms + static_cast<uint32_t>(feedback_profile) * 2u *
+                     kFeedbackPhaseMs +
         kFeedbackGuardMs;
     g_operation.phase = ModeOperationPhase::kAcknowledge;
 }
@@ -268,7 +282,7 @@ void advance_mode_write(uint32_t now_ms) {
 
 const AdapterModeAvailability& adapter_usb_mode_availability() {
     static constexpr AdapterModeAvailability kAvailability{
-        true, true, false, false};
+        true, true, true, true};
     return kAvailability;
 }
 

@@ -160,9 +160,9 @@ void test_mode_availability_has_one_stable_value() {
     const AdapterModeAvailability& second =
         adapter_usb_mode_availability();
     require(&first == &second && first.switch_mode &&
-                first.xinput_mode && !first.dinput_mode &&
-                !first.mac_mode,
-            "mode availability was not the shared implemented-mode value");
+                first.xinput_mode && first.dinput_mode &&
+                first.mac_mode,
+            "mode availability was not the shared five-mode value");
 }
 
 void test_exact_hold_release_wrap_and_consumption() {
@@ -226,11 +226,14 @@ void test_cycle_and_slot_isolation() {
                 AdapterRequestedMode::kXInput,
             "Switch did not cycle to XInput");
     require(triggered_target(AdapterRequestedMode::kXInput) ==
-                AdapterRequestedMode::kAuto,
-            "XInput did not cycle to Auto");
+                AdapterRequestedMode::kDInput,
+            "XInput did not cycle to DInput");
     require(triggered_target(AdapterRequestedMode::kDInput) ==
+                AdapterRequestedMode::kMac,
+            "DInput did not cycle to Mac");
+    require(triggered_target(AdapterRequestedMode::kMac) ==
                 AdapterRequestedMode::kAuto,
-            "unimplemented configured value entered the chord cycle");
+            "Mac did not cycle to Auto");
 
     reset_harness();
     begin_hold(0, 10, 0);
@@ -326,6 +329,53 @@ void test_commit_feedback_then_reboot() {
     adapter_mode_controller_task(4000);
     require(reboot_count == 1 && runtime_reset_count == 2,
             "scheduled watchdog reboot looped");
+}
+
+void test_feedback_distinguishes_all_modes() {
+    struct FeedbackCase {
+        AdapterRequestedMode initial_mode;
+        AdapterRequestedMode target_mode;
+        uint8_t pulses;
+        ControllerProfileConfirmationPolicy policy;
+    };
+    constexpr FeedbackCase cases[] = {
+        {AdapterRequestedMode::kAuto, AdapterRequestedMode::kSwitch, 2,
+         ControllerProfileConfirmationPolicy::kRumbleAndLed},
+        {AdapterRequestedMode::kSwitch, AdapterRequestedMode::kXInput, 3,
+         ControllerProfileConfirmationPolicy::kRumbleAndLed},
+        {AdapterRequestedMode::kXInput, AdapterRequestedMode::kDInput, 4,
+         ControllerProfileConfirmationPolicy::kRumbleAndLed},
+        {AdapterRequestedMode::kDInput, AdapterRequestedMode::kMac, 4,
+         ControllerProfileConfirmationPolicy::kLed},
+        {AdapterRequestedMode::kMac, AdapterRequestedMode::kAuto, 1,
+         ControllerProfileConfirmationPolicy::kRumbleAndLed},
+    };
+
+    for (const FeedbackCase& expected : cases) {
+        reset_harness(expected.initial_mode);
+        begin_hold(1, 23, 0);
+        finish_hold(1, 23, 0);
+        set_results = {ConfigurationTransactionStatus::kCommitted};
+        adapter_mode_controller_task(ADAPTER_MODE_CHORD_HOLD_MS);
+        require(set_modes.size() == 1 &&
+                    set_modes[0] == expected.target_mode &&
+                    feedback_slot == 1 && feedback_generation == 23 &&
+                    feedback_pulses == expected.pulses &&
+                    feedback_policy == expected.policy &&
+                    reboot_count == 0,
+                "mode feedback tuple did not uniquely identify its target");
+
+        const uint32_t feedback_duration =
+            static_cast<uint32_t>(expected.pulses) * 2u * 75u + 75u;
+        adapter_mode_controller_task(
+            ADAPTER_MODE_CHORD_HOLD_MS + feedback_duration - 1u);
+        require(reboot_count == 0,
+                "mode feedback deadline was shorter than its bounded pulse sequence");
+        adapter_mode_controller_task(
+            ADAPTER_MODE_CHORD_HOLD_MS + feedback_duration);
+        require(reboot_count == 1,
+                "mode feedback did not reboot at its bounded deadline");
+    }
 }
 
 void test_configuration_failure_and_correlated_reboot() {
@@ -512,8 +562,8 @@ ConfigurationTransactionStatus configuration_service_set_mode_internal(
             "recovery reservation admitted a non-Auto internal mode");
     calls.push_back(Call::kSetMode);
     require(availability.switch_mode && availability.xinput_mode &&
-                !availability.dinput_mode && !availability.mac_mode,
-            "mode controller advertised unavailable drivers");
+                availability.dinput_mode && availability.mac_mode,
+            "mode controller did not advertise all compiled drivers");
     set_transaction_ids.push_back(transaction_id);
     set_modes.push_back(requested_mode);
     if (next_set_result >= set_results.size()) {
@@ -605,6 +655,7 @@ int main() {
     test_cycle_and_slot_isolation();
     test_busy_retry_and_one_shot();
     test_commit_feedback_then_reboot();
+    test_feedback_distinguishes_all_modes();
     test_configuration_failure_and_correlated_reboot();
     test_recovery_auto_wins_host_mode_interleaving();
     test_failed_recovery_never_reboots();

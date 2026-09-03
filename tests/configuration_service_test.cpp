@@ -131,7 +131,7 @@ void test_service_lifecycle_and_mutations() {
                 g_flash.erase_count == erases_after_seed,
             "pre-USB initialization wrote flash");
 
-    const AdapterModeAvailability implemented{};
+    const AdapterModeAvailability implemented{true, true, true, true};
     require(configuration_service_set_mode(
                 1, AdapterRequestedMode::kSwitch, implemented) ==
                 ConfigurationTransactionStatus::kBusy,
@@ -200,8 +200,9 @@ void test_service_lifecycle_and_mutations() {
             "mode-only commit changed pairing state or host status");
 
     const int programs_before_rejections = g_flash.program_count;
+    const AdapterModeAvailability unavailable{true, true, false, false};
     require(configuration_service_set_mode(
-                11, AdapterRequestedMode::kDInput, implemented) ==
+                11, AdapterRequestedMode::kDInput, unavailable) ==
                 ConfigurationTransactionStatus::kUnsupportedSchema &&
                 configuration_service_set_mode(
                     11, static_cast<AdapterRequestedMode>(5), implemented) ==
@@ -493,7 +494,7 @@ void test_abandoned_host_receive_does_not_block_recovery() {
                     ConfigurationTransactionStatus::kBusy,
             "recovery reservation did not terminally cancel host receive");
 
-    const AdapterModeAvailability implemented{};
+    const AdapterModeAvailability implemented{true, true, true, true};
     constexpr uint32_t kRecoveryAuto = 0x80000040u;
     require(configuration_service_set_mode_internal(
                 kRecoveryAuto, AdapterRequestedMode::kAuto,

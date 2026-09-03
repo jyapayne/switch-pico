@@ -118,6 +118,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             pico_configuration_storage.cpp
             usb_configuration_management.cpp
             xinput_driver.cpp
+            generic_hid_driver.cpp
     )
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
