@@ -1,0 +1,5 @@
+# Development USB identities used by switch-pico XInput and generic HID modes.
+# Restrict configuration access to the active local seat and plugdev members.
+SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4010", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4020", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4021", MODE="0660", GROUP="plugdev", TAG+="uaccess"

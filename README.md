@@ -177,6 +177,14 @@ To reproduce the validation:
 6. **Verify rumble per slot**: Send rumble to interface 0 and confirm only the slot 0 controller vibrates. Send rumble to interface 1 and confirm only the slot 1 controller vibrates.
 7. **Verify motion**: Enable gyro/accel on both controllers. Rotate each controller independently and confirm that motion is per-slot (rotating controller 0 does not affect controller 1's IMU output).
 
+On macOS, inspect the firmware's raw Game Pad values before GameController or browser remapping with:
+
+```sh
+swift tools/Test-SwitchPicoMac.swift
+```
+
+The diagnostic matches only `CAFE:4021`, identifies each of the four interfaces by interface and location, and prints changed axes, hats, and buttons with their HID usage and logical range. Move each analog trigger slowly and confirm that `Ry`/`Rz` report intermediate values across `0...65535`, rather than only the endpoints. It continues through hot-plug events until Ctrl-C. If opening a device fails, allow the terminal (or the app launching Swift) under **System Settings → Privacy & Security → Input Monitoring**, then rerun it.
+
 On the tested Linux host, all four HID interfaces enumerated, but `hid-nintendo` timed out (`-110`) while requesting controller information from the composite device and removed the transient hidraw nodes. This is an observed, undiagnosed composite interoperability limitation; its root cause has not been established. The timeout was not observed on the Switch, so successful `hid-nintendo` binding is not the release criterion for the four-interface AIO firmware. The pairing CLI uses vendor control transfers on endpoint 0 and does not depend on those hidraw nodes.
 
 Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry Pi's BTstack license.

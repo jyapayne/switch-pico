@@ -73,14 +73,28 @@ void test_initial_report_and_descriptor_routing() {
                        "initialized generic HID report is not neutral");
             }
         }
-        const uint8_t* descriptor =
-            generic_hid_report_descriptor(instance);
-        expect(descriptor != nullptr &&
-                   std::memcmp(descriptor, GenericHid::kReportDescriptor,
-                               sizeof(GenericHid::kReportDescriptor)) == 0,
-               "valid HID instance did not receive the shared descriptor");
+        const uint8_t* dinput_descriptor = generic_hid_report_descriptor(
+            instance, GenericHid::ReportDescriptorVariant::kDInput);
+        const uint8_t* mac_descriptor = generic_hid_report_descriptor(
+            instance, GenericHid::ReportDescriptorVariant::kMac);
+        expect(dinput_descriptor != nullptr &&
+                   std::memcmp(dinput_descriptor,
+                               GenericHid::kDInputReportDescriptor,
+                               sizeof(GenericHid::kDInputReportDescriptor)) ==
+                       0,
+               "valid HID instance did not receive the DInput descriptor");
+        expect(mac_descriptor != nullptr &&
+                   std::memcmp(mac_descriptor,
+                               GenericHid::kMacReportDescriptor,
+                               sizeof(GenericHid::kMacReportDescriptor)) == 0,
+               "valid HID instance did not receive the Mac descriptor");
     }
-    expect(generic_hid_report_descriptor(kInvalidInstance) == nullptr,
+    expect(generic_hid_report_descriptor(
+               kInvalidInstance,
+               GenericHid::ReportDescriptorVariant::kDInput) == nullptr &&
+               generic_hid_report_descriptor(
+                   kInvalidInstance,
+                   GenericHid::ReportDescriptorVariant::kMac) == nullptr,
            "invalid HID instance received a report descriptor");
 }
 

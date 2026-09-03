@@ -225,7 +225,11 @@ extern "C" uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
         return nullptr;
     }
     if (generic_selected()) {
-        return generic_hid_report_descriptor(instance);
+        const GenericHid::ReportDescriptorVariant variant =
+            g_mode == AdapterUsbMode::kMac
+                ? GenericHid::ReportDescriptorVariant::kMac
+                : GenericHid::ReportDescriptorVariant::kDInput;
+        return generic_hid_report_descriptor(instance, variant);
     }
 #endif
     return switch_pro_hid_report_descriptor(instance);

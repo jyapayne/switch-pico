@@ -157,7 +157,7 @@ inline constexpr uint8_t kMacDeviceDescriptor[] = {
 };
 
 // One report per interface, so no Report ID item is needed.
-inline constexpr uint8_t kReportDescriptor[] = {
+inline constexpr uint8_t kDInputReportDescriptor[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x05,        // Usage (Game Pad)
     0xa1, 0x01,        // Collection (Application)
@@ -207,11 +207,64 @@ inline constexpr uint8_t kReportDescriptor[] = {
     0xc0,        // End Collection
 };
 
+inline constexpr uint8_t kMacReportDescriptor[] = {
+    0x05, 0x01,        // Usage Page (Generic Desktop)
+    0x09, 0x05,        // Usage (Game Pad)
+    0xa1, 0x01,        // Collection (Application)
+
+    0x05, 0x01,        // Usage Page (Generic Desktop)
+    0x16, 0x00, 0x80,  // Logical Minimum (-32768)
+    0x26, 0xff, 0x7f,  // Logical Maximum (32767)
+    0x75, 0x10,        // Report Size (16)
+    0x95, 0x04,        // Report Count (4)
+    0x09, 0x30,        // Usage (X)
+    0x09, 0x31,        // Usage (Y)
+    0x09, 0x32,        // Usage (Z)
+    0x09, 0x33,        // Usage (Rx)
+    0x81, 0x02,        // Input (Data, Variable, Absolute)
+
+    0x15, 0x00,                    // Logical Minimum (0)
+    0x27, 0xff, 0xff, 0x00, 0x00,  // Logical Maximum (65535)
+    0x95, 0x02,                    // Report Count (2)
+    0x09, 0x34,                    // Usage (Ry)
+    0x09, 0x35,                    // Usage (Rz)
+    0x81, 0x02,                    // Input (Data, Variable, Absolute)
+
+    0x15, 0x00,        // Logical Minimum (0)
+    0x25, 0x07,        // Logical Maximum (7)
+    0x35, 0x00,        // Physical Minimum (0)
+    0x46, 0x3b, 0x01,  // Physical Maximum (315)
+    0x65, 0x14,        // Unit (English Rotation, Degrees)
+    0x75, 0x04,        // Report Size (4)
+    0x95, 0x01,        // Report Count (1)
+    0x09, 0x39,        // Usage (Hat Switch)
+    0x81, 0x42,        // Input (Data, Variable, Absolute, Null State)
+    0x75, 0x04,        // Report Size (4)
+    0x95, 0x01,        // Report Count (1)
+    0x81, 0x03,        // Input (Constant, Variable, Absolute)
+
+    0x05, 0x09,  // Usage Page (Button)
+    0x15, 0x00,  // Logical Minimum (0)
+    0x25, 0x01,  // Logical Maximum (1)
+    0x35, 0x00,  // Physical Minimum (0)
+    0x45, 0x00,  // Physical Maximum (0)
+    0x65, 0x00,  // Unit (None)
+    0x19, 0x01,  // Usage Minimum (Button 1)
+    0x29, 0x10,  // Usage Maximum (Button 16)
+    0x75, 0x01,  // Report Size (1)
+    0x95, 0x10,  // Report Count (16)
+    0x81, 0x02,  // Input (Data, Variable, Absolute)
+    0xc0,        // End Collection
+};
+
+static_assert(sizeof(kDInputReportDescriptor) ==
+              sizeof(kMacReportDescriptor));
+
 #define GENERIC_HID_INTERFACE(number, endpoint)                              \
     0x09, 0x04, number, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00,               \
         0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22,                          \
-        static_cast<uint8_t>(sizeof(kReportDescriptor)),                    \
-        static_cast<uint8_t>(sizeof(kReportDescriptor) >> 8u),              \
+        static_cast<uint8_t>(sizeof(kDInputReportDescriptor)),              \
+        static_cast<uint8_t>(sizeof(kDInputReportDescriptor) >> 8u),        \
         0x07, 0x05, static_cast<uint8_t>(0x80u | endpoint), 0x03,           \
         kEndpointSize, 0x00, kEndpointIntervalMs
 

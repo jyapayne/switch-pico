@@ -74,8 +74,12 @@ uint16_t generic_hid_get_report(uint8_t instance, uint8_t report_id,
     return report_size;
 }
 
-const uint8_t* generic_hid_report_descriptor(uint8_t instance) {
-    return context_for(instance) == nullptr
-               ? nullptr
-               : GenericHid::kReportDescriptor;
+const uint8_t* generic_hid_report_descriptor(
+    uint8_t instance, GenericHid::ReportDescriptorVariant variant) {
+    if (context_for(instance) == nullptr) {
+        return nullptr;
+    }
+    return variant == GenericHid::ReportDescriptorVariant::kMac
+               ? GenericHid::kMacReportDescriptor
+               : GenericHid::kDInputReportDescriptor;
 }

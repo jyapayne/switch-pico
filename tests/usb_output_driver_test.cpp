@@ -560,6 +560,7 @@ void test_xinput_boundary_dispatch() {
 
 void test_generic_boundary_dispatch(
     AdapterUsbMode mode, const uint8_t* expected_device_descriptor,
+    const uint8_t* expected_report_descriptor,
     const char* expected_driver_name, const char* expected_mode_name,
     const char* expected_product, const char* expected_serial) {
     reset_usb_harness();
@@ -593,9 +594,8 @@ void test_generic_boundary_dispatch(
     const uint8_t* report_descriptor =
         tud_hid_descriptor_report_cb(0);
     expect(report_descriptor != nullptr &&
-               std::memcmp(report_descriptor,
-                           GenericHid::kReportDescriptor,
-                           sizeof(GenericHid::kReportDescriptor)) == 0 &&
+               std::memcmp(report_descriptor, expected_report_descriptor,
+                           sizeof(GenericHid::kDInputReportDescriptor)) == 0 &&
                tud_hid_descriptor_report_cb(kInvalidInstance) == nullptr,
            "generic report descriptor routing was incorrect");
 
@@ -679,12 +679,12 @@ void test_generic_boundary_dispatch(
 void test_generic_modes_boundary_dispatch() {
     test_generic_boundary_dispatch(
         AdapterUsbMode::kDInput, GenericHid::kDInputDeviceDescriptor,
-        "DINPUT", "DInput", GenericHid::kDInputProductString,
-        GenericHid::kDInputSerialString);
+        GenericHid::kDInputReportDescriptor, "DINPUT", "DInput",
+        GenericHid::kDInputProductString, GenericHid::kDInputSerialString);
     test_generic_boundary_dispatch(
         AdapterUsbMode::kMac, GenericHid::kMacDeviceDescriptor,
-        "MAC", "Mac", GenericHid::kMacProductString,
-        GenericHid::kMacSerialString);
+        GenericHid::kMacReportDescriptor, "MAC", "Mac",
+        GenericHid::kMacProductString, GenericHid::kMacSerialString);
 }
 
 void test_vendor_control_boundary() {
