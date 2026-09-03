@@ -1039,7 +1039,8 @@ void test_independent_lifecycle() {
             "unstable replacement must not be enrolled for profiles");
 
     g_slots[3].pending_rumble = {
-        3, disconnected_generation, ControllerRumbleOutput{77, 88}};
+        3, disconnected_generation, ControllerRumbleOutput{77, 88},
+        kXInputHostRumbleDurationMs};
     g_slots[3].rumble_pending = true;
     process_rumble_timer(&g_rumble_timer);
     require(slot_three_replacement.rumble_calls == 0,
@@ -1273,102 +1274,437 @@ void test_slot_lighting() {
             "controller without RGB support did not receive its slot LED");
 }
 
-void require_south_button_mapping(const ControllerState& state,
-                                  bool swapped,
-                                  const char* message) {
-    require(state.button_east == swapped && state.button_south == !swapped &&
-                !state.button_north && !state.button_west,
-            message);
-}
-
-void test_abxy_hotkey() {
+void test_profile_chord_remains_raw() {
     start_pairing_backend();
-    uni_hid_device_t slot_zero = device(0);
-    uni_hid_device_t slot_one = device(1);
-    require(platform_on_device_ready(&slot_zero) == UNI_ERROR_SUCCESS &&
-                platform_on_device_ready(&slot_one) == UNI_ERROR_SUCCESS,
-            "ABXY test controllers did not become ready");
+    uni_hid_device_t controller = device(0);
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+            "raw profile chord controller did not become ready");
 
     uni_controller_t input{};
     input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
-    input.gamepad.buttons = BUTTON_A;
-    platform_on_controller_data(&slot_zero, &input);
-    ControllerState snapshot{};
-    require(read_controller_state(0, &snapshot),
-            "slot 0 ABXY state was not published");
-    require_south_button_mapping(
-        snapshot, kDefaultSwapAbxy,
-        "slot 0 did not start in the configured ABXY layout");
-
     input.gamepad.buttons =
-        kAbxyHotkeyButtonMask | BUTTON_A;
-    input.gamepad.misc_buttons = kAbxyHotkeyMiscMask;
-    platform_on_controller_data(&slot_zero, &input);
-    require(read_controller_state(0, &snapshot),
-            "toggled slot 0 state was not published");
-    require_south_button_mapping(
-        snapshot, !kDefaultSwapAbxy,
-        "hotkey did not toggle slot 0 ABXY mapping");
-    require(!snapshot.button_left_shoulder && !snapshot.button_right_shoulder &&
-                !snapshot.button_select && !snapshot.button_start,
-            "hotkey chord leaked into the Switch report");
-
-    bluepad32_input_backend_queue_rumble(
-        0, ControllerRumbleOutput{0x11, 0x22});
+        BUTTON_A | BUTTON_SHOULDER_L | BUTTON_SHOULDER_R;
+    input.gamepad.misc_buttons =
+        MISC_BUTTON_SELECT | MISC_BUTTON_START;
+    platform_on_controller_data(&controller, &input);
+    ControllerState snapshot{};
+    require(read_controller_state(0, &snapshot) &&
+                snapshot.button_south && !snapshot.button_east &&
+                snapshot.button_left_shoulder &&
+                snapshot.button_right_shoulder &&
+                snapshot.button_select && snapshot.button_start,
+            "Core 1 suppressed the profile chord or mutated ABXY mapping");
     process_rumble_timer(&g_rumble_timer);
-    require(slot_zero.rumble_calls == 1 &&
-                slot_zero.last_high == kAbxyFeedbackWeakMagnitude &&
-                slot_zero.last_low == kAbxyFeedbackStrongMagnitude &&
-                slot_zero.last_high == UINT8_MAX &&
-                slot_zero.last_low == UINT8_MAX &&
-                g_slots[0].rumble_pending,
-            "ABXY confirmation was not full-strength or did not take priority");
-
-    platform_on_controller_data(&slot_zero, &input);
-    process_rumble_timer(&g_rumble_timer);
-    require(g_slots[0].swap_abxy == !kDefaultSwapAbxy &&
-                slot_zero.rumble_calls == 1,
-            "held hotkey toggled or rumbled more than once");
-
-    input.gamepad = {};
-    platform_on_controller_data(&slot_zero, &input);
-    input.gamepad.buttons = kAbxyHotkeyButtonMask | BUTTON_A;
-    input.gamepad.misc_buttons = kAbxyHotkeyMiscMask;
-    platform_on_controller_data(&slot_zero, &input);
-    process_rumble_timer(&g_rumble_timer);
-    require(g_slots[0].swap_abxy == kDefaultSwapAbxy &&
-                slot_zero.rumble_calls == 2,
-            "released hotkey did not re-arm for a second toggle");
-
-    now_ms = kAbxyFeedbackDurationMs - 1;
-    process_rumble_timer(&g_rumble_timer);
-    require(slot_zero.rumble_calls == 2 && g_slots[0].rumble_pending,
-            "host rumble interrupted ABXY confirmation");
-    now_ms = kAbxyFeedbackDurationMs;
-    process_rumble_timer(&g_rumble_timer);
-    require(slot_zero.rumble_calls == 3 &&
-                slot_zero.last_high == 0x22 &&
-                slot_zero.last_low == 0x11 &&
-                !g_slots[0].rumble_pending,
-            "deferred host rumble did not resume after confirmation");
-
-    uni_controller_t peer_input{};
-    peer_input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
-    peer_input.gamepad.buttons = BUTTON_A;
-    platform_on_controller_data(&slot_one, &peer_input);
-    require(read_controller_state(1, &snapshot),
-            "slot 1 ABXY state was not published");
-    require_south_button_mapping(
-        snapshot, kDefaultSwapAbxy,
-        "slot 0 hotkey changed slot 1 layout");
-
-    platform_on_device_disconnected(&slot_zero);
-    uni_hid_device_t replacement = device(0);
-    require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS &&
-                g_slots[0].swap_abxy == kDefaultSwapAbxy &&
-                !g_slots[0].abxy_hotkey_latched &&
+    require(controller.rumble_calls == 0 &&
                 !g_slots[0].feedback_pending,
-            "disconnect did not reset slot 0 hotkey state");
+            "legacy ABXY chord still produced local feedback");
+}
+
+void test_profile_feedback_scheduler() {
+    start_pairing_backend();
+    uni_hid_device_t devices[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+    devices[0].report_parser.set_lightbar_color = set_lightbar;
+    devices[1].report_parser.set_player_leds = set_player_leds;
+    devices[2].report_parser.set_lightbar_color = set_lightbar;
+    devices[3].report_parser.set_player_leds = set_player_leds;
+
+    uint32_t generations[kSlotCount]{};
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot) {
+        require(platform_on_device_ready(&devices[slot]) ==
+                    UNI_ERROR_SUCCESS,
+                "profile feedback controller did not become ready");
+        Bluepad32SlotSnapshot snapshot{};
+        bluepad32_input_backend_snapshot(slot, &snapshot);
+        generations[slot] = snapshot.connection_generation;
+        require(devices[slot].rumble_calls == 0 &&
+                    !g_slots[slot].profile_feedback.active &&
+                    !g_slots[slot].profile_feedback_pending,
+                "initial controller/profile load scheduled confirmation feedback");
+        bluepad32_input_backend_queue_profile_feedback(
+            slot, generations[slot], static_cast<uint8_t>(slot + 1u),
+            ControllerProfileConfirmationPolicy::kRumble);
+        bluepad32_input_backend_queue_rumble(
+            slot, ControllerRumbleOutput{
+                      static_cast<uint8_t>(0x10u + slot),
+                      static_cast<uint8_t>(0x20u + slot)});
+    }
+
+    now_ms = 0;
+    process_rumble_timer(&g_rumble_timer);
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot) {
+        require(devices[slot].rumble_calls == 1 &&
+                    devices[slot].last_rumble_duration_ms ==
+                        kProfileFeedbackPhaseDurationMs &&
+                    devices[slot].last_high == UINT8_MAX &&
+                    devices[slot].last_low == UINT8_MAX &&
+                    g_slots[slot].rumble_pending &&
+                    g_slots[slot].profile_feedback.active,
+                "profile pulse sequence did not start at full strength");
+    }
+
+    now_ms = 74;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 75;
+    process_rumble_timer(&g_rumble_timer);
+    for (const uni_hid_device_t& controller : devices) {
+        require(controller.rumble_calls == 1,
+                "profile pulse did not retain a 75 ms on phase");
+    }
+
+    now_ms = 149;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 150;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[0].rumble_calls == 2 &&
+                devices[0].last_high == 0x20 &&
+                devices[0].last_low == 0x10 &&
+                !g_slots[0].rumble_pending,
+            "one-pulse confirmation did not defer host rumble through its off phase");
+    for (uint8_t slot = 1; slot < kSlotCount; ++slot) {
+        require(devices[slot].rumble_calls == 2 &&
+                    devices[slot].last_high == UINT8_MAX &&
+                    g_slots[slot].rumble_pending,
+                "second profile pulse did not start after 75 ms off");
+    }
+
+    now_ms = 225;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 300;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[1].rumble_calls == 3 &&
+                devices[1].last_high == 0x21 &&
+                !g_slots[1].rumble_pending &&
+                devices[2].rumble_calls == 3 &&
+                devices[3].rumble_calls == 3,
+            "two/three/four-pulse sequences diverged at 300 ms");
+
+    now_ms = 375;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 450;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[2].rumble_calls == 4 &&
+                devices[2].last_high == 0x22 &&
+                !g_slots[2].rumble_pending &&
+                devices[3].rumble_calls == 4 &&
+                devices[3].last_high == UINT8_MAX,
+            "three/four-pulse sequences diverged at 450 ms");
+
+    now_ms = 525;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 600;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[3].rumble_calls == 5 &&
+                devices[3].last_high == 0x23 &&
+                !g_slots[3].rumble_pending &&
+                devices[0].lightbar_calls == 1 &&
+                devices[1].player_led_calls == 1 &&
+                devices[2].lightbar_calls == 1 &&
+                devices[3].player_led_calls == 1,
+            "four-pulse confirmation did not release host rumble at 600 ms");
+
+    const int slot_zero_lightbar_calls = devices[0].lightbar_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        0, generations[0], 2,
+        ControllerProfileConfirmationPolicy::kNone);
+    bluepad32_input_backend_queue_rumble(
+        0, ControllerRumbleOutput{0x31, 0x41});
+    now_ms = 700;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[0].rumble_calls == 3 &&
+                devices[0].last_high == 0x41 &&
+                devices[0].lightbar_calls ==
+                    slot_zero_lightbar_calls &&
+                !g_slots[0].profile_feedback.active,
+            "none policy scheduled profile rumble or lighting");
+
+    bluepad32_input_backend_queue_profile_feedback(
+        0, generations[0], 2,
+        ControllerProfileConfirmationPolicy::kLed);
+    bluepad32_input_backend_queue_rumble(
+        0, ControllerRumbleOutput{0x32, 0x42});
+    now_ms = 800;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[0].rumble_calls == 3 &&
+                devices[0].lightbar_calls ==
+                    slot_zero_lightbar_calls + 1 &&
+                devices[0].lightbar_red ==
+                    kProfileLightbarPalette[1].red &&
+                devices[0].lightbar_green ==
+                    kProfileLightbarPalette[1].green &&
+                devices[0].lightbar_blue ==
+                    kProfileLightbarPalette[1].blue &&
+                observed_status_led_on &&
+                g_slots[0].rumble_pending,
+            "LED policy did not set persistent profile color and first onboard blink");
+    now_ms = 875;
+    process_rumble_timer(&g_rumble_timer);
+    require(!observed_status_led_on &&
+                devices[0].rumble_calls == 3,
+            "onboard profile blink did not enter its 75 ms off phase");
+    now_ms = 950;
+    process_rumble_timer(&g_rumble_timer);
+    require(observed_status_led_on,
+            "second onboard profile blink did not start");
+    now_ms = 1025;
+    process_rumble_timer(&g_rumble_timer);
+    require(!observed_status_led_on &&
+                g_slots[0].rumble_pending,
+            "host rumble interrupted the final onboard off phase");
+    now_ms = 1100;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[0].rumble_calls == 4 &&
+                devices[0].last_high == 0x42 &&
+                !g_slots[0].rumble_pending,
+            "LED-only sequence did not release deferred host rumble");
+
+    const int slot_one_player_led_calls =
+        devices[1].player_led_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        1, generations[1], 3,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    now_ms = 1200;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[1].rumble_calls == 4 &&
+                devices[1].last_high == UINT8_MAX &&
+                devices[1].player_led_calls ==
+                    slot_one_player_led_calls + 1 &&
+                devices[1].player_leds == 0x07 &&
+                observed_status_led_on,
+            "combined policy did not drive rumble, onboard LED, and player LEDs");
+    for (uint32_t deadline = 1275; deadline <= 1650;
+         deadline += 75) {
+        now_ms = deadline;
+        process_rumble_timer(&g_rumble_timer);
+    }
+    require(devices[1].rumble_calls ==
+                    (host_rumble_duration_ms() ==
+                             kXInputHostRumbleDurationMs
+                         ? 7
+                         : 6) &&
+                !g_slots[1].profile_feedback.active,
+            "combined three-pulse sequence did not terminate");
+
+    const int old_rumble_calls = devices[2].rumble_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        2, generations[2], 4,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    platform_on_device_disconnected(&devices[2]);
+    uni_hid_device_t replacement = device(2);
+    replacement.report_parser.set_lightbar_color = set_lightbar;
+    require(platform_on_device_ready(&replacement) ==
+                UNI_ERROR_SUCCESS,
+            "replacement feedback controller did not become ready");
+    now_ms = 1700;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[2].rumble_calls == old_rumble_calls &&
+                replacement.rumble_calls == 0 &&
+                replacement.lightbar_calls == 1 &&
+                !g_slots[2].profile_feedback.active &&
+                !g_slots[2].profile_feedback_pending,
+            "slot replacement accepted stale queued profile feedback");
+    bluepad32_input_backend_queue_profile_feedback(
+        2, generations[2], 4,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    now_ms = 1705;
+    process_rumble_timer(&g_rumble_timer);
+    require(replacement.rumble_calls == 0 &&
+                replacement.lightbar_calls == 1,
+            "stale generation feedback reached a replacement controller");
+
+    const int slot_three_rumble_calls = devices[3].rumble_calls;
+    const int slot_three_player_led_calls =
+        devices[3].player_led_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        3, generations[3], 1,
+        ControllerProfileConfirmationPolicy::kLed);
+    now_ms = 1800;
+    process_rumble_timer(&g_rumble_timer);
+    require(observed_status_led_on &&
+                g_slots[3].profile_feedback.pulses_started == 1 &&
+                devices[3].player_led_calls ==
+                    slot_three_player_led_calls + 1 &&
+                devices[3].player_leds == 0x01,
+            "one-blink LED profile indication did not start");
+    now_ms = 1875;
+    process_rumble_timer(&g_rumble_timer);
+    require(!observed_status_led_on,
+            "one-blink LED profile indication did not turn off");
+    now_ms = 1950;
+    process_rumble_timer(&g_rumble_timer);
+    require(!g_slots[3].profile_feedback.active &&
+                devices[3].rumble_calls ==
+                    slot_three_rumble_calls,
+            "one-blink LED-only profile indication did not terminate cleanly");
+
+    bluepad32_input_backend_queue_profile_feedback(
+        3, generations[3], 4,
+        ControllerProfileConfirmationPolicy::kLed);
+    now_ms = 2000;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[3].player_leds == 0x0f,
+            "profile 4 did not persist four player LEDs");
+    for (uint8_t pulse = 1; pulse <= 4; ++pulse) {
+        require(observed_status_led_on &&
+                    g_slots[3].profile_feedback.on &&
+                    g_slots[3].profile_feedback.pulses_started ==
+                        pulse,
+                "four-blink LED sequence missed an on phase");
+        now_ms = static_cast<uint32_t>(
+            2075u + static_cast<uint32_t>(pulse - 1u) * 150u);
+        process_rumble_timer(&g_rumble_timer);
+        require(!observed_status_led_on &&
+                    !g_slots[3].profile_feedback.on,
+                "four-blink LED sequence missed an off phase");
+        if (pulse != 4) {
+            now_ms += 75;
+            process_rumble_timer(&g_rumble_timer);
+        }
+    }
+    now_ms = 2600;
+    process_rumble_timer(&g_rumble_timer);
+    require(!g_slots[3].profile_feedback.active &&
+                devices[3].rumble_calls ==
+                    slot_three_rumble_calls,
+            "four-blink LED-only profile indication did not terminate");
+}
+
+void test_stateful_host_rumble_restore() {
+    start_pairing_backend();
+    uni_hid_device_t devices[kSlotCount] = {
+        device(0), device(1), device(2), device(3)};
+    uint32_t generations[kSlotCount]{};
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot) {
+        require(platform_on_device_ready(&devices[slot]) ==
+                    UNI_ERROR_SUCCESS,
+                "rumble restore controller did not become ready");
+        Bluepad32SlotSnapshot snapshot{};
+        bluepad32_input_backend_snapshot(slot, &snapshot);
+        generations[slot] = snapshot.connection_generation;
+    }
+
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    test_adapter_mode = AdapterUsbMode::kXInput;
+    const ControllerRumbleOutput desired[kSlotCount] = {
+        {0x11, 0x21}, {0x12, 0x22}, {0x13, 0x23}, {0x14, 0x24}};
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot) {
+        bluepad32_input_backend_queue_rumble(slot, desired[slot]);
+    }
+    now_ms = 0;
+    process_rumble_timer(&g_rumble_timer);
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot) {
+        require(devices[slot].rumble_calls == 1 &&
+                    devices[slot].last_rumble_duration_ms ==
+                        kXInputHostRumbleDurationMs &&
+                    g_slots[slot].retained_host_rumble_valid,
+                "initial XInput rumble was not dispatched and retained");
+        bluepad32_input_backend_queue_profile_feedback(
+            slot, generations[slot], static_cast<uint8_t>(slot + 1u),
+            ControllerProfileConfirmationPolicy::kRumble);
+    }
+    now_ms = 10;
+    process_rumble_timer(&g_rumble_timer);
+    for (now_ms = 85; now_ms <= 610; now_ms += 75) {
+        process_rumble_timer(&g_rumble_timer);
+    }
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot) {
+        require(devices[slot].rumble_calls ==
+                    static_cast<int>(slot + 3u) &&
+                    devices[slot].last_low ==
+                        desired[slot].low_frequency_magnitude &&
+                    devices[slot].last_high ==
+                        desired[slot].high_frequency_magnitude &&
+                    devices[slot].last_rumble_duration_ms ==
+                        kXInputHostRumbleDurationMs &&
+                    !g_slots[slot].profile_feedback.active,
+                "XInput rumble did not resume after its profile pulse count");
+    }
+
+    const int stop_calls_before = devices[0].rumble_calls;
+    bluepad32_input_backend_queue_rumble(
+        0, ControllerRumbleOutput{0x51, 0x61});
+    now_ms = 700;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_queue_profile_feedback(
+        0, generations[0], 2,
+        ControllerProfileConfirmationPolicy::kRumble);
+    now_ms = 705;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_queue_rumble(
+        0, ControllerRumbleOutput{0, 0});
+    for (now_ms = 780; now_ms <= 1005; now_ms += 75) {
+        process_rumble_timer(&g_rumble_timer);
+    }
+    require(devices[0].rumble_calls == stop_calls_before + 4 &&
+                devices[0].last_rumble_duration_ms == 0 &&
+                devices[0].last_low == 0 &&
+                devices[0].last_high == 0 &&
+                g_slots[0].retained_host_rumble_valid,
+            "newest XInput stop did not win during profile pulses");
+
+    test_adapter_mode = AdapterUsbMode::kSwitchProbe;
+    const int switch_calls_before = devices[1].rumble_calls;
+    bluepad32_input_backend_queue_rumble(
+        1, ControllerRumbleOutput{0x31, 0x41});
+    now_ms = 1100;
+    process_rumble_timer(&g_rumble_timer);
+    require(!g_slots[1].retained_host_rumble_valid,
+            "Switch rumble retained stale XInput desired state");
+    bluepad32_input_backend_queue_profile_feedback(
+        1, generations[1], 1,
+        ControllerProfileConfirmationPolicy::kRumble);
+    now_ms = 1105;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 1180;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 1255;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[1].rumble_calls == switch_calls_before + 2 &&
+                devices[1].last_rumble_duration_ms ==
+                    kProfileFeedbackPhaseDurationMs,
+            "finite Switch rumble resumed after profile feedback");
+
+    test_adapter_mode = AdapterUsbMode::kXInput;
+    bluepad32_input_backend_queue_rumble(
+        2, ControllerRumbleOutput{0x71, 0x81});
+    now_ms = 1300;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_queue_profile_feedback(
+        2, generations[2], 3,
+        ControllerProfileConfirmationPolicy::kRumble);
+    now_ms = 1305;
+    process_rumble_timer(&g_rumble_timer);
+    const int old_device_calls = devices[2].rumble_calls;
+    platform_on_device_disconnected(&devices[2]);
+    uni_hid_device_t replacement = device(2);
+    require(platform_on_device_ready(&replacement) ==
+                UNI_ERROR_SUCCESS,
+            "rumble restore replacement did not become ready");
+    now_ms = 2000;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[2].rumble_calls == old_device_calls &&
+                replacement.rumble_calls == 0 &&
+                !g_slots[2].retained_host_rumble_valid &&
+                !g_slots[2].profile_feedback.active,
+            "stale XInput rumble resumed on a replacement connection");
+#else
+    bluepad32_input_backend_queue_rumble(
+        0, ControllerRumbleOutput{0x31, 0x41});
+    now_ms = 0;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_queue_profile_feedback(
+        0, generations[0], 1,
+        ControllerProfileConfirmationPolicy::kRumble);
+    now_ms = 5;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 80;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 155;
+    process_rumble_timer(&g_rumble_timer);
+    require(devices[0].rumble_calls == 2 &&
+                !g_slots[0].retained_host_rumble_valid,
+            "bounded Switch rumble resumed after profile feedback");
+#endif
 }
 
 void test_motion_hotkey() {
@@ -1393,12 +1729,17 @@ void test_motion_hotkey() {
     input.gamepad.buttons = kMotionHotkeyButtonMask;
     input.gamepad.misc_buttons = kMotionHotkeyMiscMask;
     platform_on_controller_data(&slot_zero, &input);
+    Bluepad32SlotSnapshot backend_snapshot{};
+    bluepad32_input_backend_snapshot(0, &backend_snapshot);
     require(read_controller_state(0, &snapshot) &&
+                backend_snapshot.pre_hotkey_button_mask ==
+                    kMotionHotkeyLogicalButtonMask &&
                 snapshot.motion_sample_count ==
                     (kDefaultMotionEnabled ? 0 : 3) &&
                 !snapshot.dpad_up && !snapshot.button_right_shoulder &&
                 !snapshot.button_start,
-            "motion chord did not toggle motion or suppress its inputs");
+            "motion chord was not published pre-hotkey or suppressed "
+            "from normal output");
 
     process_rumble_timer(&g_rumble_timer);
     require(slot_zero.rumble_calls == 1 &&
@@ -1452,6 +1793,7 @@ void test_motion_hotkey() {
     require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS &&
                 g_slots[0].motion_enabled == kDefaultMotionEnabled &&
                 !g_slots[0].motion_hotkey_latched &&
+                g_slots[0].pre_hotkey_button_mask == 0 &&
                 !g_slots[0].feedback_pending,
             "disconnect did not reset slot 0 motion hotkey state");
 }
@@ -1641,8 +1983,12 @@ int main(int argc, char** argv) {
         test_pairing_window_policy();
     } else if (scenario == "slot-lighting") {
         test_slot_lighting();
-    } else if (scenario == "abxy-hotkey") {
-        test_abxy_hotkey();
+    } else if (scenario == "stateful-rumble") {
+        test_stateful_host_rumble_restore();
+    } else if (scenario == "profile-chord-raw") {
+        test_profile_chord_remains_raw();
+    } else if (scenario == "profile-feedback") {
+        test_profile_feedback_scheduler();
     } else if (scenario == "motion-hotkey") {
         test_motion_hotkey();
     } else if (scenario == "analog-state") {

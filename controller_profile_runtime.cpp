@@ -13,11 +13,20 @@ struct ControllerProfileRuntimeContext {
     ControllerIdentity identity{};
     uint32_t database_generation = 0;
     uint8_t active_profile_index = 0;
+    bool profile_snapshot_valid = false;
     ControllerProfile profile{};
     ControllerSyntheticInputContext synthetic{};
     bool runtime_generations_initialized = false;
     AdapterUsbMode output_mode = AdapterUsbMode::kSwitchProbe;
     uint32_t configuration_reset_generation = 0;
+    bool switching_chord_held = false;
+    bool switching_chord_armed = true;
+    bool switching_activation_requested = false;
+    uint16_t held_switching_chord = 0;
+    uint8_t switching_target_profile_index = 0;
+    uint32_t switching_transaction_id = 0;
+    bool profile_change_pending = false;
+    ControllerProfileRuntimeProfileChangeEvent pending_profile_change{};
 };
 
 ControllerProfileRuntimeContext
@@ -25,6 +34,23 @@ ControllerProfileRuntimeContext
 ControllerProfile g_default_profile{};
 ControllerProfileTransformResult g_neutral_output{};
 bool g_initialized = false;
+uint32_t g_next_activation_sequence = 1;
+
+uint32_t next_activation_transaction_id() {
+    const uint32_t transaction_id =
+        0x80000000u | g_next_activation_sequence;
+    g_next_activation_sequence =
+        g_next_activation_sequence == 0x7fffffffu
+            ? 1u
+            : g_next_activation_sequence + 1u;
+    return transaction_id;
+}
+
+uint16_t effective_switching_chord(const ControllerProfile& profile) {
+    return profile.switching_chord == 0
+               ? CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD
+               : profile.switching_chord;
+}
 
 void initialize_defaults() {
     if (g_initialized) {
@@ -52,6 +78,30 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
     ProfileServiceActiveProfileSnapshot snapshot{};
     profile_service_active_profile_snapshot(identity, &snapshot);
 
+    const bool same_connection =
+        context->active &&
+        context->connection_generation == connection_generation;
+    const bool same_identity =
+        same_connection &&
+        controller_identity_equal(context->identity, identity);
+    const uint8_t previous_profile_index =
+        context->active_profile_index;
+    const bool previous_profile_valid =
+        context->profile_snapshot_valid;
+    if (!same_connection) {
+        context->runtime_generations_initialized = false;
+        context->switching_chord_held = false;
+        context->switching_chord_armed = true;
+        context->switching_activation_requested = false;
+        context->held_switching_chord = 0;
+        context->switching_target_profile_index = 0;
+        context->switching_transaction_id = 0;
+        context->profile_change_pending = false;
+        context->pending_profile_change = {};
+    }
+
+    controller_synthetic_input_cancel(&context->synthetic,
+                                      current_input_button_mask);
     context->active = true;
     context->connection_generation = connection_generation;
     context->identity = identity;
@@ -59,9 +109,25 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
                                        ? snapshot.metadata.generation
                                        : observed_database_generation;
     context->active_profile_index = snapshot.valid ? snapshot.profile_index : 0;
+    context->profile_snapshot_valid = snapshot.valid;
     context->profile = snapshot.valid ? snapshot.profile : g_default_profile;
-    controller_synthetic_input_cancel(&context->synthetic,
-                                      current_input_button_mask);
+    if (context->switching_chord_held &&
+        !context->switching_activation_requested) {
+        context->switching_target_profile_index =
+            static_cast<uint8_t>(
+                (context->active_profile_index + 1u) %
+                CONTROLLER_PROFILE_COUNT);
+    }
+    if (same_identity && previous_profile_valid && snapshot.valid &&
+        previous_profile_index != context->active_profile_index) {
+        context->pending_profile_change = {
+            connection_generation,
+            context->database_generation,
+            static_cast<uint8_t>(context->active_profile_index + 1u),
+            controller_profile_confirmation_policy(context->profile),
+        };
+        context->profile_change_pending = true;
+    }
 }
 
 ControllerProfileRuntimeContext* update_context(
@@ -91,7 +157,75 @@ ControllerProfileRuntimeContext* update_context(
     }
     return &context;
 }
+void process_profile_switching(
+    ControllerProfileRuntimeContext* context,
+    const ControllerIdentity& identity,
+    uint16_t switching_input_button_mask,
+    uint16_t current_input_button_mask,
+    ControllerState* consumed_input) {
+    if (context == nullptr || consumed_input == nullptr) {
+        return;
+    }
 
+    if (context->switching_chord_held) {
+        if ((switching_input_button_mask &
+             context->held_switching_chord) ==
+            context->held_switching_chord) {
+            controller_profile_apply_button_mask(
+                static_cast<uint16_t>(
+                    current_input_button_mask &
+                    ~context->held_switching_chord),
+                consumed_input);
+            if (!context->switching_activation_requested) {
+                const ConfigurationTransactionStatus status =
+                    profile_service_activate_internal(
+                        context->switching_transaction_id, identity,
+                        context->switching_target_profile_index);
+                if (status != ConfigurationTransactionStatus::kBusy) {
+                    context->switching_activation_requested = true;
+                }
+            }
+            return;
+        }
+        context->switching_chord_held = false;
+        context->switching_activation_requested = false;
+        context->held_switching_chord = 0;
+        context->switching_transaction_id = 0;
+    }
+
+    const uint16_t chord =
+        effective_switching_chord(context->profile);
+    const bool chord_fully_held =
+        (switching_input_button_mask & chord) == chord;
+    if (!chord_fully_held) {
+        context->switching_chord_armed = true;
+        return;
+    }
+    if (!context->switching_chord_armed) {
+        return;
+    }
+
+    context->switching_chord_armed = false;
+    context->switching_chord_held = true;
+    context->held_switching_chord = chord;
+    context->switching_target_profile_index =
+        static_cast<uint8_t>(
+            (context->active_profile_index + 1u) %
+            CONTROLLER_PROFILE_COUNT);
+    context->switching_transaction_id =
+        next_activation_transaction_id();
+    controller_profile_apply_button_mask(
+        static_cast<uint16_t>(
+            current_input_button_mask & ~context->held_switching_chord),
+        consumed_input);
+    const ConfigurationTransactionStatus status =
+        profile_service_activate_internal(
+            context->switching_transaction_id, identity,
+            context->switching_target_profile_index);
+    if (status != ConfigurationTransactionStatus::kBusy) {
+        context->switching_activation_requested = true;
+    }
+}
 
 }  // namespace
 
@@ -101,6 +235,7 @@ void controller_profile_runtime_reset() {
     for (ControllerProfileRuntimeContext& context : g_contexts) {
         clear_context(&context);
     }
+    g_next_activation_sequence = 1;
 }
 
 ControllerProfileTransformResult controller_profile_runtime_transform(
@@ -112,6 +247,12 @@ ControllerProfileTransformResult controller_profile_runtime_transform(
     if (context == nullptr) {
         return g_neutral_output;
     }
+    ControllerState consumed_input = snapshot.state;
+    const uint16_t current_input_button_mask =
+        controller_profile_extract_button_mask(snapshot.state);
+    process_profile_switching(
+        context, snapshot.identity, snapshot.pre_hotkey_button_mask,
+        current_input_button_mask, &consumed_input);
 
     const uint32_t reset_generation =
         configuration_service_reset_generation();
@@ -124,12 +265,32 @@ ControllerProfileTransformResult controller_profile_runtime_transform(
                    reset_generation) {
         controller_synthetic_input_cancel(
             &context->synthetic,
-            controller_profile_extract_button_mask(snapshot.state));
+            controller_profile_extract_button_mask(consumed_input));
         context->output_mode = output_mode;
         context->configuration_reset_generation = reset_generation;
     }
     return controller_synthetic_input_apply(
-        &context->synthetic, snapshot.state, context->profile, now_ms);
+        &context->synthetic, consumed_input, context->profile, now_ms);
+}
+
+bool controller_profile_runtime_take_profile_change(
+    uint8_t slot, ControllerProfileRuntimeProfileChangeEvent* output) {
+    if (output == nullptr) {
+        return false;
+    }
+    *output = {};
+    if (slot >= CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT) {
+        return false;
+    }
+
+    ControllerProfileRuntimeContext& context = g_contexts[slot];
+    if (!context.profile_change_pending) {
+        return false;
+    }
+    *output = context.pending_profile_change;
+    context.profile_change_pending = false;
+    context.pending_profile_change = {};
+    return true;
 }
 
 ControllerRumbleOutput controller_profile_runtime_scale_host_rumble(

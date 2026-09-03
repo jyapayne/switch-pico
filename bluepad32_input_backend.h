@@ -4,6 +4,7 @@
 
 #include "controller_color.h"
 #include "controller_identity.h"
+#include "controller_profile.h"
 #include "controller_state.h"
 #include "switch_haptics.h"
 
@@ -37,6 +38,9 @@ struct Bluepad32SlotSnapshot {
     bool active;
     uint32_t connection_generation;
     ControllerIdentity identity;
+    // Physical logical-button state before backend hotkey consumption.
+    // Valid only for this snapshot's connection generation.
+    uint16_t pre_hotkey_button_mask;
     ControllerState state;
 };
 
@@ -54,3 +58,9 @@ void bluepad32_input_backend_pairing_snapshot(
 void bluepad32_input_backend_report_sent(uint8_t slot);
 void bluepad32_input_backend_queue_rumble(
     uint8_t slot, const ControllerRumbleOutput& rumble);
+// Schedule bounded local profile confirmation only for the matching live
+// connection generation. Profile numbers are one-based (1..4).
+void bluepad32_input_backend_queue_profile_feedback(
+    uint8_t slot, uint32_t connection_generation,
+    uint8_t active_profile_number,
+    ControllerProfileConfirmationPolicy policy);

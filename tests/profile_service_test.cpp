@@ -211,6 +211,100 @@ void test_pending_commands_are_not_decoded_as_profile_writes() {
             "activation did not publish profile, index, and generation together");
 }
 
+void test_host_and_controller_mutations_are_serialized() {
+    const ControllerIdentity identity = controller_identity_global();
+    ControllerProfile profile =
+        controller_profile_default(identity, 1);
+    profile.weak_rumble_scale = 23;
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)),
+            "serialization fixture profile did not encode");
+
+    constexpr uint32_t kHostTransactionId = 0x11223344;
+    constexpr uint32_t kInternalTransactionId = 0x80000019;
+    require(profile_service_begin(
+                kHostTransactionId, identity, 1,
+                CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
+                profile_storage_crc32(encoded, sizeof(encoded))) ==
+                ConfigurationTransactionStatus::kReceiving,
+            "host write did not acquire the profile mutation boundary");
+    require(profile_service_activate_internal(
+                kInternalTransactionId, identity, 2) ==
+                ConfigurationTransactionStatus::kBusy,
+            "controller activation raced a receiving host write");
+    ProfileServiceTransactionSnapshot snapshot =
+        transaction_snapshot();
+    require(snapshot.transaction.transaction_id ==
+                    kHostTransactionId &&
+                snapshot.transaction.status ==
+                    ConfigurationTransactionStatus::kReceiving,
+            "busy controller activation replaced the host transaction");
+
+    require(profile_service_append(
+                kHostTransactionId, 0, encoded, sizeof(encoded)) ==
+                ConfigurationTransactionStatus::kReceiving &&
+                profile_service_commit(kHostTransactionId) ==
+                    ConfigurationTransactionStatus::kPending,
+            "host write did not reach pending after controller contention");
+    profile_service_task_on_storage_core(3000);
+    require(transaction_snapshot().transaction.status ==
+                ConfigurationTransactionStatus::kCommitted,
+            "serialized host write did not commit");
+
+    constexpr uint32_t kHostActivationTransactionId = 0x22334455;
+    require(profile_service_activate(
+                kHostActivationTransactionId, identity, 0) ==
+                ConfigurationTransactionStatus::kPending,
+            "host activation did not acquire the released boundary");
+    require(profile_service_activate_internal(
+                kInternalTransactionId, identity, 2) ==
+                ConfigurationTransactionStatus::kBusy,
+            "controller activation raced a pending host activation");
+    snapshot = transaction_snapshot();
+    require(snapshot.transaction.transaction_id ==
+                    kHostActivationTransactionId &&
+                snapshot.transaction.status ==
+                    ConfigurationTransactionStatus::kPending &&
+                active_profile_snapshot(identity).profile_index == 3,
+            "pending host activation was replaced or leaked before commit");
+    profile_service_task_on_storage_core(4000);
+    require(active_profile_snapshot(identity).profile_index == 0,
+            "serialized host activation did not commit");
+    require(profile_service_activate_internal(
+                0x19, identity, 2) ==
+                ConfigurationTransactionStatus::kMalformed,
+            "internal activation admitted a transaction without the high bit");
+
+    require(profile_service_activate_internal(
+                kInternalTransactionId, identity, 2) ==
+                ConfigurationTransactionStatus::kPending,
+            "controller activation did not acquire the released boundary");
+    require(profile_service_begin(
+                0x55667788, identity, 0,
+                CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
+                profile_storage_crc32(encoded, sizeof(encoded))) ==
+                ConfigurationTransactionStatus::kBusy,
+            "host write raced a pending controller activation");
+    snapshot = transaction_snapshot();
+    require(snapshot.transaction.transaction_id ==
+                    kHostActivationTransactionId &&
+                snapshot.transaction.status ==
+                    ConfigurationTransactionStatus::kCommitted &&
+                active_profile_snapshot(identity).profile_index == 0,
+            "pending controller activation replaced host-visible status or leaked before commit");
+
+    profile_service_task_on_storage_core(5000);
+    const ProfileServiceActiveProfileSnapshot active =
+        active_profile_snapshot(identity);
+    snapshot = transaction_snapshot();
+    require(active.valid && active.profile_index == 2 &&
+                snapshot.transaction.transaction_id ==
+                    kHostActivationTransactionId &&
+                snapshot.transaction.status ==
+                    ConfigurationTransactionStatus::kCommitted,
+            "controller activation did not publish while preserving host-visible status");
+}
+
 }  // namespace
 
 ProfileStorageIo pico_profile_storage_io() {
@@ -219,5 +313,6 @@ ProfileStorageIo pico_profile_storage_io() {
 
 int main() {
     test_pending_commands_are_not_decoded_as_profile_writes();
+    test_host_and_controller_mutations_are_serialized();
     return 0;
 }

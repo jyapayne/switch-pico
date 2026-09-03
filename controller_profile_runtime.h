@@ -8,6 +8,24 @@
 #include "controller_profile_transform.h"
 
 constexpr uint8_t CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT = 4;
+constexpr uint16_t CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD =
+    static_cast<uint16_t>(
+        (1u << static_cast<uint8_t>(
+             ControllerProfileLogicalButton::kLeftShoulder)) |
+        (1u << static_cast<uint8_t>(
+             ControllerProfileLogicalButton::kRightShoulder)) |
+        (1u << static_cast<uint8_t>(
+             ControllerProfileLogicalButton::kSelect)) |
+        (1u << static_cast<uint8_t>(
+             ControllerProfileLogicalButton::kStart)));
+
+struct ControllerProfileRuntimeProfileChangeEvent {
+    uint32_t connection_generation = 0;
+    uint32_t database_generation = 0;
+    uint8_t active_profile_number = 0;
+    ControllerProfileConfirmationPolicy policy =
+        ControllerProfileConfirmationPolicy::kNone;
+};
 
 struct ControllerProfileRuntimeLocalConfirmation {
     ControllerRumbleOutput rumble{};
@@ -18,13 +36,20 @@ struct ControllerProfileRuntimeLocalConfirmation {
 // Reset all four fixed slot caches to the default profile.
 void controller_profile_runtime_reset();
 
-// Refresh a slot only when its connection key or database generation changes,
-// cancel synthetic state on every runtime invalidation, then apply the shared
-// transform and synthetic pipeline. Inactive snapshots return neutral output
-// and invalidate the slot immediately.
+// Refresh a slot when its identity, connection generation, or database
+// generation changes; identity-only promotion preserves a held switching
+// transaction. Consume pre-hotkey switching chords while transforming the
+// backend-suppressed state through the shared synthetic pipeline. Inactive
+// snapshots return neutral output and invalidate the slot.
 ControllerProfileTransformResult controller_profile_runtime_transform(
     uint8_t slot, const Bluepad32SlotSnapshot& snapshot, uint32_t now_ms,
     AdapterUsbMode output_mode);
+
+// Take the single committed profile-index change observed by the slot. Initial
+// profile loads, identity promotions, and connection replacements do not
+// publish an event.
+bool controller_profile_runtime_take_profile_change(
+    uint8_t slot, ControllerProfileRuntimeProfileChangeEvent* output);
 
 // Refresh from the current slot snapshot and scale host-originated rumble.
 ControllerRumbleOutput controller_profile_runtime_scale_host_rumble(

@@ -24,11 +24,9 @@ constexpr int32_t kAxisMinimum = -512;
 constexpr int32_t kAxisMaximum = 511;
 constexpr int32_t kTriggerMaximum = 1023;
 constexpr uint16_t kSwitchHostRumbleDurationMs = 50;
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
 // XInput vibration is stateful and remains active until XInputSetState sends
 // a new magnitude.
 constexpr uint16_t kXInputHostRumbleDurationMs = UINT16_MAX;
-#endif
 constexpr uint32_t kRumblePollIntervalMs = 5;
 constexpr uint32_t kConfigurationPollIntervalMs = 50;
 constexpr uint8_t kSlotCount = BLUEPAD32_INPUT_BACKEND_SLOT_COUNT;
@@ -42,16 +40,15 @@ constexpr uint8_t kAllBlePairingMethods =
     SM_STK_GENERATION_METHOD_OOB |
     SM_STK_GENERATION_METHOD_PASSKEY |
     SM_STK_GENERATION_METHOD_NUMERIC_COMPARISON;
-constexpr uint32_t kAbxyHotkeyButtonMask =
-    SWITCH_ABXY_HOTKEY_BUTTON_MASK;
-constexpr uint32_t kAbxyHotkeyMiscMask = SWITCH_ABXY_HOTKEY_MISC_MASK;
-constexpr bool kDefaultSwapAbxy = SWITCH_ABXY_DEFAULT_SWAPPED != 0;
-constexpr uint32_t kAbxyFeedbackDurationMs =
-    SWITCH_ABXY_FEEDBACK_DURATION_MS;
-constexpr uint8_t kAbxyFeedbackWeakMagnitude =
-    SWITCH_ABXY_FEEDBACK_WEAK_MAGNITUDE;
-constexpr uint8_t kAbxyFeedbackStrongMagnitude =
-    SWITCH_ABXY_FEEDBACK_STRONG_MAGNITUDE;
+constexpr uint16_t kProfileFeedbackPhaseDurationMs = 75;
+constexpr uint8_t kProfileFeedbackWeakMagnitude = UINT8_MAX;
+constexpr uint8_t kProfileFeedbackStrongMagnitude = UINT8_MAX;
+constexpr SwitchRgbColor kProfileLightbarPalette[CONTROLLER_PROFILE_COUNT] = {
+    {0x00, 0x55, 0xff},
+    {0x00, 0xcc, 0x66},
+    {0xff, 0xaa, 0x00},
+    {0xcc, 0x33, 0xff},
+};
 constexpr uint32_t kMotionHotkeyDpadMask =
     SWITCH_MOTION_HOTKEY_DPAD_MASK;
 constexpr uint32_t kMotionHotkeyButtonMask =
@@ -73,9 +70,8 @@ constexpr uint8_t kMotionEnabledFeedbackWeakMagnitude =
 constexpr uint8_t kMotionEnabledFeedbackStrongMagnitude =
     SWITCH_MOTION_ENABLED_FEEDBACK_STRONG_MAGNITUDE;
 
-static_assert(kAbxyHotkeyButtonMask != 0);
-static_assert(kAbxyHotkeyMiscMask != 0);
-static_assert(kAbxyFeedbackDurationMs > 0);
+static_assert(kProfileFeedbackPhaseDurationMs == 75);
+static_assert(CONTROLLER_PROFILE_COUNT == 4);
 static_assert(kMotionHotkeyDpadMask != 0);
 static_assert(kMotionHotkeyButtonMask != 0);
 static_assert(kMotionHotkeyMiscMask != 0);
@@ -104,6 +100,7 @@ struct RumbleEnvelope {
     uint8_t slot;
     uint32_t connection_generation;
     ControllerRumbleOutput rumble;
+    uint16_t duration_ms;
 };
 struct FeedbackEnvelope {
     uint32_t connection_generation;
@@ -111,6 +108,23 @@ struct FeedbackEnvelope {
     uint8_t weak_magnitude;
     uint8_t strong_magnitude;
 };
+struct ProfileFeedbackEnvelope {
+    uint32_t connection_generation;
+    uint8_t active_profile_number;
+    ControllerProfileConfirmationPolicy policy;
+};
+
+struct ProfileFeedbackSequence {
+    uint32_t connection_generation;
+    uint32_t phase_deadline_ms;
+    uint8_t pulse_count;
+    uint8_t pulses_started;
+    bool active;
+    bool on;
+    bool rumble_enabled;
+    bool led_enabled;
+};
+
 
 // Security Manager identity events arrive before Bluepad32 publishes a ready
 // device. Retain only the four live handle/address associations so a BLE RPA
@@ -126,6 +140,7 @@ struct BleIdentityMapping {
 
 struct BackendSlot {
     ControllerState state;
+    uint16_t pre_hotkey_button_mask;
     ControllerIdentity identity;
     // Non-null with active=false is a connected device still becoming ready.
     uni_hid_device_t* device;
@@ -133,14 +148,17 @@ struct BackendSlot {
     uint32_t connection_generation;
     bool active;
     bool rumble_pending;
-    bool swap_abxy;
-    bool abxy_hotkey_latched;
     bool motion_enabled;
     bool motion_hotkey_latched;
     bool feedback_pending;
     uint32_t feedback_until_ms;
+    bool profile_feedback_pending;
     RumbleEnvelope pending_rumble;
+    bool retained_host_rumble_valid;
+    RumbleEnvelope retained_host_rumble;
     FeedbackEnvelope pending_feedback;
+    ProfileFeedbackEnvelope pending_profile_feedback;
+    ProfileFeedbackSequence profile_feedback;
 };
 
 critical_section_t g_state_lock;
@@ -409,6 +427,31 @@ void apply_slot_lighting(uint8_t slot_index, uni_hid_device_t* device) {
             device, static_cast<uint8_t>(1u << slot_index));
     }
 }
+bool valid_confirmation_policy(
+    ControllerProfileConfirmationPolicy policy) {
+    return static_cast<uint8_t>(policy) <=
+           static_cast<uint8_t>(
+               ControllerProfileConfirmationPolicy::kRumbleAndLed);
+}
+
+void apply_profile_lighting(
+    uint8_t active_profile_number, uni_hid_device_t* device) {
+    if (device == nullptr || active_profile_number == 0 ||
+        active_profile_number > CONTROLLER_PROFILE_COUNT) {
+        return;
+    }
+    if (device->report_parser.set_lightbar_color != nullptr) {
+        const SwitchRgbColor color =
+            kProfileLightbarPalette[active_profile_number - 1u];
+        device->report_parser.set_lightbar_color(
+            device, color.red, color.green, color.blue);
+    } else if (device->report_parser.set_player_leds != nullptr) {
+        device->report_parser.set_player_leds(
+            device, static_cast<uint8_t>(
+                        (1u << active_profile_number) - 1u));
+    }
+}
+
 
 
 ConnectionStatus compute_connection_status() {
@@ -430,11 +473,13 @@ ConnectionStatus compute_connection_status() {
 }
 
 void publish_device_state(uint8_t slot, uni_hid_device_t* device,
+                          uint16_t pre_hotkey_button_mask,
                           const ControllerState& state) {
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& target = g_slots[slot];
     if (target.active && target.device == device) {
         target.state = state;
+        target.pre_hotkey_button_mask = pre_hotkey_button_mask;
         ++target.state_generation;
     }
     critical_section_exit(&g_state_lock);
@@ -444,10 +489,18 @@ void publish_all_neutral() {
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
         slot.state = make_neutral_state();
+        slot.pre_hotkey_button_mask = 0;
         slot.identity = controller_identity_global();
         slot.device = nullptr;
         slot.active = false;
         slot.rumble_pending = false;
+        slot.retained_host_rumble_valid = false;
+        slot.retained_host_rumble = {};
+        slot.feedback_pending = false;
+        slot.feedback_until_ms = 0;
+        slot.profile_feedback_pending = false;
+        slot.pending_profile_feedback = {};
+        slot.profile_feedback = {};
         ++slot.state_generation;
         ++slot.connection_generation;
     }
@@ -541,32 +594,129 @@ bool has_motion(const uni_gamepad_t& gamepad) {
     }
     return false;
 }
+constexpr uint16_t logical_button_bit(
+    ControllerProfileLogicalButton button) {
+    return static_cast<uint16_t>(
+        1u << static_cast<uint8_t>(button));
+}
+
+constexpr uint16_t logical_button_mask(
+    uint32_t dpad, uint32_t buttons, uint32_t misc_buttons) {
+    return static_cast<uint16_t>(
+        ((buttons & BUTTON_A) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kSouth)
+             : 0u) |
+        ((buttons & BUTTON_B) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kEast)
+             : 0u) |
+        ((buttons & BUTTON_X) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kWest)
+             : 0u) |
+        ((buttons & BUTTON_Y) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kNorth)
+             : 0u) |
+        ((buttons & BUTTON_SHOULDER_L) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kLeftShoulder)
+             : 0u) |
+        ((buttons & BUTTON_SHOULDER_R) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kRightShoulder)
+             : 0u) |
+        ((misc_buttons & MISC_BUTTON_SELECT) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kSelect)
+             : 0u) |
+        ((misc_buttons & MISC_BUTTON_START) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kStart)
+             : 0u) |
+        ((misc_buttons & MISC_BUTTON_SYSTEM) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kSystem)
+             : 0u) |
+        ((misc_buttons & MISC_BUTTON_CAPTURE) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kCapture)
+             : 0u) |
+        ((buttons & BUTTON_THUMB_L) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kLeftStick)
+             : 0u) |
+        ((buttons & BUTTON_THUMB_R) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kRightStick)
+             : 0u) |
+        ((dpad & DPAD_UP) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kDpadUp)
+             : 0u) |
+        ((dpad & DPAD_DOWN) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kDpadDown)
+             : 0u) |
+        ((dpad & DPAD_LEFT) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kDpadLeft)
+             : 0u) |
+        ((dpad & DPAD_RIGHT) != 0
+             ? logical_button_bit(
+                   ControllerProfileLogicalButton::kDpadRight)
+             : 0u));
+}
+
+constexpr uint16_t kMotionHotkeyLogicalButtonMask =
+    logical_button_mask(
+        kMotionHotkeyDpadMask, kMotionHotkeyButtonMask,
+        kMotionHotkeyMiscMask);
+
+uint16_t logical_button_mask(const uni_gamepad_t& gamepad) {
+    return logical_button_mask(
+        gamepad.dpad, gamepad.buttons, gamepad.misc_buttons);
+}
 
 ControllerState map_gamepad(const uni_gamepad_t& gamepad,
-                            bool swap_abxy,
-                            bool motion_enabled) {
+                            bool motion_enabled,
+                            uint16_t button_mask) {
     ControllerState state = make_neutral_state();
 
-    state.dpad_up = (gamepad.dpad & DPAD_UP) != 0;
-    state.dpad_down = (gamepad.dpad & DPAD_DOWN) != 0;
-    state.dpad_left = (gamepad.dpad & DPAD_LEFT) != 0;
-    state.dpad_right = (gamepad.dpad & DPAD_RIGHT) != 0;
+    state.dpad_up =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kDpadUp)) != 0;
+    state.dpad_down =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kDpadDown)) != 0;
+    state.dpad_left =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kDpadLeft)) != 0;
+    state.dpad_right =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kDpadRight)) != 0;
 
-    // Bluepad32's A/B/X/Y are positional: south/east/west/north.
-    state.button_south = (gamepad.buttons & BUTTON_A) != 0;
-    state.button_east = (gamepad.buttons & BUTTON_B) != 0;
-    state.button_west = (gamepad.buttons & BUTTON_X) != 0;
-    state.button_north = (gamepad.buttons & BUTTON_Y) != 0;
-    if (swap_abxy) {
-        bool temporary = state.button_east;
-        state.button_east = state.button_south;
-        state.button_south = temporary;
-        temporary = state.button_north;
-        state.button_north = state.button_west;
-        state.button_west = temporary;
-    }
-    state.button_left_shoulder = (gamepad.buttons & BUTTON_SHOULDER_L) != 0;
-    state.button_right_shoulder = (gamepad.buttons & BUTTON_SHOULDER_R) != 0;
+    // Bluepad32's A/B/X/Y are positional: south/east/west/north. Persistent
+    // profile mappings are the only button remapping layer.
+    state.button_south =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kSouth)) != 0;
+    state.button_east =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kEast)) != 0;
+    state.button_west =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kWest)) != 0;
+    state.button_north =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kNorth)) != 0;
+    state.button_left_shoulder =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kLeftShoulder)) != 0;
+    state.button_right_shoulder =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kRightShoulder)) != 0;
     state.left_trigger =
         (gamepad.buttons & BUTTON_TRIGGER_L) != 0
             ? UINT16_MAX
@@ -575,13 +725,25 @@ ControllerState map_gamepad(const uni_gamepad_t& gamepad,
         (gamepad.buttons & BUTTON_TRIGGER_R) != 0
             ? UINT16_MAX
             : scale_trigger(gamepad.throttle);
-    state.button_left_stick = (gamepad.buttons & BUTTON_THUMB_L) != 0;
-    state.button_right_stick = (gamepad.buttons & BUTTON_THUMB_R) != 0;
+    state.button_left_stick =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kLeftStick)) != 0;
+    state.button_right_stick =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kRightStick)) != 0;
 
-    state.button_select = (gamepad.misc_buttons & MISC_BUTTON_SELECT) != 0;
-    state.button_start = (gamepad.misc_buttons & MISC_BUTTON_START) != 0;
-    state.button_system = (gamepad.misc_buttons & MISC_BUTTON_SYSTEM) != 0;
-    state.button_capture = (gamepad.misc_buttons & MISC_BUTTON_CAPTURE) != 0;
+    state.button_select =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kSelect)) != 0;
+    state.button_start =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kStart)) != 0;
+    state.button_system =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kSystem)) != 0;
+    state.button_capture =
+        (button_mask & logical_button_bit(
+                           ControllerProfileLogicalButton::kCapture)) != 0;
 
     state.left_stick_x = scale_axis(gamepad.axis_x);
     state.left_stick_y = scale_axis(gamepad.axis_y);
@@ -606,11 +768,11 @@ ControllerState map_gamepad(const uni_gamepad_t& gamepad,
     return state;
 }
 struct HotkeyDecision {
-    bool swap_abxy;
     bool motion_enabled;
     uint32_t suppress_dpad;
     uint32_t suppress_buttons;
     uint32_t suppress_misc_buttons;
+    uint16_t suppress_logical_buttons;
 };
 
 void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
@@ -622,24 +784,23 @@ void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
         strong_magnitude};
 }
 void reset_slot_hotkeys(BackendSlot& slot) {
-    slot.swap_abxy = kDefaultSwapAbxy;
-    slot.abxy_hotkey_latched = false;
     slot.motion_enabled = kDefaultMotionEnabled;
     slot.motion_hotkey_latched = false;
+    slot.pre_hotkey_button_mask = 0;
     slot.feedback_pending = false;
     slot.feedback_until_ms = 0;
     slot.pending_feedback = {};
+    slot.profile_feedback_pending = false;
+    slot.pending_profile_feedback = {};
+    slot.profile_feedback = {};
+    slot.retained_host_rumble_valid = false;
+    slot.retained_host_rumble = {};
 }
 
 
 HotkeyDecision update_controller_hotkeys(
     uint8_t slot_index, uni_hid_device_t* device,
     const uni_gamepad_t& gamepad) {
-    const bool abxy_pressed =
-        (gamepad.buttons & kAbxyHotkeyButtonMask) ==
-            kAbxyHotkeyButtonMask &&
-        (gamepad.misc_buttons & kAbxyHotkeyMiscMask) ==
-            kAbxyHotkeyMiscMask;
     const bool motion_pressed =
         (gamepad.dpad & kMotionHotkeyDpadMask) ==
             kMotionHotkeyDpadMask &&
@@ -648,18 +809,12 @@ HotkeyDecision update_controller_hotkeys(
         (gamepad.misc_buttons & kMotionHotkeyMiscMask) ==
             kMotionHotkeyMiscMask;
     HotkeyDecision decision{
-        kDefaultSwapAbxy, kDefaultMotionEnabled, 0, 0, 0};
+        kDefaultMotionEnabled, 0, 0, 0, 0};
 
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device == device) {
-        if (abxy_pressed && !slot.abxy_hotkey_latched) {
-            slot.swap_abxy = !slot.swap_abxy;
-            queue_local_feedback(
-                slot, static_cast<uint16_t>(kAbxyFeedbackDurationMs),
-                kAbxyFeedbackWeakMagnitude,
-                kAbxyFeedbackStrongMagnitude);
-        } else if (motion_pressed && !slot.motion_hotkey_latched) {
+        if (motion_pressed && !slot.motion_hotkey_latched) {
             slot.motion_enabled = !slot.motion_enabled;
             if (slot.motion_enabled) {
                 queue_local_feedback(
@@ -673,18 +828,14 @@ HotkeyDecision update_controller_hotkeys(
                     kMotionDisabledFeedbackStrongMagnitude);
             }
         }
-        slot.abxy_hotkey_latched = abxy_pressed;
         slot.motion_hotkey_latched = motion_pressed;
-        decision.swap_abxy = slot.swap_abxy;
         decision.motion_enabled = slot.motion_enabled;
-        if (abxy_pressed) {
-            decision.suppress_buttons |= kAbxyHotkeyButtonMask;
-            decision.suppress_misc_buttons |= kAbxyHotkeyMiscMask;
-        }
         if (motion_pressed) {
             decision.suppress_dpad |= kMotionHotkeyDpadMask;
             decision.suppress_buttons |= kMotionHotkeyButtonMask;
             decision.suppress_misc_buttons |= kMotionHotkeyMiscMask;
+            decision.suppress_logical_buttons |=
+                kMotionHotkeyLogicalButtonMask;
         }
     }
     critical_section_exit(&g_state_lock);
@@ -995,13 +1146,56 @@ void apply_connection_policy() {
     }
 }
 
+bool deadline_reached(uint32_t now_ms, uint32_t deadline_ms) {
+    return static_cast<int32_t>(now_ms - deadline_ms) >= 0;
+}
+
+bool advance_profile_feedback(ProfileFeedbackSequence* sequence,
+                              uint32_t now_ms) {
+    bool rumble_dispatch = false;
+    for (uint8_t transition = 0;
+         transition < CONTROLLER_PROFILE_COUNT * 2u &&
+         sequence->active &&
+         deadline_reached(now_ms, sequence->phase_deadline_ms);
+         ++transition) {
+        sequence->phase_deadline_ms +=
+            kProfileFeedbackPhaseDurationMs;
+        if (sequence->on) {
+            sequence->on = false;
+            rumble_dispatch = false;
+        } else if (sequence->pulses_started >=
+                   sequence->pulse_count) {
+            sequence->active = false;
+        } else {
+            sequence->on = true;
+            ++sequence->pulses_started;
+            rumble_dispatch = sequence->rumble_enabled;
+        }
+    }
+    return rumble_dispatch;
+}
+
 void update_status_led() {
     ++g_status_led_tick;
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
-    bool led_on = false;
+    bool profile_led_override = false;
+    bool profile_led_on = false;
+    critical_section_enter_blocking(&g_state_lock);
+    for (const BackendSlot& slot : g_slots) {
+        if (slot.profile_feedback.active &&
+            slot.profile_feedback.led_enabled) {
+            profile_led_override = true;
+            profile_led_on =
+                profile_led_on || slot.profile_feedback.on;
+        }
+    }
+    critical_section_exit(&g_state_lock);
 
-    if (static_cast<int32_t>(
-            now_ms - g_pairing_reset_feedback_deadline_ms) < 0) {
+    bool led_on = false;
+    if (profile_led_override) {
+        led_on = profile_led_on;
+    } else if (static_cast<int32_t>(
+                   now_ms - g_pairing_reset_feedback_deadline_ms) < 0) {
         led_on = (g_status_led_tick % 20) < 10;
     } else if (pairing_window_active_at(now_ms)) {
         const uint16_t phase = g_status_led_tick % 200;
@@ -1037,17 +1231,95 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     if (update_pairing_window(now_ms)) {
         apply_connection_policy();
     }
+    const bool xinput_host_mode =
+        host_rumble_duration_ms() == kXInputHostRumbleDurationMs;
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         RumbleEnvelope envelope{};
         FeedbackEnvelope feedback{};
+        ProfileFeedbackEnvelope profile_feedback{};
         uni_hid_device_t* device = nullptr;
+        bool profile_lighting_dispatch = false;
+        bool profile_rumble_dispatch = false;
         bool feedback_dispatch = false;
         bool host_dispatch = false;
 
         critical_section_enter_blocking(&g_state_lock);
         BackendSlot& slot = g_slots[slot_index];
-        if (slot.feedback_pending) {
+        if (slot.retained_host_rumble_valid &&
+            (!xinput_host_mode ||
+             slot.retained_host_rumble.duration_ms !=
+                 kXInputHostRumbleDurationMs ||
+             slot.retained_host_rumble.slot != slot_index ||
+             slot.retained_host_rumble.connection_generation !=
+                 slot.connection_generation ||
+             !slot.active || slot.device == nullptr)) {
+            slot.retained_host_rumble_valid = false;
+            slot.retained_host_rumble = {};
+        }
+        if (slot.profile_feedback.active &&
+            slot.profile_feedback.connection_generation !=
+                slot.connection_generation) {
+            slot.profile_feedback = {};
+        }
+        const bool profile_feedback_was_active =
+            slot.profile_feedback.active;
+        const bool completed_feedback_had_rumble =
+            slot.profile_feedback.rumble_enabled;
+        profile_rumble_dispatch =
+            advance_profile_feedback(&slot.profile_feedback, now_ms);
+        if (profile_feedback_was_active &&
+            !slot.profile_feedback.active &&
+            completed_feedback_had_rumble &&
+            slot.retained_host_rumble_valid) {
+            slot.pending_rumble = slot.retained_host_rumble;
+            slot.rumble_pending = true;
+        }
+        if (profile_rumble_dispatch) {
+            device = slot.device;
+        }
+
+        const bool feedback_active =
+            static_cast<int32_t>(now_ms - slot.feedback_until_ms) < 0;
+        if (!slot.profile_feedback.active && !feedback_active &&
+            slot.profile_feedback_pending) {
+            profile_feedback = slot.pending_profile_feedback;
+            slot.profile_feedback_pending = false;
+            const uint8_t policy =
+                static_cast<uint8_t>(profile_feedback.policy);
+            if (slot.active && slot.device != nullptr &&
+                profile_feedback.connection_generation ==
+                    slot.connection_generation &&
+                profile_feedback.active_profile_number != 0 &&
+                profile_feedback.active_profile_number <=
+                    CONTROLLER_PROFILE_COUNT &&
+                valid_confirmation_policy(profile_feedback.policy) &&
+                profile_feedback.policy !=
+                    ControllerProfileConfirmationPolicy::kNone) {
+                slot.profile_feedback = {
+                    slot.connection_generation,
+                    now_ms + kProfileFeedbackPhaseDurationMs,
+                    profile_feedback.active_profile_number,
+                    1,
+                    true,
+                    true,
+                    (policy & static_cast<uint8_t>(
+                                  ControllerProfileConfirmationPolicy::
+                                      kRumble)) != 0,
+                    (policy & static_cast<uint8_t>(
+                                  ControllerProfileConfirmationPolicy::
+                                      kLed)) != 0,
+                };
+                device = slot.device;
+                profile_lighting_dispatch =
+                    slot.profile_feedback.led_enabled;
+                profile_rumble_dispatch =
+                    slot.profile_feedback.rumble_enabled;
+            }
+        }
+
+        if (!slot.profile_feedback.active &&
+            slot.feedback_pending) {
             feedback = slot.pending_feedback;
             feedback_dispatch =
                 slot.active && slot.device != nullptr &&
@@ -1062,10 +1334,12 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             }
         }
 
-        const bool feedback_active =
-            static_cast<int32_t>(now_ms - slot.feedback_until_ms) < 0;
-        if (!feedback_dispatch && !feedback_active &&
-            slot.rumble_pending) {
+        const bool local_feedback_active =
+            slot.profile_feedback.active ||
+            static_cast<int32_t>(
+                now_ms - slot.feedback_until_ms) < 0;
+        if (!profile_rumble_dispatch && !feedback_dispatch &&
+            !local_feedback_active && slot.rumble_pending) {
             envelope = slot.pending_rumble;
             slot.rumble_pending = false;
             host_dispatch =
@@ -1079,7 +1353,17 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         }
         critical_section_exit(&g_state_lock);
 
-        if (feedback_dispatch) {
+        if (profile_lighting_dispatch) {
+            apply_profile_lighting(
+                profile_feedback.active_profile_number, device);
+        }
+        if (profile_rumble_dispatch && device != nullptr &&
+            device->report_parser.play_dual_rumble != nullptr) {
+            device->report_parser.play_dual_rumble(
+                device, 0, kProfileFeedbackPhaseDurationMs,
+                kProfileFeedbackWeakMagnitude,
+                kProfileFeedbackStrongMagnitude);
+        } else if (feedback_dispatch) {
             device->report_parser.play_dual_rumble(
                 device, 0, feedback.duration_ms,
                 feedback.weak_magnitude, feedback.strong_magnitude);
@@ -1089,7 +1373,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
                 envelope.rumble.low_frequency_magnitude == 0 &&
                 envelope.rumble.high_frequency_magnitude == 0;
             device->report_parser.play_dual_rumble(
-                device, 0, stop ? 0 : host_rumble_duration_ms(),
+                device, 0, stop ? 0 : envelope.duration_ms,
                 envelope.rumble.high_frequency_magnitude,
                 envelope.rumble.low_frequency_magnitude);
         }
@@ -1273,15 +1557,20 @@ void platform_on_controller_data(uni_hid_device_t* device,
     }
 
     uni_gamepad_t gamepad = controller->gamepad;
+    const uint16_t pre_hotkey_button_mask =
+        logical_button_mask(gamepad);
     const HotkeyDecision hotkeys = update_controller_hotkeys(
         static_cast<uint8_t>(slot_index), device, gamepad);
     gamepad.dpad &= ~hotkeys.suppress_dpad;
     gamepad.buttons &= ~hotkeys.suppress_buttons;
     gamepad.misc_buttons &= ~hotkeys.suppress_misc_buttons;
+    const uint16_t output_button_mask = static_cast<uint16_t>(
+        pre_hotkey_button_mask & ~hotkeys.suppress_logical_buttons);
     publish_device_state(
         static_cast<uint8_t>(slot_index), device,
-        map_gamepad(gamepad, hotkeys.swap_abxy,
-                    hotkeys.motion_enabled));
+        pre_hotkey_button_mask,
+        map_gamepad(
+            gamepad, hotkeys.motion_enabled, output_button_mask));
 }
 
 const uni_property_t* platform_get_property(uni_property_idx_t index) {
@@ -1462,6 +1751,8 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
     out->active = slot.active;
     out->connection_generation = slot.connection_generation;
     out->identity = slot.identity;
+    out->pre_hotkey_button_mask =
+        slot.pre_hotkey_button_mask;
     out->state = slot.state;
     const uint32_t state_generation = slot.state_generation;
     critical_section_exit(&g_state_lock);
@@ -1485,11 +1776,45 @@ void bluepad32_input_backend_queue_rumble(
         return;
     }
 
+    const uint16_t duration_ms = host_rumble_duration_ms();
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device != nullptr) {
-        slot.pending_rumble = {slot_index, slot.connection_generation, rumble};
+        const RumbleEnvelope envelope{
+            slot_index, slot.connection_generation, rumble,
+            duration_ms};
+        slot.pending_rumble = envelope;
         slot.rumble_pending = true;
+        if (duration_ms == kXInputHostRumbleDurationMs) {
+            slot.retained_host_rumble = envelope;
+            slot.retained_host_rumble_valid = true;
+        } else {
+            slot.retained_host_rumble = {};
+            slot.retained_host_rumble_valid = false;
+        }
+    }
+    critical_section_exit(&g_state_lock);
+}
+
+void bluepad32_input_backend_queue_profile_feedback(
+    uint8_t slot_index, uint32_t connection_generation,
+    uint8_t active_profile_number,
+    ControllerProfileConfirmationPolicy policy) {
+    if (!g_initialized || !valid_slot(slot_index) ||
+        active_profile_number == 0 ||
+        active_profile_number > CONTROLLER_PROFILE_COUNT ||
+        !valid_confirmation_policy(policy) ||
+        policy == ControllerProfileConfirmationPolicy::kNone) {
+        return;
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (slot.active && slot.device != nullptr &&
+        slot.connection_generation == connection_generation) {
+        slot.pending_profile_feedback = {
+            connection_generation, active_profile_number, policy};
+        slot.profile_feedback_pending = true;
     }
     critical_section_exit(&g_state_lock);
 }

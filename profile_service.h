@@ -79,6 +79,11 @@ ConfigurationTransactionStatus profile_service_reset(
 ConfigurationTransactionStatus profile_service_activate(
     uint32_t transaction_id, const ControllerIdentity& identity,
     uint8_t profile_index);
+// Queue a controller-originated activation without replacing the host-visible
+// transaction snapshot. transaction_id must be nonzero with its high bit set.
+ConfigurationTransactionStatus profile_service_activate_internal(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t profile_index);
 
 void profile_service_list_snapshot(ProfileServiceListSnapshot* output);
 void profile_service_selected_snapshot(

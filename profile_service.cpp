@@ -18,6 +18,7 @@ enum class PendingCommandType : uint8_t {
 
 struct PendingCommand {
     PendingCommandType type = PendingCommandType::kNone;
+    uint32_t transaction_id = 0;
     ControllerIdentity identity{};
     uint8_t profile_index = 0;
 };
@@ -48,6 +49,7 @@ PublishedActiveProfile
 uint8_t g_active_profile_count = 0;
 ProfileTransaction g_transaction;
 PendingCommand g_command;
+PendingCommand g_internal_activation;
 bool g_identity_dirty = false;
 bool g_has_committed = false;
 uint32_t g_last_commit_ms = 0;
@@ -159,6 +161,17 @@ void finish_mutation(ConfigurationTransactionStatus status,
     critical_section_exit(&g_lock);
 }
 
+void finish_internal_activation(
+    ConfigurationTransactionStatus status) {
+    critical_section_enter_blocking(&g_lock);
+    g_internal_activation = {};
+    refresh_metadata_locked(
+        status == ConfigurationTransactionStatus::kStorageError
+            ? ProfileServiceState::kStorageError
+            : ProfileServiceState::kReady);
+    critical_section_exit(&g_lock);
+}
+
 }  // namespace
 
 void profile_service_prepare() {
@@ -176,6 +189,7 @@ void profile_service_prepare() {
     g_selected.profile_index = 0;
     g_transaction = {};
     g_command = {};
+    g_internal_activation = {};
     g_identity_dirty = false;
     g_has_committed = false;
     g_last_commit_ms = 0;
@@ -226,6 +240,7 @@ bool profile_service_observe_identity_on_storage_core(
 void profile_service_task_on_storage_core(uint32_t now_ms) {
     PendingCommand command{};
     bool process_write = false;
+    bool process_internal_activation = false;
     bool process_identity = false;
     ControllerIdentity write_identity{};
     uint8_t write_profile_index = 0;
@@ -242,6 +257,10 @@ void profile_service_task_on_storage_core(uint32_t now_ms) {
             write_profile_index = g_transaction.profile_index;
             memcpy(write_payload, g_transaction.payload,
                    sizeof(write_payload));
+        } else if (g_internal_activation.type !=
+                   PendingCommandType::kNone) {
+            command = g_internal_activation;
+            process_internal_activation = true;
         } else if (g_identity_dirty) {
             process_identity = true;
         }
@@ -249,6 +268,7 @@ void profile_service_task_on_storage_core(uint32_t now_ms) {
     critical_section_exit(&g_lock);
 
     if (!process_write && !process_identity &&
+        !process_internal_activation &&
         command.type == PendingCommandType::kNone) {
         return;
     }
@@ -279,8 +299,13 @@ void profile_service_task_on_storage_core(uint32_t now_ms) {
     }
 
     if (database_result != ControllerProfileDatabaseResult::kOk) {
-        finish_mutation(database_result_status(database_result),
-                        !process_write);
+        const ConfigurationTransactionStatus error_status =
+            database_result_status(database_result);
+        if (process_internal_activation) {
+            finish_internal_activation(error_status);
+        } else {
+            finish_mutation(error_status, !process_write);
+        }
         return;
     }
 
@@ -315,7 +340,11 @@ void profile_service_task_on_storage_core(uint32_t now_ms) {
     critical_section_enter_blocking(&g_lock);
     g_identity_dirty = false;
     critical_section_exit(&g_lock);
-    finish_mutation(status, !process_write);
+    if (process_internal_activation) {
+        finish_internal_activation(status);
+    } else {
+        finish_mutation(status, !process_write);
+    }
 }
 
 ConfigurationTransactionStatus profile_service_select(
@@ -362,6 +391,7 @@ ConfigurationTransactionStatus profile_service_begin(
     }
     critical_section_enter_blocking(&g_lock);
     if (g_command.type != PendingCommandType::kNone ||
+        g_internal_activation.type != PendingCommandType::kNone ||
         g_transaction.snapshot.status ==
             ConfigurationTransactionStatus::kReceiving ||
         g_transaction.snapshot.status ==
@@ -465,6 +495,7 @@ ConfigurationTransactionStatus profile_service_reset(
     }
     critical_section_enter_blocking(&g_lock);
     if (g_command.type != PendingCommandType::kNone ||
+        g_internal_activation.type != PendingCommandType::kNone ||
         g_transaction.snapshot.status ==
             ConfigurationTransactionStatus::kReceiving ||
         g_transaction.snapshot.status ==
@@ -485,6 +516,7 @@ ConfigurationTransactionStatus profile_service_reset(
         return ConfigurationTransactionStatus::kMalformed;
     }
     g_transaction.snapshot.status = ConfigurationTransactionStatus::kPending;
+    g_command.transaction_id = transaction_id;
     g_command.type = PendingCommandType::kReset;
     g_command.identity = identity;
     g_command.profile_index = profile_index;
@@ -500,6 +532,7 @@ ConfigurationTransactionStatus profile_service_activate(
     }
     critical_section_enter_blocking(&g_lock);
     if (g_command.type != PendingCommandType::kNone ||
+        g_internal_activation.type != PendingCommandType::kNone ||
         g_transaction.snapshot.status ==
             ConfigurationTransactionStatus::kReceiving ||
         g_transaction.snapshot.status ==
@@ -519,9 +552,40 @@ ConfigurationTransactionStatus profile_service_activate(
         return ConfigurationTransactionStatus::kMalformed;
     }
     g_transaction.snapshot.status = ConfigurationTransactionStatus::kPending;
+    g_command.transaction_id = transaction_id;
     g_command.type = PendingCommandType::kActivate;
     g_command.identity = identity;
     g_command.profile_index = profile_index;
+    critical_section_exit(&g_lock);
+    return ConfigurationTransactionStatus::kPending;
+}
+
+ConfigurationTransactionStatus profile_service_activate_internal(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t profile_index) {
+    if (!g_prepared) {
+        profile_service_prepare();
+    }
+    critical_section_enter_blocking(&g_lock);
+    if (g_command.type != PendingCommandType::kNone ||
+        g_internal_activation.type != PendingCommandType::kNone ||
+        g_transaction.snapshot.status ==
+            ConfigurationTransactionStatus::kReceiving ||
+        g_transaction.snapshot.status ==
+            ConfigurationTransactionStatus::kPending) {
+        critical_section_exit(&g_lock);
+        return ConfigurationTransactionStatus::kBusy;
+    }
+    if ((transaction_id & 0x80000000u) == 0 ||
+        !valid_identity(identity) ||
+        profile_index >= CONTROLLER_PROFILE_COUNT) {
+        critical_section_exit(&g_lock);
+        return ConfigurationTransactionStatus::kMalformed;
+    }
+    g_internal_activation.type = PendingCommandType::kActivate;
+    g_internal_activation.transaction_id = transaction_id;
+    g_internal_activation.identity = identity;
+    g_internal_activation.profile_index = profile_index;
     critical_section_exit(&g_lock);
     return ConfigurationTransactionStatus::kPending;
 }

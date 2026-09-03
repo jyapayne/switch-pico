@@ -320,6 +320,14 @@ int main() {
             const ControllerProfileTransformResult transformed =
                 controller_profile_runtime_transform(
                     instance, snapshot, now_ms, output_mode);
+            ControllerProfileRuntimeProfileChangeEvent profile_change{};
+            if (controller_profile_runtime_take_profile_change(
+                    instance, &profile_change)) {
+                bluepad32_input_backend_queue_profile_feedback(
+                    instance, profile_change.connection_generation,
+                    profile_change.active_profile_number,
+                    profile_change.policy);
+            }
             g_user_states[instance] = transformed.state;
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
             bool sent = false;

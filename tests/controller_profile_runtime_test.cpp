@@ -16,11 +16,20 @@ struct FakeProfileRow {
     uint8_t active_profile = 0;
     ControllerProfile profiles[CONTROLLER_PROFILE_COUNT]{};
 };
+struct ActivationAttempt {
+    uint32_t transaction_id = 0;
+    ControllerIdentity identity{};
+    uint8_t profile_index = 0;
+};
+
 
 std::array<FakeProfileRow, CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT> rows{};
 uint32_t database_generation = 7;
 uint32_t configuration_reset_generation = 3;
 unsigned active_snapshot_count = 0;
+std::array<ActivationAttempt, 32> activation_attempts{};
+size_t activation_attempt_count = 0;
+unsigned activation_busy_attempts = 0;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -44,6 +53,9 @@ void prepare_profiles() {
     database_generation = 7;
     configuration_reset_generation = 3;
     active_snapshot_count = 0;
+    activation_attempts = {};
+    activation_attempt_count = 0;
+    activation_busy_attempts = 0;
     for (uint8_t slot = 0;
          slot < CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT; ++slot) {
         FakeProfileRow& row = rows[slot];
@@ -78,6 +90,31 @@ Bluepad32SlotSnapshot make_snapshot(uint8_t slot,
     snapshot.state = controller_neutral_state();
     return snapshot;
 }
+void apply_button_masks(uint16_t pre_hotkey_mask,
+                        uint16_t output_mask,
+                        Bluepad32SlotSnapshot* snapshot) {
+    snapshot->pre_hotkey_button_mask = pre_hotkey_mask;
+    snapshot->state = controller_neutral_state();
+    controller_profile_apply_button_mask(output_mask, &snapshot->state);
+}
+void apply_button_mask(uint16_t mask, Bluepad32SlotSnapshot* snapshot) {
+    apply_button_masks(mask, mask, snapshot);
+}
+
+ControllerProfileRuntimeProfileChangeEvent take_profile_change(
+    uint8_t slot, bool* available) {
+    ControllerProfileRuntimeProfileChangeEvent event{};
+    *available =
+        controller_profile_runtime_take_profile_change(slot, &event);
+    return event;
+}
+
+constexpr uint16_t logical_button_bit(
+    ControllerProfileLogicalButton button) {
+    return static_cast<uint16_t>(
+        1u << static_cast<uint8_t>(button));
+}
+
 
 ControllerProfileTransformResult runtime_transform(
     uint8_t slot, const Bluepad32SlotSnapshot& snapshot,
@@ -248,6 +285,292 @@ void test_analog_thresholds_rumble_and_local_confirmation() {
             "local confirmation was scaled or lost its profile policy");
 }
 
+void test_default_switching_retry_commit_and_feedback() {
+    prepare_profiles();
+    ControllerProfile& initial_profile = rows[0].profiles[0];
+    initial_profile.macro_trigger = static_cast<uint8_t>(
+        ControllerProfileLogicalButton::kLeftShoulder);
+    initial_profile.macro_step_count = 2;
+    initial_profile.macro_steps[0].type =
+        ControllerProfileMacroStepType::kState;
+    initial_profile.macro_steps[0].override_flags =
+        kControllerProfileOverrideButtons;
+    initial_profile.macro_steps[0].duration_ms = 1000;
+    initial_profile.macro_steps[0].output_button_mask =
+        logical_button_bit(ControllerProfileLogicalButton::kNorth);
+    initial_profile.macro_steps[1].type =
+        ControllerProfileMacroStepType::kEnd;
+
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+    bool event_available = true;
+    (void)take_profile_change(0, &event_available);
+    require(!event_available,
+            "initial profile load published confirmation feedback");
+
+    activation_busy_attempts = 2;
+    const uint16_t held_mask = static_cast<uint16_t>(
+        CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD |
+        logical_button_bit(ControllerProfileLogicalButton::kSouth));
+    apply_button_mask(held_mask, &snapshot);
+    ControllerProfileTransformResult output =
+        runtime_transform(0, snapshot, 1);
+    require(activation_attempt_count == 1 &&
+                rows[0].active_profile == 0 &&
+                output.state.button_south &&
+                !output.state.button_left_shoulder &&
+                !output.state.button_right_shoulder &&
+                !output.state.button_select &&
+                !output.state.button_start &&
+                !output.state.button_north,
+            "default chord was not consumed before a busy activation and synthetic trigger");
+    output = runtime_transform(0, snapshot, 2);
+    output = runtime_transform(0, snapshot, 3);
+    require(activation_attempt_count == 3 &&
+                activation_attempts[0].transaction_id ==
+                    activation_attempts[1].transaction_id &&
+                activation_attempts[1].transaction_id ==
+                    activation_attempts[2].transaction_id &&
+                (activation_attempts[0].transaction_id & 0x80000000u) != 0 &&
+                activation_attempts[0].transaction_id != 0 &&
+                activation_attempts[0].profile_index == 1 &&
+                output.state.button_south && !output.state.button_north,
+            "held busy chord did not retry one internal activation transaction");
+
+    (void)runtime_transform(0, snapshot, 4);
+    require(activation_attempt_count == 3,
+            "accepted activation repeated while the chord remained held");
+    (void)take_profile_change(0, &event_available);
+    require(!event_available,
+            "activation feedback was published before storage commit");
+
+    rows[0].active_profile = 1;
+    rows[0].profiles[1].button_map[
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kSouth)] =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kNorth);
+    rows[0].profiles[1].confirmation_policy =
+        ControllerProfileConfirmationPolicy::kLed;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 5);
+    const ControllerProfileRuntimeProfileChangeEvent event =
+        take_profile_change(0, &event_available);
+    require(event_available && event.connection_generation == 1 &&
+                event.database_generation == database_generation &&
+                event.active_profile_number == 2 &&
+                event.policy == ControllerProfileConfirmationPolicy::kLed &&
+                output.state.button_north &&
+                !output.state.button_south &&
+                !output.state.button_left_shoulder &&
+                activation_attempt_count == 3,
+            "committed activation did not cancel, transform, and publish exactly one event");
+    (void)take_profile_change(0, &event_available);
+    require(!event_available,
+            "committed profile change feedback was published twice");
+
+    apply_button_mask(0, &snapshot);
+    (void)runtime_transform(0, snapshot, 6);
+    apply_button_mask(CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD,
+                      &snapshot);
+    (void)runtime_transform(0, snapshot, 7);
+    require(activation_attempt_count == 4 &&
+                activation_attempts[3].profile_index == 2 &&
+                activation_attempts[3].transaction_id !=
+                    activation_attempts[0].transaction_id &&
+                (activation_attempts[3].transaction_id & 0x80000000u) != 0,
+            "release did not re-arm one activation for the next profile");
+}
+
+void test_identity_promotion_preserves_held_switching() {
+    prepare_profiles();
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+    snapshot.identity = controller_identity_global();
+    apply_button_mask(
+        CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD, &snapshot);
+
+    const ControllerProfileTransformResult unresolved =
+        runtime_transform(0, snapshot, 0);
+    require(activation_attempt_count == 1 &&
+                controller_identity_is_global(
+                    activation_attempts[0].identity) &&
+                unresolved.left_trigger_digital_threshold ==
+                    CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+            "unresolved BLE identity did not begin one activation");
+
+    snapshot.identity = rows[0].identity;
+    const ControllerProfileTransformResult promoted =
+        runtime_transform(0, snapshot, 1);
+    bool event_available = true;
+    (void)take_profile_change(0, &event_available);
+    require(activation_attempt_count == 1 &&
+                promoted.left_trigger_digital_threshold == 1000 &&
+                !event_available,
+            "identity-only BLE promotion re-armed a held activation or "
+            "failed to refresh its profile");
+
+    (void)runtime_transform(0, snapshot, 2);
+    require(activation_attempt_count == 1,
+            "promoted BLE identity repeated an accepted held activation");
+
+    apply_button_mask(0, &snapshot);
+    (void)runtime_transform(0, snapshot, 3);
+    apply_button_mask(
+        CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD, &snapshot);
+    (void)runtime_transform(0, snapshot, 4);
+    require(activation_attempt_count == 2 &&
+                controller_identity_equal(
+                    activation_attempts[1].identity,
+                    rows[0].identity),
+            "physical release did not re-arm the promoted identity");
+}
+
+void configure_motion_suppression_probe(ControllerProfile* profile) {
+    profile->macro_trigger = static_cast<uint8_t>(
+        ControllerProfileLogicalButton::kDpadUp);
+    profile->macro_step_count = 2;
+    profile->macro_steps[0].type =
+        ControllerProfileMacroStepType::kState;
+    profile->macro_steps[0].override_flags =
+        kControllerProfileOverrideButtons;
+    profile->macro_steps[0].duration_ms = 1000;
+    profile->macro_steps[0].output_button_mask =
+        logical_button_bit(ControllerProfileLogicalButton::kNorth);
+    profile->macro_steps[1].type =
+        ControllerProfileMacroStepType::kEnd;
+}
+
+void test_switching_uses_pre_hotkey_buttons_only() {
+    constexpr uint16_t kMotionHotkeyLogicalMask =
+        static_cast<uint16_t>(
+            logical_button_bit(
+                ControllerProfileLogicalButton::kDpadUp) |
+            logical_button_bit(
+                ControllerProfileLogicalButton::kRightShoulder) |
+            logical_button_bit(
+                ControllerProfileLogicalButton::kStart));
+    constexpr uint16_t kCustomChord =
+        static_cast<uint16_t>(
+            kMotionHotkeyLogicalMask |
+            logical_button_bit(
+                ControllerProfileLogicalButton::kSouth));
+
+    for (uint8_t custom = 0; custom < 2; ++custom) {
+        prepare_profiles();
+        ControllerProfile& profile = rows[0].profiles[0];
+        configure_motion_suppression_probe(&profile);
+        const uint16_t switching_chord =
+            custom != 0 ? kCustomChord
+                        : CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD;
+        profile.switching_chord = custom != 0 ? kCustomChord : 0;
+
+        Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+        (void)runtime_transform(0, snapshot, 0);
+        const uint16_t pre_hotkey_mask = static_cast<uint16_t>(
+            switching_chord | kMotionHotkeyLogicalMask);
+        const uint16_t output_mask = static_cast<uint16_t>(
+            pre_hotkey_mask & ~kMotionHotkeyLogicalMask);
+        apply_button_masks(
+            pre_hotkey_mask, output_mask, &snapshot);
+        ControllerProfileTransformResult output =
+            runtime_transform(0, snapshot, 1);
+        require(activation_attempt_count == 1 &&
+                    !output.state.dpad_up &&
+                    !output.state.button_right_shoulder &&
+                    !output.state.button_start &&
+                    !output.state.button_left_shoulder &&
+                    !output.state.button_select &&
+                    !output.state.button_south &&
+                    !output.state.button_north,
+                custom != 0
+                    ? "custom chord hidden by motion suppression"
+                    : "default chord hidden by motion suppression");
+
+        output = runtime_transform(0, snapshot, 2);
+        require(activation_attempt_count == 1 &&
+                    !output.state.button_north,
+                "held pre-hotkey chord repeated activation or leaked "
+                "into synthetic input");
+    }
+}
+
+void test_custom_switching_chord_and_wrap() {
+    prepare_profiles();
+    constexpr uint16_t kCustomChord =
+        static_cast<uint16_t>(
+            logical_button_bit(ControllerProfileLogicalButton::kSouth) |
+            logical_button_bit(ControllerProfileLogicalButton::kCapture));
+    rows[0].profiles[0].switching_chord = kCustomChord;
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+
+    apply_button_mask(CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD,
+                      &snapshot);
+    ControllerProfileTransformResult output =
+        runtime_transform(0, snapshot, 1);
+    require(activation_attempt_count == 0 &&
+                output.state.button_left_shoulder &&
+                output.state.button_right_shoulder &&
+                output.state.button_select && output.state.button_start,
+            "nonzero switching chord did not replace the default");
+
+    apply_button_mask(kCustomChord, &snapshot);
+    output = runtime_transform(0, snapshot, 2);
+    require(activation_attempt_count == 1 &&
+                activation_attempts[0].profile_index == 1 &&
+                !output.state.button_south &&
+                !output.state.button_capture,
+            "custom switching chord was not consumed or activated");
+
+    prepare_profiles();
+    rows[0].active_profile = 3;
+    rows[0].profiles[3].switching_chord = kCustomChord;
+    snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 10);
+    bool event_available = true;
+    (void)take_profile_change(0, &event_available);
+    require(!event_available,
+            "initial profile 4 load published a change event");
+    apply_button_mask(kCustomChord, &snapshot);
+    (void)runtime_transform(0, snapshot, 11);
+    require(activation_attempt_count == 1 &&
+                activation_attempts[0].profile_index == 0,
+            "profile switching did not wrap profile 4 to profile 1");
+}
+void test_switching_slot_isolation() {
+    prepare_profiles();
+    std::array<Bluepad32SlotSnapshot,
+               CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT>
+        snapshots{};
+    for (uint8_t slot = 0;
+         slot < CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT; ++slot) {
+        snapshots[slot] = make_snapshot(slot);
+        (void)runtime_transform(slot, snapshots[slot], 0);
+    }
+
+    apply_button_mask(CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD,
+                      &snapshots[2]);
+    (void)runtime_transform(2, snapshots[2], 1);
+    snapshots[0].state.button_south = true;
+    const ControllerProfileTransformResult untouched =
+        runtime_transform(0, snapshots[0], 1);
+    require(activation_attempt_count == 1 &&
+                controller_identity_equal(
+                    activation_attempts[0].identity,
+                    rows[2].identity) &&
+                untouched.state.button_south,
+            "one slot's switching chord affected another slot");
+
+    apply_button_mask(CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD,
+                      &snapshots[3]);
+    (void)runtime_transform(2, snapshots[2], 2);
+    (void)runtime_transform(3, snapshots[3], 2);
+    require(activation_attempt_count == 2 &&
+                controller_identity_equal(
+                    activation_attempts[1].identity,
+                    rows[3].identity),
+            "held switching state was shared between controller slots");
+}
+
+
 void configure_synthetic_profile(uint8_t slot) {
     ControllerProfile& profile = rows[slot].profiles[0];
     profile = controller_profile_default(rows[slot].identity, 0);
@@ -347,6 +670,12 @@ void test_all_runtime_cancellation_causes() {
     output = runtime_transform(0, snapshot, 33);
     require_no_synthetic_output(
         output, "profile/database generation change did not cancel");
+    bool event_available = false;
+    const ControllerProfileRuntimeProfileChangeEvent cancellation_event =
+        take_profile_change(0, &event_available);
+    require(event_available &&
+                cancellation_event.active_profile_number == 2,
+            "profile commit feedback was not observed with cancellation");
 
     prepare_profiles();
     configure_synthetic_profile(0);
@@ -413,6 +742,20 @@ uint32_t profile_service_database_generation() {
 uint32_t configuration_service_reset_generation() {
     return configuration_reset_generation;
 }
+ConfigurationTransactionStatus profile_service_activate_internal(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t profile_index) {
+    require(activation_attempt_count < activation_attempts.size(),
+            "activation attempt fixture overflow");
+    activation_attempts[activation_attempt_count++] = {
+        transaction_id, identity, profile_index};
+    if (activation_busy_attempts != 0) {
+        --activation_busy_attempts;
+        return ConfigurationTransactionStatus::kBusy;
+    }
+    return ConfigurationTransactionStatus::kPending;
+}
+
 
 void profile_service_active_profile_snapshot(
     const ControllerIdentity& identity,
@@ -439,6 +782,11 @@ int main() {
     test_four_slot_cache_and_unchanged_generation();
     test_activation_disconnect_and_default_preservation();
     test_analog_thresholds_rumble_and_local_confirmation();
+    test_default_switching_retry_commit_and_feedback();
+    test_identity_promotion_preserves_held_switching();
+    test_switching_uses_pre_hotkey_buttons_only();
+    test_custom_switching_chord_and_wrap();
+    test_switching_slot_isolation();
     test_all_runtime_cancellation_causes();
     test_runtime_slot_synthetic_isolation();
     return 0;
