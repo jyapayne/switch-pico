@@ -560,9 +560,11 @@ void test_xinput_boundary_dispatch() {
 
 void test_generic_boundary_dispatch(
     AdapterUsbMode mode, const uint8_t* expected_device_descriptor,
+    const uint8_t* expected_configuration_descriptor,
     const uint8_t* expected_report_descriptor,
-    const char* expected_driver_name, const char* expected_mode_name,
-    const char* expected_product, const char* expected_serial) {
+    size_t expected_report_descriptor_size, const char* expected_driver_name,
+    const char* expected_mode_name, const char* expected_product,
+    const char* expected_serial) {
     reset_usb_harness();
     usb_output_driver_init(mode);
 
@@ -588,14 +590,14 @@ void test_generic_boundary_dispatch(
         tud_descriptor_configuration_cb(0);
     expect(configuration_descriptor != nullptr &&
                std::memcmp(configuration_descriptor,
-                           GenericHid::kConfigurationDescriptor,
+                           expected_configuration_descriptor,
                            GenericHid::kConfigurationDescriptorSize) == 0,
            "generic configuration descriptor was not selected");
     const uint8_t* report_descriptor =
         tud_hid_descriptor_report_cb(0);
     expect(report_descriptor != nullptr &&
                std::memcmp(report_descriptor, expected_report_descriptor,
-                           sizeof(GenericHid::kDInputReportDescriptor)) == 0 &&
+                           expected_report_descriptor_size) == 0 &&
                tud_hid_descriptor_report_cb(kInvalidInstance) == nullptr,
            "generic report descriptor routing was incorrect");
 
@@ -679,11 +681,15 @@ void test_generic_boundary_dispatch(
 void test_generic_modes_boundary_dispatch() {
     test_generic_boundary_dispatch(
         AdapterUsbMode::kDInput, GenericHid::kDInputDeviceDescriptor,
-        GenericHid::kDInputReportDescriptor, "DINPUT", "DInput",
+        GenericHid::kDInputConfigurationDescriptor,
+        GenericHid::kDInputReportDescriptor,
+        sizeof(GenericHid::kDInputReportDescriptor), "DINPUT", "DInput",
         GenericHid::kDInputProductString, GenericHid::kDInputSerialString);
     test_generic_boundary_dispatch(
         AdapterUsbMode::kMac, GenericHid::kMacDeviceDescriptor,
-        GenericHid::kMacReportDescriptor, "MAC", "Mac",
+        GenericHid::kMacConfigurationDescriptor,
+        GenericHid::kMacReportDescriptor,
+        sizeof(GenericHid::kMacReportDescriptor), "MAC", "Mac",
         GenericHid::kMacProductString, GenericHid::kMacSerialString);
 }
 

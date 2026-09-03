@@ -2063,9 +2063,26 @@ void test_motion_hotkey() {
 void test_protocol_neutral_analog_state() {
     start_pairing_backend();
     uni_hid_device_t controller = device(0);
+    uni_hid_device_t peer = device(1);
     platform_on_device_connected(&controller);
-    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
-            "analog-state controller did not become ready");
+    platform_on_device_connected(&peer);
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&peer) == UNI_ERROR_SUCCESS,
+            "analog-state controllers did not become ready");
+
+    uni_controller_t peer_input{};
+    peer_input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    peer_input.gamepad.brake = 256;
+    peer_input.gamepad.throttle = 768;
+    peer_input.gamepad.buttons =
+        BUTTON_TRIGGER_L | BUTTON_TRIGGER_R;
+    platform_on_controller_data(&peer, &peer_input);
+
+    ControllerState peer_state{};
+    require(read_controller_state(1, &peer_state) &&
+                peer_state.left_trigger == 16399 &&
+                peer_state.right_trigger == 49199,
+            "peer analog trigger state was not published exactly");
 
     uni_controller_t input{};
     input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
@@ -2073,33 +2090,69 @@ void test_protocol_neutral_analog_state() {
     input.gamepad.axis_y = 0;
     input.gamepad.axis_rx = 511;
     input.gamepad.axis_ry = -256;
-    input.gamepad.brake = 1;
-    input.gamepad.throttle = 512;
-    platform_on_controller_data(&controller, &input);
+    input.gamepad.buttons =
+        BUTTON_TRIGGER_L | BUTTON_TRIGGER_R;
 
+    struct TriggerCase {
+        int32_t brake;
+        int32_t throttle;
+        uint16_t expected_left;
+        uint16_t expected_right;
+    };
+    constexpr TriggerCase trigger_cases[] = {
+        {4, 512, 256, 32799},
+        {512, 1020, 32799, UINT16_MAX},
+        {1020, 1016, UINT16_MAX, 65086},
+        {1016, 1023, 65086, UINT16_MAX},
+        {1023, 4, UINT16_MAX, 256},
+    };
     ControllerState state{};
-    require(read_controller_state(0, &state),
-            "analog state was not published");
+    for (const TriggerCase& trigger_case : trigger_cases) {
+        input.gamepad.brake = trigger_case.brake;
+        input.gamepad.throttle = trigger_case.throttle;
+        platform_on_controller_data(&controller, &input);
+
+        require(read_controller_state(0, &state) &&
+                    state.left_trigger == trigger_case.expected_left &&
+                    state.right_trigger == trigger_case.expected_right,
+                "digital trigger bits flattened analog trigger precision");
+        require(read_controller_state(1, &peer_state) &&
+                    peer_state.left_trigger == 16399 &&
+                    peer_state.right_trigger == 49199,
+                "slot 0 trigger update changed slot 1");
+    }
     require(state.left_stick_x == INT16_MIN &&
                 state.left_stick_y == 0 &&
                 state.right_stick_x == INT16_MAX &&
                 state.right_stick_y == -16384,
             "stick axes were not normalized to signed full range");
-    require(state.left_trigger == scale_trigger(1) &&
-                state.left_trigger > 0 &&
-                state.right_trigger == scale_trigger(512) &&
-                state.right_trigger < UINT16_MAX,
-            "analog trigger precision was discarded");
 
     input.gamepad.brake = 0;
     input.gamepad.throttle = 0;
-    input.gamepad.buttons =
-        BUTTON_TRIGGER_L | BUTTON_TRIGGER_R;
+    input.gamepad.buttons = BUTTON_TRIGGER_L;
     platform_on_controller_data(&controller, &input);
     require(read_controller_state(0, &state) &&
                 state.left_trigger == UINT16_MAX &&
+                state.right_trigger == 0,
+            "left digital-only trigger did not map independently");
+
+    input.gamepad.buttons = BUTTON_TRIGGER_R;
+    platform_on_controller_data(&controller, &input);
+    require(read_controller_state(0, &state) &&
+                state.left_trigger == 0 &&
                 state.right_trigger == UINT16_MAX,
-            "digital trigger buttons did not map to full analog range");
+            "right digital-only trigger did not map independently");
+
+    input.gamepad.buttons = 0;
+    platform_on_controller_data(&controller, &input);
+    require(read_controller_state(0, &state) &&
+                state.left_trigger == 0 &&
+                state.right_trigger == 0,
+            "released triggers did not return to zero");
+    require(read_controller_state(1, &peer_state) &&
+                peer_state.left_trigger == 16399 &&
+                peer_state.right_trigger == 49199,
+            "slot 0 digital trigger fallback changed slot 1");
 }
 
 void test_host_rumble_mode_duration() {

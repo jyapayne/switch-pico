@@ -12,11 +12,13 @@
 #endif
 
 static_assert(SWITCH_PICO_HID_INSTANCE_COUNT == EXPECTED_HID_INSTANCE_COUNT);
-static_assert(sizeof(GenericHid::kConfigurationDescriptor) ==
+static_assert(sizeof(GenericHid::kDInputConfigurationDescriptor) ==
+              9u + 25u * EXPECTED_HID_INSTANCE_COUNT);
+static_assert(sizeof(GenericHid::kMacConfigurationDescriptor) ==
               9u + 25u * EXPECTED_HID_INSTANCE_COUNT);
 static_assert(sizeof(GenericHid::InputReport) == 15);
-static_assert(sizeof(GenericHid::kDInputReportDescriptor) ==
-              sizeof(GenericHid::kMacReportDescriptor));
+static_assert(sizeof(GenericHid::kMacReportDescriptor) ==
+              sizeof(GenericHid::kDInputReportDescriptor) + 4u);
 
 
 namespace {
@@ -63,6 +65,55 @@ constexpr std::array<ItemGolden, 43> kDInputReportItemGolden{{
     {1, 7, 1, 0x01}, {1, 9, 1, 0x10}, {0, 8, 1, 0x02},
     {0, 12, 0, 0x00},
 }};
+
+bool expected_report_item(size_t decoded, bool mac_variant,
+                          ItemGolden* expected) {
+    if (!mac_variant) {
+        if (decoded >= kDInputReportItemGolden.size()) {
+            return false;
+        }
+        *expected = kDInputReportItemGolden[decoded];
+        return true;
+    }
+
+    if (decoded < 16) {
+        if (decoded >= kDInputReportItemGolden.size()) {
+            return false;
+        }
+        *expected = kDInputReportItemGolden[decoded];
+        if (decoded == 10) {
+            expected->value = 0x32;
+        } else if (decoded == 11) {
+            expected->value = 0x33;
+        }
+        return true;
+    }
+    if (decoded == 16) {
+        *expected = {1, 0, 1, 0x02};
+        return true;
+    }
+    if (decoded == 17) {
+        *expected = {2, 0, 1, 0xc5};
+        return true;
+    }
+    if (decoded == 18) {
+        *expected = {2, 0, 1, 0xc4};
+        return true;
+    }
+    if (decoded == 19) {
+        *expected = kDInputReportItemGolden[18];
+        return true;
+    }
+    if (decoded == 20) {
+        *expected = {1, 0, 1, 0x01};
+        return true;
+    }
+    if (decoded - 2u >= kDInputReportItemGolden.size()) {
+        return false;
+    }
+    *expected = kDInputReportItemGolden[decoded - 2u];
+    return true;
+}
 
 int32_t sign_extend(uint32_t value, uint8_t size) {
     if (size == 4 || size == 0) {
@@ -111,7 +162,7 @@ void inspect_report_descriptor(const uint8_t* descriptor,
         mac_variant ? std::array<uint32_t, 4>{{0x30, 0x31, 0x32, 0x33}}
                     : std::array<uint32_t, 4>{{0x30, 0x31, 0x33, 0x34}};
     const std::array<uint32_t, 2> expected_trigger_usages =
-        mac_variant ? std::array<uint32_t, 2>{{0x34, 0x35}}
+        mac_variant ? std::array<uint32_t, 2>{{0xc5, 0xc4}}
                     : std::array<uint32_t, 2>{{0x32, 0x35}};
     size_t offset = 0;
     size_t decoded = 0;
@@ -149,24 +200,13 @@ void inspect_report_descriptor(const uint8_t* descriptor,
         const uint8_t type = static_cast<uint8_t>((prefix >> 2u) & 0x03u);
         const uint8_t tag = static_cast<uint8_t>(prefix >> 4u);
 
-        expect(decoded < kDInputReportItemGolden.size(),
-               "report descriptor contains an extra HID item");
-        if (decoded < kDInputReportItemGolden.size()) {
-            const ItemGolden& golden = kDInputReportItemGolden[decoded];
-            uint32_t expected_value = golden.value;
-            if (mac_variant) {
-                if (decoded == 10) {
-                    expected_value = 0x32;
-                } else if (decoded == 11) {
-                    expected_value = 0x33;
-                } else if (decoded == 16) {
-                    expected_value = 0x34;
-                } else if (decoded == 17) {
-                    expected_value = 0x35;
-                }
-            }
+        ItemGolden golden{};
+        const bool has_golden =
+            expected_report_item(decoded, mac_variant, &golden);
+        expect(has_golden, "report descriptor contains an extra HID item");
+        if (has_golden) {
             expect(type == golden.type && tag == golden.tag &&
-                       size == golden.size && value == expected_value,
+                       size == golden.size && value == golden.value,
                    "decoded HID item differs from its mode golden");
         }
         ++decoded;
@@ -265,8 +305,9 @@ void inspect_report_descriptor(const uint8_t* descriptor,
         locals.clear();
     }
 
-    expect(offset == descriptor_size, "report descriptor was not fully decoded");
-    expect(decoded == kDInputReportItemGolden.size(),
+    const size_t expected_item_count =
+        kDInputReportItemGolden.size() + (mac_variant ? 2u : 0u);
+    expect(decoded == expected_item_count,
            "report descriptor is missing a golden HID item");
     expect(gamepad_application && collection_depth == 0,
            "report is not one balanced Game Pad application collection");
@@ -296,35 +337,22 @@ void inspect_report_descriptor(const uint8_t* descriptor,
     const InputField& triggers = fields[1];
     expect(triggers.bit_offset == 64 && triggers.size == 16 &&
                triggers.count == 2 && triggers.flags == 0x02 &&
-               triggers.globals.usage_page == 1 &&
+               triggers.globals.usage_page == (mac_variant ? 2u : 1u) &&
                triggers.globals.logical_minimum == 0 &&
                triggers.globals.logical_maximum == 65535 &&
                triggers.locals.usage_count ==
                    expected_trigger_usages.size() &&
                triggers.locals.usages[0] == expected_trigger_usages[0] &&
                triggers.locals.usages[1] == expected_trigger_usages[1],
-           mac_variant ? "unsigned Mac Ry/Rz trigger field layout is wrong"
-                       : "unsigned DInput Z/Rz trigger field layout is wrong");
+           mac_variant
+               ? "unsigned Mac Brake/Accelerator trigger field layout is wrong"
+               : "unsigned DInput Z/Rz trigger field layout is wrong");
     if (mac_variant) {
-        const std::array<uint32_t, 6> usage_indices{{
-            sticks.locals.usages[0] - 0x30u,
-            sticks.locals.usages[1] - 0x30u,
-            sticks.locals.usages[2] - 0x30u,
-            sticks.locals.usages[3] - 0x30u,
-            triggers.locals.usages[0] - 0x30u,
-            triggers.locals.usages[1] - 0x30u,
-        }};
-        constexpr std::array<uint32_t, 6> kSemanticAxisGolden{{
-            0, 1, 2, 3, 4, 5,
-        }};
-        expect(usage_indices == kSemanticAxisGolden,
-               "Mac physical fields do not map to Chromium axes 0..5");
         expect((sticks.bit_offset + 3u * sticks.size) / 8u == 6u &&
-                   usage_indices[3] == 3u &&
+                   sticks.locals.usages[3] == 0x33u &&
                    triggers.bit_offset / 8u == 8u &&
-                   usage_indices[4] == 4u,
-               "Mac field offset 6 must be Rx/axis3 and offset 8 must be "
-               "Ry/axis4; reversing them reproduces the hardware failure");
+                   (triggers.bit_offset + triggers.size) / 8u == 10u,
+               "Mac X/Y/Z/Rx sticks and following trigger offsets changed");
     }
 
     const InputField& hat = fields[2];
@@ -355,34 +383,6 @@ void inspect_report_descriptor(const uint8_t* descriptor,
                buttons.locals.usage_minimum == 1 &&
                buttons.locals.usage_maximum == 16,
            "sequential Button 1..16 field layout is wrong");
-}
-void inspect_report_descriptor_parity() {
-    constexpr std::array<uint8_t, 3> kDInputDifferentBytes{{
-        0x33, 0x34, 0x32,
-    }};
-    constexpr std::array<uint8_t, 3> kMacDifferentBytes{{
-        0x32, 0x33, 0x34,
-    }};
-    size_t difference_count = 0;
-    for (size_t offset = 0;
-         offset < sizeof(GenericHid::kDInputReportDescriptor); ++offset) {
-        const uint8_t dinput =
-            GenericHid::kDInputReportDescriptor[offset];
-        const uint8_t mac = GenericHid::kMacReportDescriptor[offset];
-        if (dinput == mac) {
-            continue;
-        }
-        expect(difference_count < kDInputDifferentBytes.size(),
-               "report descriptors differ outside the three Mac axis usages");
-        if (difference_count < kDInputDifferentBytes.size()) {
-            expect(dinput == kDInputDifferentBytes[difference_count] &&
-                       mac == kMacDifferentBytes[difference_count],
-                   "report descriptor axis usage difference is wrong");
-        }
-        ++difference_count;
-    }
-    expect(difference_count == kDInputDifferentBytes.size(),
-           "report descriptors do not differ at exactly three axis usages");
 }
 
 
@@ -423,13 +423,13 @@ void inspect_device_descriptors_and_strings() {
            "DInput and Mac identities do not have distinct strings");
 }
 
-void inspect_configuration_descriptor() {
+void inspect_configuration_descriptor(
+    const uint8_t* descriptor, size_t descriptor_size,
+    size_t expected_report_descriptor_size) {
     constexpr uint8_t kConfiguration = 0x02;
     constexpr uint8_t kInterface = 0x04;
     constexpr uint8_t kEndpoint = 0x05;
     constexpr uint8_t kHid = 0x21;
-    const uint8_t* descriptor = GenericHid::kConfigurationDescriptor;
-    const size_t descriptor_size = sizeof(GenericHid::kConfigurationDescriptor);
 
     expect(descriptor[0] == 9 && descriptor[1] == kConfiguration &&
                read_u16(descriptor + 2) == descriptor_size &&
@@ -474,9 +474,7 @@ void inspect_configuration_descriptor() {
             const uint16_t report_descriptor_length =
                 read_u16(descriptor + offset + 7);
             expect(report_descriptor_length ==
-                           sizeof(GenericHid::kDInputReportDescriptor) &&
-                       report_descriptor_length ==
-                           sizeof(GenericHid::kMacReportDescriptor),
+                       expected_report_descriptor_size,
                    "HID descriptor advertises the wrong report length");
             if (current_interface >= 0) {
                 ++hid_counts[static_cast<size_t>(current_interface)];
@@ -521,6 +519,28 @@ void inspect_configuration_descriptor() {
                    endpoint_counts[instance] == 1 && endpoints[instance + 1],
                "configured HID interface is missing or not isolated");
     }
+}
+
+void inspect_configuration_descriptor_parity() {
+    size_t difference_count = 0;
+    for (size_t offset = 0;
+         offset < sizeof(GenericHid::kDInputConfigurationDescriptor);
+         ++offset) {
+        const uint8_t dinput =
+            GenericHid::kDInputConfigurationDescriptor[offset];
+        const uint8_t mac = GenericHid::kMacConfigurationDescriptor[offset];
+        if (dinput == mac) {
+            continue;
+        }
+        const size_t expected_offset = 25u + 25u * difference_count;
+        expect(offset == expected_offset &&
+                   dinput == sizeof(GenericHid::kDInputReportDescriptor) &&
+                   mac == sizeof(GenericHid::kMacReportDescriptor),
+               "configuration descriptors differ outside report lengths");
+        ++difference_count;
+    }
+    expect(difference_count == EXPECTED_HID_INSTANCE_COUNT,
+           "configuration descriptors do not differ once per interface");
 }
 
 void inspect_report_encoding() {
@@ -622,9 +642,16 @@ int main() {
                               false);
     inspect_report_descriptor(GenericHid::kMacReportDescriptor,
                               sizeof(GenericHid::kMacReportDescriptor), true);
-    inspect_report_descriptor_parity();
     inspect_device_descriptors_and_strings();
-    inspect_configuration_descriptor();
+    inspect_configuration_descriptor(
+        GenericHid::kDInputConfigurationDescriptor,
+        sizeof(GenericHid::kDInputConfigurationDescriptor),
+        sizeof(GenericHid::kDInputReportDescriptor));
+    inspect_configuration_descriptor(
+        GenericHid::kMacConfigurationDescriptor,
+        sizeof(GenericHid::kMacConfigurationDescriptor),
+        sizeof(GenericHid::kMacReportDescriptor));
+    inspect_configuration_descriptor_parity();
     inspect_report_encoding();
     return failures == 0 ? 0 : 1;
 }

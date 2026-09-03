@@ -24,7 +24,7 @@ Official feature references:
 - Keep settings and Bluetooth bond storage separate.
 - DualShock 3 support is explicitly out of scope.
 - Proprietary 2.4 GHz controllers are out of scope; Bluetooth Classic and BLE controllers are in scope.
-- Do not impersonate 8BitDo or Microsoft USB identities in a release build.
+- Do not impersonate vendor USB identities; compatibility modes use project-owned or clearly development-only identities.
 - PlayStation Classic and Mega Drive output modes are explicitly out of scope.
 
 The official adapter also does not support the following, so they are not parity requirements:
@@ -458,9 +458,11 @@ no-phantom-controller tests on Switch and Windows.
 - implement four-interface DInput generic HID first
 - capture DInput rumble requirements before promising force feedback; Windows
   HID PID force feedback is not a free consequence of a gamepad descriptor
-- research whether the same standards-compliant HID report is sufficient on
-  macOS; share the driver when hardware proves it, otherwise add only the
-  descriptor/report differences required by macOS
+- Mac mode remains generic HID under the project development identity
+- use X/Y/Z/Rx for left/right sticks so generic macOS axis indices 0..3 are
+  stable
+- expose independent analog triggers through Simulation Controls Brake and
+  Accelerator usages; verify raw IOHID values and GameController behavior
 - do not duplicate profile transforms inside either output driver
 
 Gate: descriptor/report/output tests, then real Windows DInput and macOS

@@ -226,10 +226,12 @@ inline constexpr uint8_t kMacReportDescriptor[] = {
     0x15, 0x00,                    // Logical Minimum (0)
     0x27, 0xff, 0xff, 0x00, 0x00,  // Logical Maximum (65535)
     0x95, 0x02,                    // Report Count (2)
-    0x09, 0x34,                    // Usage (Ry)
-    0x09, 0x35,                    // Usage (Rz)
+    0x05, 0x02,                    // Usage Page (Simulation Controls)
+    0x09, 0xc5,                    // Usage (Brake)
+    0x09, 0xc4,                    // Usage (Accelerator)
     0x81, 0x02,                    // Input (Data, Variable, Absolute)
 
+    0x05, 0x01,        // Usage Page (Generic Desktop)
     0x15, 0x00,        // Logical Minimum (0)
     0x25, 0x07,        // Logical Maximum (7)
     0x35, 0x00,        // Physical Minimum (0)
@@ -257,32 +259,48 @@ inline constexpr uint8_t kMacReportDescriptor[] = {
     0xc0,        // End Collection
 };
 
-static_assert(sizeof(kDInputReportDescriptor) ==
-              sizeof(kMacReportDescriptor));
 
-#define GENERIC_HID_INTERFACE(number, endpoint)                              \
+#define GENERIC_HID_INTERFACE(number, endpoint, report_descriptor)           \
     0x09, 0x04, number, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00,               \
         0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22,                          \
-        static_cast<uint8_t>(sizeof(kDInputReportDescriptor)),              \
-        static_cast<uint8_t>(sizeof(kDInputReportDescriptor) >> 8u),        \
+        static_cast<uint8_t>(sizeof(report_descriptor)),                    \
+        static_cast<uint8_t>(sizeof(report_descriptor) >> 8u),              \
         0x07, 0x05, static_cast<uint8_t>(0x80u | endpoint), 0x03,           \
         kEndpointSize, 0x00, kEndpointIntervalMs
 
-inline constexpr uint8_t kConfigurationDescriptor[] = {
+inline constexpr uint8_t kDInputConfigurationDescriptor[] = {
     0x09, 0x02,
     static_cast<uint8_t>(kConfigurationDescriptorSize),
     static_cast<uint8_t>(kConfigurationDescriptorSize >> 8u),
     SWITCH_PICO_HID_INSTANCE_COUNT,
     0x01, 0x00, 0x80, 0xfa,
-    GENERIC_HID_INTERFACE(0x00, 0x01),
+    GENERIC_HID_INTERFACE(0x00, 0x01, kDInputReportDescriptor),
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 2
-    GENERIC_HID_INTERFACE(0x01, 0x02),
+    GENERIC_HID_INTERFACE(0x01, 0x02, kDInputReportDescriptor),
 #endif
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 3
-    GENERIC_HID_INTERFACE(0x02, 0x03),
+    GENERIC_HID_INTERFACE(0x02, 0x03, kDInputReportDescriptor),
 #endif
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 4
-    GENERIC_HID_INTERFACE(0x03, 0x04),
+    GENERIC_HID_INTERFACE(0x03, 0x04, kDInputReportDescriptor),
+#endif
+};
+
+inline constexpr uint8_t kMacConfigurationDescriptor[] = {
+    0x09, 0x02,
+    static_cast<uint8_t>(kConfigurationDescriptorSize),
+    static_cast<uint8_t>(kConfigurationDescriptorSize >> 8u),
+    SWITCH_PICO_HID_INSTANCE_COUNT,
+    0x01, 0x00, 0x80, 0xfa,
+    GENERIC_HID_INTERFACE(0x00, 0x01, kMacReportDescriptor),
+#if SWITCH_PICO_HID_INSTANCE_COUNT >= 2
+    GENERIC_HID_INTERFACE(0x01, 0x02, kMacReportDescriptor),
+#endif
+#if SWITCH_PICO_HID_INSTANCE_COUNT >= 3
+    GENERIC_HID_INTERFACE(0x02, 0x03, kMacReportDescriptor),
+#endif
+#if SWITCH_PICO_HID_INSTANCE_COUNT >= 4
+    GENERIC_HID_INTERFACE(0x03, 0x04, kMacReportDescriptor),
 #endif
 };
 
@@ -290,6 +308,9 @@ inline constexpr uint8_t kConfigurationDescriptor[] = {
 
 static_assert(sizeof(kDInputDeviceDescriptor) == 18);
 static_assert(sizeof(kMacDeviceDescriptor) == 18);
-static_assert(sizeof(kConfigurationDescriptor) == kConfigurationDescriptorSize);
+static_assert(sizeof(kDInputConfigurationDescriptor) ==
+              kConfigurationDescriptorSize);
+static_assert(sizeof(kMacConfigurationDescriptor) ==
+              kConfigurationDescriptorSize);
 
 }  // namespace GenericHid

@@ -259,7 +259,9 @@ extern "C" uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
         return XInput::kConfigurationDescriptor;
     }
     if (generic_selected()) {
-        return GenericHid::kConfigurationDescriptor;
+        return g_mode == AdapterUsbMode::kMac
+                   ? GenericHid::kMacConfigurationDescriptor
+                   : GenericHid::kDInputConfigurationDescriptor;
     }
 #endif
     return switch_pro_configuration_descriptor;

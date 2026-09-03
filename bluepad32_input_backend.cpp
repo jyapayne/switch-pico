@@ -23,6 +23,7 @@ namespace {
 constexpr int32_t kAxisMinimum = -512;
 constexpr int32_t kAxisMaximum = 511;
 constexpr int32_t kTriggerMaximum = 1023;
+constexpr int32_t kTriggerFullScaleMinimum = 1020;
 constexpr uint16_t kSwitchHostRumbleDurationMs = 50;
 // XInput vibration is stateful and remains active until XInputSetState sends
 // a new magnitude.
@@ -570,7 +571,7 @@ constexpr uint16_t scale_trigger(int32_t value) {
     if (value <= 0) {
         return 0;
     }
-    if (value >= kTriggerMaximum) {
+    if (value >= kTriggerFullScaleMinimum) {
         return UINT16_MAX;
     }
     return static_cast<uint16_t>(
@@ -610,6 +611,8 @@ static_assert(scale_axis(-512) == INT16_MIN);
 static_assert(scale_axis(0) == 0);
 static_assert(scale_axis(511) == INT16_MAX);
 static_assert(scale_trigger(0) == 0);
+static_assert(scale_trigger(1016) == 65086);
+static_assert(scale_trigger(1020) == UINT16_MAX);
 static_assert(scale_trigger(1023) == UINT16_MAX);
 static_assert(convert_accel(8192) == 4096);
 static_assert(convert_accel(-8192) == -4096);
@@ -747,14 +750,16 @@ ControllerState map_gamepad(const uni_gamepad_t& gamepad,
     state.button_right_shoulder =
         (button_mask & logical_button_bit(
                            ControllerProfileLogicalButton::kRightShoulder)) != 0;
-    state.left_trigger =
-        (gamepad.buttons & BUTTON_TRIGGER_L) != 0
-            ? UINT16_MAX
-            : scale_trigger(gamepad.brake);
-    state.right_trigger =
-        (gamepad.buttons & BUTTON_TRIGGER_R) != 0
-            ? UINT16_MAX
-            : scale_trigger(gamepad.throttle);
+    state.left_trigger = scale_trigger(gamepad.brake);
+    if (gamepad.brake == 0 &&
+        (gamepad.buttons & BUTTON_TRIGGER_L) != 0) {
+        state.left_trigger = UINT16_MAX;
+    }
+    state.right_trigger = scale_trigger(gamepad.throttle);
+    if (gamepad.throttle == 0 &&
+        (gamepad.buttons & BUTTON_TRIGGER_R) != 0) {
+        state.right_trigger = UINT16_MAX;
+    }
     state.button_left_stick =
         (button_mask & logical_button_bit(
                            ControllerProfileLogicalButton::kLeftStick)) != 0;

@@ -8,6 +8,7 @@ import IOKit.hid
 private let vendorID = 0xCAFE
 private let productID = 0x4021
 private let genericDesktopPage = 0x01
+private let simulationControlsPage = 0x02
 private let gamePadUsage = 0x05
 private let buttonPage = 0x09
 private let expectedInterfaceCount = 4
@@ -229,9 +230,14 @@ private func usageName(page: UInt32, usage: UInt32) -> String? {
         case 0x31: return "Y"
         case 0x32: return "Z"
         case 0x33: return "Rx"
-        case 0x34: return "Ry"
-        case 0x35: return "Rz"
         case 0x39: return "Hat"
+        default: return nil
+        }
+    }
+    if page == UInt32(simulationControlsPage) {
+        switch usage {
+        case 0xc5: return "LeftBrake"
+        case 0xc4: return "RightAccelerator"
         default: return nil
         }
     }
