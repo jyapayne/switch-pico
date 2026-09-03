@@ -287,7 +287,7 @@ private func inputValueCallback(
 }
 
 let manager: IOHIDManager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-let monitorInstance = HIDMonitor(manager: manager, runLoop: CFRunLoopGetCurrent())
+private let monitorInstance = HIDMonitor(manager: manager, runLoop: CFRunLoopGetCurrent())
 let openResult = monitorInstance.start()
 if openResult != kIOReturnSuccess {
     monitorInstance.cleanup()
