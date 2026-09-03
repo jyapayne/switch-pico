@@ -1,4 +1,5 @@
 #include "switch_pro_driver.h"
+#include "usb_output_driver.h"
 #include "controller_color_config.h"
 #include "tusb.h"
 #include "pico/time.h"
@@ -57,8 +58,8 @@ void initialize_contexts() {
     for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
         hid_ready[instance] = true;
         hid_report_succeeds[instance] = true;
-        switch_pro_init(instance);
     }
+    usb_output_driver_init(AdapterUsbMode::kSwitchProbe);
     clear_sent_reports();
 }
 
@@ -500,7 +501,7 @@ void test_rumble_callbacks_and_decoders_are_isolated() {
     initialize_contexts();
     rumble_events = {};
     for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
-        switch_pro_set_rumble_callback(instance, rumble_callback);
+        usb_output_driver_set_rumble_callback(instance, rumble_callback);
     }
     constexpr uint32_t neutral = 0x40400100u;
     auto full_payload = rumble_payload(type_2(64, 16, 64, 16), neutral);
@@ -592,7 +593,7 @@ void test_lifecycle_and_invalid_instances() {
     switch_pro_set_input(kInvalidInstance, ignored,
                          SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
                          SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
-    switch_pro_set_rumble_callback(kInvalidInstance, rumble_callback);
+    usb_output_driver_set_rumble_callback(kInvalidInstance, rumble_callback);
     expect(!switch_pro_task(kInvalidInstance),
            "invalid instance ran a driver task");
     expect(!switch_pro_is_ready(kInvalidInstance),

@@ -23,6 +23,7 @@ def test_switch_pro_driver_four_contexts_native(tmp_path: Path) -> None:
             f"-I{root / 'tests' / 'native_stubs'}",
             f"-I{root}",
             str(root / "switch_pro_driver.cpp"),
+            str(root / "usb_output_driver.cpp"),
             str(root / "switch_haptics.cpp"),
             str(root / "tests" / "switch_pro_driver_context_test.cpp"),
             "-o",

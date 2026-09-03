@@ -1,12 +1,12 @@
-#include "xinput_feasibility_driver.h"
+#include "xinput_driver.h"
 
 #include <stddef.h>
 #include <string.h>
 
 #include "device/usbd_pvt.h"
 #include "tusb.h"
-#include "xinput_feasibility_descriptors.h"
-#include "xinput_feasibility_protocol.h"
+#include "xinput_descriptors.h"
+#include "xinput_protocol.h"
 
 namespace {
 
@@ -15,7 +15,7 @@ constexpr uint8_t kEndpointBufferSize = 32;
 
 struct XInputContext {
     ControllerState input{};
-    XInputFeasibility::InputReport input_report{};
+    XInput::InputReport input_report{};
     uint8_t output_report[kEndpointBufferSize]{};
     ControllerRumbleCallback rumble_callback = nullptr;
     uint8_t endpoint_in = 0;
@@ -73,7 +73,7 @@ uint16_t driver_open(uint8_t rhport,
         interface_descriptor->bInterfaceProtocol != 0x01 ||
         interface_descriptor->bInterfaceNumber >=
             SWITCH_PICO_HID_INSTANCE_COUNT ||
-        max_length < XInputFeasibility::kInterfaceDescriptorSize) {
+        max_length < XInput::kInterfaceDescriptorSize) {
         return 0;
     }
 
@@ -83,11 +83,11 @@ uint16_t driver_open(uint8_t rhport,
     uint16_t consumed = sizeof(tusb_desc_interface_t);
     uint8_t const *descriptor = tu_desc_next(interface_descriptor);
     uint8_t endpoints_found = 0;
-    while (consumed < XInputFeasibility::kInterfaceDescriptorSize) {
+    while (consumed < XInput::kInterfaceDescriptorSize) {
         const uint8_t descriptor_length = descriptor[0];
         if (descriptor_length == 0 ||
             consumed + descriptor_length >
-                XInputFeasibility::kInterfaceDescriptorSize) {
+                XInput::kInterfaceDescriptorSize) {
             reset_context(context);
             return 0;
         }
@@ -139,8 +139,8 @@ bool driver_transfer(uint8_t rhport, uint8_t endpoint, xfer_result_t result,
     }
     if (endpoint == context->endpoint_out) {
         ControllerRumbleOutput rumble{};
-        if (XInputFeasibility::parse_rumble_report(context->output_report,
-                                                   transferred, &rumble) &&
+        if (XInput::parse_rumble_report(context->output_report, transferred,
+                                        &rumble) &&
             context->rumble_callback != nullptr) {
             const uint8_t instance = static_cast<uint8_t>(context - g_contexts);
             context->rumble_callback(instance, rumble);
@@ -154,43 +154,41 @@ bool driver_transfer(uint8_t rhport, uint8_t endpoint, xfer_result_t result,
 }
 
 usbd_class_driver_t const kDriver = {
-    "XINPUT-FEASIBILITY", driver_init,    driver_deinit,   driver_reset,
-    driver_open,          driver_control, driver_transfer, nullptr,
+    "XINPUT", driver_init,    driver_deinit,   driver_reset,
+    driver_open, driver_control, driver_transfer, nullptr,
 };
 
 } // namespace
 
-void xinput_feasibility_init(uint8_t instance) {
+void xinput_init(uint8_t instance) {
     XInputContext *context = context_for(instance);
     if (context != nullptr) {
         reset_context(*context);
     }
 }
 
-void xinput_feasibility_set_rumble_callback(uint8_t instance,
-                                            ControllerRumbleCallback callback) {
+void xinput_set_rumble_callback(uint8_t instance,
+                                ControllerRumbleCallback callback) {
     XInputContext *context = context_for(instance);
     if (context != nullptr) {
         context->rumble_callback = callback;
     }
 }
-void xinput_feasibility_set_input(uint8_t instance,
-                                  const ControllerState& state) {
+void xinput_set_input(uint8_t instance, const ControllerState& state) {
     XInputContext *context = context_for(instance);
     if (context != nullptr) {
         context->input = state;
     }
 }
 
-bool xinput_feasibility_task(uint8_t instance) {
+bool xinput_task(uint8_t instance) {
     XInputContext *context = context_for(instance);
     if (context == nullptr || !context->configured || !tud_ready() ||
         usbd_edpt_busy(kRhport, context->endpoint_in)) {
         return false;
     }
 
-    context->input_report =
-        XInputFeasibility::build_input_report(context->input);
+    context->input_report = XInput::build_input_report(context->input);
     if (!usbd_edpt_claim(kRhport, context->endpoint_in)) {
         return false;
     }
@@ -203,16 +201,11 @@ bool xinput_feasibility_task(uint8_t instance) {
     return true;
 }
 
-bool xinput_feasibility_is_ready(uint8_t instance) {
+bool xinput_is_ready(uint8_t instance) {
     XInputContext *context = context_for(instance);
     return context != nullptr && context->configured && tud_ready();
 }
 
-extern "C" usbd_class_driver_t const *
-usbd_app_driver_get_cb(uint8_t *driver_count) {
-    if (driver_count == nullptr) {
-        return nullptr;
-    }
-    *driver_count = 1;
+usbd_class_driver_t const* xinput_class_driver() {
     return &kDriver;
 }

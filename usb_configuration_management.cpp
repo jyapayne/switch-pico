@@ -479,7 +479,7 @@ bool process_out_request() {
 
 }  // namespace
 
-extern "C" bool tud_vendor_control_xfer_cb(
+bool usb_configuration_management_vendor_control(
     uint8_t rhport, uint8_t stage,
     tusb_control_request_t const* request) {
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY

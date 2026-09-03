@@ -11,6 +11,7 @@
 #include "controller_color.h"
 #include "controller_state.h"
 #include "switch_haptics.h"
+#include "tusb.h"
 #include "switch_pro_descriptors.h"
 // Preserve the pre-neutral-state 35%-of-1023 digital trigger boundary.
 constexpr uint32_t SWITCH_PRO_LEGACY_TRIGGER_RANGE_MAXIMUM = 1023;
@@ -46,3 +47,18 @@ bool switch_pro_is_ready(uint8_t instance);
 
 void switch_pro_set_rumble_callback(uint8_t instance,
                                     ControllerRumbleCallback callback);
+
+// TinyUSB-facing helpers called only by usb_output_driver.
+uint16_t switch_pro_hid_get_report(uint8_t instance, uint8_t report_id,
+                                   hid_report_type_t report_type,
+                                   uint8_t* buffer,
+                                   uint16_t requested_length);
+void switch_pro_hid_set_report(uint8_t instance, uint8_t report_id,
+                               hid_report_type_t report_type,
+                               const uint8_t* buffer, uint16_t buffer_size);
+void switch_pro_hid_report_received(uint8_t instance, uint8_t report_id,
+                                    const uint8_t* buffer,
+                                    uint16_t buffer_size);
+uint8_t const* switch_pro_hid_report_descriptor(uint8_t instance);
+void switch_pro_mount();
+void switch_pro_unmount();

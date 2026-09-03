@@ -36,9 +36,6 @@ bool tud_control_xfer(uint8_t rhport,
                       void* buffer, uint16_t length);
 bool tud_control_status(uint8_t rhport,
                         const tusb_control_request_t* request);
-bool tud_vendor_control_xfer_cb(
-    uint8_t rhport, uint8_t stage,
-    const tusb_control_request_t* request);
 #ifdef __cplusplus
 }
 #endif

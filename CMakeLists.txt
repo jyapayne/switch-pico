@@ -94,6 +94,7 @@ endif()
 add_executable(switch-pico
         switch-pico.cpp
         switch_pro_driver.cpp
+        usb_output_driver.cpp
         switch_haptics.cpp
 )
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
@@ -118,7 +119,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     if(SWITCH_PICO_ADAPTER_FEASIBILITY)
         target_sources(switch-pico PRIVATE
                 adapter_host_probe.cpp
-                xinput_feasibility_driver.cpp
+                xinput_driver.cpp
         )
         target_compile_definitions(switch-pico PRIVATE
                 SWITCH_PICO_ADAPTER_FEASIBILITY=1

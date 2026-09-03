@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tusb.h"
+
 #include "bluepad32_input_backend.h"
 #include "configuration_service.h"
 #include "profile_service.h"
@@ -83,3 +85,7 @@ size_t encode_profile_transaction(
     uint8_t* output, size_t output_size);
 
 }  // namespace UsbConfigurationManagement
+
+bool usb_configuration_management_vendor_control(
+    uint8_t rhport, uint8_t stage,
+    tusb_control_request_t const* request);

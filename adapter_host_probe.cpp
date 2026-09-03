@@ -12,7 +12,7 @@
 #include "hardware/structs/watchdog.h"
 #include "hardware/watchdog.h"
 #include "pico/time.h"
-#include "xinput_feasibility_descriptors.h"
+#include "xinput_descriptors.h"
 
 namespace {
 
@@ -82,8 +82,8 @@ bool adapter_host_probe_vendor_control(uint8_t rhport, uint8_t stage,
                                 sizeof(g_status_response));
     }
 
-    if (request->bRequest != XInputFeasibility::kMsVendorRequest ||
-        request->wIndex != XInputFeasibility::kMsCompatIdIndex) {
+    if (request->bRequest != XInput::kMsVendorRequest ||
+        request->wIndex != XInput::kMsCompatIdIndex) {
         return false;
     }
 
@@ -93,8 +93,8 @@ bool adapter_host_probe_vendor_control(uint8_t rhport, uint8_t stage,
         const bool queued = tud_control_xfer(
             rhport, request,
             const_cast<uint8_t *>(
-                XInputFeasibility::kProbeMsCompatIdDescriptor),
-            sizeof(XInputFeasibility::kProbeMsCompatIdDescriptor));
+                XInput::kProbeMsCompatIdDescriptor),
+            sizeof(XInput::kProbeMsCompatIdDescriptor));
         if (queued && g_reboot_alarm == 0) {
             g_reboot_alarm = add_alarm_in_ms(
                 AdapterHostProbeState::kRebootDelayMs,
@@ -107,6 +107,6 @@ bool adapter_host_probe_vendor_control(uint8_t rhport, uint8_t stage,
 
     return tud_control_xfer(
         rhport, request,
-        const_cast<uint8_t *>(XInputFeasibility::kMsCompatIdDescriptor),
-        sizeof(XInputFeasibility::kMsCompatIdDescriptor));
+        const_cast<uint8_t *>(XInput::kMsCompatIdDescriptor),
+        sizeof(XInput::kMsCompatIdDescriptor));
 }

@@ -5,7 +5,7 @@
 #include "controller_state.h"
 #include "switch_haptics.h"
 
-namespace XInputFeasibility {
+namespace XInput {
 
 constexpr uint16_t kDpadUp = 0x0001;
 constexpr uint16_t kDpadDown = 0x0002;
@@ -84,4 +84,4 @@ inline bool parse_rumble_report(const uint8_t *data, uint32_t size,
     return true;
 }
 
-} // namespace XInputFeasibility
+} // namespace XInput

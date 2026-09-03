@@ -11,11 +11,11 @@
 #error "SWITCH_PICO_HID_INSTANCE_COUNT must be between 1 and 4"
 #endif
 
-namespace XInputFeasibility {
+namespace XInput {
 
-constexpr uint16_t kPrototypeVendorId = 0xcafe;
-constexpr uint16_t kPrototypeProductId = 0x4010;
-constexpr uint16_t kPrototypeDeviceRevision = 0x0101;
+constexpr uint16_t kDevelopmentVendorId = 0xcafe;
+constexpr uint16_t kDevelopmentProductId = 0x4010;
+constexpr uint16_t kDevelopmentDeviceRevision = 0x0101;
 constexpr uint8_t kInterfaceDescriptorSize = 39;
 constexpr uint16_t kConfigurationDescriptorSize =
     9 + SWITCH_PICO_HID_INSTANCE_COUNT * kInterfaceDescriptorSize;
@@ -61,19 +61,19 @@ static const uint8_t kDeviceDescriptor[] = {
     0x00,
     0x00, // Composite device; each interface binds to the XUSB driver
     0x40, // Endpoint zero packet size
-    static_cast<uint8_t>(kPrototypeVendorId & 0xff),
-    static_cast<uint8_t>(kPrototypeVendorId >> 8),
-    static_cast<uint8_t>(kPrototypeProductId & 0xff),
-    static_cast<uint8_t>(kPrototypeProductId >> 8),
-    static_cast<uint8_t>(kPrototypeDeviceRevision & 0xff),
-    static_cast<uint8_t>(kPrototypeDeviceRevision >> 8),
+    static_cast<uint8_t>(kDevelopmentVendorId & 0xff),
+    static_cast<uint8_t>(kDevelopmentVendorId >> 8),
+    static_cast<uint8_t>(kDevelopmentProductId & 0xff),
+    static_cast<uint8_t>(kDevelopmentProductId >> 8),
+    static_cast<uint8_t>(kDevelopmentDeviceRevision & 0xff),
+    static_cast<uint8_t>(kDevelopmentDeviceRevision >> 8),
     0x01,
     0x02,
     0x03, // Manufacturer, product, serial strings
     0x01, // One configuration
 };
 
-#define XINPUT_FEASIBILITY_INTERFACE(number, endpoint)                         \
+#define XINPUT_INTERFACE(number, endpoint)                                     \
     0x09, 0x04, number, 0x00, 0x02, 0xff, 0x5d, 0x01, 0x00, 0x10, 0x21, 0x10,  \
         0x01, 0x01, 0x24, static_cast<uint8_t>(0x80 | endpoint), 0x14, 0x03,   \
         0x00, 0x03, 0x13, endpoint, 0x00, 0x03, 0x00, 0x07, 0x05,              \
@@ -90,21 +90,21 @@ static const uint8_t kConfigurationDescriptor[] = {
     0x00,
     0x80,
     0xfa,
-    XINPUT_FEASIBILITY_INTERFACE(0x00, 0x01),
+    XINPUT_INTERFACE(0x00, 0x01),
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 2
-    XINPUT_FEASIBILITY_INTERFACE(0x01, 0x02),
+    XINPUT_INTERFACE(0x01, 0x02),
 #endif
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 3
-    XINPUT_FEASIBILITY_INTERFACE(0x02, 0x03),
+    XINPUT_INTERFACE(0x02, 0x03),
 #endif
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 4
-    XINPUT_FEASIBILITY_INTERFACE(0x03, 0x04),
+    XINPUT_INTERFACE(0x03, 0x04),
 #endif
 };
 
-#undef XINPUT_FEASIBILITY_INTERFACE
+#undef XINPUT_INTERFACE
 
-#define XINPUT_FEASIBILITY_COMPAT_FUNCTION(number)                             \
+#define XINPUT_COMPAT_FUNCTION(number)                                         \
     number, 0x01, 'X', 'U', 'S', 'B', '1', '0', 0x00, 0x00, 0x00, 0x00, 0x00,  \
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 
@@ -125,19 +125,19 @@ static const uint8_t kMsCompatIdDescriptor[] = {
     0x00,
     0x00,
     0x00,
-    XINPUT_FEASIBILITY_COMPAT_FUNCTION(0x00),
+    XINPUT_COMPAT_FUNCTION(0x00),
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 2
-    XINPUT_FEASIBILITY_COMPAT_FUNCTION(0x01),
+    XINPUT_COMPAT_FUNCTION(0x01),
 #endif
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 3
-    XINPUT_FEASIBILITY_COMPAT_FUNCTION(0x02),
+    XINPUT_COMPAT_FUNCTION(0x02),
 #endif
 #if SWITCH_PICO_HID_INSTANCE_COUNT >= 4
-    XINPUT_FEASIBILITY_COMPAT_FUNCTION(0x03),
+    XINPUT_COMPAT_FUNCTION(0x03),
 #endif
 };
 
-#undef XINPUT_FEASIBILITY_COMPAT_FUNCTION
+#undef XINPUT_COMPAT_FUNCTION
 
 static const uint8_t kProbeMsCompatIdDescriptor[] = {
     0x10, 0x00, 0x00, 0x00, 0x00, 0x01, 0x04, 0x00,
@@ -150,4 +150,4 @@ static_assert(sizeof(kConfigurationDescriptor) == kConfigurationDescriptorSize);
 static_assert(sizeof(kMsCompatIdDescriptor) == kMsCompatIdDescriptorSize);
 static_assert(sizeof(kProbeMsCompatIdDescriptor) == 16);
 
-} // namespace XInputFeasibility
+} // namespace XInput

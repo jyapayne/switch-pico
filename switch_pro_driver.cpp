@@ -8,10 +8,6 @@
 #include "pico/rand.h"
 #include "pico/time.h"
 #include "tusb.h"
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-#include "adapter_host_probe.h"
-#include "xinput_feasibility_descriptors.h"
-#endif
 
 #ifdef SWITCH_PICO_LOG
 #define LOG_PRINTF(...) printf(__VA_ARGS__)
@@ -1034,10 +1030,11 @@ bool switch_pro_is_ready(uint8_t instance) {
     return context != nullptr && context->is_ready;
 }
 
-// HID callbacks
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
-                               hid_report_type_t report_type, uint8_t* buffer,
-                               uint16_t requested_length) {
+// TinyUSB callback helpers routed by usb_output_driver.
+uint16_t switch_pro_hid_get_report(uint8_t instance, uint8_t report_id,
+                                   hid_report_type_t report_type,
+                                   uint8_t* buffer,
+                                   uint16_t requested_length) {
     (void)report_id;
     (void)report_type;
     SwitchProContext* context = context_for(instance);
@@ -1095,9 +1092,9 @@ static void process_output_report(uint8_t instance,
     }
 }
 
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
-                           hid_report_type_t report_type,
-                           const uint8_t* buffer, uint16_t buffer_size) {
+void switch_pro_hid_set_report(uint8_t instance, uint8_t report_id,
+                               hid_report_type_t report_type,
+                               const uint8_t* buffer, uint16_t buffer_size) {
     SwitchProContext* context = context_for(instance);
     if (context == nullptr || report_type != HID_REPORT_TYPE_OUTPUT) {
         return;
@@ -1105,9 +1102,9 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     process_output_report(instance, *context, report_id, buffer, buffer_size);
 }
 
-void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id,
-                                const uint8_t* buffer,
-                                uint16_t buffer_size) {
+void switch_pro_hid_report_received(uint8_t instance, uint8_t report_id,
+                                    const uint8_t* buffer,
+                                    uint16_t buffer_size) {
     SwitchProContext* context = context_for(instance);
     if (context == nullptr) {
         return;
@@ -1115,114 +1112,17 @@ void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id,
     process_output_report(instance, *context, report_id, buffer, buffer_size);
 }
 
-uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
+uint8_t const* switch_pro_hid_report_descriptor(uint8_t instance) {
     if (context_for(instance) == nullptr) {
         return nullptr;
     }
     return switch_pro_report_descriptor;
 }
 
-uint8_t const* tud_descriptor_device_cb(void) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-    if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
-        return XInputFeasibility::kDeviceDescriptor;
-    }
-    return XInputFeasibility::kSwitchProbeDeviceDescriptor;
-#else
-    return switch_pro_device_descriptor;
-#endif
-}
-
-uint8_t const* tud_descriptor_configuration_cb(uint8_t index) {
-    (void)index;
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-    if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
-        return XInputFeasibility::kConfigurationDescriptor;
-    }
-#endif
-    return switch_pro_configuration_descriptor;
-}
-
-bool tud_control_request_cb(uint8_t rhport,
-                            tusb_control_request_t const* request) {
-    (void)rhport;
-    (void)request;
-    LOG_PRINTF(
-        "[CTRL] bmReq=0x%02x bReq=0x%02x wValue=0x%04x wIndex=0x%04x "
-        "wLen=%u\n",
-        request->bmRequestType, request->bRequest, request->wValue,
-        request->wIndex, request->wLength);
-    return false;  // let TinyUSB handle it normally
-}
-
-void tud_mount_cb(void) {
-    LOG_PRINTF("[USB] mount_cb\n");
+void switch_pro_mount() {
     reset_all_contexts(false);
 }
 
-void tud_umount_cb(void) {
-    LOG_PRINTF("[USB] umount_cb\n");
+void switch_pro_unmount() {
     reset_all_contexts(false);
-}
-
-static uint16_t desc_str[32];
-
-uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
-    (void)langid;
-
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-    adapter_host_probe_note_string_descriptor(index);
-    if (index == 0xee) {
-        static constexpr char kSignature[] = "MSFT100";
-        for (uint8_t i = 0; i < sizeof(kSignature) - 1; ++i) {
-            desc_str[1 + i] = kSignature[i];
-        }
-        desc_str[8] = XInputFeasibility::kMsVendorRequest;
-        desc_str[0] = static_cast<uint16_t>((0x03 << 8) | 18);
-        return desc_str;
-    }
-#endif
-
-    uint8_t chr_count = 0;
-    if (index == 0) {
-        memcpy(&desc_str[1], switch_pro_string_language, 2);
-        chr_count = 1;
-    } else {
-        const uint8_t* str = nullptr;
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-        static const uint8_t kManufacturer[] = "Switch Pico";
-        static const uint8_t kProduct[] = "XInput Feasibility";
-        static const uint8_t kSerial[] = "XINPUT-PROTOTYPE";
-        static const uint8_t* const kXInputStrings[] = {
-            nullptr, kManufacturer, kProduct, kSerial};
-        if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
-            if (index >= sizeof(kXInputStrings) /
-                             sizeof(kXInputStrings[0])) {
-                return nullptr;
-            }
-            str = kXInputStrings[index];
-        } else
-#endif
-        {
-            if (index >= sizeof(switch_pro_string_descriptors) /
-                             sizeof(switch_pro_string_descriptors[0])) {
-                return nullptr;
-            }
-            str = switch_pro_string_descriptors[index];
-        }
-
-        while (str[chr_count] != 0) {
-            ++chr_count;
-        }
-        if (chr_count > 31) {
-            chr_count = 31;
-        }
-        for (uint8_t i = 0; i < chr_count; ++i) {
-            desc_str[1 + i] = str[i];
-        }
-    }
-
-    desc_str[0] =
-        static_cast<uint16_t>((0x03 << 8) | (2 * chr_count + 2));
-    return desc_str;
 }

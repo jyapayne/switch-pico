@@ -158,10 +158,10 @@ void perform_out(UsbConfigurationManagement::Operation operation,
     tusb_control_request_t request = setup_request(
         operation, TUSB_DIR_OUT,
         static_cast<uint16_t>(next_out_payload.size()));
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request),
             "valid OUT setup was rejected");
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_ACK, &request) == expected_ack,
             "OUT acknowledgement result was incorrect");
 }
@@ -177,7 +177,7 @@ void test_vendor_requests() {
 
     tusb_control_request_t request = setup_request(
         Operation::kPairingRead, TUSB_DIR_IN, kMaximumResponseSize);
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload[5] ==
                     static_cast<uint8_t>(Operation::kPairingRead) &&
@@ -221,14 +221,14 @@ void test_vendor_requests() {
     request = setup_request(
         Operation::kPairingRefresh, TUSB_DIR_OUT,
         static_cast<uint16_t>(next_out_payload.size()));
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
-                !tud_vendor_control_xfer_cb(
+                !usb_configuration_management_vendor_control(
                     0, CONTROL_STAGE_ACK, &request),
             "bad request CRC was accepted");
 
     request.wValue = 0;
-    require(!tud_vendor_control_xfer_cb(
+    require(!usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request),
             "request with invalid magic was accepted");
 }
@@ -251,7 +251,7 @@ void test_profile_vendor_requests() {
     current_profile_list.rows[1].active_profile = 2;
     tusb_control_request_t request = setup_request(
         Operation::kProfileList, TUSB_DIR_IN, kMaximumResponseSize);
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload.size() == kResponseHeaderSize + 33 &&
                 control_payload[5] ==
@@ -274,7 +274,7 @@ void test_profile_vendor_requests() {
         controller_profile_default(expected_identity, 2);
     request = setup_request(
         Operation::kProfileRead, TUSB_DIR_IN, kMaximumResponseSize);
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload.size() ==
                     kResponseHeaderSize +
@@ -299,7 +299,7 @@ void test_profile_vendor_requests() {
     request = setup_request(
         Operation::kProfileTransactionStatus, TUSB_DIR_IN,
         kMaximumResponseSize);
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload.size() == kResponseHeaderSize + 20 &&
                 control_payload[6] ==
@@ -313,7 +313,7 @@ void test_profile_vendor_requests() {
     current_profile_transaction.transaction.stored_generation =
         0x11223344;
     current_profile_transaction.transaction.stored_crc = 0xaabbccdd;
-    require(tud_vendor_control_xfer_cb(
+    require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload[6] == static_cast<uint8_t>(Status::kOk) &&
                 read_u32(control_payload, kResponseHeaderSize) ==
@@ -391,7 +391,7 @@ void test_profile_vendor_requests() {
     perform_out(Operation::kProfileActivate, mutation, false);
     request = setup_request(
         Operation::kProfileReset, TUSB_DIR_OUT, kRequestHeaderSize + 15);
-    require(!tud_vendor_control_xfer_cb(
+    require(!usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request),
             "legacy profile reset payload was accepted");
 
@@ -400,7 +400,7 @@ void test_profile_vendor_requests() {
     request = setup_request(
         Operation::kProfileSelect, TUSB_DIR_OUT,
         kRequestHeaderSize + 14);
-    require(!tud_vendor_control_xfer_cb(
+    require(!usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request),
             "short profile selection request was accepted");
 }

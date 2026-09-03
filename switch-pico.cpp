@@ -3,6 +3,7 @@
 #include "pico/stdlib.h"
 #include "tusb.h"
 #include "switch_pro_driver.h"
+#include "usb_output_driver.h"
 #ifndef SWITCH_PICO_BLUEPAD32
 #include "hardware/uart.h"
 #else
@@ -11,7 +12,6 @@
 #include "bootsel_pairing_button.h"
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
 #include "adapter_host_probe.h"
-#include "xinput_feasibility_driver.h"
 #endif
 #endif
 
@@ -79,8 +79,8 @@ static void send_rumble_uart_frame(const ControllerRumbleOutput& rumble) {
 }
 #endif
 
-static void on_rumble_from_switch(uint8_t instance,
-                                  const ControllerRumbleOutput& rumble) {
+static void on_rumble_from_usb(uint8_t instance,
+                               const ControllerRumbleOutput& rumble) {
 #ifdef SWITCH_PICO_BLUEPAD32
     if (instance >= BLUEPAD32_INPUT_BACKEND_SLOT_COUNT) {
         return;
@@ -188,22 +188,13 @@ static void log_usb_state() {
 #ifdef SWITCH_PICO_BLUEPAD32
     for (uint8_t instance = 0;
          instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-        const bool ready =
-            adapter_host_probe_mode() == AdapterUsbMode::kXInput
-                ? xinput_feasibility_is_ready(instance)
-                : switch_pro_is_ready(instance);
-#else
-        const bool ready = switch_pro_is_ready(instance);
-#endif
+        const bool ready = usb_output_driver_is_ready(instance);
         if (ready != g_last_ready[instance]) {
             g_last_ready[instance] = ready;
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
             LOG_PRINTF("[%s %u] driver %s\n",
-                       adapter_host_probe_mode() == AdapterUsbMode::kXInput
-                           ? "XINPUT"
-                           : "SWITCH",
-                       instance, ready ? "ready" : "not ready");
+                       usb_output_driver_name(), instance,
+                       ready ? "ready" : "not ready");
 #else
             LOG_PRINTF("[SWITCH %u] driver %s\n", instance,
                        ready ? "ready (handshake OK)" : "not ready");
@@ -211,7 +202,7 @@ static void log_usb_state() {
         }
     }
 #else
-    const bool ready = switch_pro_is_ready(SWITCH_HID_INSTANCE);
+    const bool ready = usb_output_driver_is_ready(SWITCH_HID_INSTANCE);
     if (ready != g_last_ready) {
         g_last_ready = ready;
         LOG_PRINTF("[SWITCH] driver %s\n",
@@ -233,56 +224,38 @@ int main() {
 #else
     init_uart_input();
 #endif
+#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
+    usb_output_driver_init(adapter_host_probe_mode());
+#else
+    usb_output_driver_init(AdapterUsbMode::kSwitchProbe);
+#endif
 
     tusb_init();
 #ifdef SWITCH_PICO_BLUEPAD32
     for (uint8_t instance = 0;
          instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-        if (adapter_host_probe_mode() == AdapterUsbMode::kXInput) {
-            xinput_feasibility_init(instance);
-            xinput_feasibility_set_rumble_callback(
-                instance, on_rumble_from_switch);
-            g_user_states[instance] = neutral_input();
-            xinput_feasibility_set_input(instance,
-                                         g_user_states[instance]);
-        } else {
-            switch_pro_init(instance);
-            switch_pro_set_rumble_callback(instance,
-                                           on_rumble_from_switch);
-            g_user_states[instance] = neutral_input();
-            switch_pro_set_input(
-                instance, g_user_states[instance],
-                CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
-                CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD);
-        }
-#else
-        switch_pro_init(instance);
-        switch_pro_set_rumble_callback(instance, on_rumble_from_switch);
+        usb_output_driver_set_rumble_callback(instance,
+                                              on_rumble_from_usb);
         g_user_states[instance] = neutral_input();
-        switch_pro_set_input(
+        usb_output_driver_set_input(
             instance, g_user_states[instance],
             CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
             CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD);
-#endif
     }
 #else
-    switch_pro_init(SWITCH_HID_INSTANCE);
-    switch_pro_set_rumble_callback(SWITCH_HID_INSTANCE,
-                                   on_rumble_from_switch);
+    usb_output_driver_set_rumble_callback(SWITCH_HID_INSTANCE,
+                                          on_rumble_from_usb);
     g_user_state = neutral_input();
-    switch_pro_set_input(SWITCH_HID_INSTANCE, g_user_state,
-                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
-                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+    usb_output_driver_set_input(SWITCH_HID_INSTANCE, g_user_state,
+                                SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                                SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
 #endif
 
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_start();
 #ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
     LOG_PRINTF("[BOOT] adapter feasibility mode=%s\n",
-               adapter_host_probe_mode() == AdapterUsbMode::kXInput
-                   ? "XInput"
-                   : "Switch probe");
+               usb_output_driver_mode_name());
 #else
     LOG_PRINTF("[BOOT] switch-pico starting (Bluepad32 wireless @ 115200)\n");
 #endif
@@ -308,11 +281,7 @@ int main() {
         }
         const uint32_t now_ms =
             static_cast<uint32_t>(to_ms_since_boot(get_absolute_time()));
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-        const AdapterUsbMode output_mode = adapter_host_probe_mode();
-#else
-        constexpr AdapterUsbMode output_mode = AdapterUsbMode::kSwitchProbe;
-#endif
+        const AdapterUsbMode output_mode = usb_output_driver_mode();
         for (uint8_t instance = 0;
              instance < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++instance) {
             Bluepad32SlotSnapshot snapshot{};
@@ -341,40 +310,22 @@ int main() {
                 }
             }
             g_user_states[instance] = transformed.state;
-#ifdef SWITCH_PICO_ADAPTER_FEASIBILITY
-            bool sent = false;
-            if (output_mode == AdapterUsbMode::kXInput) {
-                xinput_feasibility_set_input(instance,
-                                             g_user_states[instance]);
-                sent = xinput_feasibility_task(instance);
-            } else {
-                switch_pro_set_input(
-                    instance, g_user_states[instance],
-                    transformed.left_trigger_digital_threshold,
-                    transformed.right_trigger_digital_threshold);
-                sent = switch_pro_task(instance);
-            }
-            if (sent) {
-                bluepad32_input_backend_report_sent(instance);
-            }
-#else
-            switch_pro_set_input(
+            usb_output_driver_set_input(
                 instance, g_user_states[instance],
                 transformed.left_trigger_digital_threshold,
                 transformed.right_trigger_digital_threshold);
-            if (switch_pro_task(instance)) {
+            if (usb_output_driver_task(instance)) {
                 bluepad32_input_backend_report_sent(instance);
             }
-#endif
         }
 #else
         bool new_data = poll_uart_frames();  // Pull controller state from UART1
         (void)new_data;
         ControllerState state = g_user_state;
-        switch_pro_set_input(SWITCH_HID_INSTANCE, state,
-                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
-                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
-        (void)switch_pro_task(SWITCH_HID_INSTANCE);
+        usb_output_driver_set_input(SWITCH_HID_INSTANCE, state,
+                                    SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                                    SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+        (void)usb_output_driver_task(SWITCH_HID_INSTANCE);
 #endif
         log_usb_state();
     }
