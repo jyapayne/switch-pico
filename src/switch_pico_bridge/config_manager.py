@@ -38,6 +38,7 @@ HOST_TRANSACTION_ID_MASK = 0x7FFFFFFF
 OP_INFO = 0x01
 OP_MODE_SET = 0x02
 OP_REBOOT = 0x03
+OP_BOOTSEL_REBOOT = 0x04
 OP_CONFIGURATION_READ = 0x10
 OP_CONFIGURATION_BEGIN = 0x11
 OP_CONFIGURATION_CHUNK = 0x12
@@ -1512,6 +1513,9 @@ def request_reboot(device: UsbDevice, transaction_id: int) -> None:
     )
     _control_out(device, OP_REBOOT, struct.pack("<I", transaction_id))
 
+def request_bootsel_reboot(device: UsbDevice) -> None:
+    _control_out(device, OP_BOOTSEL_REBOOT)
+
 
 def _mode_is_active(requested_mode: int, active_mode: int) -> bool:
     if requested_mode == REQUESTED_MODE_AUTO:
@@ -2169,6 +2173,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "diagnostics", help="show live Bluetooth and rumble pipeline counters"
     )
+    reboot = commands.add_parser(
+        "reboot", help="reboot into a firmware or ROM target"
+    )
+    reboot.add_argument("target", choices=("bootsel",))
     mode = commands.add_parser("mode", help="select the persistent USB mode")
     mode.add_argument("mode", choices=SELECTABLE_MODE_NAMES)
 
@@ -2319,6 +2327,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Rumble-pending slots: "
                 f"{diagnostics.rumble_pending_slots}"
             )
+        elif args.command == "reboot":
+            request_bootsel_reboot(device)
+            print("Rebooting into USB BOOTSEL mode.")
         elif args.command == "mode":
             requested_mode = REQUESTED_MODE_NAMES.index(args.mode)
             _, changed = configure_mode(device, requested_mode, args.timeout)

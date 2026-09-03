@@ -30,6 +30,7 @@ uint32_t mode_set_call_count = 0;
 uint32_t correlated_reboot_transaction_id = 0;
 uint32_t reboot_transaction_id = 0;
 uint32_t reboot_call_count = 0;
+bool bootsel_reboot_requested = false;
 bool refresh_requested = false;
 bool clear_requested = false;
 Bluepad32BackendDiagnostics current_diagnostics{};
@@ -221,6 +222,9 @@ void test_vendor_requests() {
     perform_out(Operation::kPairingRefresh, {});
     require(refresh_requested,
             "pairing refresh was not dispatched");
+    perform_out(Operation::kBootselReboot, {});
+    require(bootsel_reboot_requested,
+            "BOOTSEL reboot request was not dispatched");
     perform_out(Operation::kPairingClear, {});
     require(clear_requested, "pairing clear was not dispatched");
 
@@ -754,6 +758,11 @@ void bluepad32_input_backend_pairing_snapshot(
 void bluepad32_input_backend_diagnostics(
     Bluepad32BackendDiagnostics* out) {
     *out = current_diagnostics;
+}
+
+bool adapter_reboot_to_bootsel() {
+    bootsel_reboot_requested = true;
+    return true;
 }
 
 bool adapter_host_probe_vendor_control(

@@ -29,6 +29,7 @@ enum class Call : uint8_t {
     kClearPairings,
     kPairingSnapshot,
     kWatchdogReboot,
+    kBootselReboot,
 };
 
 std::vector<Call> calls;
@@ -61,6 +62,9 @@ ControllerProfileConfirmationPolicy feedback_policy =
 int reboot_count = 0;
 int runtime_reset_count = 0;
 int clear_pairings_count = 0;
+int bootsel_reboot_count = 0;
+uint32_t bootsel_gpio_mask = UINT32_MAX;
+uint32_t bootsel_disable_mask = UINT32_MAX;
 bool recovery_reserved = false;
 bool abandoned_host_receive = false;
 bool abandoned_host_receive_canceled = false;
@@ -101,6 +105,9 @@ void reset_harness(AdapterRequestedMode requested_mode =
     reboot_count = 0;
     runtime_reset_count = 0;
     clear_pairings_count = 0;
+    bootsel_reboot_count = 0;
+    bootsel_gpio_mask = UINT32_MAX;
+    bootsel_disable_mask = UINT32_MAX;
     recovery_reserved = false;
     abandoned_host_receive = false;
     abandoned_host_receive_canceled = false;
@@ -553,6 +560,29 @@ void test_auto_xinput_disconnect_reboots_to_probe() {
             "Auto Switch probe rebooted after USB unmount");
 }
 
+void test_bootsel_reboot_is_delayed_and_idempotent() {
+    reset_harness(AdapterRequestedMode::kAuto);
+    require(adapter_reboot_to_bootsel() &&
+                adapter_reboot_to_bootsel() &&
+                runtime_reset_count == 1 &&
+                bootsel_reboot_count == 0 && reboot_count == 0,
+            "BOOTSEL request was not accepted exactly once");
+
+    adapter_mode_controller_task(UINT32_MAX - 25u);
+    adapter_mode_controller_task(23);
+    require(bootsel_reboot_count == 0,
+            "BOOTSEL reboot occurred before the control-transfer guard");
+    adapter_mode_controller_task(24);
+    adapter_mode_controller_task(25);
+    require(bootsel_reboot_count == 1 &&
+                bootsel_gpio_mask == 0 &&
+                bootsel_disable_mask == 0 &&
+                reboot_count == 0 &&
+                !adapter_reboot_for_mode_transaction(91),
+            "BOOTSEL reboot was not delayed, one-shot, or isolated from "
+            "the correlated watchdog path");
+}
+
 }  // namespace
 
 void configuration_service_initialize_pre_usb() {
@@ -669,6 +699,14 @@ void watchdog_reboot(uint32_t, uint32_t, uint32_t) {
     ++reboot_count;
 }
 
+void reset_usb_boot(uint32_t usb_activity_gpio_pin_mask,
+                    uint32_t disable_interface_mask) {
+    calls.push_back(Call::kBootselReboot);
+    ++bootsel_reboot_count;
+    bootsel_gpio_mask = usb_activity_gpio_pin_mask;
+    bootsel_disable_mask = disable_interface_mask;
+}
+
 int main() {
     test_pre_tusb_ordering_and_configured_selection();
     test_mode_availability_has_one_stable_value();
@@ -681,5 +719,6 @@ int main() {
     test_recovery_auto_wins_host_mode_interleaving();
     test_failed_recovery_never_reboots();
     test_auto_xinput_disconnect_reboots_to_probe();
+    test_bootsel_reboot_is_delayed_and_idempotent();
     return 0;
 }

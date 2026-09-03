@@ -58,6 +58,7 @@ class FakeDevice:
         self.mode_pending_reads = 0
         self.fail_mode_status: int | None = None
         self.reboot_transaction_ids: list[int] = []
+        self.bootsel_reboot_requested = False
         self.records = [
             (
                 config_manager.TRANSPORT_CLASSIC,
@@ -392,6 +393,9 @@ class FakeDevice:
             assert reboot_transaction_id == self.transaction_id
             assert self.transaction_status == config_manager.STATUS_OK
             self.reboot_transaction_ids.append(reboot_transaction_id)
+        elif request == config_manager.OP_BOOTSEL_REBOOT:
+            assert payload == b""
+            self.bootsel_reboot_requested = True
         elif request == config_manager.OP_PAIRING_REFRESH:
             self.pairing_generation += 1
         elif request == config_manager.OP_PAIRING_CLEAR:
@@ -659,6 +663,15 @@ def test_mode_envelopes_and_host_side_validation(
     assert encoded == config_manager.encode_request(
         config_manager.OP_REBOOT, reboot_payload
     )
+
+    config_manager.request_bootsel_reboot(device)
+    operation, payload, encoded = device.out_requests[-1]
+    assert operation == config_manager.OP_BOOTSEL_REBOOT
+    assert payload == b""
+    assert encoded == config_manager.encode_request(
+        config_manager.OP_BOOTSEL_REBOOT
+    )
+    assert device.bootsel_reboot_requested
 
     for transaction_id in (0, 0x80000000, True):
         with pytest.raises(config_manager.ConfigManagerError):
@@ -1685,6 +1698,20 @@ def test_mode_cli_changes_then_noops(
     assert config_manager.main(["mode", mode_name]) == 0
     assert capsys.readouterr().out == f"USB mode is already {mode_name}.\n"
     assert reenumerated.out_requests == []
+
+
+def test_bootsel_reboot_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = FakeDevice()
+    monkeypatch.setattr(
+        config_manager, "_candidate_devices", lambda: (device,)
+    )
+
+    assert config_manager.main(["reboot", "bootsel"]) == 0
+    assert capsys.readouterr().out == "Rebooting into USB BOOTSEL mode.\n"
+    assert device.bootsel_reboot_requested
 
 
 def test_mode_parser_accepts_all_implemented_modes() -> None:

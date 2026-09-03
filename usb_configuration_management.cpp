@@ -79,6 +79,8 @@ bool valid_out_size(Operation operation, size_t size) {
             return size == kRequestHeaderSize + 5;
         case Operation::kReboot:
             return size == kRequestHeaderSize + 4;
+        case Operation::kBootselReboot:
+            return size == kRequestHeaderSize;
         case Operation::kConfigurationBegin:
             return size == kRequestHeaderSize + 12;
         case Operation::kProfileBegin:
@@ -385,6 +387,8 @@ bool process_out_request() {
             }
             return adapter_reboot_for_mode_transaction(transaction_id);
         }
+        case Operation::kBootselReboot:
+            return adapter_reboot_to_bootsel();
         case Operation::kConfigurationBegin:
             configuration_service_begin(
                 static_cast<uint32_t>(payload[0]) |

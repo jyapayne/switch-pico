@@ -92,6 +92,7 @@ Connect the Pico 2 W to the PC while the AIO firmware is running normally; do no
 ```sh
 uv run switch-pico-config status
 uv run switch-pico-config diagnostics
+uv run switch-pico-config reboot bootsel
 uv run switch-pico-config config show
 uv run switch-pico-config config set --pairing-window-seconds 90
 uv run switch-pico-config config reset --yes
@@ -389,6 +390,17 @@ If you already have a built (or use the pre-built one in `firmware/`) `.uf2`, yo
 5. The Pico will reboot automatically and the `RPI-RP2` drive will disappear when flashing completes.
 
 Tip: if you don’t see `RPI-RP2`, try a different USB cable (some are charge-only) or a different USB port/hub.
+
+When the AIO firmware is already running on a PC, enter ROM BOOTSEL without
+touching the board:
+
+```sh
+uv run switch-pico-config reboot bootsel
+```
+
+The firmware acknowledges the endpoint-zero request, waits 50 ms, and then
+calls the Pico ROM `reset_usb_boot()` entry point. Physical BOOTSEL remains the
+fallback if the firmware or USB management path is unavailable.
 
 Flash alternatives: bootsel + drag-drop or `picotool load`.
 Flags:

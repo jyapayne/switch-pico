@@ -8,6 +8,7 @@
 #include "controller_profile.h"
 #include "controller_profile_runtime.h"
 #include "hardware/watchdog.h"
+#include "pico/bootrom.h"
 #include "tusb.h"
 #include "usb_output_driver.h"
 
@@ -19,6 +20,7 @@ constexpr uint32_t kInternalTransactionValueMask =
     ~kInternalTransactionBit;
 constexpr uint32_t kFeedbackPhaseMs = 75;
 constexpr uint32_t kFeedbackGuardMs = 75;
+constexpr uint32_t kBootselRebootDelayMs = 50;
 static_assert(
     ADAPTER_MODE_CHORD_BUTTON_MASK ==
         static_cast<uint16_t>(
@@ -69,6 +71,9 @@ ModeOperation g_operation{};
 uint32_t g_reboot_transaction_id = 0;
 bool g_reboot_scheduled = false;
 bool g_correlated_reboot_scheduled = false;
+bool g_bootsel_reboot_requested = false;
+bool g_bootsel_reboot_delay_started = false;
+uint32_t g_bootsel_reboot_deadline_ms = 0;
 AdapterRequestedMode g_requested_mode = AdapterRequestedMode::kAuto;
 uint32_t g_next_internal_transaction_value = 1;
 bool g_recovery_requested = false;
@@ -298,6 +303,9 @@ void adapter_mode_controller_initialize_usb() {
     g_recovery_failed = false;
     g_recovery_clear_pairings_token = 0;
     g_correlated_reboot_scheduled = false;
+    g_bootsel_reboot_requested = false;
+    g_bootsel_reboot_delay_started = false;
+    g_bootsel_reboot_deadline_ms = 0;
 
     configuration_service_initialize_pre_usb();
     ConfigurationServiceSnapshot snapshot{};
@@ -383,6 +391,18 @@ void adapter_mode_controller_process_input(
 }
 
 void adapter_mode_controller_task(uint32_t now_ms) {
+    if (g_bootsel_reboot_requested) {
+        if (!g_bootsel_reboot_delay_started) {
+            g_bootsel_reboot_delay_started = true;
+            g_bootsel_reboot_deadline_ms =
+                now_ms + kBootselRebootDelayMs;
+        } else if (deadline_reached(
+                       now_ms, g_bootsel_reboot_deadline_ms)) {
+            g_bootsel_reboot_requested = false;
+            reset_usb_boot(0, 0);
+        }
+        return;
+    }
     if (g_reboot_scheduled) {
         return;
     }
@@ -447,5 +467,15 @@ bool adapter_reboot_for_mode_transaction(uint32_t transaction_id) {
     g_correlated_reboot_scheduled = true;
     g_reboot_transaction_id = transaction_id;
     reboot_now();
+    return true;
+}
+
+bool adapter_reboot_to_bootsel() {
+    if (g_reboot_scheduled) {
+        return g_bootsel_reboot_requested;
+    }
+    g_reboot_scheduled = true;
+    g_bootsel_reboot_requested = true;
+    controller_profile_runtime_reset();
     return true;
 }

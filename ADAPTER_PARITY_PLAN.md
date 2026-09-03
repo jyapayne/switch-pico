@@ -534,6 +534,16 @@ Evaluate a newer tagged Bluepad32 only when it closes a specific coverage gap. L
 
 The ROM UF2 path remains the trusted update mechanism.
 
+The management foundation is now available:
+
+```text
+switch-pico-config reboot bootsel
+```
+
+The endpoint-zero request is acknowledged before a guarded 50 ms delayed call
+to the Pico ROM `reset_usb_boot()` entry point. Physical BOOTSEL remains the
+recovery path when management USB is unavailable.
+
 Add:
 
 ```text
