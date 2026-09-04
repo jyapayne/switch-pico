@@ -63,6 +63,8 @@ uint16_t transform_left_trigger(
     uint16_t value) {
     ControllerProfile profile = default_profile();
     profile.triggers[0] = configuration;
+    profile.triggers[0].output =
+        CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
     ControllerState state{};
     state.left_trigger = value;
     return controller_profile_transform(state, profile).state.left_trigger;
@@ -107,9 +109,9 @@ void test_button_masks_and_direct_mapping() {
             "disabled button mapping still produced output");
 
     ControllerProfile invalid = default_profile();
-    invalid.button_map[0] = CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT;
+    invalid.button_map[0] = CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT;
     require(!controller_profile_validate(invalid),
-            "logical output 16 was accepted");
+            "logical output 18 was accepted");
     invalid.button_map[0] = 0xfe;
     require(!controller_profile_validate(invalid),
             "logical output 0xfe was accepted");
@@ -271,6 +273,8 @@ void test_trigger_boundaries_curves_and_thresholds() {
 
     ControllerProfile profile = default_profile();
     profile.triggers[0] = slow;
+    profile.triggers[0].output =
+        CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
     profile.triggers[0].digital_threshold = 12345;
     profile.triggers[1].digital_threshold = 54321;
     ControllerState state{};
@@ -280,6 +284,41 @@ void test_trigger_boundaries_curves_and_thresholds() {
     require(transformed.left_trigger_digital_threshold == 12345 &&
                 transformed.right_trigger_digital_threshold == 54321,
             "profile-owned digital thresholds were not returned");
+}
+
+void test_trigger_and_button_cross_mapping() {
+    ControllerProfile profile = default_profile();
+    profile.triggers[0].output =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kSouth);
+    profile.triggers[0].digital_threshold = 30000;
+    profile.triggers[1].output =
+        CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    profile.triggers[1].digital_threshold = 40000;
+    profile.button_map[
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kEast)] =
+        CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL;
+
+    ControllerState input{};
+    input.left_trigger = 29999;
+    input.right_trigger = 45000;
+    input.button_east = true;
+    ControllerProfileTransformResult output =
+        controller_profile_transform(input, profile);
+    require(!output.state.button_south &&
+                output.state.left_trigger == 45000 &&
+                output.state.right_trigger == UINT16_MAX &&
+                output.left_trigger_digital_threshold == 40000,
+            "cross-mapped triggers lost analog or button output");
+
+    input.left_trigger = 30000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.button_south,
+            "trigger threshold did not produce its mapped button");
+
+    profile.triggers[0].output =
+        CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    require(!controller_profile_validate(profile),
+            "two analog triggers targeting one output were accepted");
 }
 
 void test_default_whole_state_equivalence() {
@@ -378,6 +417,7 @@ int main() {
     test_stick_center_boundaries_and_inversion();
     test_stick_curves_and_monotonicity();
     test_trigger_boundaries_curves_and_thresholds();
+    test_trigger_and_button_cross_mapping();
     test_default_whole_state_equivalence();
     test_rumble_scaling_and_confirmation_policy();
     return 0;

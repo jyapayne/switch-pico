@@ -9,8 +9,12 @@ constexpr uint16_t button_bit(uint8_t button) {
     return static_cast<uint16_t>(1u << button);
 }
 
-bool is_bound_button(uint8_t button) {
-    return button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT;
+constexpr uint32_t control_bit(uint8_t control) {
+    return static_cast<uint32_t>(1u << control);
+}
+
+bool is_bound_control(uint8_t control) {
+    return control < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT;
 }
 
 void clear_binding(ControllerSyntheticBindingState* binding) {
@@ -127,12 +131,12 @@ void apply_macro_override(const ControllerProfileMacroStep& step,
 
 void controller_synthetic_input_cancel(
     ControllerSyntheticInputContext* context,
-    uint16_t current_input_button_mask) {
+    uint32_t current_input_control_mask) {
     if (context == nullptr) {
         return;
     }
     *context = {};
-    context->previous_input_button_mask = current_input_button_mask;
+    context->previous_input_control_mask = current_input_control_mask;
 }
 
 ControllerProfileTransformResult controller_synthetic_input_apply(
@@ -142,26 +146,35 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
         return controller_profile_transform(input, profile);
     }
 
-    const uint16_t input_button_mask =
-        controller_profile_extract_button_mask(input);
-    uint16_t rising_button_mask = static_cast<uint16_t>(
-        input_button_mask & ~context->previous_input_button_mask);
+    const uint32_t input_control_mask =
+        controller_profile_extract_control_mask(input, profile);
+    uint32_t rising_control_mask =
+        input_control_mask & ~context->previous_input_control_mask;
     const bool cancel_pressed =
-        is_bound_button(profile.macro_cancel) &&
-        (input_button_mask & button_bit(profile.macro_cancel)) != 0;
+        is_bound_control(profile.macro_cancel) &&
+        (input_control_mask & control_bit(profile.macro_cancel)) != 0;
     if (cancel_pressed) {
-        controller_synthetic_input_cancel(context, input_button_mask);
-        rising_button_mask = 0;
+        controller_synthetic_input_cancel(context, input_control_mask);
+        rising_control_mask = 0;
     }
 
     bool macro_started = false;
-    if (!cancel_pressed && is_bound_button(profile.macro_trigger) &&
-        (rising_button_mask & button_bit(profile.macro_trigger)) != 0) {
+    const bool trigger_chord_completed =
+        profile.macro_trigger_mask != 0 &&
+        (input_control_mask & profile.macro_trigger_mask) ==
+            profile.macro_trigger_mask &&
+        (rising_control_mask & profile.macro_trigger_mask) != 0;
+    if (!cancel_pressed && trigger_chord_completed) {
         macro_started = start_macro(context, profile, now_ms);
     }
     if (!macro_started) {
         advance_macro(context, profile, now_ms);
     }
+    const bool consume_macro_trigger =
+        context->macro_active ||
+        (profile.macro_trigger_mask != 0 &&
+         (input_control_mask & profile.macro_trigger_mask) ==
+             profile.macro_trigger_mask);
 
     uint16_t gated_input_button_mask = 0;
     for (uint8_t input_button = 0;
@@ -169,15 +182,15 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
          ++input_button) {
         ControllerSyntheticBindingState& binding =
             context->bindings[input_button];
-        if (input_button == profile.macro_trigger ||
+        const uint16_t bit = button_bit(input_button);
+        if ((consume_macro_trigger &&
+             (profile.macro_trigger_mask & bit) != 0) ||
             input_button == profile.macro_cancel) {
             clear_binding(&binding);
             continue;
         }
-
-        const uint16_t bit = button_bit(input_button);
-        const bool pressed = (input_button_mask & bit) != 0;
-        const bool rising = (rising_button_mask & bit) != 0;
+        const bool pressed = (input_control_mask & bit) != 0;
+        const bool rising = (rising_control_mask & bit) != 0;
         switch (profile.turbo_modes[input_button]) {
             case ControllerProfileTurboMode::kOff:
                 clear_binding(&binding);
@@ -219,6 +232,14 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
     ControllerState gated_input = input;
     controller_profile_apply_button_mask(gated_input_button_mask,
                                          &gated_input);
+    uint32_t consumed_controls =
+        consume_macro_trigger ? profile.macro_trigger_mask : 0;
+    if (cancel_pressed) {
+        consumed_controls |= control_bit(profile.macro_cancel);
+    }
+    controller_profile_remove_control_mask(
+        consumed_controls, &gated_input);
+
     ControllerProfileTransformResult result =
         controller_profile_transform(gated_input, profile);
     if (context->macro_active &&
@@ -232,6 +253,6 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
         }
     }
 
-    context->previous_input_button_mask = input_button_mask;
+    context->previous_input_control_mask = input_control_mask;
     return result;
 }

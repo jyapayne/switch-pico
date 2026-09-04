@@ -31,4 +31,4 @@ where = ["src"]
 include = ["switch_pico_bridge*"]
 
 [tool.setuptools.package-data]
-switch_pico_bridge = ["controller_db/gamecontrollerdb.txt"]
+switch_pico_bridge = ["controller_db/gamecontrollerdb.txt", "web/*", "web/assets/*"]

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Switch Pico Profile Studio</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span></div>
+      <div>
+        <p class="eyebrow">Switch Pico</p>
+        <h1>Profile Studio</h1>
+      </div>
+    </div>
+    <div class="connection" id="connectionState" data-state="loading">
+      <span class="connection-dot"></span>
+      <span id="connectionText">Connecting to adapter…</span>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="sidebar">
+      <div class="sidebar-heading">
+        <div>
+          <p class="eyebrow">Controller</p>
+          <h2>Profile library</h2>
+        </div>
+        <button class="icon-button" id="refreshButton" type="button" title="Refresh controllers" aria-label="Refresh controllers">↻</button>
+      </div>
+
+      <label class="field-label" for="identitySelect">Profile owner</label>
+      <select id="identitySelect" class="select"></select>
+      <p class="field-help">Choose the global fallback or a paired controller.</p>
+
+      <div class="profile-list" id="profileList" aria-label="Profiles"></div>
+
+      <div class="sidebar-note">
+        <span class="note-icon">i</span>
+        <p>Every controller has four slots. Start from defaults, tune the draft, then save it atomically to the Pico.</p>
+      </div>
+    </aside>
+
+    <section class="editor-shell">
+      <div class="editor-header">
+        <div>
+          <p class="eyebrow" id="profileOwner">Global fallback</p>
+          <div class="title-line">
+            <h2 id="profileTitle">Profile 1</h2>
+            <span class="active-badge" id="activeBadge" hidden>Active</span>
+            <span class="dirty-badge" id="dirtyBadge" hidden>Unsaved</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="button button-ghost" id="resetDraftButton" type="button">Start from defaults</button>
+          <button class="button button-secondary" id="activateButton" type="button">Make active</button>
+          <button class="button button-primary" id="saveButton" type="button">Save to Pico</button>
+        </div>
+      </div>
+
+      <nav class="section-nav" aria-label="Editor sections">
+        <a href="#mapping">Mapping</a>
+        <a href="#analog">Analog</a>
+        <a href="#feedback">Feedback</a>
+        <a href="#turbo">Turbo</a>
+        <a href="#macro">Macro</a>
+      </nav>
+
+      <div class="loading-card" id="loadingCard">
+        <div class="spinner"></div>
+        <p>Reading profile from the adapter…</p>
+      </div>
+
+      <form id="profileForm" hidden>
+        <section class="panel" id="mapping">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">01 · Controls</p>
+              <h3>Button mapping</h3>
+            </div>
+            <p>Choose what each physical button should produce.</p>
+          </div>
+          <div class="controller-mapper">
+            <div class="controller-canvas" id="controllerCanvas" data-style="generic">
+              <div class="controller-caption">
+                <span class="controller-live"><i></i> Connected layout</span>
+                <strong id="controllerModel">Generic controller</strong>
+              </div>
+              <div class="controller-photo-wrap">
+                <img
+                  class="controller-photo"
+                  id="controllerImage"
+                  src="/assets/controller-xbox.svg"
+                  alt="Connected controller"
+                >
+                <div class="controller-hotspots" id="controllerHotspots">
+                  <button type="button" data-controller-button="left_shoulder" aria-label="Left Shoulder">L</button>
+                  <button type="button" data-controller-button="right_shoulder" aria-label="Right Shoulder">R</button>
+                  <button type="button" data-controller-button="left_trigger" aria-label="Left Trigger">LT</button>
+                  <button type="button" data-controller-button="right_trigger" aria-label="Right Trigger">RT</button>
+                  <button type="button" data-controller-button="dpad_up" aria-label="D-pad Up">▲</button>
+                  <button type="button" data-controller-button="dpad_right" aria-label="D-pad Right">▶</button>
+                  <button type="button" data-controller-button="dpad_down" aria-label="D-pad Down">▼</button>
+                  <button type="button" data-controller-button="dpad_left" aria-label="D-pad Left">◀</button>
+                  <button type="button" data-controller-button="north" aria-label="North button">N</button>
+                  <button type="button" data-controller-button="west" aria-label="West button">W</button>
+                  <button type="button" data-controller-button="east" aria-label="East button">E</button>
+                  <button type="button" data-controller-button="south" aria-label="South button">S</button>
+                  <button type="button" data-controller-button="left_stick" aria-label="Left Stick">L3</button>
+                  <button type="button" data-controller-button="right_stick" aria-label="Right Stick">R3</button>
+                  <button type="button" data-controller-button="select" aria-label="Select">−</button>
+                  <button type="button" data-controller-button="start" aria-label="Start">+</button>
+                  <button type="button" data-controller-button="capture" aria-label="Capture">▣</button>
+                  <button type="button" data-controller-button="system" aria-label="System">⌂</button>
+                </div>
+              </div>
+              <p class="controller-hint">Select a highlighted control on the controller to remap it.</p>
+              <p class="controller-credit">
+                Image:
+                <a id="controllerCredit" href="https://github.com/AL2009man/Gamepad-Asset-Pack" target="_blank" rel="noreferrer">Controller artwork by Al. Lopez · MIT</a>
+              </p>
+            </div>
+
+            <aside class="mapping-inspector">
+              <p class="eyebrow">Selected control</p>
+              <div class="selected-control-mark" id="selectedControlGlyph">S</div>
+              <h4 id="selectedControlName">South button</h4>
+              <p id="selectedControlDescription">Physical South currently produces South.</p>
+              <label class="field-label" for="selectedMapping">Output action</label>
+              <select class="select" id="selectedMapping"></select>
+              <div class="mapping-key">
+                <span><i class="key-dot mapped"></i>Mapped</span>
+                <span><i class="key-dot disabled"></i>Disabled</span>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="panel" id="analog">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">02 · Response</p>
+              <h3>Sticks &amp; triggers</h3>
+            </div>
+            <p>Values use the controller's normalized integer range.</p>
+          </div>
+          <div class="analog-grid" id="analogFields"></div>
+        </section>
+
+        <section class="panel" id="feedback">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">03 · Identity</p>
+              <h3>Feedback</h3>
+            </div>
+            <p>Scale rumble and choose profile-change confirmation.</p>
+          </div>
+          <div class="subpanel" id="rumbleFields"></div>
+        </section>
+
+        <section class="panel" id="turbo">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">04 · Repeat</p>
+              <h3>Turbo behavior</h3>
+            </div>
+            <p>Off, hold-to-repeat, or press-once Auto Burst per button.</p>
+          </div>
+          <div class="mapping-grid compact" id="turboFields"></div>
+        </section>
+
+        <section class="panel" id="macro">
+          <div class="panel-heading macro-heading">
+            <div>
+              <p class="eyebrow">05 · Actions</p>
+              <h3>Bindings &amp; custom macro</h3>
+            </div>
+            <button class="button button-secondary" id="addMacroStepButton" type="button">Add state step</button>
+          </div>
+          <div class="builtin-actions" id="builtinActions"></div>
+          <div class="macro-controls" id="macroControls"></div>
+          <div class="macro-steps" id="macroSteps"></div>
+        </section>
+      </form>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

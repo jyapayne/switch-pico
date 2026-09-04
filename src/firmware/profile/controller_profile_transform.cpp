@@ -177,6 +177,26 @@ uint16_t transform_trigger(
         kQ16One);
 }
 
+void route_trigger_output(
+    uint8_t output, uint16_t value, uint16_t digital_threshold,
+    uint16_t* output_button_mask, uint16_t output_triggers[2],
+    uint16_t output_thresholds[2]) {
+    if (output < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT) {
+        if (value >= digital_threshold) {
+            *output_button_mask |= static_cast<uint16_t>(1u << output);
+        }
+        return;
+    }
+    if (output < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT) {
+        const uint8_t trigger_index = static_cast<uint8_t>(
+            output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL);
+        if (value > output_triggers[trigger_index]) {
+            output_triggers[trigger_index] = value;
+        }
+        output_thresholds[trigger_index] = digital_threshold;
+    }
+}
+
 }  // namespace
 
 uint16_t controller_profile_extract_button_mask(const ControllerState& state) {
@@ -230,6 +250,44 @@ uint16_t controller_profile_extract_button_mask(const ControllerState& state) {
                 ? button_bit(ControllerProfileLogicalButton::kDpadRight)
                 : 0;
     return mask;
+}
+
+uint32_t controller_profile_extract_control_mask(
+    const ControllerState& state, const ControllerProfile& profile) {
+    uint32_t mask = controller_profile_extract_button_mask(state);
+    const uint16_t trigger_values[2] = {
+        transform_trigger(state.left_trigger, profile.triggers[0]),
+        transform_trigger(state.right_trigger, profile.triggers[1]),
+    };
+    for (uint8_t index = 0; index < 2; ++index) {
+        if (trigger_values[index] >=
+            profile.triggers[index].digital_threshold) {
+            mask |= static_cast<uint32_t>(
+                1u << (CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL + index));
+        }
+    }
+    return mask;
+}
+
+void controller_profile_remove_control_mask(
+    uint32_t control_mask, ControllerState* state) {
+    if (state == nullptr) {
+        return;
+    }
+    const uint16_t buttons =
+        controller_profile_extract_button_mask(*state);
+    controller_profile_apply_button_mask(
+        static_cast<uint16_t>(
+            buttons & ~static_cast<uint16_t>(control_mask)),
+        state);
+    if ((control_mask &
+         (1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL)) != 0) {
+        state->left_trigger = 0;
+    }
+    if ((control_mask &
+         (1u << CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL)) != 0) {
+        state->right_trigger = 0;
+    }
 }
 
 void controller_profile_apply_button_mask(uint16_t button_mask,
@@ -297,9 +355,42 @@ ControllerProfileTransformResult controller_profile_transform(
     result.state = input;
     const uint16_t input_button_mask =
         controller_profile_extract_button_mask(input);
-    controller_profile_apply_button_mask(
-        controller_profile_map_button_mask(input_button_mask, profile),
-        &result.state);
+    uint16_t output_button_mask =
+        controller_profile_map_button_mask(input_button_mask, profile);
+    uint16_t output_triggers[2]{};
+    uint16_t output_thresholds[2] = {
+        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+    };
+
+    for (uint8_t input_button = 0;
+         input_button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT;
+         ++input_button) {
+        if ((input_button_mask &
+             static_cast<uint16_t>(1u << input_button)) == 0) {
+            continue;
+        }
+        const uint8_t output = profile.button_map[input_button];
+        if (output >= CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+            output < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT) {
+            output_triggers[
+                output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL] =
+                UINT16_MAX;
+        }
+    }
+
+    const uint16_t transformed_triggers[2] = {
+        transform_trigger(input.left_trigger, profile.triggers[0]),
+        transform_trigger(input.right_trigger, profile.triggers[1]),
+    };
+    for (uint8_t input_trigger = 0; input_trigger < 2; ++input_trigger) {
+        route_trigger_output(
+            profile.triggers[input_trigger].output,
+            transformed_triggers[input_trigger],
+            profile.triggers[input_trigger].digital_threshold,
+            &output_button_mask, output_triggers, output_thresholds);
+    }
+    controller_profile_apply_button_mask(output_button_mask, &result.state);
 
     transform_stick(profile.sticks[0], input.left_stick_x,
                     input.left_stick_y, &result.state.left_stick_x,
@@ -307,14 +398,10 @@ ControllerProfileTransformResult controller_profile_transform(
     transform_stick(profile.sticks[1], input.right_stick_x,
                     input.right_stick_y, &result.state.right_stick_x,
                     &result.state.right_stick_y);
-    result.state.left_trigger = transform_trigger(input.left_trigger,
-                                                  profile.triggers[0]);
-    result.state.right_trigger = transform_trigger(input.right_trigger,
-                                                   profile.triggers[1]);
-    result.left_trigger_digital_threshold =
-        profile.triggers[0].digital_threshold;
-    result.right_trigger_digital_threshold =
-        profile.triggers[1].digital_threshold;
+    result.state.left_trigger = output_triggers[0];
+    result.state.right_trigger = output_triggers[1];
+    result.left_trigger_digital_threshold = output_thresholds[0];
+    result.right_trigger_digital_threshold = output_thresholds[1];
     return result;
 }
 

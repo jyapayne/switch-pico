@@ -15,7 +15,7 @@ struct ControllerSyntheticInputContext {
     bool macro_active = false;
     uint8_t macro_step_index = 0;
     uint32_t macro_deadline_ms = 0;
-    uint16_t previous_input_button_mask = 0;
+    uint32_t previous_input_control_mask = 0;
     ControllerSyntheticBindingState
         bindings[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{};
 };
@@ -25,7 +25,7 @@ struct ControllerSyntheticInputContext {
 // restart until they are released and pressed again.
 void controller_synthetic_input_cancel(
     ControllerSyntheticInputContext* context,
-    uint16_t current_input_button_mask = 0);
+    uint32_t current_input_control_mask = 0);
 
 // Apply raw-input consumption, mapped physical contributions, Turbo/Auto Burst
 // gating, and finally the active macro step's field overrides.

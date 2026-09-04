@@ -15,6 +15,10 @@ struct ControllerProfileTransformResult {
 };
 
 uint16_t controller_profile_extract_button_mask(const ControllerState& state);
+uint32_t controller_profile_extract_control_mask(
+    const ControllerState& state, const ControllerProfile& profile);
+void controller_profile_remove_control_mask(
+    uint32_t control_mask, ControllerState* state);
 void controller_profile_apply_button_mask(uint16_t button_mask,
                                           ControllerState* state);
 uint16_t controller_profile_map_button_mask(

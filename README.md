@@ -122,6 +122,7 @@ uv run switch-pico-config mode xinput
 uv run switch-pico-config mode dinput
 uv run switch-pico-config mode mac
 uv run switch-pico-config profiles list
+uv run switch-pico-config profiles edit
 uv run switch-pico-config profiles export 1 profile.json --identity 0
 uv run switch-pico-config profiles import 2 profile.json --identity 0
 uv run switch-pico-config profiles activate 2 --identity 0
@@ -136,7 +137,11 @@ Output mode is selected before TinyUSB starts and never changes while mounted. A
 
 Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `CAFE:4021` (Mac). DInput and Mac expose four input-only generic HID interfaces and no rumble. Mac uses X/Y/Z/Rx sticks plus Simulation Brake/Accelerator triggers. Switch reports input, rumble, and motion capability; XInput reports input and rumble.
 
-`profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns four persistent profiles and one active index. Exported JSON contains direct logical button mappings, independent stick and trigger calibration/curves, digital trigger thresholds, weak/strong rumble scales, a profile-switching chord, one bounded eight-step macro, and per-button Turbo modes. Profile numbers shown to users are `1` through `4`; `--identity` uses the zero-based index from `profiles list`.
+`profiles edit` starts a local-only browser editor at `http://127.0.0.1:8765/`. It exposes every profile field: all 16 buttons plus the L2/R2 analog triggers can be remapped to any button or trigger output; both sticks and triggers retain independent deadzone/saturation/curve settings; and rumble, confirmation, Turbo/Auto Burst, built-in action chords, and the complete bounded custom macro sequence are editable. Select a controller identity and one of its four profile slots, use **Start from defaults** for a new draft, then **Save to Pico**. The backend validates the complete profile before using the existing chunked atomic transaction; invalid drafts never reach flash. Use `profiles edit --no-browser` for a printed URL or `profiles edit --port PORT` to choose another localhost port.
+
+The editor selects Switch Pro, DualSense, or Xbox artwork from the connected controller's USB VID/PID and places each remappable control directly over the matching physical button. Controller artwork is from [AL2009man/Gamepad-Asset-Pack](https://github.com/AL2009man/Gamepad-Asset-Pack) under its MIT license; the bundled license and source revision are recorded beside the assets.
+
+`profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns four persistent profiles and one active index. The JSON export/import commands remain available for version-controlled or scripted profiles. Profile numbers shown to users are `1` through `4`; `--identity` uses the zero-based index from `profiles list`.
 
 `pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses. `pairings clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
 
@@ -149,7 +154,7 @@ configuration, pairing, and profile work.
 
 ### Per-controller profiles
 
-The default profile-switching chord is **L + R + Select + Start**. On DualSense, use **L1 + R1 + Create + Options**. A profile can replace this chord with any nonzero logical-button mask; a stored zero selects the default chord.
+The profile editor lists **Cycle active profile**, **Toggle motion**, and **Run custom macro** as separate editable actions. Every action chord can contain any combination of the 16 buttons and the L2/R2 analog triggers. The default profile-switching chord is **L + R + Select + Start**; on DualSense, use **L1 + R1 + Create + Options**. A stored empty chord selects that default.
 
 - The chord cycles persistent profiles `1 → 2 → 3 → 4 → 1`.
 - Chord buttons are consumed locally and are not forwarded to the host.
@@ -159,11 +164,11 @@ The default profile-switching chord is **L + R + Select + Start**. On DualSense,
 - On connection and profile changes, RGB/player LEDs briefly show the active profile color/count, then return to the persistent USB slot color/player number.
 - Each controller identity and each of the four active USB slots remain isolated.
 
-Profile input processing is deterministic: physical input is mapped and tuned first, Turbo or Auto Burst gates configured buttons second, and active macro overrides apply last. Turbo runs at 15 activations per second while held. Auto Burst starts on one press and stops on a second press or the configured macro-cancel button. Macros contain at most eight state steps plus an explicit end and are cancelled on disconnect, profile/output-mode change, configured cancellation, or adapter configuration reset.
+Profile input processing is deterministic: physical buttons and analog triggers are mapped and tuned first, Turbo or Auto Burst gates configured buttons second, and active macro overrides apply last. Turbo runs at 15 activations per second while held. Auto Burst starts on one press and stops on a second press or the configured macro-cancel control. A custom macro can be triggered or cancelled by a button or analog trigger, and its trigger can be a multi-control chord. Partial chords remain available as ordinary input. Macros contain at most seven state steps plus the required explicit end and are cancelled on disconnect, profile/output-mode change, configured cancellation, or adapter configuration reset.
 
 ### Per-controller motion toggle
 
-Press **D-pad Up + R + Start** together to disable or re-enable motion for one controller. On DualSense, use **D-pad Up + R1 + Options**.
+The default motion action is **D-pad Up + R + Start**; on DualSense, use **D-pad Up + R1 + Options**. Each profile can replace it with any button/trigger chord from the graphical editor; a stored empty chord selects the default.
 
 - A longer rumble confirms motion disabled.
 - A shorter rumble confirms motion enabled.
@@ -171,7 +176,7 @@ Press **D-pad Up + R + Start** together to disable or re-enable motion for one c
 - Other controller slots are unaffected.
 - Motion returns to enabled after disconnect or reboot.
 
-Edit `controller_hotkey_config.h` to change the chord, default state, or feedback patterns.
+Edit `src/firmware/input/controller_hotkey_config.h` only to change the default motion-enabled state or its feedback patterns.
 
 ### Per-slot controller colors
 

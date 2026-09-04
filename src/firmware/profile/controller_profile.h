@@ -6,10 +6,15 @@
 #include "core/controller_identity.h"
 
 constexpr uint16_t CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION = 1;
-constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 2;
+constexpr uint16_t CONTROLLER_PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2;
+constexpr uint16_t CONTROLLER_PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3;
+constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 4;
 constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 256;
 constexpr uint8_t CONTROLLER_PROFILE_COUNT = 4;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT = 16;
+constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT = 18;
+constexpr uint8_t CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL = 16;
+constexpr uint8_t CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL = 17;
 constexpr uint8_t CONTROLLER_PROFILE_MACRO_STEP_CAPACITY = 8;
 constexpr uint16_t CONTROLLER_PROFILE_MAX_WAIT_MS = 10000;
 constexpr uint8_t CONTROLLER_PROFILE_NO_BUTTON = 0xff;
@@ -99,6 +104,8 @@ struct ControllerProfileTriggerConfiguration {
     // Compared against the transformed uint16 trigger output.
     uint16_t digital_threshold =
         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD;
+    // Logical control output (button, analog trigger, or NO_BUTTON).
+    uint8_t output = CONTROLLER_PROFILE_NO_BUTTON;
 };
 
 struct ControllerProfileMacroStep {
@@ -123,8 +130,9 @@ struct ControllerProfile {
     uint8_t strong_rumble_scale = UINT8_MAX;
     ControllerProfileConfirmationPolicy confirmation_policy =
         ControllerProfileConfirmationPolicy::kRumbleAndLed;
-    uint16_t switching_chord = 0;
-    uint8_t macro_trigger = CONTROLLER_PROFILE_NO_BUTTON;
+    uint32_t switching_chord = 0;
+    uint32_t motion_toggle_chord = 0;
+    uint32_t macro_trigger_mask = 0;
     uint8_t macro_cancel = CONTROLLER_PROFILE_NO_BUTTON;
     uint8_t macro_step_count = 1;
     ControllerProfileTurboMode

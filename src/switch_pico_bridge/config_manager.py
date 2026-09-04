@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import secrets
 import struct
@@ -99,7 +100,9 @@ TRANSPORT_UNKNOWN = 0
 TRANSPORT_CLASSIC = 1
 TRANSPORT_BLE = 2
 PROFILE_LEGACY_SCHEMA_VERSION = 1
-PROFILE_SCHEMA_VERSION = 2
+PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2
+PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3
+PROFILE_SCHEMA_VERSION = 4
 PROFILE_SIZE = 256
 PROFILE_CAPACITY = 4
 PROFILE_IDENTITY_CAPACITY = 16
@@ -131,6 +134,8 @@ LOGICAL_BUTTONS = (
     "dpad_left",
     "dpad_right",
 )
+LOGICAL_CONTROLS = LOGICAL_BUTTONS + ("left_trigger", "right_trigger")
+PROFILE_LOGICAL_CONTROL_MASK = (1 << len(LOGICAL_CONTROLS)) - 1
 RUMBLE_POLICIES = ("none", "rumble", "led", "rumble_and_led")
 TURBO_MODES = ("off", "turbo", "auto_burst")
 MACRO_STEP_TYPES = ("state", "end")
@@ -332,6 +337,21 @@ def _button_name(value: int) -> str | None:
         return None
     return LOGICAL_BUTTONS[value]
 
+def _control_index(value: Any, name: str) -> int:
+    if value is None:
+        return PROFILE_NONE_BUTTON
+    if type(value) is not str or value not in LOGICAL_CONTROLS:
+        choices = ", ".join(LOGICAL_CONTROLS)
+        raise ConfigManagerError(f"{name} must be null or one of: {choices}")
+    return LOGICAL_CONTROLS.index(value)
+
+
+def _control_name(value: int) -> str | None:
+    if value == PROFILE_NONE_BUTTON:
+        return None
+    return LOGICAL_CONTROLS[value]
+
+
 
 def _button_mask_from_json(value: Any, name: str) -> int:
     if type(value) is not list:
@@ -346,6 +366,28 @@ def _button_mask_from_json(value: Any, name: str) -> int:
             raise ConfigManagerError(f"{name} contains a duplicate button")
         mask |= bit
     return mask
+
+def _control_mask_from_json(value: Any, name: str) -> int:
+    if type(value) is not list:
+        raise ConfigManagerError(f"{name} must be a JSON array")
+    mask = 0
+    for entry in value:
+        index = _control_index(entry, name)
+        if index == PROFILE_NONE_BUTTON:
+            raise ConfigManagerError(f"{name} cannot contain null")
+        bit = 1 << index
+        if mask & bit:
+            raise ConfigManagerError(f"{name} contains a duplicate control")
+        mask |= bit
+    return mask
+
+
+def _control_mask_to_json(mask: int) -> list[str]:
+    return [
+        name
+        for index, name in enumerate(LOGICAL_CONTROLS)
+        if mask & (1 << index)
+    ]
 
 
 def _button_mask_to_json(mask: int) -> list[str]:
@@ -570,6 +612,7 @@ class TriggerConfig:
     upper_saturation: int
     curve_q8_8: int
     digital_threshold: int
+    output: int
 
     def __post_init__(self) -> None:
         _require_int(
@@ -586,39 +629,83 @@ class TriggerConfig:
         _require_int(
             self.digital_threshold, "trigger digital_threshold", 0, 0xFFFF
         )
+        if (
+            type(self.output) is not int
+            or self.output != PROFILE_NONE_BUTTON
+            and not 0 <= self.output < len(LOGICAL_CONTROLS)
+        ):
+            raise ConfigManagerError("invalid trigger output mapping")
 
     @classmethod
-    def from_bytes(cls, payload: bytes) -> TriggerConfig:
-        if len(payload) != 10 or payload[8:] != b"\x00\x00":
+    def from_bytes(
+        cls,
+        payload: bytes,
+        *,
+        schema_version: int,
+        source_index: int,
+    ) -> TriggerConfig:
+        if len(payload) != 10 or payload[9] != 0:
             raise ConfigManagerError("invalid trigger configuration encoding")
-        return cls(*struct.unpack("<HHHH", payload[:8]))
+        if (
+            schema_version < PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
+            and payload[8] != 0
+        ):
+            raise ConfigManagerError("invalid legacy trigger configuration")
+        output = (
+            payload[8]
+            if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
+            else len(LOGICAL_BUTTONS) + source_index
+        )
+        lower, upper, curve_q8_8, threshold = struct.unpack(
+            "<HHHH", payload[:8]
+        )
+        return cls(
+            lower, upper, curve_q8_8, threshold, output
+        )
 
     def to_bytes(self) -> bytes:
         return struct.pack(
-            "<HHHH2x",
+            "<HHHHBB",
             self.lower_deadzone,
             self.upper_saturation,
             self.curve_q8_8,
             self.digital_threshold,
+            self.output,
+            0,
         )
 
-    def to_json_object(self) -> dict[str, int]:
+    def to_json_object(self) -> dict[str, int | str | None]:
         return {
             "lower_deadzone": self.lower_deadzone,
             "upper_saturation": self.upper_saturation,
             "curve_q8_8": self.curve_q8_8,
             "digital_threshold": self.digital_threshold,
+            "output": _control_name(self.output),
         }
 
     @classmethod
-    def from_json_object(cls, value: Any, name: str) -> TriggerConfig:
+    def from_json_object(
+        cls,
+        value: Any,
+        name: str,
+        *,
+        schema_version: int,
+        source_index: int,
+    ) -> TriggerConfig:
         fields = (
             "lower_deadzone",
             "upper_saturation",
             "curve_q8_8",
             "digital_threshold",
         )
+        if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
+            fields += ("output",)
         obj = _require_object(value, fields, name)
+        output = (
+            _control_index(obj["output"], f"{name}.output")
+            if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
+            else len(LOGICAL_BUTTONS) + source_index
+        )
         return cls(
             _require_int(
                 obj["lower_deadzone"],
@@ -641,7 +728,9 @@ class TriggerConfig:
                 0,
                 0xFFFF,
             ),
+            output,
         )
+
 
 def _migrate_legacy_trigger_threshold(trigger: TriggerConfig) -> TriggerConfig:
     if (
@@ -654,6 +743,7 @@ def _migrate_legacy_trigger_threshold(trigger: TriggerConfig) -> TriggerConfig:
         trigger.upper_saturation,
         trigger.curve_q8_8,
         PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+        trigger.output,
     )
 
 
@@ -877,7 +967,8 @@ class ControllerProfile:
     strong_rumble_scale: int
     confirmation_policy: int
     switching_chord: int
-    macro_trigger: int
+    motion_toggle_chord: int
+    macro_trigger_mask: int
     macro_cancel: int
     macro_steps: tuple[MacroStep, ...]
     turbo_modes: tuple[int, ...]
@@ -892,9 +983,9 @@ class ControllerProfile:
         for mapping in self.button_map:
             if type(mapping) is not int or (
                 mapping != PROFILE_NONE_BUTTON
-                and not 0 <= mapping < len(LOGICAL_BUTTONS)
+                and not 0 <= mapping < len(LOGICAL_CONTROLS)
             ):
-                raise ConfigManagerError("invalid logical button mapping")
+                raise ConfigManagerError("invalid logical control mapping")
         if not isinstance(self.left_stick, StickConfig) or not isinstance(
             self.right_stick, StickConfig
         ):
@@ -904,6 +995,15 @@ class ControllerProfile:
         ):
             raise ConfigManagerError(
                 "profile triggers must be TriggerConfig values"
+            )
+        routed_triggers = [
+            trigger.output
+            for trigger in (self.left_trigger, self.right_trigger)
+            if len(LOGICAL_BUTTONS) <= trigger.output < len(LOGICAL_CONTROLS)
+        ]
+        if len(routed_triggers) != len(set(routed_triggers)):
+            raise ConfigManagerError(
+                "left and right trigger cannot target the same analog trigger"
             )
         _require_int(
             self.weak_rumble_scale, "weak rumble scale", 0, 0xFF
@@ -917,16 +1017,29 @@ class ControllerProfile:
             0,
             len(RUMBLE_POLICIES) - 1,
         )
-        _require_int(self.switching_chord, "switching chord", 0, 0xFFFF)
-        for value, name in (
-            (self.macro_trigger, "macro trigger"),
-            (self.macro_cancel, "macro cancel"),
+        _require_int(
+            self.switching_chord,
+            "switching chord",
+            0,
+            PROFILE_LOGICAL_CONTROL_MASK,
+        )
+        _require_int(
+            self.motion_toggle_chord,
+            "motion toggle chord",
+            0,
+            PROFILE_LOGICAL_CONTROL_MASK,
+        )
+        _require_int(
+            self.macro_trigger_mask,
+            "macro trigger chord",
+            0,
+            PROFILE_LOGICAL_CONTROL_MASK,
+        )
+        if type(self.macro_cancel) is not int or (
+            self.macro_cancel != PROFILE_NONE_BUTTON
+            and not 0 <= self.macro_cancel < len(LOGICAL_CONTROLS)
         ):
-            if type(value) is not int or (
-                value != PROFILE_NONE_BUTTON
-                and not 0 <= value < len(LOGICAL_BUTTONS)
-            ):
-                raise ConfigManagerError(f"invalid {name}")
+            raise ConfigManagerError("invalid macro cancel")
         if (
             type(self.macro_steps) is not tuple
             or not 1 <= len(self.macro_steps) <= PROFILE_MACRO_STEP_CAPACITY
@@ -947,20 +1060,32 @@ class ControllerProfile:
     @classmethod
     def default(cls) -> ControllerProfile:
         stick = StickConfig(0, 0, 0, 0x7FFF, 256, False, False)
-        trigger = TriggerConfig(
-            0, 0xFFFF, 256, PROFILE_DEFAULT_DIGITAL_THRESHOLD
+        left_trigger = TriggerConfig(
+            0,
+            0xFFFF,
+            256,
+            PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+            LOGICAL_CONTROLS.index("left_trigger"),
+        )
+        right_trigger = TriggerConfig(
+            0,
+            0xFFFF,
+            256,
+            PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+            LOGICAL_CONTROLS.index("right_trigger"),
         )
         return cls(
             button_map=tuple(range(len(LOGICAL_BUTTONS))),
             left_stick=stick,
             right_stick=stick,
-            left_trigger=trigger,
-            right_trigger=trigger,
+            left_trigger=left_trigger,
+            right_trigger=right_trigger,
             weak_rumble_scale=0xFF,
             strong_rumble_scale=0xFF,
             confirmation_policy=3,
             switching_chord=0,
-            macro_trigger=PROFILE_NONE_BUTTON,
+            motion_toggle_chord=0,
+            macro_trigger_mask=0,
             macro_cancel=PROFILE_NONE_BUTTON,
             macro_steps=(MacroStep.end(),),
             turbo_modes=(0,) * len(LOGICAL_BUTTONS),
@@ -973,15 +1098,26 @@ class ControllerProfile:
             raise ConfigManagerError("invalid profile size")
         version, size = struct.unpack_from("<HH", payload)
         if (
-            version
-            not in (PROFILE_LEGACY_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION)
+            version < PROFILE_LEGACY_SCHEMA_VERSION
+            or version > PROFILE_SCHEMA_VERSION
             or size != PROFILE_SIZE
         ):
             raise ConfigManagerError("unsupported profile schema")
-        if payload[75] != 0 or payload[81] != 0:
+        has_control_mapping = (
+            version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
+        )
+        has_action_trigger_bits = version == PROFILE_SCHEMA_VERSION
+        if payload[252:] != bytes(4):
             raise ConfigManagerError("profile reserved fields must be zero")
-        if payload[98:100] != b"\x00\x00" or payload[252:] != bytes(4):
-            raise ConfigManagerError("profile reserved fields must be zero")
+        if has_action_trigger_bits:
+            if payload[75] & 0xC0:
+                raise ConfigManagerError("profile action flags are invalid")
+        elif payload[75] != 0:
+            raise ConfigManagerError("legacy profile reserved fields must be zero")
+        if not has_control_mapping and (
+            payload[81] != 0 or payload[98:100] != b"\x00\x00"
+        ):
+            raise ConfigManagerError("legacy profile reserved fields must be zero")
         macro_count = payload[80]
         if not 1 <= macro_count <= PROFILE_MACRO_STEP_CAPACITY:
             raise ConfigManagerError("invalid macro step count")
@@ -999,11 +1135,38 @@ class ControllerProfile:
             step != MacroStep.end() for step in all_steps[macro_count:]
         ):
             raise ConfigManagerError("unused macro steps must be canonical end")
-        left_trigger = TriggerConfig.from_bytes(payload[52:62])
-        right_trigger = TriggerConfig.from_bytes(payload[62:72])
+        left_trigger = TriggerConfig.from_bytes(
+            payload[52:62], schema_version=version, source_index=0
+        )
+        right_trigger = TriggerConfig.from_bytes(
+            payload[62:72], schema_version=version, source_index=1
+        )
         if version == PROFILE_LEGACY_SCHEMA_VERSION:
             left_trigger = _migrate_legacy_trigger_threshold(left_trigger)
             right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
+        if has_control_mapping:
+            macro_trigger_mask = struct.unpack_from("<H", payload, 78)[0]
+            macro_cancel = payload[81]
+            motion_toggle_chord = struct.unpack_from("<H", payload, 98)[0]
+        else:
+            legacy_trigger = payload[78]
+            if legacy_trigger != PROFILE_NONE_BUTTON and not (
+                0 <= legacy_trigger < len(LOGICAL_BUTTONS)
+            ):
+                raise ConfigManagerError("invalid legacy macro trigger")
+            macro_trigger_mask = (
+                0
+                if legacy_trigger == PROFILE_NONE_BUTTON
+                else 1 << legacy_trigger
+            )
+            macro_cancel = payload[79]
+            motion_toggle_chord = 0
+        switching_chord = struct.unpack_from("<H", payload, 76)[0]
+        if has_action_trigger_bits:
+            action_bits = payload[75]
+            switching_chord |= (action_bits & 0x03) << 16
+            macro_trigger_mask |= ((action_bits >> 2) & 0x03) << 16
+            motion_toggle_chord |= ((action_bits >> 4) & 0x03) << 16
         return cls(
             button_map=tuple(payload[4:20]),
             left_stick=StickConfig.from_bytes(payload[20:36]),
@@ -1013,9 +1176,10 @@ class ControllerProfile:
             weak_rumble_scale=payload[72],
             strong_rumble_scale=payload[73],
             confirmation_policy=payload[74],
-            switching_chord=struct.unpack_from("<H", payload, 76)[0],
-            macro_trigger=payload[78],
-            macro_cancel=payload[79],
+            switching_chord=switching_chord,
+            motion_toggle_chord=motion_toggle_chord,
+            macro_trigger_mask=macro_trigger_mask,
+            macro_cancel=macro_cancel,
             macro_steps=all_steps[:macro_count],
             turbo_modes=tuple(payload[82:98]),
         )
@@ -1030,24 +1194,24 @@ class ControllerProfile:
         payload[36:52] = self.right_stick.to_bytes()
         payload[52:62] = self.left_trigger.to_bytes()
         payload[62:72] = self.right_trigger.to_bytes()
-        payload[72:76] = bytes(
+        payload[72:75] = bytes(
             (
                 self.weak_rumble_scale,
                 self.strong_rumble_scale,
                 self.confirmation_policy,
-                0,
             )
         )
-        struct.pack_into("<H", payload, 76, self.switching_chord)
-        payload[78:82] = bytes(
-            (
-                self.macro_trigger,
-                self.macro_cancel,
-                len(self.macro_steps),
-                0,
-            )
+        payload[75] = (
+            ((self.switching_chord >> 16) & 0x03)
+            | (((self.macro_trigger_mask >> 16) & 0x03) << 2)
+            | (((self.motion_toggle_chord >> 16) & 0x03) << 4)
         )
+        struct.pack_into("<H", payload, 76, self.switching_chord & 0xFFFF)
+        struct.pack_into("<H", payload, 78, self.macro_trigger_mask & 0xFFFF)
+        payload[80] = len(self.macro_steps)
+        payload[81] = self.macro_cancel
         payload[82:98] = bytes(self.turbo_modes)
+        struct.pack_into("<H", payload, 98, self.motion_toggle_chord & 0xFFFF)
         for index in range(PROFILE_MACRO_STEP_CAPACITY):
             step = (
                 self.macro_steps[index]
@@ -1063,7 +1227,7 @@ class ControllerProfile:
             "schema_version": PROFILE_SCHEMA_VERSION,
             "size": PROFILE_SIZE,
             "button_map": {
-                name: _button_name(self.button_map[index])
+                name: _control_name(self.button_map[index])
                 for index, name in enumerate(LOGICAL_BUTTONS)
             },
             "sticks": {
@@ -1081,10 +1245,13 @@ class ControllerProfile:
                     self.confirmation_policy
                 ],
             },
-            "switching_chord": _button_mask_to_json(self.switching_chord),
+            "switching_chord": _control_mask_to_json(self.switching_chord),
+            "motion_toggle_chord": _control_mask_to_json(
+                self.motion_toggle_chord
+            ),
             "macro": {
-                "trigger": _button_name(self.macro_trigger),
-                "cancel": _button_name(self.macro_cancel),
+                "trigger": _control_mask_to_json(self.macro_trigger_mask),
+                "cancel": _control_name(self.macro_cancel),
                 "steps": [
                     step.to_json_object() for step in self.macro_steps
                 ],
@@ -1100,6 +1267,19 @@ class ControllerProfile:
 
     @classmethod
     def from_json_object(cls, value: Any) -> ControllerProfile:
+        if type(value) is not dict:
+            raise ConfigManagerError("profile must be a JSON object")
+        schema_version = _require_int(
+            value.get("schema_version"),
+            "profile.schema_version",
+            0,
+            0xFFFF,
+        )
+        if (
+            schema_version < PROFILE_LEGACY_SCHEMA_VERSION
+            or schema_version > PROFILE_SCHEMA_VERSION
+        ):
+            raise ConfigManagerError("unsupported profile schema")
         fields = (
             "schema_version",
             "size",
@@ -1111,16 +1291,10 @@ class ControllerProfile:
             "macro",
             "turbo",
         )
+        if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
+            fields += ("motion_toggle_chord",)
         obj = _require_object(value, fields, "profile")
-        schema_version = _require_int(
-            obj["schema_version"], "profile.schema_version", 0, 0xFFFF
-        )
-        if (
-            schema_version
-            not in (PROFILE_LEGACY_SCHEMA_VERSION, PROFILE_SCHEMA_VERSION)
-            or _require_int(obj["size"], "profile.size", 0, 0xFFFF)
-            != PROFILE_SIZE
-        ):
+        if _require_int(obj["size"], "profile.size", 0, 0xFFFF) != PROFILE_SIZE:
             raise ConfigManagerError("unsupported profile schema")
         button_map = _require_object(
             obj["button_map"], LOGICAL_BUTTONS, "profile.button_map"
@@ -1150,17 +1324,67 @@ class ControllerProfile:
                 "profile.macro.steps must contain one to eight steps"
             )
         left_trigger = TriggerConfig.from_json_object(
-            triggers["left"], "profile.triggers.left"
+            triggers["left"],
+            "profile.triggers.left",
+            schema_version=schema_version,
+            source_index=0,
         )
         right_trigger = TriggerConfig.from_json_object(
-            triggers["right"], "profile.triggers.right"
+            triggers["right"],
+            "profile.triggers.right",
+            schema_version=schema_version,
+            source_index=1,
         )
         if schema_version == PROFILE_LEGACY_SCHEMA_VERSION:
             left_trigger = _migrate_legacy_trigger_threshold(left_trigger)
             right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
+        if schema_version == PROFILE_SCHEMA_VERSION:
+            switching_chord = _control_mask_from_json(
+                obj["switching_chord"], "profile.switching_chord"
+            )
+            motion_toggle_chord = _control_mask_from_json(
+                obj["motion_toggle_chord"],
+                "profile.motion_toggle_chord",
+            )
+            macro_trigger_mask = _control_mask_from_json(
+                macro["trigger"], "profile.macro.trigger"
+            )
+            macro_cancel = _control_index(
+                macro["cancel"], "profile.macro.cancel"
+            )
+        elif schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
+            switching_chord = _button_mask_from_json(
+                obj["switching_chord"], "profile.switching_chord"
+            )
+            motion_toggle_chord = _button_mask_from_json(
+                obj["motion_toggle_chord"],
+                "profile.motion_toggle_chord",
+            )
+            macro_trigger_mask = _button_mask_from_json(
+                macro["trigger"], "profile.macro.trigger"
+            )
+            macro_cancel = _button_index(
+                macro["cancel"], "profile.macro.cancel"
+            )
+        else:
+            switching_chord = _button_mask_from_json(
+                obj["switching_chord"], "profile.switching_chord"
+            )
+            motion_toggle_chord = 0
+            legacy_trigger = _button_index(
+                macro["trigger"], "profile.macro.trigger"
+            )
+            macro_trigger_mask = (
+                0
+                if legacy_trigger == PROFILE_NONE_BUTTON
+                else 1 << legacy_trigger
+            )
+            macro_cancel = _button_index(
+                macro["cancel"], "profile.macro.cancel"
+            )
         return cls(
             button_map=tuple(
-                _button_index(
+                _control_index(
                     button_map[name], f"profile.button_map.{name}"
                 )
                 for name in LOGICAL_BUTTONS
@@ -1190,15 +1414,10 @@ class ControllerProfile:
                 RUMBLE_POLICIES,
                 "profile.rumble.confirmation_policy",
             ),
-            switching_chord=_button_mask_from_json(
-                obj["switching_chord"], "profile.switching_chord"
-            ),
-            macro_trigger=_button_index(
-                macro["trigger"], "profile.macro.trigger"
-            ),
-            macro_cancel=_button_index(
-                macro["cancel"], "profile.macro.cancel"
-            ),
+            switching_chord=switching_chord,
+            motion_toggle_chord=motion_toggle_chord,
+            macro_trigger_mask=macro_trigger_mask,
+            macro_cancel=macro_cancel,
             macro_steps=tuple(
                 MacroStep.from_json_object(
                     step, f"profile.macro.steps[{index}]"
@@ -1535,6 +1754,8 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
     _raise_status(envelope)
     if envelope.schema_version not in (
         PROFILE_LEGACY_SCHEMA_VERSION,
+        PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
+        PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile-list schema")
@@ -1600,6 +1821,8 @@ def read_selected_profile(device: UsbDevice) -> ControllerProfile:
     _raise_status(envelope)
     if envelope.schema_version not in (
         PROFILE_LEGACY_SCHEMA_VERSION,
+        PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
+        PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile schema")
@@ -2138,6 +2361,20 @@ def _identity_index(value: str) -> int:
         )
     return index
 
+def _tcp_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "port must be a number from 0 to 65535"
+        ) from exc
+    if not 0 <= port <= 0xFFFF:
+        raise argparse.ArgumentTypeError(
+            "port must be a number from 0 to 65535"
+        )
+    return port
+
+
 
 def _add_identity_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -2194,13 +2431,29 @@ def build_parser() -> argparse.ArgumentParser:
     config_reset.add_argument("--yes", action="store_true")
 
     profiles = commands.add_parser(
-        "profiles", help="list, import, export, or select controller profiles"
+        "profiles",
+        help="open the editor or manage controller profiles as JSON",
     )
     profile_commands = profiles.add_subparsers(
         dest="profile_command", required=True
     )
     profile_commands.add_parser(
         "list", help="list profile identities and active profiles"
+    )
+    profile_edit = profile_commands.add_parser(
+        "edit", help="open the local graphical profile editor"
+    )
+    profile_edit.add_argument(
+        "--port",
+        type=_tcp_port,
+        default=8765,
+        metavar="PORT",
+        help="localhost port (default: 8765; use 0 to choose automatically)",
+    )
+    profile_edit.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="print the editor URL without opening a browser",
     )
     profile_export = profile_commands.add_parser(
         "export", help="export a profile as JSON"
@@ -2275,6 +2528,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     imported_profile: ControllerProfile | None = None
     try:
+        if args.command == "profiles" and args.profile_command == "edit":
+            profile_web = importlib.import_module(
+                ".profile_web", __package__
+            )
+            profile_web.run_profile_editor(
+                bus=args.bus,
+                address=args.address,
+                timeout=args.timeout,
+                port=args.port,
+                open_browser=not args.no_browser,
+            )
+            return 0
         if args.command == "profiles" and args.profile_command == "import":
             imported_profile = _load_profile(args.path)
         device = find_pico(args.bus, args.address, args.timeout)

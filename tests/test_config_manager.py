@@ -483,7 +483,7 @@ class FakeDevice:
 def custom_profile() -> config_manager.ControllerProfile:
     return config_manager.ControllerProfile(
         button_map=(
-            1,
+            config_manager.LOGICAL_CONTROLS.index("left_trigger"),
             0,
             2,
             3,
@@ -506,14 +506,21 @@ def custom_profile() -> config_manager.ControllerProfile:
         right_stick=config_manager.StickConfig(
             789, -321, 500, 31000, 192, False, True
         ),
-        left_trigger=config_manager.TriggerConfig(100, 65000, 320, 32000),
-        right_trigger=config_manager.TriggerConfig(200, 64000, 224, 33000),
+        left_trigger=config_manager.TriggerConfig(
+            100, 65000, 320, 32000,
+            config_manager.LOGICAL_CONTROLS.index("right_trigger"),
+        ),
+        right_trigger=config_manager.TriggerConfig(
+            200, 64000, 224, 33000,
+            config_manager.LOGICAL_BUTTONS.index("north"),
+        ),
         weak_rumble_scale=77,
         strong_rumble_scale=201,
         confirmation_policy=2,
-        switching_chord=(1 << 6) | (1 << 7),
-        macro_trigger=0,
-        macro_cancel=1,
+        switching_chord=(1 << 6) | (1 << 16),
+        motion_toggle_chord=(1 << 5) | (1 << 17),
+        macro_trigger_mask=(1 << 0) | (1 << 16) | (1 << 17),
+        macro_cancel=config_manager.LOGICAL_CONTROLS.index("right_trigger"),
         macro_steps=(
             config_manager.MacroStep(
                 0,
@@ -1113,13 +1120,18 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         config_manager.PROFILE_SCHEMA_VERSION,
         config_manager.PROFILE_SIZE,
     )
-    assert encoded[75] == encoded[81] == 0
-    assert encoded[98:100] == b"\x00\x00"
+    assert encoded[75] == 0x2D
+    assert encoded[60:62] == bytes((17, 0))
+    assert encoded[70:72] == bytes((3, 0))
+    assert encoded[81] == config_manager.LOGICAL_CONTROLS.index("right_trigger")
+    assert struct.unpack_from("<H", encoded, 98)[0] == (
+        profile.motion_toggle_chord & 0xFFFF
+    )
     assert encoded[252:] == bytes(4)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
 
     serialized = profile.to_json()
-    assert serialized.startswith('{\n  "schema_version": 2,\n  "size": 256,')
+    assert serialized.startswith('{\n  "schema_version": 4,\n  "size": 256,')
     decoded = config_manager.ControllerProfile.from_json(serialized)
     assert decoded == profile
     assert decoded.to_json() == serialized
@@ -1131,6 +1143,12 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         0,
         config_manager.PROFILE_LEGACY_SCHEMA_VERSION,
     )
+    legacy_default_wire[60:62] = b"\x00\x00"
+    legacy_default_wire[70:72] = b"\x00\x00"
+    legacy_default_wire[78] = config_manager.PROFILE_NONE_BUTTON
+    legacy_default_wire[79] = config_manager.PROFILE_NONE_BUTTON
+    legacy_default_wire[81] = 0
+    legacy_default_wire[98:100] = b"\x00\x00"
     struct.pack_into(
         "<HHHH",
         legacy_default_wire,
@@ -1180,22 +1198,37 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         == config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
     )
 
-    legacy_custom_wire = bytearray(encoded)
+    previous_wire = bytearray(default_wire)
     struct.pack_into(
         "<H",
-        legacy_custom_wire,
+        previous_wire,
         0,
-        config_manager.PROFILE_LEGACY_SCHEMA_VERSION,
+        config_manager.PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
     )
-    assert (
-        config_manager.ControllerProfile.from_bytes(legacy_custom_wire)
-        == profile
+    previous_wire[60:62] = b"\x00\x00"
+    previous_wire[70:72] = b"\x00\x00"
+    previous_wire[78] = 0
+    previous_wire[79] = 1
+    previous_wire[81] = 0
+    previous_wire[98:100] = b"\x00\x00"
+    migrated_previous = config_manager.ControllerProfile.from_bytes(
+        previous_wire
     )
+    assert migrated_previous.left_trigger.output == 16
+    assert migrated_previous.right_trigger.output == 17
+    assert migrated_previous.macro_trigger_mask == 1
+    assert migrated_previous.macro_cancel == 1
+    assert migrated_previous.motion_toggle_chord == 0
+    assert migrated_previous.to_bytes()[0] == config_manager.PROFILE_SCHEMA_VERSION
 
     legacy_json_object = default_profile.to_json_object()
     legacy_json_object["schema_version"] = (
         config_manager.PROFILE_LEGACY_SCHEMA_VERSION
     )
+    del legacy_json_object["motion_toggle_chord"]
+    del legacy_json_object["triggers"]["left"]["output"]
+    del legacy_json_object["triggers"]["right"]["output"]
+    legacy_json_object["macro"]["trigger"] = "south"
     legacy_json_object["triggers"]["left"]["digital_threshold"] = (
         config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
     )
@@ -1212,15 +1245,31 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     assert migrated_json.right_trigger.digital_threshold == 33000
     assert migrated_json.left_trigger.lower_deadzone == 30000
     assert migrated_json.left_trigger.upper_saturation == 40000
+    assert migrated_json.left_trigger.output == 16
+    assert migrated_json.right_trigger.output == 17
+    assert migrated_json.macro_trigger_mask == 1
+    assert migrated_json.motion_toggle_chord == 0
 
 
 def test_trigger_threshold_uses_transformed_output_domain() -> None:
     for threshold in (0, 0xFFFF):
-        trigger = config_manager.TriggerConfig(30000, 40000, 256, threshold)
-        assert config_manager.TriggerConfig.from_bytes(trigger.to_bytes()) == trigger
+        trigger = config_manager.TriggerConfig(
+            30000, 40000, 256, threshold, 16
+        )
+        assert (
+            config_manager.TriggerConfig.from_bytes(
+                trigger.to_bytes(),
+                schema_version=config_manager.PROFILE_SCHEMA_VERSION,
+                source_index=0,
+            )
+            == trigger
+        )
         assert (
             config_manager.TriggerConfig.from_json_object(
-                trigger.to_json_object(), "trigger"
+                trigger.to_json_object(),
+                "trigger",
+                schema_version=config_manager.PROFILE_SCHEMA_VERSION,
+                source_index=0,
             )
             == trigger
         )
@@ -1242,7 +1291,7 @@ def test_trigger_threshold_uses_transformed_output_domain() -> None:
             config_manager.ConfigManagerError,
             match="trigger digital_threshold",
         ):
-            config_manager.TriggerConfig(30000, 40000, 256, threshold)
+            config_manager.TriggerConfig(30000, 40000, 256, threshold, 16)
 
     for lower_deadzone, upper_saturation in (
         (40000, 40000),
@@ -1253,7 +1302,7 @@ def test_trigger_threshold_uses_transformed_output_domain() -> None:
             match="lower_deadzone must be below upper_saturation",
         ):
             config_manager.TriggerConfig(
-                lower_deadzone, upper_saturation, 256, 0
+                lower_deadzone, upper_saturation, 256, 0, 16
             )
 
 
@@ -1368,6 +1417,53 @@ def test_profile_cli_surfaces_late_storage_failure(
         (device.profile_transaction_id, 8),
     ]
 
+
+def test_profile_edit_cli_starts_local_web_editor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from switch_pico_bridge import profile_web
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        profile_web,
+        "run_profile_editor",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        config_manager,
+        "_candidate_devices",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("editor startup must not require a connected Pico")
+        ),
+    )
+
+    assert (
+        config_manager.main(
+            [
+                "--bus",
+                "3",
+                "--address",
+                "7",
+                "--timeout",
+                "8",
+                "profiles",
+                "edit",
+                "--port",
+                "9000",
+                "--no-browser",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "bus": 3,
+            "address": 7,
+            "timeout": 8.0,
+            "port": 9000,
+            "open_browser": False,
+        }
+    ]
 
 def test_profile_cli_json_round_trip_activate_and_reset(
     monkeypatch: pytest.MonkeyPatch,
@@ -1485,9 +1581,9 @@ def test_malformed_profiles_are_rejected_before_usb(
     tmp_path: Path,
 ) -> None:
     malformed_binary = bytearray(config_manager.ControllerProfile.default().to_bytes())
-    malformed_binary[75] = 1
+    malformed_binary[75] = 0xC0
     with pytest.raises(
-        config_manager.ConfigManagerError, match="reserved fields"
+        config_manager.ConfigManagerError, match="action flags"
     ):
         config_manager.ControllerProfile.from_bytes(malformed_binary)
 

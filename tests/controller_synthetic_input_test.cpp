@@ -39,7 +39,7 @@ ControllerProfile profile_with_macro(
         ControllerProfileLogicalButton::kCapture) {
     ControllerProfile profile =
         controller_profile_default(controller_identity_global(), 0);
-    profile.macro_trigger = button_index(trigger);
+    profile.macro_trigger_mask = button_bit(trigger);
     profile.macro_cancel = button_index(cancel);
     return profile;
 }
@@ -98,6 +98,54 @@ void test_immediate_press_release_dpad_and_explicit_end() {
     require(has_button(output, ControllerProfileLogicalButton::kWest) &&
                 !context.macro_active,
             "explicit end did not clear overrides and restore physical input");
+}
+
+void test_macro_trigger_chord_requires_every_button() {
+    ControllerProfile profile =
+        profile_with_macro(ControllerProfileLogicalButton::kSouth);
+    profile.macro_trigger_mask =
+        button_bit(ControllerProfileLogicalButton::kSouth) |
+        (1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL);
+    profile.macro_cancel =
+        CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL;
+    profile.macro_step_count = 2;
+    profile.macro_steps[0].type =
+        ControllerProfileMacroStepType::kState;
+    profile.macro_steps[0].override_flags =
+        kControllerProfileOverrideButtons;
+    profile.macro_steps[0].duration_ms = 100;
+    profile.macro_steps[0].output_button_mask =
+        button_bit(ControllerProfileLogicalButton::kNorth);
+    set_end(&profile, 1);
+
+    ControllerSyntheticInputContext context{};
+    ControllerState input =
+        state_with_buttons(
+            button_bit(ControllerProfileLogicalButton::kSouth));
+    ControllerProfileTransformResult output =
+        controller_synthetic_input_apply(&context, input, profile, 0);
+    require(!context.macro_active &&
+                has_button(output, ControllerProfileLogicalButton::kSouth),
+            "partial macro chord triggered or consumed a normal button");
+
+    input = state_with_buttons(
+        button_bit(ControllerProfileLogicalButton::kSouth));
+    input.left_trigger = UINT16_MAX;
+    output = controller_synthetic_input_apply(
+        &context, input, profile, 1);
+    require(context.macro_active &&
+                has_button(output, ControllerProfileLogicalButton::kNorth) &&
+                !has_button(output, ControllerProfileLogicalButton::kSouth) &&
+                output.state.left_trigger == 0,
+            "completed trigger-backed macro chord did not consume inputs");
+
+    input = controller_neutral_state();
+    input.right_trigger = UINT16_MAX;
+    output = controller_synthetic_input_apply(
+        &context, input, profile, 2);
+    require(!context.macro_active &&
+                output.state.right_trigger == 0,
+            "trigger-backed macro cancellation leaked or stayed active");
 }
 
 void test_optional_field_overrides_and_motion_preservation() {
@@ -454,6 +502,7 @@ void test_four_contexts_are_isolated() {
 
 int main() {
     test_immediate_press_release_dpad_and_explicit_end();
+    test_macro_trigger_chord_requires_every_button();
     test_optional_field_overrides_and_motion_preservation();
     test_zero_max_wait_and_scheduled_catch_up();
     test_consumption_cancel_precedence_and_duplicate_contributors();

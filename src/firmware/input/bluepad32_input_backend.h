@@ -92,6 +92,10 @@ void bluepad32_input_backend_pairing_snapshot(
 void bluepad32_input_backend_diagnostics(
     Bluepad32BackendDiagnostics* out);
 void bluepad32_input_backend_report_sent(uint8_t slot);
+// Toggle motion and queue state feedback only for the matching live
+// connection generation.
+bool bluepad32_input_backend_toggle_motion(
+    uint8_t slot, uint32_t connection_generation);
 void bluepad32_input_backend_queue_rumble(
     uint8_t slot, const ControllerRumbleOutput& rumble);
 // Enqueue bounded local profile confirmation for the matching live connection

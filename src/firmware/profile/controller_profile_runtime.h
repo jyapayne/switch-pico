@@ -18,6 +18,14 @@ constexpr uint16_t CONTROLLER_PROFILE_DEFAULT_SWITCHING_CHORD =
              ControllerProfileLogicalButton::kSelect)) |
         (1u << static_cast<uint8_t>(
              ControllerProfileLogicalButton::kStart)));
+constexpr uint16_t CONTROLLER_PROFILE_DEFAULT_MOTION_TOGGLE_CHORD =
+    static_cast<uint16_t>(
+        (1u << static_cast<uint8_t>(
+             ControllerProfileLogicalButton::kDpadUp)) |
+        (1u << static_cast<uint8_t>(
+             ControllerProfileLogicalButton::kRightShoulder)) |
+        (1u << static_cast<uint8_t>(
+             ControllerProfileLogicalButton::kStart)));
 
 struct ControllerProfileRuntimeProfileChangeEvent {
     uint32_t connection_generation = 0;

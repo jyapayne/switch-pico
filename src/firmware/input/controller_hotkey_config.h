@@ -1,11 +1,7 @@
-// Compile-time AIO controller hotkey configuration.
+// Compile-time AIO controller action feedback configuration.
 
 #pragma once
 
-// Motion toggle chord: D-pad Up + R + START / Options.
-#define SWITCH_MOTION_HOTKEY_DPAD_MASK DPAD_UP
-#define SWITCH_MOTION_HOTKEY_BUTTON_MASK BUTTON_SHOULDER_R
-#define SWITCH_MOTION_HOTKEY_MISC_MASK MISC_BUTTON_START
 #define SWITCH_MOTION_DEFAULT_ENABLED 1
 
 // A longer pulse confirms disabled; a shorter pulse confirms enabled.

@@ -45,9 +45,9 @@ void test_profile_wire_schema() {
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)),
             "default profile did not encode");
-    require(encoded[0] == 2 && encoded[1] == 0 &&
+    require(encoded[0] == 4 && encoded[1] == 0 &&
                 encoded[2] == 0 && encoded[3] == 1,
-            "profile header is not little-endian v2/256");
+            "profile header is not little-endian v4/256");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
         require(encoded[4 + index] == index,
@@ -64,9 +64,15 @@ void test_profile_wire_schema() {
                     static_cast<uint8_t>(
                         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8),
             "default trigger encoding changed");
+    require(encoded[60] == CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+                encoded[61] == 0 &&
+                encoded[70] == CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL &&
+                encoded[71] == 0,
+            "default trigger mappings are not identity");
     require(encoded[72] == 0xff && encoded[73] == 0xff &&
-                encoded[74] == 3 && encoded[78] == 0xff &&
-                encoded[79] == 0xff && encoded[80] == 1,
+                encoded[74] == 3 && encoded[78] == 0 &&
+                encoded[79] == 0 && encoded[80] == 1 &&
+                encoded[81] == CONTROLLER_PROFILE_NO_BUTTON,
             "default rumble or macro encoding changed");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_MACRO_STEP_CAPACITY; ++index) {
@@ -77,12 +83,40 @@ void test_profile_wire_schema() {
     ControllerProfile decoded{};
     require(controller_profile_decode(encoded, sizeof(encoded), &decoded),
             "default profile did not decode");
+    ControllerProfile action_profile = profile;
+    action_profile.switching_chord =
+        (1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL) |
+        (1u << static_cast<uint8_t>(
+            ControllerProfileLogicalButton::kSouth));
+    action_profile.macro_trigger_mask =
+        (1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL) |
+        (1u << CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL);
+    action_profile.motion_toggle_chord =
+        (1u << CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL);
+    action_profile.macro_cancel =
+        CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    uint8_t action_encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(
+                action_profile, action_encoded, sizeof(action_encoded)) &&
+                action_encoded[75] == 0x2d &&
+                action_encoded[81] ==
+                    CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+                controller_profile_decode(
+                    action_encoded, sizeof(action_encoded), &decoded) &&
+                decoded.switching_chord ==
+                    action_profile.switching_chord &&
+                decoded.motion_toggle_chord ==
+                    action_profile.motion_toggle_chord &&
+                decoded.macro_trigger_mask ==
+                    action_profile.macro_trigger_mask &&
+                decoded.macro_cancel == action_profile.macro_cancel,
+            "trigger-backed action masks did not round-trip");
     encoded[252] = 1;
     require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
             "nonzero reserved profile byte was accepted");
 
     ControllerProfile invalid = profile;
-    invalid.button_map[0] = 16;
+    invalid.button_map[0] = CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT;
     require(!controller_profile_validate(invalid),
             "invalid direct output was accepted");
     invalid = profile;
@@ -156,11 +190,14 @@ void test_legacy_profile_migration() {
     require(controller_profile_encode(migrated, encoded, sizeof(encoded)),
             "migrated default profile did not encode");
     for (size_t index = 0; index < sizeof(encoded); ++index) {
-        const bool schema_byte = index == 0;
-        const bool threshold_byte =
+        const bool migration_byte =
+            index == 0 ||
             (index >= 58 && index < 60) ||
-            (index >= 68 && index < 70);
-        if (!schema_byte && !threshold_byte) {
+            index == 60 ||
+            (index >= 68 && index < 70) ||
+            index == 70 ||
+            index == 78 || index == 79 || index == 81;
+        if (!migration_byte) {
             require(encoded[index] == kLegacyDefaultProfile[index],
                     "legacy default profile changed an unrelated byte");
         }
@@ -177,8 +214,12 @@ void test_legacy_profile_migration() {
                         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD) &&
                 encoded[69] ==
                     static_cast<uint8_t>(
-                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8),
-            "migrated default profile did not encode as v2");
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8) &&
+                encoded[60] == CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+                encoded[70] == CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL &&
+                encoded[78] == 0 && encoded[79] == 0 &&
+                encoded[81] == CONTROLLER_PROFILE_NO_BUTTON,
+            "migrated default profile did not encode as v4");
 
     require(controller_profile_decode(
                 kLegacyNarrowRawRangeProfile,
@@ -196,11 +237,14 @@ void test_legacy_profile_migration() {
     require(controller_profile_encode(migrated, encoded, sizeof(encoded)),
             "migrated narrow-raw-range profile did not encode");
     for (size_t index = 0; index < sizeof(encoded); ++index) {
-        const bool schema_byte = index == 0;
-        const bool threshold_byte =
+        const bool migration_byte =
+            index == 0 ||
             (index >= 58 && index < 60) ||
-            (index >= 68 && index < 70);
-        if (!schema_byte && !threshold_byte) {
+            index == 60 ||
+            (index >= 68 && index < 70) ||
+            index == 70 ||
+            index == 78 || index == 79 || index == 81;
+        if (!migration_byte) {
             require(
                 encoded[index] == kLegacyNarrowRawRangeProfile[index],
                 "narrow-raw-range migration changed unrelated profile data");
@@ -214,12 +258,67 @@ void test_legacy_profile_migration() {
     require(migrated.triggers[0].digital_threshold == 0x1234 &&
                 migrated.triggers[1].digital_threshold == 0xabcd,
             "legacy custom thresholds were not preserved");
+    require(migrated.triggers[0].output ==
+                    CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+                migrated.triggers[1].output ==
+                    CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL,
+            "legacy trigger identity mappings were not restored");
     require(controller_profile_encode(migrated, encoded, sizeof(encoded)),
             "legacy custom-threshold profile did not re-encode");
+    const uint8_t legacy_macro_trigger =
+        kLegacyCustomThresholdProfile[78];
+    const uint16_t expected_macro_trigger =
+        legacy_macro_trigger < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT
+            ? static_cast<uint16_t>(1u << legacy_macro_trigger)
+            : 0;
+    require(migrated.macro_trigger_mask == expected_macro_trigger &&
+                migrated.macro_cancel ==
+                    kLegacyCustomThresholdProfile[79],
+            "legacy macro trigger was not migrated to a chord");
     for (size_t index = 1; index < sizeof(encoded); ++index) {
-        require(encoded[index] == kLegacyCustomThresholdProfile[index],
-                "legacy custom-threshold profile changed data");
+        const bool migration_byte =
+            index == 60 || index == 70 ||
+            index == 78 || index == 79 || index == 81;
+        if (!migration_byte) {
+            require(encoded[index] ==
+                        kLegacyCustomThresholdProfile[index],
+                    "legacy custom-threshold profile changed data");
+        }
     }
+
+    const ControllerProfile previous_source =
+        controller_profile_default(controller_identity_global(), 0);
+    uint8_t previous_encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(
+                previous_source, previous_encoded,
+                sizeof(previous_encoded)),
+            "previous-schema fixture did not encode");
+    previous_encoded[0] = static_cast<uint8_t>(
+        CONTROLLER_PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION);
+    previous_encoded[60] = 0;
+    previous_encoded[70] = 0;
+    previous_encoded[78] = static_cast<uint8_t>(
+        ControllerProfileLogicalButton::kSouth);
+    previous_encoded[79] = static_cast<uint8_t>(
+        ControllerProfileLogicalButton::kCapture);
+    previous_encoded[81] = 0;
+    previous_encoded[98] = 0;
+    previous_encoded[99] = 0;
+    require(controller_profile_decode(
+                previous_encoded, sizeof(previous_encoded), &migrated) &&
+                migrated.triggers[0].output ==
+                    CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+                migrated.triggers[1].output ==
+                    CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL &&
+                migrated.macro_trigger_mask ==
+                    static_cast<uint16_t>(
+                        1u << static_cast<uint8_t>(
+                            ControllerProfileLogicalButton::kSouth)) &&
+                migrated.macro_cancel ==
+                    static_cast<uint8_t>(
+                        ControllerProfileLogicalButton::kCapture) &&
+                migrated.motion_toggle_chord == 0,
+            "v2 profile controls did not migrate to v4");
 
     ControllerProfile current =
         controller_profile_default(controller_identity_global(), 0);

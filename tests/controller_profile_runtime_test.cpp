@@ -28,6 +28,9 @@ unsigned active_snapshot_count = 0;
 std::array<ActivationAttempt, 32> activation_attempts{};
 size_t activation_attempt_count = 0;
 unsigned activation_busy_attempts = 0;
+uint8_t last_motion_toggle_slot = 0;
+uint32_t last_motion_toggle_connection_generation = 0;
+unsigned motion_toggle_count = 0;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -54,6 +57,9 @@ void prepare_profiles() {
     activation_attempts = {};
     activation_attempt_count = 0;
     activation_busy_attempts = 0;
+    last_motion_toggle_slot = 0;
+    last_motion_toggle_connection_generation = 0;
+    motion_toggle_count = 0;
     for (uint8_t slot = 0;
          slot < CONTROLLER_PROFILE_RUNTIME_SLOT_COUNT; ++slot) {
         FakeProfileRow& row = rows[slot];
@@ -390,8 +396,9 @@ void test_initial_profile_indication_once_per_connection() {
 void test_default_switching_retry_commit_and_feedback() {
     prepare_profiles();
     ControllerProfile& initial_profile = rows[0].profiles[0];
-    initial_profile.macro_trigger = static_cast<uint8_t>(
-        ControllerProfileLogicalButton::kLeftShoulder);
+    initial_profile.macro_trigger_mask =
+        logical_button_bit(
+            ControllerProfileLogicalButton::kLeftShoulder);
     initial_profile.macro_step_count = 2;
     initial_profile.macro_steps[0].type =
         ControllerProfileMacroStepType::kState;
@@ -526,8 +533,9 @@ void test_identity_promotion_preserves_held_switching() {
 }
 
 void configure_motion_suppression_probe(ControllerProfile* profile) {
-    profile->macro_trigger = static_cast<uint8_t>(
-        ControllerProfileLogicalButton::kDpadUp);
+    profile->macro_trigger_mask =
+        logical_button_bit(
+            ControllerProfileLogicalButton::kDpadUp);
     profile->macro_step_count = 2;
     profile->macro_steps[0].type =
         ControllerProfileMacroStepType::kState;
@@ -673,11 +681,50 @@ void test_switching_slot_isolation() {
 }
 
 
+void test_profile_motion_toggle_supports_trigger_chords() {
+    prepare_profiles();
+    const uint32_t custom_chord =
+        logical_button_bit(ControllerProfileLogicalButton::kSouth) |
+        (1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL);
+    rows[0].profiles[0].motion_toggle_chord = custom_chord;
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0, 9);
+
+    (void)runtime_transform(0, snapshot, 0);
+    require(motion_toggle_count == 0,
+            "profile refresh toggled motion without a chord");
+
+    apply_button_mask(
+        logical_button_bit(ControllerProfileLogicalButton::kSouth),
+        &snapshot);
+    snapshot.state.left_trigger = UINT16_MAX;
+    ControllerProfileTransformResult output =
+        runtime_transform(0, snapshot, 1);
+    require(motion_toggle_count == 1 &&
+                last_motion_toggle_slot == 0 &&
+                last_motion_toggle_connection_generation == 9 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.state.left_trigger == 0,
+            "trigger-backed motion chord did not toggle and consume inputs");
+
+    (void)runtime_transform(0, snapshot, 2);
+    require(motion_toggle_count == 1,
+            "held trigger-backed motion chord toggled twice");
+    snapshot = make_snapshot(0, 9);
+    (void)runtime_transform(0, snapshot, 3);
+    apply_button_mask(
+        logical_button_bit(ControllerProfileLogicalButton::kSouth),
+        &snapshot);
+    snapshot.state.left_trigger = UINT16_MAX;
+    (void)runtime_transform(0, snapshot, 4);
+    require(motion_toggle_count == 2,
+            "released trigger-backed motion chord did not re-arm");
+}
+
 void configure_synthetic_profile(uint8_t slot) {
     ControllerProfile& profile = rows[slot].profiles[0];
     profile = controller_profile_default(rows[slot].identity, 0);
-    profile.macro_trigger =
-        static_cast<uint8_t>(ControllerProfileLogicalButton::kSouth);
+    profile.macro_trigger_mask =
+        logical_button_bit(ControllerProfileLogicalButton::kSouth);
     profile.macro_cancel =
         static_cast<uint8_t>(ControllerProfileLogicalButton::kCapture);
     profile.macro_step_count = 2;
@@ -837,6 +884,14 @@ void test_runtime_slot_synthetic_isolation() {
 
 }  // namespace
 
+bool bluepad32_input_backend_toggle_motion(
+    uint8_t slot, uint32_t connection_generation) {
+    last_motion_toggle_slot = slot;
+    last_motion_toggle_connection_generation = connection_generation;
+    ++motion_toggle_count;
+    return true;
+}
+
 uint32_t profile_service_database_generation() {
     return database_generation;
 }
@@ -889,6 +944,7 @@ int main() {
     test_identity_promotion_preserves_held_switching();
     test_switching_uses_pre_hotkey_buttons_only();
     test_custom_switching_chord_and_wrap();
+    test_profile_motion_toggle_supports_trigger_chords();
     test_switching_slot_isolation();
     test_all_runtime_cancellation_causes();
     test_runtime_slot_synthetic_isolation();

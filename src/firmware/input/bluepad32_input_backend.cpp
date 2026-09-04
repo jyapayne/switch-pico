@@ -53,12 +53,6 @@ constexpr SwitchRgbColor kProfileLightbarPalette[CONTROLLER_PROFILE_COUNT] = {
     {0xff, 0xaa, 0x00},
     {0xcc, 0x33, 0xff},
 };
-constexpr uint32_t kMotionHotkeyDpadMask =
-    SWITCH_MOTION_HOTKEY_DPAD_MASK;
-constexpr uint32_t kMotionHotkeyButtonMask =
-    SWITCH_MOTION_HOTKEY_BUTTON_MASK;
-constexpr uint32_t kMotionHotkeyMiscMask =
-    SWITCH_MOTION_HOTKEY_MISC_MASK;
 constexpr bool kDefaultMotionEnabled =
     SWITCH_MOTION_DEFAULT_ENABLED != 0;
 constexpr uint16_t kMotionDisabledFeedbackDurationMs =
@@ -76,9 +70,6 @@ constexpr uint8_t kMotionEnabledFeedbackStrongMagnitude =
 
 static_assert(kProfileFeedbackPhaseDurationMs == 75);
 static_assert(CONTROLLER_PROFILE_COUNT == 4);
-static_assert(kMotionHotkeyDpadMask != 0);
-static_assert(kMotionHotkeyButtonMask != 0);
-static_assert(kMotionHotkeyMiscMask != 0);
 static_assert(kMotionDisabledFeedbackDurationMs > 0);
 static_assert(kMotionEnabledFeedbackDurationMs > 0);
 
@@ -153,7 +144,6 @@ struct BackendSlot {
     bool active;
     bool rumble_pending;
     bool motion_enabled;
-    bool motion_hotkey_latched;
     bool feedback_pending;
     uint32_t feedback_until_ms;
     uint8_t pending_profile_feedback_count;
@@ -708,10 +698,6 @@ constexpr uint16_t logical_button_mask(
              : 0u));
 }
 
-constexpr uint16_t kMotionHotkeyLogicalButtonMask =
-    logical_button_mask(
-        kMotionHotkeyDpadMask, kMotionHotkeyButtonMask,
-        kMotionHotkeyMiscMask);
 
 uint16_t logical_button_mask(const uni_gamepad_t& gamepad) {
     return logical_button_mask(
@@ -810,10 +796,6 @@ ControllerState map_gamepad(const uni_gamepad_t& gamepad,
 }
 struct HotkeyDecision {
     bool motion_enabled;
-    uint32_t suppress_dpad;
-    uint32_t suppress_buttons;
-    uint32_t suppress_misc_buttons;
-    uint16_t suppress_logical_buttons;
 };
 
 void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
@@ -827,7 +809,6 @@ void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
 }
 void reset_slot_hotkeys(BackendSlot& slot) {
     slot.motion_enabled = kDefaultMotionEnabled;
-    slot.motion_hotkey_latched = false;
     slot.pre_hotkey_button_mask = 0;
     slot.feedback_pending = false;
     slot.feedback_until_ms = 0;
@@ -844,44 +825,12 @@ void reset_slot_hotkeys(BackendSlot& slot) {
 
 
 HotkeyDecision update_controller_hotkeys(
-    uint8_t slot_index, uni_hid_device_t* device,
-    const uni_gamepad_t& gamepad) {
-    const bool motion_pressed =
-        (gamepad.dpad & kMotionHotkeyDpadMask) ==
-            kMotionHotkeyDpadMask &&
-        (gamepad.buttons & kMotionHotkeyButtonMask) ==
-            kMotionHotkeyButtonMask &&
-        (gamepad.misc_buttons & kMotionHotkeyMiscMask) ==
-            kMotionHotkeyMiscMask;
-    HotkeyDecision decision{
-        kDefaultMotionEnabled, 0, 0, 0, 0};
-
+    uint8_t slot_index, uni_hid_device_t* device) {
+    HotkeyDecision decision{kDefaultMotionEnabled};
     critical_section_enter_blocking(&g_state_lock);
-    BackendSlot& slot = g_slots[slot_index];
+    const BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device == device) {
-        if (motion_pressed && !slot.motion_hotkey_latched) {
-            slot.motion_enabled = !slot.motion_enabled;
-            if (slot.motion_enabled) {
-                queue_local_feedback(
-                    slot, kMotionEnabledFeedbackDurationMs,
-                    kMotionEnabledFeedbackWeakMagnitude,
-                    kMotionEnabledFeedbackStrongMagnitude);
-            } else {
-                queue_local_feedback(
-                    slot, kMotionDisabledFeedbackDurationMs,
-                    kMotionDisabledFeedbackWeakMagnitude,
-                    kMotionDisabledFeedbackStrongMagnitude);
-            }
-        }
-        slot.motion_hotkey_latched = motion_pressed;
         decision.motion_enabled = slot.motion_enabled;
-        if (motion_pressed) {
-            decision.suppress_dpad |= kMotionHotkeyDpadMask;
-            decision.suppress_buttons |= kMotionHotkeyButtonMask;
-            decision.suppress_misc_buttons |= kMotionHotkeyMiscMask;
-            decision.suppress_logical_buttons |=
-                kMotionHotkeyLogicalButtonMask;
-        }
     }
     critical_section_exit(&g_state_lock);
     return decision;
@@ -1672,12 +1621,8 @@ void platform_on_controller_data(uni_hid_device_t* device,
     const uint16_t pre_hotkey_button_mask =
         logical_button_mask(gamepad);
     const HotkeyDecision hotkeys = update_controller_hotkeys(
-        static_cast<uint8_t>(slot_index), device, gamepad);
-    gamepad.dpad &= ~hotkeys.suppress_dpad;
-    gamepad.buttons &= ~hotkeys.suppress_buttons;
-    gamepad.misc_buttons &= ~hotkeys.suppress_misc_buttons;
-    const uint16_t output_button_mask = static_cast<uint16_t>(
-        pre_hotkey_button_mask & ~hotkeys.suppress_logical_buttons);
+        static_cast<uint8_t>(slot_index), device);
+    const uint16_t output_button_mask = pre_hotkey_button_mask;
     publish_device_state(
         static_cast<uint8_t>(slot_index), device,
         pre_hotkey_button_mask,
@@ -1937,6 +1882,34 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
         out->state.motion_sample_count = 0;
     }
     g_last_snapshot_generation[slot_index] = state_generation;
+}
+
+bool bluepad32_input_backend_toggle_motion(
+    uint8_t slot_index, uint32_t connection_generation) {
+    if (!g_initialized || !valid_slot(slot_index)) {
+        return false;
+    }
+    bool toggled = false;
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (slot.active &&
+        slot.connection_generation == connection_generation) {
+        slot.motion_enabled = !slot.motion_enabled;
+        if (slot.motion_enabled) {
+            queue_local_feedback(
+                slot, kMotionEnabledFeedbackDurationMs,
+                kMotionEnabledFeedbackWeakMagnitude,
+                kMotionEnabledFeedbackStrongMagnitude);
+        } else {
+            queue_local_feedback(
+                slot, kMotionDisabledFeedbackDurationMs,
+                kMotionDisabledFeedbackWeakMagnitude,
+                kMotionDisabledFeedbackStrongMagnitude);
+        }
+        toggled = true;
+    }
+    critical_section_exit(&g_state_lock);
+    return toggled;
 }
 
 void bluepad32_input_backend_report_sent(uint8_t slot_index) {
