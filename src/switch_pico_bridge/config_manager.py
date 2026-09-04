@@ -105,7 +105,7 @@ PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3
 PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4
 PROFILE_SCHEMA_VERSION = 5
 PROFILE_SIZE = 256
-PROFILE_CAPACITY = 4
+PROFILE_CAPACITY = 8
 PROFILE_IDENTITY_CAPACITY = 16
 PROFILE_LIST_CAPACITY = PROFILE_IDENTITY_CAPACITY + 1
 CONTROLLER_IDENTITY_SIZE = 14
@@ -2572,10 +2572,12 @@ def _profile_number(value: str) -> int:
         number = int(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            "profile must be a number from 1 to 4"
+            f"profile must be a number from 1 to {PROFILE_CAPACITY}"
         ) from exc
     if not 1 <= number <= PROFILE_CAPACITY:
-        raise argparse.ArgumentTypeError("profile must be a number from 1 to 4")
+        raise argparse.ArgumentTypeError(
+            f"profile must be a number from 1 to {PROFILE_CAPACITY}"
+        )
     return number - 1
 
 

@@ -5,79 +5,125 @@
 
 #include "profile/controller_profile.h"
 
-constexpr uint8_t PROFILE_STORAGE_BANK_COUNT = 2;
+constexpr uint8_t PROFILE_STORAGE_ARENA_COUNT = 2;
 constexpr size_t PROFILE_STORAGE_SECTOR_SIZE = 4096;
-constexpr size_t PROFILE_STORAGE_SECTORS_PER_BANK = 5;
-constexpr size_t PROFILE_STORAGE_BANK_SIZE =
-    PROFILE_STORAGE_SECTOR_SIZE * PROFILE_STORAGE_SECTORS_PER_BANK;
-constexpr size_t PROFILE_STORAGE_TOTAL_SIZE =
-    PROFILE_STORAGE_BANK_COUNT * PROFILE_STORAGE_BANK_SIZE;
 constexpr size_t PROFILE_STORAGE_PAGE_SIZE = 256;
-constexpr size_t PROFILE_STORAGE_RECORD_HEADER_SIZE =
-    PROFILE_STORAGE_PAGE_SIZE;
+constexpr size_t PROFILE_STORAGE_ARENA_SIZE = 128 * 1024;
+constexpr size_t PROFILE_STORAGE_TOTAL_SIZE =
+    PROFILE_STORAGE_ARENA_COUNT * PROFILE_STORAGE_ARENA_SIZE;
+constexpr size_t PROFILE_STORAGE_SUPERBLOCK_SIZE = PROFILE_STORAGE_PAGE_SIZE;
+constexpr size_t PROFILE_STORAGE_RECORD_SIZE = 2 * PROFILE_STORAGE_PAGE_SIZE;
+constexpr size_t PROFILE_STORAGE_RECORDS_OFFSET = PROFILE_STORAGE_SECTOR_SIZE;
+constexpr uint32_t PROFILE_STORAGE_NO_RECORD = UINT32_MAX;
 
-static_assert(PROFILE_STORAGE_BANK_SIZE == 20 * 1024);
-static_assert(PROFILE_STORAGE_TOTAL_SIZE == 40 * 1024);
-static_assert(PROFILE_STORAGE_RECORD_HEADER_SIZE +
-                      CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE <=
-                  PROFILE_STORAGE_BANK_SIZE,
-              "profile database does not fit a storage bank");
+// Layout of the retired v1/v2 whole-database store. The indexed catalog reads
+// this region once during migration; new firmware never writes it.
+constexpr uint8_t PROFILE_STORAGE_LEGACY_BANK_COUNT = 2;
+constexpr size_t PROFILE_STORAGE_LEGACY_BANK_SIZE = 20 * 1024;
+constexpr size_t PROFILE_STORAGE_LEGACY_TOTAL_SIZE =
+    PROFILE_STORAGE_LEGACY_BANK_COUNT * PROFILE_STORAGE_LEGACY_BANK_SIZE;
+constexpr size_t PROFILE_STORAGE_LEGACY_HEADER_SIZE = PROFILE_STORAGE_PAGE_SIZE;
+constexpr uint8_t PROFILE_STORAGE_LEGACY_PROFILE_COUNT = 4;
+constexpr size_t PROFILE_STORAGE_LEGACY_DATABASE_SIZE = 17696;
 
-enum class ProfileStorageResult : uint8_t {
-    kOk = 0,
-    kUnchanged = 1,
-    kInvalidArgument = 2,
-    kIoError = 3,
-};
+static_assert(PROFILE_STORAGE_ARENA_SIZE % PROFILE_STORAGE_SECTOR_SIZE == 0);
+static_assert(PROFILE_STORAGE_RECORDS_OFFSET % PROFILE_STORAGE_RECORD_SIZE ==
+              0);
 
 struct ProfileStorageIo {
-    void* context = nullptr;
-    size_t bank_size = 0;
-    size_t sector_size = 0;
-    size_t page_size = 0;
-    bool (*read)(void* context, uint8_t bank, size_t offset,
-                 uint8_t* output, size_t size) = nullptr;
-    // Replaces one bank and verifies the payload before publishing the
-    // complete header page.
-    bool (*replace_bank)(void* context, uint8_t bank,
-                         const uint8_t* payload, size_t payload_size,
-                         const uint8_t* header, size_t header_size) = nullptr;
+  void *context = nullptr;
+  size_t arena_size = 0;
+  size_t sector_size = 0;
+  size_t page_size = 0;
+  bool (*read)(void *context, uint8_t arena, size_t offset, uint8_t *output,
+               size_t size) = nullptr;
+  bool (*erase_arena)(void *context, uint8_t arena) = nullptr;
+  bool (*program_page)(void *context, uint8_t arena, size_t offset,
+                       const uint8_t *page, size_t size) = nullptr;
 };
 
 struct ProfileStorageSnapshot {
-    bool valid = false;
-    uint32_t generation = 0;
-    uint32_t payload_crc = 0;
-    uint8_t active_bank = 0;
+  bool valid = false;
+  uint32_t generation = 0;
+  uint32_t payload_crc = 0;
+  uint8_t active_bank = 0;
 };
 
-uint32_t profile_storage_crc32(const uint8_t* data, size_t size);
+enum class ProfileStorageResult : uint8_t {
+  kOk = 0,
+  kUnchanged = 1,
+  kInvalidArgument = 2,
+  kIoError = 3,
+  kFull = 4,
+};
+
+struct ProfileStorageIdentityIndex {
+  bool used = false;
+  ControllerIdentity identity{};
+  uint8_t active_profile = 0;
+  uint32_t active_generation = 0;
+  uint32_t profile_generation[CONTROLLER_PROFILE_COUNT]{};
+  uint32_t profile_record[CONTROLLER_PROFILE_COUNT]{};
+};
+
+uint32_t profile_storage_crc32(const uint8_t *data, size_t size);
 
 class ProfileStorage {
 public:
-    bool initialize(const ProfileStorageIo& io,
-                    ControllerProfileDatabase* database);
-    ProfileStorageResult commit(
-        const ControllerProfileDatabase& database,
-        uint8_t* encoded_database,
-        size_t encoded_database_size);
-    const ProfileStorageSnapshot& snapshot() const;
+  bool initialize(const ProfileStorageIo &io);
+  ProfileStorageResult ensure_identity(const ControllerIdentity &identity);
+  ProfileStorageResult get(const ControllerIdentity &identity,
+                           uint8_t profile_index,
+                           ControllerProfile *output) const;
+  ProfileStorageResult set(const ControllerIdentity &identity,
+                           uint8_t profile_index,
+                           const ControllerProfile &profile);
+  ProfileStorageResult reset(const ControllerIdentity &identity,
+                             uint8_t profile_index);
+  ProfileStorageResult activate(const ControllerIdentity &identity,
+                                uint8_t profile_index);
+
+  uint8_t identity_count() const;
+  const ProfileStorageIdentityIndex *identity(uint8_t index) const;
+  const ProfileStorageIdentityIndex *
+  find(const ControllerIdentity &identity) const;
+  const ProfileStorageSnapshot &snapshot() const;
 
 private:
-    struct BankHeader {
-        uint32_t generation = 0;
-        uint32_t payload_crc = 0;
-    };
+  enum class RecordType : uint8_t {
+    kProfile = 1,
+    kReset = 2,
+    kResetAll = 3,
+    kActivate = 4,
+  };
 
-    bool read_header(uint8_t bank, BankHeader* output) const;
-    bool validate_payload(uint8_t bank, uint32_t expected_crc) const;
-    bool decode_bank(uint8_t bank,
-                     ControllerProfileDatabase* database) const;
-    bool payload_matches_encoded(uint8_t bank,
-                                 const uint8_t* payload,
-                                 size_t payload_size) const;
+  bool scan_arena(uint8_t arena, uint32_t *epoch, uint32_t *generation,
+                  uint32_t *payload_crc, size_t *next_offset,
+                  ProfileStorageIdentityIndex *index,
+                  uint8_t *identity_count) const;
+  bool read_profile_record(uint32_t record, ControllerProfile *output) const;
+  ProfileStorageResult append(RecordType type,
+                              const ControllerIdentity &identity,
+                              uint8_t profile_index, const uint8_t *payload,
+                              size_t payload_size);
+  ProfileStorageResult compact();
+  bool migrate_legacy();
+  bool publish_empty_arena(uint8_t arena, uint32_t epoch);
+  bool write_record(uint8_t arena, size_t offset, RecordType type,
+                    const ControllerIdentity &identity, uint8_t profile_index,
+                    uint32_t generation, const uint8_t *payload,
+                    size_t payload_size) const;
+  void apply_record(ProfileStorageIdentityIndex *index, uint8_t *identity_count,
+                    RecordType type, const ControllerIdentity &identity,
+                    uint8_t profile_index, uint32_t generation,
+                    uint32_t record) const;
 
-    ProfileStorageIo io_{};
-    ProfileStorageSnapshot snapshot_{};
-    bool initialized_ = false;
+  ProfileStorageIo io_{};
+  ProfileStorageSnapshot snapshot_{};
+  ProfileStorageIdentityIndex
+      index_[CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1]{};
+  uint8_t identity_count_ = 0;
+  uint32_t epoch_ = 0;
+  size_t next_offset_ = PROFILE_STORAGE_RECORDS_OFFSET;
+  bool initialized_ = false;
 };

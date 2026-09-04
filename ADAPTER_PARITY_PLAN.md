@@ -323,7 +323,7 @@ Core completion evidence:
 
 ### Phase 3 — Mapping, tuning, profiles, and macros — Complete
 
-Use four profile slots per stable controller identity. Resolve identity from Bluetooth transport, identity address, VID, and PID; use a global default when stable identity is unavailable.
+Use eight profile slots per stable controller identity. Resolve identity from Bluetooth transport, identity address, VID, and PID; use a global default when stable identity is unavailable.
 
 Button mapping:
 
@@ -380,7 +380,7 @@ Turbo behavior:
 Profile switching:
 
 - configurable controller chord
-- one to four rumble pulses
+- one to eight rumble pulses
 - matching onboard LED count
 - controller RGB/player LED feedback when supported
 
@@ -394,12 +394,13 @@ Acceptance:
 
 Completion evidence:
 
-- strict 256-byte profile schema and 17,696-byte fixed database support four
+- strict 256-byte profile records and a compact indexed catalog support eight
   profiles for the global fallback and each of sixteen stable identities
 - profile and adapter stores remain separate from each other and BTstack bonds;
-  profile commits use one flash-safe batched inactive-bank replacement
-- schema-v1 profile databases migrate inherited trigger defaults to schema v2
-  without losing custom thresholds, identities, active profiles, or other data
+  profile commits append one flash-safe record and compact atomically between
+  two 128 KiB arenas
+- legacy fixed profile databases migrate without losing custom thresholds,
+  identities, active profiles, or other data
 - direct mapping, stick/trigger fixed-point transforms, Switch thresholds,
   XInput analog values, rumble scaling, macros, Turbo, Auto Burst, and all
   cancellation paths have deterministic native coverage
@@ -562,7 +563,57 @@ Flow:
 
 Do not add a second in-application flash writer unless ROM UF2 cannot meet a concrete requirement.
 
-### Phase 7 — Performance and release qualification
+### Phase 7 — Indexed profile catalog — Complete
+
+Replace the fully decoded fixed database before increasing profile count.
+Initial capacity is eight profiles for the global fallback and each of sixteen
+stable controller identities; the format must support a later increase without
+another storage rewrite.
+
+Storage design:
+
+- reserve two 128 KiB flash arenas for append-only profile records and atomic
+  compaction
+- store identity, profile index, generation, schema, payload length, and CRC
+  in every record header
+- keep two independently checksummed superblocks; publish a compacted arena
+  only after every live record verifies
+- retain the current four-profile bank reader for one-time migration
+- do not erase an admitted legacy bank until the new catalog and superblock
+  have been read back successfully
+- maintain a compact RAM index, not a decoded copy of every profile
+- decode only the fallback and active profile for each observed identity
+- keep report-path profile access allocation-free with bounded snapshots
+
+The completed AIO image uses 683,128 bytes of 4 MiB flash and reserves 256
+KiB for the two profile arenas. Total flash use plus configuration, bonds,
+and the RP2350 terminal sector is 965,752 bytes (23.03%). Linked SRAM is
+97,600 of 532,480 bytes; the profile catalog index is 1,556 bytes.
+
+Acceptance:
+
+- all existing profiles 1–4 survive migration byte-for-byte at the semantic
+  level
+- profiles 5–8 default independently and persist across reboot
+- interrupted append and compaction recover the last published generation
+- corrupt newest records fall back to the previous valid record
+- identity capacity remains aligned with the sixteen-entry bond store
+- only active/fallback profiles are decoded in SRAM
+- profile switching, management USB, and the graphical editor expose all
+  eight slots
+
+Completion evidence:
+
+- the native catalog suite covers interrupted header publication, corrupt
+  payload fallback, compaction, sixteen-identity capacity, and semantic
+  migration of global and stable profiles 1–4
+- service tests cover on-demand selection, cached active profiles, reset-all,
+  controller-originated activation, and persistence of profiles 7 and 8
+- all 109 tests pass; UART, AIO, and feasibility firmware build
+- the browser editor renders and selects all eight slots
+- Pico 2 W hardware read and activated profile 8, then restored profile 1
+
+### Phase 8 — Performance and release qualification
 
 Measure:
 

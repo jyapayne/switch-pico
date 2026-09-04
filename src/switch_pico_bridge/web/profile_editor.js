@@ -40,6 +40,7 @@ const elements = {
   turbo: document.querySelector("#turboFields"),
   macroControls: document.querySelector("#macroControls"),
   macroSteps: document.querySelector("#macroSteps"),
+  macroStepsTitle: document.querySelector("#macroStepsTitle"),
   refresh: document.querySelector("#refreshButton"),
   resetDraft: document.querySelector("#resetDraftButton"),
   activate: document.querySelector("#activateButton"),
@@ -62,6 +63,24 @@ function label(value) {
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+
+const directionalLabels = {
+  dpad_up: "D-pad Up",
+  dpad_right: "D-pad Right",
+  dpad_down: "D-pad Down",
+  dpad_left: "D-pad Left",
+};
+
+function currentControllerStyle() {
+  return state.identities[state.identityIndex]?.controller?.style || "generic";
+}
+
+function controlLabel(control, style = currentControllerStyle()) {
+  return state.schema.control_labels?.[style]?.[control] ||
+    directionalLabels[control] ||
+    label(control);
 }
 
 function clone(value) {
@@ -156,7 +175,7 @@ function renderIdentities() {
 
 function renderProfileList() {
   const owner = state.identities[state.identityIndex];
-  elements.profileList.innerHTML = Array.from({ length: 4 }, (_, index) => {
+  elements.profileList.innerHTML = Array.from({ length: state.schema.profile_capacity }, (_, index) => {
     const selected = index === state.profileIndex;
     const active = owner && owner.active_profile === index + 1;
     return `
@@ -179,13 +198,14 @@ function renderProfileList() {
 function buttonOptions(
   selected,
   includeNone = true,
-  choices = state.schema.controls
+  choices = state.schema.controls,
+  style = currentControllerStyle()
 ) {
   const none = includeNone
     ? `<option value=""${selected === null ? " selected" : ""}>None</option>`
     : "";
   return none + choices.map((button) => (
-    `<option value="${button}"${selected === button ? " selected" : ""}>${label(button)}</option>`
+    `<option value="${button}"${selected === button ? " selected" : ""}>${escapeHtml(controlLabel(button, style))}</option>`
   )).join("");
 }
 
@@ -299,7 +319,7 @@ function renderButtonMap() {
     hotspot.textContent = controlGlyph(button, style);
     hotspot.classList.toggle("selected", button === selected);
     hotspot.classList.toggle("disabled-map", output === null);
-    hotspot.title = `${label(button)} → ${output === null ? "Disabled" : label(output)}`;
+    hotspot.title = `${controlLabel(button, style)} → ${output === null ? "Disabled" : controlLabel(output, style)}`;
     hotspot.setAttribute("aria-label", hotspot.title);
     hotspot.onclick = () => {
       state.selectedButton = button;
@@ -308,11 +328,11 @@ function renderButtonMap() {
   });
 
   elements.selectedControlGlyph.textContent = controlGlyph(selected, style);
-  elements.selectedControlName.textContent = label(selected);
+  elements.selectedControlName.textContent = controlLabel(selected, style);
   elements.selectedControlDescription.textContent = (
-    `Physical ${label(selected)} currently produces ${mappedOutput === null ? "no output" : label(mappedOutput)}.`
+    `Physical ${controlLabel(selected, style)} currently produces ${mappedOutput === null ? "no output" : controlLabel(mappedOutput, style)}.`
   );
-  elements.selectedMapping.innerHTML = buttonOptions(mappedOutput);
+  elements.selectedMapping.innerHTML = buttonOptions(mappedOutput, true, state.schema.controls, style);
   elements.selectedMapping.onchange = () => {
     setControlMapping(selected, elements.selectedMapping.value || null);
     renderButtonMap();
@@ -395,7 +415,7 @@ function renderFeedback() {
 function renderTurbo() {
   elements.turbo.innerHTML = state.schema.buttons.map((button) => `
     <div class="control-card">
-      <label for="turbo-${button}">${label(button)}</label>
+      <label for="turbo-${button}">${controlLabel(button)}</label>
       <select class="select" id="turbo-${button}" data-kind="turbo" data-name="${button}">
         ${state.schema.turbo_modes.map((mode) => `<option value="${mode}"${state.profile.turbo[button] === mode ? " selected" : ""}>${label(mode)}</option>`).join("")}
       </select>
@@ -415,9 +435,9 @@ function actionChordCard(action, title, description, selectedButtons, defaults) 
   const effectiveButtons = inherited ? defaults : selectedButtons;
   const selected = new Set(effectiveButtons);
   const defaultText = inherited
-    ? `Using default: ${defaults.map(label).join(" + ")}.`
+    ? `Using default: ${defaults.map((button) => controlLabel(button)).join(" + ")}.`
     : defaults?.length
-      ? `Clear every selection to restore ${defaults.map(label).join(" + ")}.`
+      ? `Clear every selection to restore ${defaults.map((button) => controlLabel(button)).join(" + ")}.`
       : "Empty disables this action.";
   return `
     <div class="action-card">
@@ -431,7 +451,7 @@ function actionChordCard(action, title, description, selectedButtons, defaults) 
             <input type="checkbox" data-kind="action-chord" data-action="${action}" data-name="${button}"${selected.has(button) ? " checked" : ""}>
             <span data-button="${button}">
               <b>${controlGlyph(button, state.identities[state.identityIndex]?.controller?.style || "generic")}</b>
-              <small>${label(button)}</small>
+              <small>${controlLabel(button)}</small>
             </span>
           </label>`).join("")}
       </div>
@@ -467,7 +487,7 @@ function renderMacro() {
     actionChordCard(
       "profile_switch",
       "Cycle active profile",
-      "Advance through profile slots 1–4.",
+      `Advance through profile slots 1–${state.schema.profile_capacity}.`,
       state.profile.switching_chord,
       state.schema.default_switching_chord
     ),
@@ -503,7 +523,7 @@ function renderMacro() {
     <div class="control-card">
       <label for="macro-cancel">Macro ${state.selectedMacro + 1} cancel control</label>
       <select class="select" id="macro-cancel" data-kind="macro-selector" data-field="cancel">
-        ${buttonOptions(macro.cancel, true, state.schema.controls)}
+        ${buttonOptions(macro.cancel, true, state.schema.controls, controllerStyle)}
       </select>
     </div>`;
 
@@ -550,12 +570,13 @@ function renderMacro() {
               ${state.schema.buttons.map((button) => `
                 <label class="checkbox-pill">
                   <input type="checkbox" data-kind="macro-output" data-index="${index}" data-name="${button}"${outputButtons.has(button) ? " checked" : ""}${overrides.has("buttons") ? "" : " disabled"}>
-                  <span>${label(button)}</span>
+                  <span>${controlLabel(button, controllerStyle)}</span>
                 </label>`).join("")}
             </div>
           </div>
         </div>`;
     }).join("");
+  elements.macroStepsTitle.textContent = `Macro ${state.selectedMacro + 1} steps`;
   elements.addMacroStep.textContent = `Add step to macro ${state.selectedMacro + 1}`;
   elements.addMacroStep.disabled = (
     state.busy || macro.steps.length >= 8 || totalSteps >= 16 ||

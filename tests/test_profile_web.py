@@ -87,6 +87,13 @@ def test_editor_serves_assets_and_complete_schema(
     assert schema["rumble_policies"] == list(config_manager.RUMBLE_POLICIES)
     assert schema["turbo_modes"] == list(config_manager.TURBO_MODES)
     assert schema["macro_overrides"] == list(config_manager.MACRO_OVERRIDE_NAMES)
+    assert schema["profile_capacity"] == 8
+    assert schema["control_labels"]["generic"]["south"] == "A"
+    assert schema["control_labels"]["xbox"]["left_shoulder"] == "LB"
+    assert schema["control_labels"]["switch"]["east"] == "A"
+    assert schema["control_labels"]["switch"]["left_trigger"] == "ZL"
+    assert schema["control_labels"]["playstation"]["south"] == "Cross"
+    assert schema["control_labels"]["playstation"]["select"] == "Create"
     assert (
         config_manager.ControllerProfile.from_json(
             json.dumps(schema["default_profile"])
@@ -152,13 +159,13 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
             "style": "xbox",
         }
 
-        status, selected = request_json(f"{base_url}/api/profiles/1/3")
+        status, selected = request_json(f"{base_url}/api/profiles/1/8")
         assert status == 200
         assert selected["active"] is False
 
         profile = custom_profile().to_json_object()
         status, stored = request_json(
-            f"{base_url}/api/profiles/1/3",
+            f"{base_url}/api/profiles/1/8",
             method="PUT",
             value=profile,
             token=token,
@@ -167,21 +174,21 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
         assert stored["stored_generation"] == 8
         assert (
             config_manager.ControllerProfile.from_bytes(
-                device.profiles[(device.stable_identity.to_bytes(), 2)]
+                device.profiles[(device.stable_identity.to_bytes(), 7)]
             )
             == custom_profile()
         )
         assert device.profile_chunk_sizes == [40, 40, 40, 40, 40, 40, 16]
 
         status, activated = request_json(
-            f"{base_url}/api/profiles/1/3/activate",
+            f"{base_url}/api/profiles/1/8/activate",
             method="POST",
             token=token,
         )
 
     assert status == 200
     assert activated["stored_generation"] == 9
-    assert device.active_profiles[device.stable_identity.to_bytes()] == 2
+    assert device.active_profiles[device.stable_identity.to_bytes()] == 7
 
 
 def test_editor_rejects_invalid_or_unauthorized_mutations(

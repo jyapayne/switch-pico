@@ -627,19 +627,19 @@ void test_custom_switching_chord_and_wrap() {
             "custom switching chord was not consumed or activated");
 
     prepare_profiles();
-    rows[0].active_profile = 3;
-    rows[0].profiles[3].switching_chord = kCustomChord;
+    rows[0].active_profile = 7;
+    rows[0].profiles[7].switching_chord = kCustomChord;
     snapshot = make_snapshot(0);
     (void)runtime_transform(0, snapshot, 10);
     bool event_available = true;
     (void)take_profile_change(0, &event_available);
     require(!event_available,
-            "initial profile 4 load published a change event");
+            "initial profile 8 load published a change event");
     apply_button_mask(kCustomChord, &snapshot);
     (void)runtime_transform(0, snapshot, 11);
     require(activation_attempt_count == 1 &&
                 activation_attempts[0].profile_index == 0,
-            "profile switching did not wrap profile 4 to profile 1");
+            "profile switching did not wrap profile 8 to profile 1");
 }
 void test_switching_slot_isolation() {
     prepare_profiles();

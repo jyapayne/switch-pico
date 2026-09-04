@@ -52,6 +52,10 @@ constexpr SwitchRgbColor kProfileLightbarPalette[CONTROLLER_PROFILE_COUNT] = {
     {0x00, 0xcc, 0x66},
     {0xff, 0xaa, 0x00},
     {0xcc, 0x33, 0xff},
+    {0xff, 0x44, 0x44},
+    {0x00, 0xdd, 0xdd},
+    {0xff, 0x66, 0xbb},
+    {0xcc, 0xff, 0x33},
 };
 constexpr bool kDefaultMotionEnabled =
     SWITCH_MOTION_DEFAULT_ENABLED != 0;
@@ -69,7 +73,7 @@ constexpr uint8_t kMotionEnabledFeedbackStrongMagnitude =
     SWITCH_MOTION_ENABLED_FEEDBACK_STRONG_MAGNITUDE;
 
 static_assert(kProfileFeedbackPhaseDurationMs == 75);
-static_assert(CONTROLLER_PROFILE_COUNT == 4);
+static_assert(CONTROLLER_PROFILE_COUNT == 8);
 static_assert(kMotionDisabledFeedbackDurationMs > 0);
 static_assert(kMotionEnabledFeedbackDurationMs > 0);
 

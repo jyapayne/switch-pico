@@ -33,6 +33,41 @@ _ASSET_TYPES = {
     ),
 }
 
+_CONTROL_LABELS = {
+    "generic": {
+        "north": "Y", "east": "B", "south": "A", "west": "X",
+        "left_shoulder": "LB", "right_shoulder": "RB",
+        "left_trigger": "LT", "right_trigger": "RT",
+        "select": "View", "start": "Menu", "capture": "Share",
+        "system": "Xbox", "left_stick": "Left Stick",
+        "right_stick": "Right Stick",
+    },
+    "xbox": {
+        "north": "Y", "east": "B", "south": "A", "west": "X",
+        "left_shoulder": "LB", "right_shoulder": "RB",
+        "left_trigger": "LT", "right_trigger": "RT",
+        "select": "View", "start": "Menu", "capture": "Share",
+        "system": "Xbox", "left_stick": "Left Stick",
+        "right_stick": "Right Stick",
+    },
+    "switch": {
+        "north": "X", "east": "A", "south": "B", "west": "Y",
+        "left_shoulder": "L", "right_shoulder": "R",
+        "left_trigger": "ZL", "right_trigger": "ZR",
+        "select": "Minus", "start": "Plus", "capture": "Capture",
+        "system": "Home", "left_stick": "Left Stick",
+        "right_stick": "Right Stick",
+    },
+    "playstation": {
+        "north": "Triangle", "east": "Circle", "south": "Cross",
+        "west": "Square", "left_shoulder": "L1",
+        "right_shoulder": "R1", "left_trigger": "L2",
+        "right_trigger": "R2", "select": "Create", "start": "Options",
+        "capture": "Touchpad", "system": "PS", "left_stick": "L3",
+        "right_stick": "R3",
+    },
+}
+
 def _controller_presentation(
     identity: config_manager.ControllerIdentity,
 ) -> dict[str, str]:
@@ -116,6 +151,8 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                     "turbo_modes": list(config_manager.TURBO_MODES),
                     "macro_overrides": list(config_manager.MACRO_OVERRIDE_NAMES),
                     "macro_count": config_manager.PROFILE_MACRO_COUNT,
+                    "profile_capacity": config_manager.PROFILE_CAPACITY,
+                    "control_labels": _CONTROL_LABELS,
                     "maximum_macro_state_steps": (
                         config_manager.PROFILE_MACRO_STEPS_PER_MACRO
                     ),

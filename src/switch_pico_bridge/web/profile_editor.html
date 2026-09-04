@@ -174,15 +174,23 @@
         </section>
 
         <section class="panel" id="macro">
-          <div class="panel-heading macro-heading">
+          <div class="panel-heading">
             <div>
               <p class="eyebrow">05 · Actions</p>
               <h3>Bindings &amp; custom macro</h3>
             </div>
-            <button class="button button-secondary" id="addMacroStepButton" type="button">Add state step</button>
           </div>
           <div class="builtin-actions" id="builtinActions"></div>
           <div class="macro-controls" id="macroControls"></div>
+          <div class="macro-steps-heading">
+            <div>
+              <p class="eyebrow">Sequence</p>
+              <h4 id="macroStepsTitle">Macro 1 steps</h4>
+            </div>
+            <span class="macro-step-action">
+              <button class="button button-secondary" id="addMacroStepButton" type="button">Add state step</button>
+            </span>
+          </div>
           <div class="macro-steps" id="macroSteps"></div>
         </section>
       </form>

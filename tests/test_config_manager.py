@@ -1598,11 +1598,11 @@ def test_profile_cli_json_round_trip_activate_and_reset(
 
     assert (
         config_manager.main(
-            ["profiles", "activate", "4", "--identity", "1"]
+            ["profiles", "activate", "8", "--identity", "1"]
         )
         == 0
     )
-    assert device.active_profiles[device.stable_identity.to_bytes()] == 3
+    assert device.active_profiles[device.stable_identity.to_bytes()] == 7
     _ = capsys.readouterr()
 
     before_reset_requests = len(device.requests)

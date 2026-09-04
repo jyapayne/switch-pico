@@ -141,7 +141,7 @@ Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `
 
 The editor selects Switch Pro, DualSense, or Xbox artwork from the connected controller's USB VID/PID and places each remappable control directly over the matching physical button. Controller artwork is from [AL2009man/Gamepad-Asset-Pack](https://github.com/AL2009man/Gamepad-Asset-Pack) under its MIT license; the bundled license and source revision are recorded beside the assets.
 
-`profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns four persistent profiles and one active index. The JSON export/import commands remain available for version-controlled or scripted profiles. Profile numbers shown to users are `1` through `4`; `--identity` uses the zero-based index from `profiles list`.
+`profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns eight persistent profiles and one active index. The JSON export/import commands remain available for version-controlled or scripted profiles. Profile numbers shown to users are `1` through `8`; `--identity` uses the zero-based index from `profiles list`.
 
 `pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses. `pairings clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
 
@@ -156,10 +156,10 @@ configuration, pairing, and profile work.
 
 The profile editor lists **Cycle active profile**, **Toggle motion**, and **Run custom macro** as separate editable actions. Every action chord can contain any combination of the 16 buttons and the L2/R2 analog triggers. The default profile-switching chord is **L + R + Select + Start**; on DualSense, use **L1 + R1 + Create + Options**. A stored empty chord selects that default.
 
-- The chord cycles persistent profiles `1 → 2 → 3 → 4 → 1`.
+- The chord cycles persistent profiles `1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 1`.
 - Chord buttons are consumed locally and are not forwarded to the host.
 - The new profile applies only after its atomic flash commit completes.
-- Confirmation uses one to four 75 ms pulses matching the active profile number.
+- Confirmation uses one to eight 75 ms pulses matching the active profile number.
 - The profile policy independently enables rumble and LED feedback.
 - On connection and profile changes, RGB/player LEDs briefly show the active profile color/count, then return to the persistent USB slot color/player number.
 - Each controller identity and each of the four active USB slots remain isolated.
@@ -593,6 +593,41 @@ After changing any IMU conversion, calibration, timing, or report packing:
 4. Send subcommand `0x40` with value `2`. Every resulting report must have mode bits `2` and timestamp count `3`.
 5. Inject a known single-axis gyro rate and decode the packed quaternion. The corresponding component must change smoothly with the expected sign.
 6. Perform the decisive end-to-end check: genuine Pro Controller → SDL3 bridge → UART → emulated Pico → Zelda. This path was confirmed correct after the mode-2 fix.
+
+## Firmware resource usage
+
+The Pico 2 W AIO build is measured from `build-aio/switch-pico.elf` and its
+linked binary, not from the larger debug-bearing ELF or UF2 transport file:
+
+| Resource | Used or reserved | Device capacity |
+|---|---:|---:|
+| Executable flash image | 683,128 bytes | 4 MiB |
+| Indexed profile arenas | 256 KiB | 4 MiB flash |
+| Adapter configuration | 8 KiB | 4 MiB flash |
+| BTstack bonds | 8 KiB | 4 MiB flash |
+| RP2350 terminal sector | 4 KiB | 4 MiB flash |
+| Linked SRAM | 97,600 bytes | 520 KiB |
+
+The executable plus persistent reservations consume 965,752 bytes (23.03%)
+of flash, leaving 3,228,552 bytes (3.08 MiB). Linked SRAM consumes 18.33%,
+leaving 434,880 bytes of link-time headroom.
+
+Profiles use two 128 KiB append-only arenas. Each independently published
+record contains one identity/profile key, generation, schema, length, and CRC.
+The compact in-memory index is 1,556 bytes; only the fallback and active
+profile for each observed identity are decoded and published. Including the
+active cache, selected-profile buffer, transaction state, profile runtime
+contexts, and catalog index, the profile subsystem uses approximately 13 KiB
+of SRAM instead of retaining every profile in decoded form.
+
+The catalog supports eight profiles for the global fallback and each of 16
+stable identities. Missing records resolve to defaults, so profiles 5–8 do
+not consume flash until changed. When an arena fills, the latest indexed
+records are compacted into its peer and the new superblock is published last.
+Interrupted or corrupt appends therefore leave the previous valid record
+available. On first boot after upgrading, the legacy four-profile banks are
+read from their old flash addresses and copied into the new catalog before
+the legacy region can be erased.
 
 ## References
 - GP2040-CE (controller firmware ecosystem): https://github.com/OpenStickCommunity/GP2040-CE
