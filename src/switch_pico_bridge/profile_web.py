@@ -115,8 +115,15 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                     "rumble_policies": list(config_manager.RUMBLE_POLICIES),
                     "turbo_modes": list(config_manager.TURBO_MODES),
                     "macro_overrides": list(config_manager.MACRO_OVERRIDE_NAMES),
+                    "macro_count": config_manager.PROFILE_MACRO_COUNT,
                     "maximum_macro_state_steps": (
-                        config_manager.PROFILE_MACRO_STEP_CAPACITY - 1
+                        config_manager.PROFILE_MACRO_STEPS_PER_MACRO
+                    ),
+                    "maximum_shared_macro_steps": (
+                        config_manager.PROFILE_MACRO_STEP_CAPACITY
+                    ),
+                    "maximum_macro_stream_bytes": (
+                        config_manager.PROFILE_MACRO_STREAM_SIZE
                     ),
                     "default_profile": (
                         config_manager.ControllerProfile.default().to_json_object()

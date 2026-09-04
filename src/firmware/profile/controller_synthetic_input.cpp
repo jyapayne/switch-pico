@@ -52,22 +52,27 @@ bool deadline_reached(uint32_t now_ms, uint32_t deadline_ms) {
 
 void stop_macro(ControllerSyntheticInputContext* context) {
     context->macro_active = false;
+    context->macro_index = 0;
     context->macro_step_index = 0;
     context->macro_deadline_ms = 0;
 }
 
 bool start_macro(ControllerSyntheticInputContext* context,
-                 const ControllerProfile& profile, uint32_t now_ms) {
-    if (profile.macro_step_count == 0 ||
-        profile.macro_steps[0].type !=
-            ControllerProfileMacroStepType::kState) {
-        stop_macro(context);
+                 const ControllerProfile& profile, uint8_t macro_index,
+                 uint32_t now_ms) {
+    if (macro_index >= CONTROLLER_PROFILE_MACRO_COUNT) {
+        return false;
+    }
+    const ControllerProfileMacro& macro = profile.macros[macro_index];
+    if (macro.step_count == 0 ||
+        macro.first_step >= profile.macro_step_count) {
         return false;
     }
     context->macro_active = true;
+    context->macro_index = macro_index;
     context->macro_step_index = 0;
     context->macro_deadline_ms =
-        now_ms + profile.macro_steps[0].duration_ms;
+        now_ms + profile.macro_steps[macro.first_step].duration_ms;
     return true;
 }
 
@@ -77,31 +82,28 @@ void advance_macro(ControllerSyntheticInputContext* context,
          transition < CONTROLLER_PROFILE_MACRO_STEP_CAPACITY;
          ++transition) {
         if (!context->macro_active ||
-            context->macro_step_index >= profile.macro_step_count) {
+            context->macro_index >= CONTROLLER_PROFILE_MACRO_COUNT) {
             stop_macro(context);
             return;
         }
-        const ControllerProfileMacroStep& current =
-            profile.macro_steps[context->macro_step_index];
-        if (current.type != ControllerProfileMacroStepType::kState) {
+        const ControllerProfileMacro& macro =
+            profile.macros[context->macro_index];
+        if (context->macro_step_index >= macro.step_count) {
             stop_macro(context);
             return;
         }
         if (!deadline_reached(now_ms, context->macro_deadline_ms)) {
             return;
         }
-
         const uint8_t next_index =
             static_cast<uint8_t>(context->macro_step_index + 1u);
-        if (next_index >= profile.macro_step_count ||
-            profile.macro_steps[next_index].type ==
-                ControllerProfileMacroStepType::kEnd) {
+        if (next_index >= macro.step_count) {
             stop_macro(context);
             return;
         }
         context->macro_step_index = next_index;
         context->macro_deadline_ms +=
-            profile.macro_steps[next_index].duration_ms;
+            profile.macro_steps[macro.first_step + next_index].duration_ms;
     }
 }
 
@@ -150,31 +152,48 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
         controller_profile_extract_control_mask(input, profile);
     uint32_t rising_control_mask =
         input_control_mask & ~context->previous_input_control_mask;
-    const bool cancel_pressed =
-        is_bound_control(profile.macro_cancel) &&
-        (input_control_mask & control_bit(profile.macro_cancel)) != 0;
+    bool cancel_pressed = false;
+    uint32_t consumed_controls = 0;
+    for (const ControllerProfileMacro& macro : profile.macros) {
+        if (is_bound_control(macro.cancel_control) &&
+            (input_control_mask & control_bit(macro.cancel_control)) != 0) {
+            cancel_pressed = true;
+            consumed_controls |= control_bit(macro.cancel_control);
+            break;
+        }
+    }
     if (cancel_pressed) {
         controller_synthetic_input_cancel(context, input_control_mask);
         rising_control_mask = 0;
     }
 
     bool macro_started = false;
-    const bool trigger_chord_completed =
-        profile.macro_trigger_mask != 0 &&
-        (input_control_mask & profile.macro_trigger_mask) ==
-            profile.macro_trigger_mask &&
-        (rising_control_mask & profile.macro_trigger_mask) != 0;
-    if (!cancel_pressed && trigger_chord_completed) {
-        macro_started = start_macro(context, profile, now_ms);
+    if (!cancel_pressed && !context->macro_active) {
+        for (uint8_t macro_index = 0;
+             macro_index < CONTROLLER_PROFILE_MACRO_COUNT; ++macro_index) {
+            const ControllerProfileMacro& macro =
+                profile.macros[macro_index];
+            const bool completed =
+                macro.trigger_mask != 0 && macro.step_count != 0 &&
+                (input_control_mask & macro.trigger_mask) ==
+                    macro.trigger_mask &&
+                (rising_control_mask & macro.trigger_mask) != 0;
+            if (completed &&
+                start_macro(context, profile, macro_index, now_ms)) {
+                macro_started = true;
+                consumed_controls |= macro.trigger_mask;
+                break;
+            }
+        }
     }
     if (!macro_started) {
         advance_macro(context, profile, now_ms);
     }
-    const bool consume_macro_trigger =
-        context->macro_active ||
-        (profile.macro_trigger_mask != 0 &&
-         (input_control_mask & profile.macro_trigger_mask) ==
-             profile.macro_trigger_mask);
+    if (context->macro_active &&
+        context->macro_index < CONTROLLER_PROFILE_MACRO_COUNT) {
+        consumed_controls |=
+            profile.macros[context->macro_index].trigger_mask;
+    }
 
     uint16_t gated_input_button_mask = 0;
     for (uint8_t input_button = 0;
@@ -183,9 +202,7 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
         ControllerSyntheticBindingState& binding =
             context->bindings[input_button];
         const uint16_t bit = button_bit(input_button);
-        if ((consume_macro_trigger &&
-             (profile.macro_trigger_mask & bit) != 0) ||
-            input_button == profile.macro_cancel) {
+        if ((consumed_controls & bit) != 0) {
             clear_binding(&binding);
             continue;
         }
@@ -232,22 +249,20 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
     ControllerState gated_input = input;
     controller_profile_apply_button_mask(gated_input_button_mask,
                                          &gated_input);
-    uint32_t consumed_controls =
-        consume_macro_trigger ? profile.macro_trigger_mask : 0;
-    if (cancel_pressed) {
-        consumed_controls |= control_bit(profile.macro_cancel);
-    }
     controller_profile_remove_control_mask(
         consumed_controls, &gated_input);
 
     ControllerProfileTransformResult result =
         controller_profile_transform(gated_input, profile);
     if (context->macro_active &&
-        context->macro_step_index < profile.macro_step_count) {
-        const ControllerProfileMacroStep& step =
-            profile.macro_steps[context->macro_step_index];
-        if (step.type == ControllerProfileMacroStepType::kState) {
-            apply_macro_override(step, &result.state);
+        context->macro_index < CONTROLLER_PROFILE_MACRO_COUNT) {
+        const ControllerProfileMacro& macro =
+            profile.macros[context->macro_index];
+        if (context->macro_step_index < macro.step_count) {
+            apply_macro_override(
+                profile.macro_steps[
+                    macro.first_step + context->macro_step_index],
+                &result.state);
         } else {
             stop_macro(context);
         }

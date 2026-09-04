@@ -102,7 +102,8 @@ TRANSPORT_BLE = 2
 PROFILE_LEGACY_SCHEMA_VERSION = 1
 PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2
 PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3
-PROFILE_SCHEMA_VERSION = 4
+PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4
+PROFILE_SCHEMA_VERSION = 5
 PROFILE_SIZE = 256
 PROFILE_CAPACITY = 4
 PROFILE_IDENTITY_CAPACITY = 16
@@ -110,7 +111,11 @@ PROFILE_LIST_CAPACITY = PROFILE_IDENTITY_CAPACITY + 1
 CONTROLLER_IDENTITY_SIZE = 14
 PROFILE_LIST_ROW_SIZE = 16
 PROFILE_NONE_BUTTON = 0xFF
-PROFILE_MACRO_STEP_CAPACITY = 8
+PROFILE_MACRO_COUNT = 4
+PROFILE_MACRO_STEP_CAPACITY = 16
+PROFILE_MACRO_STEPS_PER_MACRO = 8
+PROFILE_LEGACY_MACRO_STEP_CAPACITY = 8
+PROFILE_MACRO_STREAM_SIZE = 136
 PROFILE_MACRO_STEP_SIZE = 19
 PROFILE_MAXIMUM_WAIT_MS = 10000
 PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD = 0x8000
@@ -856,6 +861,63 @@ class MacroStep:
             0,
         )
 
+    def to_sparse_bytes(self) -> bytes:
+        if self.step_type != 0:
+            raise ConfigManagerError("only state steps use sparse encoding")
+        payload = bytearray(struct.pack("<BH", self.override_flags, self.duration_ms))
+        if self.override_flags & 1:
+            payload.extend(struct.pack("<H", self.output_button_mask))
+        if self.override_flags & 2:
+            payload.extend(struct.pack("<hh", self.left_stick_x, self.left_stick_y))
+        if self.override_flags & 4:
+            payload.extend(struct.pack("<hh", self.right_stick_x, self.right_stick_y))
+        if self.override_flags & 8:
+            payload.extend(struct.pack("<H", self.left_trigger))
+        if self.override_flags & 16:
+            payload.extend(struct.pack("<H", self.right_trigger))
+        return bytes(payload)
+
+    @classmethod
+    def from_sparse_bytes(
+        cls, payload: bytes, name: str
+    ) -> tuple[MacroStep, int]:
+        if len(payload) < 3:
+            raise ConfigManagerError(f"{name} is truncated")
+        flags, duration = struct.unpack_from("<BH", payload)
+        if flags & ~MACRO_OVERRIDE_MASK:
+            raise ConfigManagerError(f"{name} has invalid override flags")
+        offset = 3
+
+        def take(fmt: str) -> tuple[int, ...]:
+            nonlocal offset
+            size = struct.calcsize(fmt)
+            if offset + size > len(payload):
+                raise ConfigManagerError(f"{name} is truncated")
+            values = struct.unpack_from(fmt, payload, offset)
+            offset += size
+            return values
+
+        buttons = take("<H")[0] if flags & 1 else 0
+        left_x, left_y = take("<hh") if flags & 2 else (0, 0)
+        right_x, right_y = take("<hh") if flags & 4 else (0, 0)
+        left_trigger = take("<H")[0] if flags & 8 else 0
+        right_trigger = take("<H")[0] if flags & 16 else 0
+        return (
+            cls(
+                0,
+                flags,
+                duration,
+                buttons,
+                left_x,
+                left_y,
+                right_x,
+                right_y,
+                left_trigger,
+                right_trigger,
+            ),
+            offset,
+        )
+
     def to_json_object(self) -> dict[str, Any]:
         return {
             "type": MACRO_STEP_TYPES[self.step_type],
@@ -957,6 +1019,67 @@ class MacroStep:
 
 
 @dataclass(frozen=True)
+class ControllerMacro:
+    trigger_mask: int
+    cancel_control: int
+    steps: tuple[MacroStep, ...]
+
+    def __post_init__(self) -> None:
+        _require_int(
+            self.trigger_mask,
+            "macro trigger chord",
+            0,
+            PROFILE_LOGICAL_CONTROL_MASK,
+        )
+        if type(self.cancel_control) is not int or (
+            self.cancel_control != PROFILE_NONE_BUTTON
+            and not 0 <= self.cancel_control < len(LOGICAL_CONTROLS)
+        ):
+            raise ConfigManagerError("invalid macro cancel control")
+        if (
+            type(self.steps) is not tuple
+            or len(self.steps) > PROFILE_MACRO_STEPS_PER_MACRO
+            or not all(
+                isinstance(step, MacroStep) and step.step_type == 0
+                for step in self.steps
+            )
+        ):
+            raise ConfigManagerError(
+                "macro must contain zero to eight state steps"
+            )
+
+    @classmethod
+    def empty(cls) -> ControllerMacro:
+        return cls(0, PROFILE_NONE_BUTTON, ())
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            "trigger": _control_mask_to_json(self.trigger_mask),
+            "cancel": _control_name(self.cancel_control),
+            "steps": [step.to_json_object() for step in self.steps],
+        }
+
+    @classmethod
+    def from_json_object(cls, value: Any, name: str) -> ControllerMacro:
+        obj = _require_object(
+            value, ("trigger", "cancel", "steps"), name
+        )
+        steps = obj["steps"]
+        if type(steps) is not list or len(steps) > PROFILE_MACRO_STEPS_PER_MACRO:
+            raise ConfigManagerError(
+                f"{name}.steps must contain zero to eight steps"
+            )
+        return cls(
+            _control_mask_from_json(obj["trigger"], f"{name}.trigger"),
+            _control_index(obj["cancel"], f"{name}.cancel"),
+            tuple(
+                MacroStep.from_json_object(step, f"{name}.steps[{index}]")
+                for index, step in enumerate(steps)
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class ControllerProfile:
     button_map: tuple[int, ...]
     left_stick: StickConfig
@@ -968,9 +1091,7 @@ class ControllerProfile:
     confirmation_policy: int
     switching_chord: int
     motion_toggle_chord: int
-    macro_trigger_mask: int
-    macro_cancel: int
-    macro_steps: tuple[MacroStep, ...]
+    macros: tuple[ControllerMacro, ...]
     turbo_modes: tuple[int, ...]
 
     def __post_init__(self) -> None:
@@ -1029,27 +1150,33 @@ class ControllerProfile:
             0,
             PROFILE_LOGICAL_CONTROL_MASK,
         )
-        _require_int(
-            self.macro_trigger_mask,
-            "macro trigger chord",
-            0,
-            PROFILE_LOGICAL_CONTROL_MASK,
-        )
-        if type(self.macro_cancel) is not int or (
-            self.macro_cancel != PROFILE_NONE_BUTTON
-            and not 0 <= self.macro_cancel < len(LOGICAL_CONTROLS)
-        ):
-            raise ConfigManagerError("invalid macro cancel")
         if (
-            type(self.macro_steps) is not tuple
-            or not 1 <= len(self.macro_steps) <= PROFILE_MACRO_STEP_CAPACITY
-            or not all(isinstance(step, MacroStep) for step in self.macro_steps)
+            type(self.macros) is not tuple
+            or len(self.macros) != PROFILE_MACRO_COUNT
+            or not all(isinstance(macro, ControllerMacro) for macro in self.macros)
         ):
-            raise ConfigManagerError("macro must contain one to eight steps")
-        if any(step.step_type != 0 for step in self.macro_steps[:-1]):
-            raise ConfigManagerError("only the final macro step may be end")
-        if self.macro_steps[-1] != MacroStep.end():
-            raise ConfigManagerError("final macro step must be canonical end")
+            raise ConfigManagerError("profile must contain four macros")
+        total_steps = sum(len(macro.steps) for macro in self.macros)
+        if total_steps > PROFILE_MACRO_STEP_CAPACITY:
+            raise ConfigManagerError(
+                "profile macros exceed the sixteen-step shared pool"
+            )
+        encoded_size = sum(
+            len(step.to_sparse_bytes())
+            for macro in self.macros
+            for step in macro.steps
+        )
+        if encoded_size > PROFILE_MACRO_STREAM_SIZE:
+            raise ConfigManagerError(
+                "profile macros exceed the 136-byte sparse stream"
+            )
+        triggers = [
+            macro.trigger_mask
+            for macro in self.macros
+            if macro.trigger_mask != 0
+        ]
+        if len(triggers) != len(set(triggers)):
+            raise ConfigManagerError("macro trigger chords must be unique")
         if type(self.turbo_modes) is not tuple or len(
             self.turbo_modes
         ) != len(LOGICAL_BUTTONS):
@@ -1085,9 +1212,9 @@ class ControllerProfile:
             confirmation_policy=3,
             switching_chord=0,
             motion_toggle_chord=0,
-            macro_trigger_mask=0,
-            macro_cancel=PROFILE_NONE_BUTTON,
-            macro_steps=(MacroStep.end(),),
+            macros=tuple(
+                ControllerMacro.empty() for _ in range(PROFILE_MACRO_COUNT)
+            ),
             turbo_modes=(0,) * len(LOGICAL_BUTTONS),
         )
 
@@ -1106,35 +1233,25 @@ class ControllerProfile:
         has_control_mapping = (
             version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
         )
-        has_action_trigger_bits = version == PROFILE_SCHEMA_VERSION
-        if payload[252:] != bytes(4):
-            raise ConfigManagerError("profile reserved fields must be zero")
-        if has_action_trigger_bits:
+        has_action_controls = (
+            version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
+        )
+        sparse_macros = version == PROFILE_SCHEMA_VERSION
+        if sparse_macros:
+            if payload[75] & 0xCC:
+                raise ConfigManagerError("profile action flags are invalid")
+        elif has_action_controls:
             if payload[75] & 0xC0:
                 raise ConfigManagerError("profile action flags are invalid")
-        elif payload[75] != 0:
+            if payload[252:] != bytes(4):
+                raise ConfigManagerError("profile reserved fields must be zero")
+        elif payload[75] != 0 or payload[252:] != bytes(4):
             raise ConfigManagerError("legacy profile reserved fields must be zero")
         if not has_control_mapping and (
             payload[81] != 0 or payload[98:100] != b"\x00\x00"
         ):
             raise ConfigManagerError("legacy profile reserved fields must be zero")
-        macro_count = payload[80]
-        if not 1 <= macro_count <= PROFILE_MACRO_STEP_CAPACITY:
-            raise ConfigManagerError("invalid macro step count")
-        all_steps = tuple(
-            MacroStep.from_bytes(
-                payload[
-                    100
-                    + index * PROFILE_MACRO_STEP_SIZE : 100
-                    + (index + 1) * PROFILE_MACRO_STEP_SIZE
-                ]
-            )
-            for index in range(PROFILE_MACRO_STEP_CAPACITY)
-        )
-        if any(
-            step != MacroStep.end() for step in all_steps[macro_count:]
-        ):
-            raise ConfigManagerError("unused macro steps must be canonical end")
+
         left_trigger = TriggerConfig.from_bytes(
             payload[52:62], schema_version=version, source_index=0
         )
@@ -1144,29 +1261,116 @@ class ControllerProfile:
         if version == PROFILE_LEGACY_SCHEMA_VERSION:
             left_trigger = _migrate_legacy_trigger_threshold(left_trigger)
             right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
-        if has_control_mapping:
-            macro_trigger_mask = struct.unpack_from("<H", payload, 78)[0]
-            macro_cancel = payload[81]
-            motion_toggle_chord = struct.unpack_from("<H", payload, 98)[0]
-        else:
-            legacy_trigger = payload[78]
-            if legacy_trigger != PROFILE_NONE_BUTTON and not (
-                0 <= legacy_trigger < len(LOGICAL_BUTTONS)
-            ):
-                raise ConfigManagerError("invalid legacy macro trigger")
-            macro_trigger_mask = (
-                0
-                if legacy_trigger == PROFILE_NONE_BUTTON
-                else 1 << legacy_trigger
+
+        if sparse_macros:
+            switching_chord = (
+                struct.unpack_from("<H", payload, 76)[0]
+                | ((payload[75] & 0x03) << 16)
             )
-            macro_cancel = payload[79]
-            motion_toggle_chord = 0
-        switching_chord = struct.unpack_from("<H", payload, 76)[0]
-        if has_action_trigger_bits:
-            action_bits = payload[75]
-            switching_chord |= (action_bits & 0x03) << 16
-            macro_trigger_mask |= ((action_bits >> 2) & 0x03) << 16
-            motion_toggle_chord |= ((action_bits >> 4) & 0x03) << 16
+            motion_toggle_chord = (
+                struct.unpack_from("<H", payload, 78)[0]
+                | (((payload[75] >> 4) & 0x03) << 16)
+            )
+            turbo_modes = tuple(payload[80:96])
+            macros: list[ControllerMacro] = []
+            stream_offset = 0
+            total_steps = 0
+            for macro_index in range(PROFILE_MACRO_COUNT):
+                offset = 96 + macro_index * 6
+                descriptor = payload[offset : offset + 6]
+                if descriptor[2] & 0x80 or descriptor[3] != stream_offset:
+                    raise ConfigManagerError("invalid sparse macro descriptor")
+                trigger_mask = (
+                    struct.unpack_from("<H", descriptor)[0]
+                    | ((descriptor[2] & 0x03) << 16)
+                )
+                cancel = (descriptor[2] >> 2) & 0x1F
+                if cancel > len(LOGICAL_CONTROLS) - 1 and cancel != 0x1F:
+                    raise ConfigManagerError("invalid sparse macro cancel control")
+                step_count = descriptor[4]
+                encoded_size = descriptor[5]
+                if (
+                    step_count > PROFILE_MACRO_STEPS_PER_MACRO
+                    or total_steps + step_count > PROFILE_MACRO_STEP_CAPACITY
+                    or stream_offset + encoded_size > PROFILE_MACRO_STREAM_SIZE
+                ):
+                    raise ConfigManagerError("invalid sparse macro bounds")
+                consumed = 0
+                steps: list[MacroStep] = []
+                for step_index in range(step_count):
+                    step, step_size = MacroStep.from_sparse_bytes(
+                        payload[
+                            120 + stream_offset + consumed :
+                            120 + stream_offset + encoded_size
+                        ],
+                        f"profile.macros[{macro_index}].steps[{step_index}]",
+                    )
+                    steps.append(step)
+                    consumed += step_size
+                if consumed != encoded_size:
+                    raise ConfigManagerError("invalid sparse macro size")
+                macros.append(
+                    ControllerMacro(
+                        trigger_mask,
+                        PROFILE_NONE_BUTTON if cancel == 0x1F else cancel,
+                        tuple(steps),
+                    )
+                )
+                stream_offset += consumed
+                total_steps += step_count
+            if payload[120 + stream_offset :] != bytes(
+                PROFILE_MACRO_STREAM_SIZE - stream_offset
+            ):
+                raise ConfigManagerError("nonzero sparse macro padding")
+        else:
+            switching_chord = struct.unpack_from("<H", payload, 76)[0]
+            motion_toggle_chord = (
+                struct.unpack_from("<H", payload, 98)[0]
+                if has_control_mapping
+                else 0
+            )
+            if has_control_mapping:
+                trigger_mask = struct.unpack_from("<H", payload, 78)[0]
+                cancel_control = payload[81]
+            else:
+                legacy_trigger = payload[78]
+                if legacy_trigger != PROFILE_NONE_BUTTON and not (
+                    0 <= legacy_trigger < len(LOGICAL_BUTTONS)
+                ):
+                    raise ConfigManagerError("invalid legacy macro trigger")
+                trigger_mask = (
+                    0
+                    if legacy_trigger == PROFILE_NONE_BUTTON
+                    else 1 << legacy_trigger
+                )
+                cancel_control = payload[79]
+            if has_action_controls:
+                switching_chord |= (payload[75] & 0x03) << 16
+                trigger_mask |= ((payload[75] >> 2) & 0x03) << 16
+                motion_toggle_chord |= ((payload[75] >> 4) & 0x03) << 16
+            legacy_count = payload[80]
+            if not 1 <= legacy_count <= PROFILE_LEGACY_MACRO_STEP_CAPACITY:
+                raise ConfigManagerError("invalid legacy macro step count")
+            legacy_steps = tuple(
+                MacroStep.from_bytes(
+                    payload[
+                        100 + index * PROFILE_MACRO_STEP_SIZE :
+                        100 + (index + 1) * PROFILE_MACRO_STEP_SIZE
+                    ]
+                )
+                for index in range(PROFILE_LEGACY_MACRO_STEP_CAPACITY)
+            )
+            if any(step != MacroStep.end() for step in legacy_steps[legacy_count - 1 :]):
+                raise ConfigManagerError("invalid legacy macro end padding")
+            state_steps = legacy_steps[: legacy_count - 1]
+            if any(step.step_type != 0 for step in state_steps):
+                raise ConfigManagerError("invalid legacy macro state step")
+            macros = [
+                ControllerMacro(trigger_mask, cancel_control, state_steps),
+                *(ControllerMacro.empty() for _ in range(PROFILE_MACRO_COUNT - 1)),
+            ]
+            turbo_modes = tuple(payload[82:98])
+
         return cls(
             button_map=tuple(payload[4:20]),
             left_stick=StickConfig.from_bytes(payload[20:36]),
@@ -1178,12 +1382,9 @@ class ControllerProfile:
             confirmation_policy=payload[74],
             switching_chord=switching_chord,
             motion_toggle_chord=motion_toggle_chord,
-            macro_trigger_mask=macro_trigger_mask,
-            macro_cancel=macro_cancel,
-            macro_steps=all_steps[:macro_count],
-            turbo_modes=tuple(payload[82:98]),
+            macros=tuple(macros),
+            turbo_modes=turbo_modes,
         )
-
     def to_bytes(self) -> bytes:
         payload = bytearray(PROFILE_SIZE)
         struct.pack_into(
@@ -1203,23 +1404,38 @@ class ControllerProfile:
         )
         payload[75] = (
             ((self.switching_chord >> 16) & 0x03)
-            | (((self.macro_trigger_mask >> 16) & 0x03) << 2)
             | (((self.motion_toggle_chord >> 16) & 0x03) << 4)
         )
         struct.pack_into("<H", payload, 76, self.switching_chord & 0xFFFF)
-        struct.pack_into("<H", payload, 78, self.macro_trigger_mask & 0xFFFF)
-        payload[80] = len(self.macro_steps)
-        payload[81] = self.macro_cancel
-        payload[82:98] = bytes(self.turbo_modes)
-        struct.pack_into("<H", payload, 98, self.motion_toggle_chord & 0xFFFF)
-        for index in range(PROFILE_MACRO_STEP_CAPACITY):
-            step = (
-                self.macro_steps[index]
-                if index < len(self.macro_steps)
-                else MacroStep.end()
+        struct.pack_into("<H", payload, 78, self.motion_toggle_chord & 0xFFFF)
+        payload[80:96] = bytes(self.turbo_modes)
+
+        stream = bytearray()
+        for macro_index, macro in enumerate(self.macros):
+            encoded_steps = b"".join(
+                step.to_sparse_bytes() for step in macro.steps
             )
-            offset = 100 + index * PROFILE_MACRO_STEP_SIZE
-            payload[offset : offset + PROFILE_MACRO_STEP_SIZE] = step.to_bytes()
+            descriptor_offset = 96 + macro_index * 6
+            struct.pack_into(
+                "<H", payload, descriptor_offset, macro.trigger_mask & 0xFFFF
+            )
+            cancel = (
+                0x1F
+                if macro.cancel_control == PROFILE_NONE_BUTTON
+                else macro.cancel_control
+            )
+            payload[descriptor_offset + 2] = (
+                ((macro.trigger_mask >> 16) & 0x03) | (cancel << 2)
+            )
+            payload[descriptor_offset + 3] = len(stream)
+            payload[descriptor_offset + 4] = len(macro.steps)
+            payload[descriptor_offset + 5] = len(encoded_steps)
+            stream.extend(encoded_steps)
+        if len(stream) > PROFILE_MACRO_STREAM_SIZE:
+            raise ConfigManagerError(
+                "profile macros exceed the 136-byte sparse stream"
+            )
+        payload[120 : 120 + len(stream)] = stream
         return bytes(payload)
 
     def to_json_object(self) -> dict[str, Any]:
@@ -1249,13 +1465,9 @@ class ControllerProfile:
             "motion_toggle_chord": _control_mask_to_json(
                 self.motion_toggle_chord
             ),
-            "macro": {
-                "trigger": _control_mask_to_json(self.macro_trigger_mask),
-                "cancel": _control_name(self.macro_cancel),
-                "steps": [
-                    step.to_json_object() for step in self.macro_steps
-                ],
-            },
+            "macros": [
+                macro.to_json_object() for macro in self.macros
+            ],
             "turbo": {
                 name: TURBO_MODES[self.turbo_modes[index]]
                 for index, name in enumerate(LOGICAL_BUTTONS)
@@ -1280,7 +1492,7 @@ class ControllerProfile:
             or schema_version > PROFILE_SCHEMA_VERSION
         ):
             raise ConfigManagerError("unsupported profile schema")
-        fields = (
+        fields = [
             "schema_version",
             "size",
             "button_map",
@@ -1288,11 +1500,13 @@ class ControllerProfile:
             "triggers",
             "rumble",
             "switching_chord",
-            "macro",
             "turbo",
-        )
+        ]
         if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
-            fields += ("motion_toggle_chord",)
+            fields.append("motion_toggle_chord")
+        fields.append(
+            "macros" if schema_version == PROFILE_SCHEMA_VERSION else "macro"
+        )
         obj = _require_object(value, fields, "profile")
         if _require_int(obj["size"], "profile.size", 0, 0xFFFF) != PROFILE_SIZE:
             raise ConfigManagerError("unsupported profile schema")
@@ -1310,19 +1524,9 @@ class ControllerProfile:
             ("weak_scale", "strong_scale", "confirmation_policy"),
             "profile.rumble",
         )
-        macro = _require_object(
-            obj["macro"], ("trigger", "cancel", "steps"), "profile.macro"
-        )
         turbo = _require_object(
             obj["turbo"], LOGICAL_BUTTONS, "profile.turbo"
         )
-        steps = macro["steps"]
-        if type(steps) is not list or not (
-            1 <= len(steps) <= PROFILE_MACRO_STEP_CAPACITY
-        ):
-            raise ConfigManagerError(
-                "profile.macro.steps must contain one to eight steps"
-            )
         left_trigger = TriggerConfig.from_json_object(
             triggers["left"],
             "profile.triggers.left",
@@ -1338,55 +1542,93 @@ class ControllerProfile:
         if schema_version == PROFILE_LEGACY_SCHEMA_VERSION:
             left_trigger = _migrate_legacy_trigger_threshold(left_trigger)
             right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
+
+        mask_parser = (
+            _control_mask_from_json
+            if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
+            else _button_mask_from_json
+        )
+        switching_chord = mask_parser(
+            obj["switching_chord"], "profile.switching_chord"
+        )
+        motion_toggle_chord = (
+            mask_parser(
+                obj["motion_toggle_chord"],
+                "profile.motion_toggle_chord",
+            )
+            if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
+            else 0
+        )
         if schema_version == PROFILE_SCHEMA_VERSION:
-            switching_chord = _control_mask_from_json(
-                obj["switching_chord"], "profile.switching_chord"
-            )
-            motion_toggle_chord = _control_mask_from_json(
-                obj["motion_toggle_chord"],
-                "profile.motion_toggle_chord",
-            )
-            macro_trigger_mask = _control_mask_from_json(
-                macro["trigger"], "profile.macro.trigger"
-            )
-            macro_cancel = _control_index(
-                macro["cancel"], "profile.macro.cancel"
-            )
-        elif schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
-            switching_chord = _button_mask_from_json(
-                obj["switching_chord"], "profile.switching_chord"
-            )
-            motion_toggle_chord = _button_mask_from_json(
-                obj["motion_toggle_chord"],
-                "profile.motion_toggle_chord",
-            )
-            macro_trigger_mask = _button_mask_from_json(
-                macro["trigger"], "profile.macro.trigger"
-            )
-            macro_cancel = _button_index(
-                macro["cancel"], "profile.macro.cancel"
+            macro_values = obj["macros"]
+            if type(macro_values) is not list or len(macro_values) != PROFILE_MACRO_COUNT:
+                raise ConfigManagerError("profile.macros must contain four macros")
+            macros = tuple(
+                ControllerMacro.from_json_object(
+                    macro, f"profile.macros[{index}]"
+                )
+                for index, macro in enumerate(macro_values)
             )
         else:
-            switching_chord = _button_mask_from_json(
-                obj["switching_chord"], "profile.switching_chord"
+            macro = _require_object(
+                obj["macro"], ("trigger", "cancel", "steps"), "profile.macro"
             )
-            motion_toggle_chord = 0
-            legacy_trigger = _button_index(
-                macro["trigger"], "profile.macro.trigger"
+            steps = macro["steps"]
+            if type(steps) is not list or not (
+                1 <= len(steps) <= PROFILE_LEGACY_MACRO_STEP_CAPACITY
+            ):
+                raise ConfigManagerError(
+                    "profile.macro.steps must contain one to eight steps"
+                )
+            decoded_steps = tuple(
+                MacroStep.from_json_object(
+                    step, f"profile.macro.steps[{index}]"
+                )
+                for index, step in enumerate(steps)
             )
-            macro_trigger_mask = (
-                0
-                if legacy_trigger == PROFILE_NONE_BUTTON
-                else 1 << legacy_trigger
+            if decoded_steps[-1] != MacroStep.end() or any(
+                step.step_type != 0 for step in decoded_steps[:-1]
+            ):
+                raise ConfigManagerError(
+                    "legacy macro must end with one canonical end step"
+                )
+            if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
+                trigger_mask = mask_parser(
+                    macro["trigger"], "profile.macro.trigger"
+                )
+                cancel_control = (
+                    _control_index(
+                        macro["cancel"], "profile.macro.cancel"
+                    )
+                    if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
+                    else _button_index(
+                        macro["cancel"], "profile.macro.cancel"
+                    )
+                )
+            else:
+                trigger = _button_index(
+                    macro["trigger"], "profile.macro.trigger"
+                )
+                trigger_mask = (
+                    0 if trigger == PROFILE_NONE_BUTTON else 1 << trigger
+                )
+                cancel_control = _button_index(
+                    macro["cancel"], "profile.macro.cancel"
+                )
+            macros = (
+                ControllerMacro(
+                    trigger_mask, cancel_control, decoded_steps[:-1]
+                ),
+                *(ControllerMacro.empty() for _ in range(PROFILE_MACRO_COUNT - 1)),
             )
-            macro_cancel = _button_index(
-                macro["cancel"], "profile.macro.cancel"
-            )
+
         return cls(
             button_map=tuple(
-                _control_index(
-                    button_map[name], f"profile.button_map.{name}"
-                )
+                (
+                    _control_index
+                    if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
+                    else _button_index
+                )(button_map[name], f"profile.button_map.{name}")
                 for name in LOGICAL_BUTTONS
             ),
             left_stick=StickConfig.from_json_object(
@@ -1398,16 +1640,10 @@ class ControllerProfile:
             left_trigger=left_trigger,
             right_trigger=right_trigger,
             weak_rumble_scale=_require_int(
-                rumble["weak_scale"],
-                "profile.rumble.weak_scale",
-                0,
-                0xFF,
+                rumble["weak_scale"], "profile.rumble.weak_scale", 0, 0xFF
             ),
             strong_rumble_scale=_require_int(
-                rumble["strong_scale"],
-                "profile.rumble.strong_scale",
-                0,
-                0xFF,
+                rumble["strong_scale"], "profile.rumble.strong_scale", 0, 0xFF
             ),
             confirmation_policy=_require_enum(
                 rumble["confirmation_policy"],
@@ -1416,14 +1652,7 @@ class ControllerProfile:
             ),
             switching_chord=switching_chord,
             motion_toggle_chord=motion_toggle_chord,
-            macro_trigger_mask=macro_trigger_mask,
-            macro_cancel=macro_cancel,
-            macro_steps=tuple(
-                MacroStep.from_json_object(
-                    step, f"profile.macro.steps[{index}]"
-                )
-                for index, step in enumerate(steps)
-            ),
+            macros=macros,
             turbo_modes=tuple(
                 _require_enum(
                     turbo[name], TURBO_MODES, f"profile.turbo.{name}"
@@ -1756,6 +1985,7 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
         PROFILE_LEGACY_SCHEMA_VERSION,
         PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
         PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
+        PROFILE_ACTION_CONTROL_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile-list schema")
@@ -1823,6 +2053,7 @@ def read_selected_profile(device: UsbDevice) -> ControllerProfile:
         PROFILE_LEGACY_SCHEMA_VERSION,
         PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
         PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
+        PROFILE_ACTION_CONTROL_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile schema")

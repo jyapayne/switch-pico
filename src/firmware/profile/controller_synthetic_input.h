@@ -13,6 +13,7 @@ struct ControllerSyntheticBindingState {
 
 struct ControllerSyntheticInputContext {
     bool macro_active = false;
+    uint8_t macro_index = 0;
     uint8_t macro_step_index = 0;
     uint32_t macro_deadline_ms = 0;
     uint32_t previous_input_control_mask = 0;

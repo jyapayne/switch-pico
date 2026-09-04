@@ -8,14 +8,20 @@
 constexpr uint16_t CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION = 1;
 constexpr uint16_t CONTROLLER_PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2;
 constexpr uint16_t CONTROLLER_PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3;
-constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 4;
+constexpr uint16_t CONTROLLER_PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4;
+constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 5;
 constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 256;
 constexpr uint8_t CONTROLLER_PROFILE_COUNT = 4;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT = 16;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT = 18;
 constexpr uint8_t CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL = 16;
 constexpr uint8_t CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL = 17;
-constexpr uint8_t CONTROLLER_PROFILE_MACRO_STEP_CAPACITY = 8;
+constexpr uint8_t CONTROLLER_PROFILE_MACRO_COUNT = 4;
+constexpr uint8_t CONTROLLER_PROFILE_MACRO_STEP_CAPACITY = 16;
+constexpr uint8_t CONTROLLER_PROFILE_MACRO_STEPS_PER_MACRO = 8;
+constexpr uint8_t CONTROLLER_PROFILE_LEGACY_MACRO_STEP_CAPACITY = 8;
+constexpr size_t CONTROLLER_PROFILE_MACRO_DESCRIPTOR_SIZE = 6;
+constexpr size_t CONTROLLER_PROFILE_MACRO_STREAM_SIZE = 136;
 constexpr uint16_t CONTROLLER_PROFILE_MAX_WAIT_MS = 10000;
 constexpr uint8_t CONTROLLER_PROFILE_NO_BUTTON = 0xff;
 constexpr uint8_t CONTROLLER_PROFILE_ALL = 0xff;
@@ -74,10 +80,6 @@ enum class ControllerProfileTurboMode : uint8_t {
     kAutoBurst = 2,
 };
 
-enum class ControllerProfileMacroStepType : uint8_t {
-    kState = 0,
-    kEnd = 1,
-};
 
 enum ControllerProfileMacroOverride : uint8_t {
     kControllerProfileOverrideButtons = 1u << 0,
@@ -109,8 +111,6 @@ struct ControllerProfileTriggerConfiguration {
 };
 
 struct ControllerProfileMacroStep {
-    ControllerProfileMacroStepType type =
-        ControllerProfileMacroStepType::kEnd;
     uint8_t override_flags = 0;
     uint16_t duration_ms = 0;
     uint16_t output_button_mask = 0;
@@ -120,6 +120,13 @@ struct ControllerProfileMacroStep {
     int16_t right_stick_y = 0;
     uint16_t left_trigger = 0;
     uint16_t right_trigger = 0;
+};
+
+struct ControllerProfileMacro {
+    uint32_t trigger_mask = 0;
+    uint8_t cancel_control = CONTROLLER_PROFILE_NO_BUTTON;
+    uint8_t first_step = 0;
+    uint8_t step_count = 0;
 };
 
 struct ControllerProfile {
@@ -132,9 +139,8 @@ struct ControllerProfile {
         ControllerProfileConfirmationPolicy::kRumbleAndLed;
     uint32_t switching_chord = 0;
     uint32_t motion_toggle_chord = 0;
-    uint32_t macro_trigger_mask = 0;
-    uint8_t macro_cancel = CONTROLLER_PROFILE_NO_BUTTON;
-    uint8_t macro_step_count = 1;
+    ControllerProfileMacro macros[CONTROLLER_PROFILE_MACRO_COUNT]{};
+    uint8_t macro_step_count = 0;
     ControllerProfileTurboMode
         turbo_modes[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{};
     ControllerProfileMacroStep

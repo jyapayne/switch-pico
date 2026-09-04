@@ -396,19 +396,17 @@ void test_initial_profile_indication_once_per_connection() {
 void test_default_switching_retry_commit_and_feedback() {
     prepare_profiles();
     ControllerProfile& initial_profile = rows[0].profiles[0];
-    initial_profile.macro_trigger_mask =
+    initial_profile.macros[0].trigger_mask =
         logical_button_bit(
             ControllerProfileLogicalButton::kLeftShoulder);
-    initial_profile.macro_step_count = 2;
-    initial_profile.macro_steps[0].type =
-        ControllerProfileMacroStepType::kState;
+    initial_profile.macros[0].first_step = 0;
+    initial_profile.macros[0].step_count = 1;
+    initial_profile.macro_step_count = 1;
     initial_profile.macro_steps[0].override_flags =
         kControllerProfileOverrideButtons;
     initial_profile.macro_steps[0].duration_ms = 1000;
     initial_profile.macro_steps[0].output_button_mask =
         logical_button_bit(ControllerProfileLogicalButton::kNorth);
-    initial_profile.macro_steps[1].type =
-        ControllerProfileMacroStepType::kEnd;
 
     Bluepad32SlotSnapshot snapshot = make_snapshot(0);
     (void)runtime_transform(0, snapshot, 0);
@@ -533,19 +531,17 @@ void test_identity_promotion_preserves_held_switching() {
 }
 
 void configure_motion_suppression_probe(ControllerProfile* profile) {
-    profile->macro_trigger_mask =
+    profile->macros[0].trigger_mask =
         logical_button_bit(
             ControllerProfileLogicalButton::kDpadUp);
-    profile->macro_step_count = 2;
-    profile->macro_steps[0].type =
-        ControllerProfileMacroStepType::kState;
+    profile->macros[0].first_step = 0;
+    profile->macros[0].step_count = 1;
+    profile->macro_step_count = 1;
     profile->macro_steps[0].override_flags =
         kControllerProfileOverrideButtons;
     profile->macro_steps[0].duration_ms = 1000;
     profile->macro_steps[0].output_button_mask =
         logical_button_bit(ControllerProfileLogicalButton::kNorth);
-    profile->macro_steps[1].type =
-        ControllerProfileMacroStepType::kEnd;
 }
 
 void test_switching_uses_pre_hotkey_buttons_only() {
@@ -723,22 +719,19 @@ void test_profile_motion_toggle_supports_trigger_chords() {
 void configure_synthetic_profile(uint8_t slot) {
     ControllerProfile& profile = rows[slot].profiles[0];
     profile = controller_profile_default(rows[slot].identity, 0);
-    profile.macro_trigger_mask =
+    profile.macros[0].trigger_mask =
         logical_button_bit(ControllerProfileLogicalButton::kSouth);
-    profile.macro_cancel =
+    profile.macros[0].cancel_control =
         static_cast<uint8_t>(ControllerProfileLogicalButton::kCapture);
-    profile.macro_step_count = 2;
-    profile.macro_steps[0].type =
-        ControllerProfileMacroStepType::kState;
+    profile.macros[0].first_step = 0;
+    profile.macros[0].step_count = 1;
+    profile.macro_step_count = 1;
     profile.macro_steps[0].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[0].duration_ms = 1000;
     profile.macro_steps[0].output_button_mask = static_cast<uint16_t>(
         1u << static_cast<uint8_t>(
             ControllerProfileLogicalButton::kNorth));
-    profile.macro_steps[1] = {};
-    profile.macro_steps[1].type =
-        ControllerProfileMacroStepType::kEnd;
     profile.turbo_modes[static_cast<uint8_t>(
         ControllerProfileLogicalButton::kEast)] =
         ControllerProfileTurboMode::kAutoBurst;

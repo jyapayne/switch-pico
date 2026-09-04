@@ -57,18 +57,8 @@ bool valid_control_output(uint8_t output) {
            output == CONTROLLER_PROFILE_NO_BUTTON;
 }
 
-bool valid_macro_step(const ControllerProfileMacroStep& step,
-                      bool must_end) {
-    if (must_end) {
-        return step.type == ControllerProfileMacroStepType::kEnd &&
-               step.override_flags == 0 && step.duration_ms == 0 &&
-               step.output_button_mask == 0 && step.left_stick_x == 0 &&
-               step.left_stick_y == 0 && step.right_stick_x == 0 &&
-               step.right_stick_y == 0 && step.left_trigger == 0 &&
-               step.right_trigger == 0;
-    }
-    if (step.type != ControllerProfileMacroStepType::kState ||
-        (step.override_flags & ~kMacroOverrideMask) != 0 ||
+bool valid_macro_step(const ControllerProfileMacroStep& step) {
+    if ((step.override_flags & ~kMacroOverrideMask) != 0 ||
         step.duration_ms > CONTROLLER_PROFILE_MAX_WAIT_MS) {
         return false;
     }
@@ -92,6 +82,112 @@ bool valid_macro_step(const ControllerProfileMacroStep& step,
         step.right_trigger != 0) {
         return false;
     }
+    return true;
+}
+
+size_t sparse_macro_step_size(const ControllerProfileMacroStep& step) {
+    size_t size = 3;
+    size += (step.override_flags & kControllerProfileOverrideButtons) != 0
+                ? 2
+                : 0;
+    size += (step.override_flags & kControllerProfileOverrideLeftStick) != 0
+                ? 4
+                : 0;
+    size += (step.override_flags & kControllerProfileOverrideRightStick) != 0
+                ? 4
+                : 0;
+    size += (step.override_flags & kControllerProfileOverrideLeftTrigger) != 0
+                ? 2
+                : 0;
+    size += (step.override_flags & kControllerProfileOverrideRightTrigger) != 0
+                ? 2
+                : 0;
+    return size;
+}
+
+bool encode_sparse_macro_step(
+    const ControllerProfileMacroStep& step, uint8_t* output,
+    size_t output_size, size_t* encoded_size) {
+    const size_t required = sparse_macro_step_size(step);
+    if (!valid_macro_step(step) || output == nullptr ||
+        encoded_size == nullptr || required > output_size) {
+        return false;
+    }
+    size_t offset = 0;
+    output[offset++] = step.override_flags;
+    profile_write_u16(&output[offset], step.duration_ms);
+    offset += 2;
+    if ((step.override_flags & kControllerProfileOverrideButtons) != 0) {
+        profile_write_u16(&output[offset], step.output_button_mask);
+        offset += 2;
+    }
+    if ((step.override_flags & kControllerProfileOverrideLeftStick) != 0) {
+        profile_write_i16(&output[offset], step.left_stick_x);
+        profile_write_i16(&output[offset + 2], step.left_stick_y);
+        offset += 4;
+    }
+    if ((step.override_flags & kControllerProfileOverrideRightStick) != 0) {
+        profile_write_i16(&output[offset], step.right_stick_x);
+        profile_write_i16(&output[offset + 2], step.right_stick_y);
+        offset += 4;
+    }
+    if ((step.override_flags & kControllerProfileOverrideLeftTrigger) != 0) {
+        profile_write_u16(&output[offset], step.left_trigger);
+        offset += 2;
+    }
+    if ((step.override_flags & kControllerProfileOverrideRightTrigger) != 0) {
+        profile_write_u16(&output[offset], step.right_trigger);
+        offset += 2;
+    }
+    *encoded_size = offset;
+    return true;
+}
+
+bool decode_sparse_macro_step(
+    const uint8_t* input, size_t input_size,
+    ControllerProfileMacroStep* output, size_t* decoded_size) {
+    if (input == nullptr || output == nullptr || decoded_size == nullptr ||
+        input_size < 3) {
+        return false;
+    }
+    ControllerProfileMacroStep step{};
+    step.override_flags = input[0];
+    step.duration_ms = profile_read_u16(&input[1]);
+    if (!valid_macro_step(step)) {
+        return false;
+    }
+    const size_t required = sparse_macro_step_size(step);
+    if (required > input_size) {
+        return false;
+    }
+    size_t offset = 3;
+    if ((step.override_flags & kControllerProfileOverrideButtons) != 0) {
+        step.output_button_mask = profile_read_u16(&input[offset]);
+        offset += 2;
+    }
+    if ((step.override_flags & kControllerProfileOverrideLeftStick) != 0) {
+        step.left_stick_x = profile_read_i16(&input[offset]);
+        step.left_stick_y = profile_read_i16(&input[offset + 2]);
+        offset += 4;
+    }
+    if ((step.override_flags & kControllerProfileOverrideRightStick) != 0) {
+        step.right_stick_x = profile_read_i16(&input[offset]);
+        step.right_stick_y = profile_read_i16(&input[offset + 2]);
+        offset += 4;
+    }
+    if ((step.override_flags & kControllerProfileOverrideLeftTrigger) != 0) {
+        step.left_trigger = profile_read_u16(&input[offset]);
+        offset += 2;
+    }
+    if ((step.override_flags & kControllerProfileOverrideRightTrigger) != 0) {
+        step.right_trigger = profile_read_u16(&input[offset]);
+        offset += 2;
+    }
+    if (!valid_macro_step(step)) {
+        return false;
+    }
+    *output = step;
+    *decoded_size = offset;
     return true;
 }
 
@@ -164,12 +260,13 @@ ControllerProfile controller_profile_default(const ControllerIdentity& identity,
         ControllerProfileConfirmationPolicy::kRumbleAndLed;
     profile.switching_chord = 0;
     profile.motion_toggle_chord = 0;
-    profile.macro_trigger_mask = 0;
-    profile.macro_cancel = CONTROLLER_PROFILE_NO_BUTTON;
-    profile.macro_step_count = 1;
+    for (ControllerProfileMacro& macro : profile.macros) {
+        macro = {};
+        macro.cancel_control = CONTROLLER_PROFILE_NO_BUTTON;
+    }
+    profile.macro_step_count = 0;
     for (ControllerProfileMacroStep& step : profile.macro_steps) {
         step = {};
-        step.type = ControllerProfileMacroStepType::kEnd;
     }
     return profile;
 }
@@ -207,24 +304,62 @@ bool controller_profile_validate(const ControllerProfile& profile) {
     if (static_cast<uint8_t>(profile.confirmation_policy) >
             static_cast<uint8_t>(
                 ControllerProfileConfirmationPolicy::kRumbleAndLed) ||
-        !valid_control_output(profile.macro_cancel) ||
         (profile.switching_chord & ~kLogicalControlMask) != 0 ||
         (profile.motion_toggle_chord & ~kLogicalControlMask) != 0 ||
-        (profile.macro_trigger_mask & ~kLogicalControlMask) != 0 ||
-        profile.macro_step_count == 0 ||
         profile.macro_step_count > CONTROLLER_PROFILE_MACRO_STEP_CAPACITY) {
         return false;
+    }
+    uint8_t expected_first_step = 0;
+    size_t encoded_macro_size = 0;
+    uint32_t trigger_masks[CONTROLLER_PROFILE_MACRO_COUNT]{};
+    for (uint8_t macro_index = 0;
+         macro_index < CONTROLLER_PROFILE_MACRO_COUNT; ++macro_index) {
+        const ControllerProfileMacro& macro =
+            profile.macros[macro_index];
+        if ((macro.trigger_mask & ~kLogicalControlMask) != 0 ||
+            !valid_control_output(macro.cancel_control) ||
+            macro.first_step != expected_first_step ||
+            macro.step_count > CONTROLLER_PROFILE_MACRO_STEPS_PER_MACRO ||
+            macro.step_count >
+                profile.macro_step_count - expected_first_step) {
+            return false;
+        }
+        for (uint8_t previous = 0; previous < macro_index; ++previous) {
+            if (macro.trigger_mask != 0 &&
+                trigger_masks[previous] == macro.trigger_mask) {
+                return false;
+            }
+        }
+        trigger_masks[macro_index] = macro.trigger_mask;
+        for (uint8_t step = 0; step < macro.step_count; ++step) {
+            const ControllerProfileMacroStep& value =
+                profile.macro_steps[expected_first_step + step];
+            if (!valid_macro_step(value)) {
+                return false;
+            }
+            encoded_macro_size += sparse_macro_step_size(value);
+        }
+        expected_first_step =
+            static_cast<uint8_t>(expected_first_step + macro.step_count);
+    }
+    if (expected_first_step != profile.macro_step_count ||
+        encoded_macro_size > CONTROLLER_PROFILE_MACRO_STREAM_SIZE) {
+        return false;
+    }
+    for (uint8_t index = profile.macro_step_count;
+         index < CONTROLLER_PROFILE_MACRO_STEP_CAPACITY; ++index) {
+        const ControllerProfileMacroStep& step = profile.macro_steps[index];
+        if (step.override_flags != 0 || step.duration_ms != 0 ||
+            step.output_button_mask != 0 || step.left_stick_x != 0 ||
+            step.left_stick_y != 0 || step.right_stick_x != 0 ||
+            step.right_stick_y != 0 || step.left_trigger != 0 ||
+            step.right_trigger != 0) {
+            return false;
+        }
     }
     for (ControllerProfileTurboMode mode : profile.turbo_modes) {
         if (static_cast<uint8_t>(mode) >
             static_cast<uint8_t>(ControllerProfileTurboMode::kAutoBurst)) {
-            return false;
-        }
-    }
-    for (uint8_t index = 0;
-         index < CONTROLLER_PROFILE_MACRO_STEP_CAPACITY; ++index) {
-        const bool must_end = index >= profile.macro_step_count - 1;
-        if (!valid_macro_step(profile.macro_steps[index], must_end)) {
             return false;
         }
     }
@@ -269,37 +404,53 @@ bool controller_profile_encode(const ControllerProfile& profile,
     output[74] = static_cast<uint8_t>(profile.confirmation_policy);
     output[75] = static_cast<uint8_t>(
         ((profile.switching_chord >> 16) & 0x03u) |
-        (((profile.macro_trigger_mask >> 16) & 0x03u) << 2) |
         (((profile.motion_toggle_chord >> 16) & 0x03u) << 4));
     profile_write_u16(
         &output[76], static_cast<uint16_t>(profile.switching_chord));
     profile_write_u16(
-        &output[78], static_cast<uint16_t>(profile.macro_trigger_mask));
-    output[80] = profile.macro_step_count;
-    output[81] = profile.macro_cancel;
-    profile_write_u16(
-        &output[98], static_cast<uint16_t>(profile.motion_toggle_chord));
+        &output[78], static_cast<uint16_t>(profile.motion_toggle_chord));
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
-        output[82 + index] =
+        output[80 + index] =
             static_cast<uint8_t>(profile.turbo_modes[index]);
     }
-    for (uint8_t index = 0;
-         index < CONTROLLER_PROFILE_MACRO_STEP_CAPACITY; ++index) {
-        const ControllerProfileMacroStep& step = profile.macro_steps[index];
-        uint8_t* encoded = &output[100 + index * 19];
-        encoded[0] = static_cast<uint8_t>(step.type);
-        encoded[1] = step.override_flags;
-        profile_write_u16(&encoded[2], step.duration_ms);
-        profile_write_u16(&encoded[4], step.output_button_mask);
-        profile_write_i16(&encoded[6], step.left_stick_x);
-        profile_write_i16(&encoded[8], step.left_stick_y);
-        profile_write_i16(&encoded[10], step.right_stick_x);
-        profile_write_i16(&encoded[12], step.right_stick_y);
-        profile_write_u16(&encoded[14], step.left_trigger);
-        profile_write_u16(&encoded[16], step.right_trigger);
+
+    size_t stream_offset = 0;
+    for (uint8_t macro_index = 0;
+         macro_index < CONTROLLER_PROFILE_MACRO_COUNT; ++macro_index) {
+        const ControllerProfileMacro& macro =
+            profile.macros[macro_index];
+        uint8_t* descriptor =
+            &output[96 + macro_index *
+                              CONTROLLER_PROFILE_MACRO_DESCRIPTOR_SIZE];
+        profile_write_u16(
+            descriptor, static_cast<uint16_t>(macro.trigger_mask));
+        const uint8_t cancel =
+            macro.cancel_control == CONTROLLER_PROFILE_NO_BUTTON
+                ? 0x1fu
+                : macro.cancel_control;
+        descriptor[2] = static_cast<uint8_t>(
+            ((macro.trigger_mask >> 16) & 0x03u) |
+            (cancel << 2));
+        descriptor[3] = static_cast<uint8_t>(stream_offset);
+        descriptor[4] = macro.step_count;
+        const size_t macro_start = stream_offset;
+        for (uint8_t step_index = 0;
+             step_index < macro.step_count; ++step_index) {
+            size_t encoded_size = 0;
+            if (!encode_sparse_macro_step(
+                    profile.macro_steps[macro.first_step + step_index],
+                    &output[120 + stream_offset],
+                    CONTROLLER_PROFILE_MACRO_STREAM_SIZE - stream_offset,
+                    &encoded_size)) {
+                return false;
+            }
+            stream_offset += encoded_size;
+        }
+        descriptor[5] =
+            static_cast<uint8_t>(stream_offset - macro_start);
     }
-    return true;
+    return stream_offset <= CONTROLLER_PROFILE_MACRO_STREAM_SIZE;
 }
 
 bool controller_profile_decode(const uint8_t* input, size_t input_size,
@@ -309,27 +460,32 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
         return false;
     }
     const uint16_t schema_version = profile_read_u16(&input[0]);
-    const bool has_control_mapping =
-        schema_version >= CONTROLLER_PROFILE_CONTROL_MAPPING_SCHEMA_VERSION;
-    const bool has_action_trigger_bits =
-        schema_version == CONTROLLER_PROFILE_SCHEMA_VERSION;
-    const bool trigger_extension_valid =
-        has_control_mapping
-            ? input[61] == 0 && input[71] == 0
-            : profile_bytes_are_zero(&input[60], 2) &&
-                  profile_bytes_are_zero(&input[70], 2);
     if (schema_version < CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION ||
         schema_version > CONTROLLER_PROFILE_SCHEMA_VERSION ||
         profile_read_u16(&input[2]) != CONTROLLER_PROFILE_ENCODED_SIZE ||
         !profile_bytes_are_zero(&input[31], 5) ||
-        !profile_bytes_are_zero(&input[47], 5) ||
-        !trigger_extension_valid ||
-        (has_action_trigger_bits ? (input[75] & 0xc0u) != 0
-                                 : input[75] != 0) ||
-        (!has_control_mapping && input[81] != 0) ||
+        !profile_bytes_are_zero(&input[47], 5)) {
+        return false;
+    }
+    const bool has_control_mapping =
+        schema_version >= CONTROLLER_PROFILE_CONTROL_MAPPING_SCHEMA_VERSION;
+    const bool has_action_controls =
+        schema_version >= CONTROLLER_PROFILE_ACTION_CONTROL_SCHEMA_VERSION;
+    const bool sparse_macros =
+        schema_version == CONTROLLER_PROFILE_SCHEMA_VERSION;
+    if ((has_control_mapping
+             ? input[61] != 0 || input[71] != 0
+             : !profile_bytes_are_zero(&input[60], 2) ||
+                   !profile_bytes_are_zero(&input[70], 2)) ||
+        (sparse_macros
+             ? (input[75] & 0xccu) != 0
+             : (has_action_controls ? (input[75] & 0xc0u) != 0
+                                    : input[75] != 0)) ||
         (!has_control_mapping &&
-         !profile_bytes_are_zero(&input[98], 2)) ||
-        !profile_bytes_are_zero(&input[252], 4)) {
+         (input[81] != 0 ||
+          !profile_bytes_are_zero(&input[98], 2))) ||
+        (!sparse_macros &&
+         !profile_bytes_are_zero(&input[252], 4))) {
         return false;
     }
 
@@ -339,7 +495,8 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     for (uint8_t index = 0; index < 2; ++index) {
         ControllerProfileStickConfiguration& stick = profile.sticks[index];
         const uint8_t* encoded = &input[20 + index * 16];
-        if ((encoded[10] & ~(kStickInvertX | kStickInvertY)) != 0) {
+        if ((encoded[10] & ~(kStickInvertX | kStickInvertY)) != 0 ||
+            !profile_bytes_are_zero(&encoded[11], 5)) {
             return false;
         }
         stick.center_x = profile_read_i16(&encoded[0]);
@@ -373,53 +530,147 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     profile.strong_rumble_scale = input[73];
     profile.confirmation_policy =
         static_cast<ControllerProfileConfirmationPolicy>(input[74]);
-    profile.switching_chord = profile_read_u16(&input[76]);
-    profile.motion_toggle_chord =
-        has_control_mapping ? profile_read_u16(&input[98]) : 0;
-    if (has_control_mapping) {
-        profile.macro_trigger_mask = profile_read_u16(&input[78]);
-        profile.macro_cancel = input[81];
+
+    if (sparse_macros) {
+        profile.switching_chord =
+            profile_read_u16(&input[76]) |
+            (static_cast<uint32_t>(input[75] & 0x03u) << 16);
+        profile.motion_toggle_chord =
+            profile_read_u16(&input[78]) |
+            (static_cast<uint32_t>((input[75] >> 4) & 0x03u) << 16);
+        for (uint8_t index = 0;
+             index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
+            profile.turbo_modes[index] =
+                static_cast<ControllerProfileTurboMode>(input[80 + index]);
+        }
+
+        size_t expected_stream_offset = 0;
+        uint8_t decoded_step_count = 0;
+        for (uint8_t macro_index = 0;
+             macro_index < CONTROLLER_PROFILE_MACRO_COUNT; ++macro_index) {
+            const uint8_t* descriptor =
+                &input[96 + macro_index *
+                                 CONTROLLER_PROFILE_MACRO_DESCRIPTOR_SIZE];
+            if ((descriptor[2] & 0x80u) != 0 ||
+                descriptor[3] != expected_stream_offset ||
+                descriptor[4] >
+                    CONTROLLER_PROFILE_MACRO_STEPS_PER_MACRO ||
+                expected_stream_offset + descriptor[5] >
+                    CONTROLLER_PROFILE_MACRO_STREAM_SIZE ||
+                decoded_step_count + descriptor[4] >
+                    CONTROLLER_PROFILE_MACRO_STEP_CAPACITY) {
+                return false;
+            }
+            ControllerProfileMacro& macro = profile.macros[macro_index];
+            macro.trigger_mask =
+                profile_read_u16(descriptor) |
+                (static_cast<uint32_t>(descriptor[2] & 0x03u) << 16);
+            const uint8_t cancel =
+                static_cast<uint8_t>((descriptor[2] >> 2) & 0x1fu);
+            if (cancel > CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL &&
+                cancel != 0x1fu) {
+                return false;
+            }
+            macro.cancel_control =
+                cancel == 0x1fu ? CONTROLLER_PROFILE_NO_BUTTON : cancel;
+            macro.first_step = decoded_step_count;
+            macro.step_count = descriptor[4];
+
+            size_t consumed = 0;
+            for (uint8_t step_index = 0;
+                 step_index < macro.step_count; ++step_index) {
+                size_t step_size = 0;
+                if (!decode_sparse_macro_step(
+                        &input[120 + expected_stream_offset + consumed],
+                        descriptor[5] - consumed,
+                        &profile.macro_steps[decoded_step_count],
+                        &step_size)) {
+                    return false;
+                }
+                consumed += step_size;
+                ++decoded_step_count;
+            }
+            if (consumed != descriptor[5]) {
+                return false;
+            }
+            expected_stream_offset += consumed;
+        }
+        if (!profile_bytes_are_zero(
+                &input[120 + expected_stream_offset],
+                CONTROLLER_PROFILE_MACRO_STREAM_SIZE -
+                    expected_stream_offset)) {
+            return false;
+        }
+        profile.macro_step_count = decoded_step_count;
     } else {
-        if (!valid_button(input[78])) {
+        profile.switching_chord = profile_read_u16(&input[76]);
+        profile.motion_toggle_chord =
+            has_control_mapping ? profile_read_u16(&input[98]) : 0;
+        ControllerProfileMacro& macro = profile.macros[0];
+        if (has_control_mapping) {
+            macro.trigger_mask = profile_read_u16(&input[78]);
+            macro.cancel_control = input[81];
+        } else {
+            if (!valid_button(input[78])) {
+                return false;
+            }
+            macro.trigger_mask =
+                input[78] < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT
+                    ? static_cast<uint32_t>(1u << input[78])
+                    : 0;
+            macro.cancel_control = input[79];
+        }
+        if (has_action_controls) {
+            profile.switching_chord |=
+                static_cast<uint32_t>(input[75] & 0x03u) << 16;
+            macro.trigger_mask |=
+                static_cast<uint32_t>((input[75] >> 2) & 0x03u) << 16;
+            profile.motion_toggle_chord |=
+                static_cast<uint32_t>((input[75] >> 4) & 0x03u) << 16;
+        }
+        const uint8_t legacy_step_count = input[80];
+        if (legacy_step_count == 0 ||
+            legacy_step_count >
+                CONTROLLER_PROFILE_LEGACY_MACRO_STEP_CAPACITY) {
             return false;
         }
-        profile.macro_trigger_mask =
-            input[78] < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT
-                ? static_cast<uint32_t>(1u << input[78])
-                : 0;
-        profile.macro_cancel = input[79];
-    }
-    if (has_action_trigger_bits) {
-        profile.switching_chord |=
-            static_cast<uint32_t>(input[75] & 0x03u) << 16;
-        profile.macro_trigger_mask |=
-            static_cast<uint32_t>((input[75] >> 2) & 0x03u) << 16;
-        profile.motion_toggle_chord |=
-            static_cast<uint32_t>((input[75] >> 4) & 0x03u) << 16;
-    }
-    profile.macro_step_count = input[80];
-    for (uint8_t index = 0;
-         index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
-        profile.turbo_modes[index] =
-            static_cast<ControllerProfileTurboMode>(input[82 + index]);
-    }
-    for (uint8_t index = 0;
-         index < CONTROLLER_PROFILE_MACRO_STEP_CAPACITY; ++index) {
-        ControllerProfileMacroStep& step = profile.macro_steps[index];
-        const uint8_t* encoded = &input[100 + index * 19];
-        if (encoded[18] != 0) {
-            return false;
+        for (uint8_t index = 0;
+             index < CONTROLLER_PROFILE_LEGACY_MACRO_STEP_CAPACITY;
+             ++index) {
+            const uint8_t* encoded = &input[100 + index * 19];
+            const bool must_end = index >= legacy_step_count - 1;
+            if (must_end) {
+                if (encoded[0] != 1 ||
+                    !profile_bytes_are_zero(&encoded[1], 18)) {
+                    return false;
+                }
+                continue;
+            }
+            if (encoded[0] != 0 || encoded[18] != 0) {
+                return false;
+            }
+            ControllerProfileMacroStep& step = profile.macro_steps[index];
+            step.override_flags = encoded[1];
+            step.duration_ms = profile_read_u16(&encoded[2]);
+            step.output_button_mask = profile_read_u16(&encoded[4]);
+            step.left_stick_x = profile_read_i16(&encoded[6]);
+            step.left_stick_y = profile_read_i16(&encoded[8]);
+            step.right_stick_x = profile_read_i16(&encoded[10]);
+            step.right_stick_y = profile_read_i16(&encoded[12]);
+            step.left_trigger = profile_read_u16(&encoded[14]);
+            step.right_trigger = profile_read_u16(&encoded[16]);
+            if (!valid_macro_step(step)) {
+                return false;
+            }
         }
-        step.type = static_cast<ControllerProfileMacroStepType>(encoded[0]);
-        step.override_flags = encoded[1];
-        step.duration_ms = profile_read_u16(&encoded[2]);
-        step.output_button_mask = profile_read_u16(&encoded[4]);
-        step.left_stick_x = profile_read_i16(&encoded[6]);
-        step.left_stick_y = profile_read_i16(&encoded[8]);
-        step.right_stick_x = profile_read_i16(&encoded[10]);
-        step.right_stick_y = profile_read_i16(&encoded[12]);
-        step.left_trigger = profile_read_u16(&encoded[14]);
-        step.right_trigger = profile_read_u16(&encoded[16]);
+        macro.first_step = 0;
+        macro.step_count = static_cast<uint8_t>(legacy_step_count - 1u);
+        profile.macro_step_count = macro.step_count;
+        for (uint8_t index = 0;
+             index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
+            profile.turbo_modes[index] =
+                static_cast<ControllerProfileTurboMode>(input[82 + index]);
+        }
     }
     if (!controller_profile_validate(profile)) {
         return false;

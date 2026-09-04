@@ -39,36 +39,28 @@ ControllerProfile profile_with_macro(
         ControllerProfileLogicalButton::kCapture) {
     ControllerProfile profile =
         controller_profile_default(controller_identity_global(), 0);
-    profile.macro_trigger_mask = button_bit(trigger);
-    profile.macro_cancel = button_index(cancel);
+    profile.macros[0].trigger_mask = button_bit(trigger);
+    profile.macros[0].cancel_control = button_index(cancel);
+    profile.macros[0].first_step = 0;
     return profile;
 }
 
-void set_end(ControllerProfile* profile, uint8_t index) {
-    profile->macro_steps[index] = {};
-    profile->macro_steps[index].type =
-        ControllerProfileMacroStepType::kEnd;
-}
 
 void test_immediate_press_release_dpad_and_explicit_end() {
     ControllerProfile profile =
         profile_with_macro(ControllerProfileLogicalButton::kSouth);
-    profile.macro_step_count = 3;
-    profile.macro_steps[0].type =
-        ControllerProfileMacroStepType::kState;
+    profile.macro_step_count = 2;
+    profile.macros[0].step_count = 2;
     profile.macro_steps[0].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[0].duration_ms = 10;
     profile.macro_steps[0].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kNorth) |
         button_bit(ControllerProfileLogicalButton::kDpadUp);
-    profile.macro_steps[1].type =
-        ControllerProfileMacroStepType::kState;
     profile.macro_steps[1].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[1].duration_ms = 20;
     profile.macro_steps[1].output_button_mask = 0;
-    set_end(&profile, 2);
 
     ControllerSyntheticInputContext context{};
     ControllerState input =
@@ -103,20 +95,18 @@ void test_immediate_press_release_dpad_and_explicit_end() {
 void test_macro_trigger_chord_requires_every_button() {
     ControllerProfile profile =
         profile_with_macro(ControllerProfileLogicalButton::kSouth);
-    profile.macro_trigger_mask =
+    profile.macros[0].trigger_mask =
         button_bit(ControllerProfileLogicalButton::kSouth) |
         (1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL);
-    profile.macro_cancel =
+    profile.macros[0].cancel_control =
         CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL;
-    profile.macro_step_count = 2;
-    profile.macro_steps[0].type =
-        ControllerProfileMacroStepType::kState;
+    profile.macro_step_count = 1;
+    profile.macros[0].step_count = 1;
     profile.macro_steps[0].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[0].duration_ms = 100;
     profile.macro_steps[0].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kNorth);
-    set_end(&profile, 1);
 
     ControllerSyntheticInputContext context{};
     ControllerState input =
@@ -151,9 +141,9 @@ void test_macro_trigger_chord_requires_every_button() {
 void test_optional_field_overrides_and_motion_preservation() {
     ControllerProfile profile =
         profile_with_macro(ControllerProfileLogicalButton::kSelect);
-    profile.macro_step_count = 2;
+    profile.macro_step_count = 1;
+    profile.macros[0].step_count = 1;
     ControllerProfileMacroStep& step = profile.macro_steps[0];
-    step.type = ControllerProfileMacroStepType::kState;
     step.override_flags = kControllerProfileOverrideLeftStick |
                           kControllerProfileOverrideRightStick |
                           kControllerProfileOverrideLeftTrigger |
@@ -165,7 +155,6 @@ void test_optional_field_overrides_and_motion_preservation() {
     step.right_stick_y = INT16_MAX;
     step.left_trigger = 0;
     step.right_trigger = UINT16_MAX;
-    set_end(&profile, 1);
 
     ControllerState input = state_with_buttons(
         button_bit(ControllerProfileLogicalButton::kSelect) |
@@ -203,29 +192,23 @@ void test_optional_field_overrides_and_motion_preservation() {
 void test_zero_max_wait_and_scheduled_catch_up() {
     ControllerProfile profile =
         profile_with_macro(ControllerProfileLogicalButton::kSouth);
-    profile.macro_step_count = 4;
-    profile.macro_steps[0].type =
-        ControllerProfileMacroStepType::kState;
+    profile.macro_step_count = 3;
+    profile.macros[0].step_count = 3;
     profile.macro_steps[0].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[0].duration_ms = 0;
     profile.macro_steps[0].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kNorth);
-    profile.macro_steps[1].type =
-        ControllerProfileMacroStepType::kState;
     profile.macro_steps[1].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[1].duration_ms = CONTROLLER_PROFILE_MAX_WAIT_MS;
     profile.macro_steps[1].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kEast);
-    profile.macro_steps[2].type =
-        ControllerProfileMacroStepType::kState;
     profile.macro_steps[2].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[2].duration_ms = 0;
     profile.macro_steps[2].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kWest);
-    set_end(&profile, 3);
 
     ControllerSyntheticInputContext context{};
     ControllerProfileTransformResult output =
@@ -252,7 +235,8 @@ void test_zero_max_wait_and_scheduled_catch_up() {
                 !context.macro_active,
             "zero-duration catch-up did not reach the explicit end");
 
-    profile.macro_step_count = 4;
+    profile.macro_step_count = 3;
+    profile.macros[0].step_count = 3;
     profile.macro_steps[0].duration_ms = 10;
     profile.macro_steps[0].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kNorth);
@@ -277,11 +261,11 @@ void test_zero_max_wait_and_scheduled_catch_up() {
                 controller_profile_extract_button_mask(output.state) == 0,
             "large time jump did not finish the bounded macro");
 
-    profile.macro_step_count = 2;
+    profile.macro_step_count = 1;
+    profile.macros[0].step_count = 1;
     profile.macro_steps[0].duration_ms = 10;
     profile.macro_steps[0].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kNorth);
-    set_end(&profile, 1);
     context = {};
     constexpr uint32_t macro_near_wrap = UINT32_MAX - 5u;
     output = controller_synthetic_input_apply(
@@ -305,15 +289,13 @@ void test_consumption_cancel_precedence_and_duplicate_contributors() {
     ControllerProfile profile =
         profile_with_macro(ControllerProfileLogicalButton::kSelect,
                            ControllerProfileLogicalButton::kCapture);
-    profile.macro_step_count = 2;
-    profile.macro_steps[0].type =
-        ControllerProfileMacroStepType::kState;
+    profile.macro_step_count = 1;
+    profile.macros[0].step_count = 1;
     profile.macro_steps[0].override_flags =
         kControllerProfileOverrideButtons;
     profile.macro_steps[0].duration_ms = 100;
     profile.macro_steps[0].output_button_mask =
         button_bit(ControllerProfileLogicalButton::kDpadLeft);
-    set_end(&profile, 1);
     profile.button_map[button_index(ControllerProfileLogicalButton::kSouth)] =
         button_index(ControllerProfileLogicalButton::kNorth);
     profile.button_map[button_index(ControllerProfileLogicalButton::kEast)] =
@@ -469,6 +451,53 @@ void test_auto_burst_toggle_cancel_and_external_cancel() {
             "Auto Burst did not restart after release following cancellation");
 }
 
+void test_multiple_macro_bindings_share_step_pool() {
+    ControllerProfile profile =
+        controller_profile_default(controller_identity_global(), 0);
+    profile.macros[0] = {
+        button_bit(ControllerProfileLogicalButton::kSouth),
+        CONTROLLER_PROFILE_NO_BUTTON, 0, 1};
+    profile.macros[1] = {
+        button_bit(ControllerProfileLogicalButton::kEast),
+        CONTROLLER_PROFILE_NO_BUTTON, 1, 1};
+    profile.macros[2].first_step = 2;
+    profile.macros[3].first_step = 2;
+    profile.macro_step_count = 2;
+    profile.macro_steps[0].override_flags =
+        kControllerProfileOverrideButtons;
+    profile.macro_steps[0].duration_ms = 1;
+    profile.macro_steps[0].output_button_mask =
+        button_bit(ControllerProfileLogicalButton::kNorth);
+    profile.macro_steps[1].override_flags =
+        kControllerProfileOverrideButtons;
+    profile.macro_steps[1].duration_ms = 1;
+    profile.macro_steps[1].output_button_mask =
+        button_bit(ControllerProfileLogicalButton::kWest);
+
+    ControllerSyntheticInputContext context{};
+    ControllerProfileTransformResult output =
+        controller_synthetic_input_apply(
+            &context,
+            state_with_buttons(
+                button_bit(ControllerProfileLogicalButton::kEast)),
+            profile, 0);
+    require(context.macro_active && context.macro_index == 1 &&
+                has_button(output, ControllerProfileLogicalButton::kWest),
+            "second macro descriptor did not execute its shared step");
+    (void)controller_synthetic_input_apply(
+        &context, controller_neutral_state(), profile, 1);
+    (void)controller_synthetic_input_apply(
+        &context, controller_neutral_state(), profile, 2);
+    output = controller_synthetic_input_apply(
+        &context,
+        state_with_buttons(
+            button_bit(ControllerProfileLogicalButton::kSouth)),
+        profile, 3);
+    require(context.macro_active && context.macro_index == 0 &&
+                has_button(output, ControllerProfileLogicalButton::kNorth),
+            "first macro descriptor did not execute independently");
+}
+
 void test_four_contexts_are_isolated() {
     ControllerProfile profile =
         controller_profile_default(controller_identity_global(), 0);
@@ -507,6 +536,7 @@ int main() {
     test_zero_max_wait_and_scheduled_catch_up();
     test_consumption_cancel_precedence_and_duplicate_contributors();
     test_turbo_rate_release_and_uint32_wrap();
+    test_multiple_macro_bindings_share_step_pool();
     test_auto_burst_toggle_cancel_and_external_cancel();
     test_four_contexts_are_isolated();
     return 0;

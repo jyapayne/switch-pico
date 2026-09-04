@@ -9,6 +9,7 @@ const state = {
   original: "",
   active: false,
   selectedButton: "south",
+  selectedMacro: 0,
   token: "",
   busy: false,
 };
@@ -115,11 +116,18 @@ function setBusy(busy) {
   elements.refresh.disabled = busy;
   elements.identity.disabled = busy;
   if (state.schema && state.profile) {
-    const stateStepCount = state.profile.macro.steps.filter(
-      (step) => step.type === "state"
-    ).length;
+    const macro = state.profile.macros[state.selectedMacro];
+    const totalSteps = state.profile.macros.reduce(
+      (sum, item) => sum + item.steps.length, 0
+    );
+    const totalBytes = state.profile.macros.reduce(
+      (sum, item) => sum + item.steps.reduce(
+        (stepSum, step) => stepSum + macroStepWireSize(step), 0
+      ), 0
+    );
     elements.addMacroStep.disabled = (
-      busy || stateStepCount >= state.schema.maximum_macro_state_steps
+      busy || macro.steps.length >= 8 || totalSteps >= 16 ||
+      totalBytes + 3 > 136
     );
   }
   document.querySelectorAll(".profile-button").forEach((button) => {
@@ -431,11 +439,30 @@ function actionChordCard(action, title, description, selectedButtons, defaults) 
     </div>`;
 }
 
+function macroStepWireSize(step) {
+  const overrides = new Set(step.overrides);
+  return 3 +
+    (overrides.has("buttons") ? 2 : 0) +
+    (overrides.has("left_stick") ? 4 : 0) +
+    (overrides.has("right_stick") ? 4 : 0) +
+    (overrides.has("left_trigger") ? 2 : 0) +
+    (overrides.has("right_trigger") ? 2 : 0);
+}
+
 function renderMacro() {
   const controllerStyle =
     state.identities[state.identityIndex]?.controller?.style || "generic";
   elements.builtinActions.dataset.controllerStyle = controllerStyle;
-  const macro = state.profile.macro;
+  elements.macroControls.dataset.controllerStyle = controllerStyle;
+  const macro = state.profile.macros[state.selectedMacro];
+  const totalSteps = state.profile.macros.reduce(
+    (sum, item) => sum + item.steps.length, 0
+  );
+  const totalBytes = state.profile.macros.reduce(
+    (sum, item) => sum + item.steps.reduce(
+      (stepSum, step) => stepSum + macroStepWireSize(step), 0
+    ), 0
+  );
   elements.builtinActions.innerHTML = [
     actionChordCard(
       "profile_switch",
@@ -451,67 +478,89 @@ function renderMacro() {
       state.profile.motion_toggle_chord,
       state.schema.default_motion_toggle_chord
     ),
-    actionChordCard(
-      "custom_macro",
-      "Run custom macro",
-      "Start the editable sequence below.",
-      macro.trigger,
-      null
-    ),
   ].join("");
   elements.macroControls.innerHTML = `
+    <div class="macro-picker">
+      <div class="macro-tabs">
+        ${state.profile.macros.map((item, index) => `
+          <button type="button" class="macro-tab${index === state.selectedMacro ? " selected" : ""}" data-macro-index="${index}">
+            Macro ${index + 1}<small>${item.steps.length} step${item.steps.length === 1 ? "" : "s"}</small>
+          </button>`).join("")}
+      </div>
+      <div class="macro-budget">
+        <strong>${totalSteps}/16 steps</strong>
+        <span>${totalBytes}/136 sparse bytes</span>
+        <progress max="136" value="${totalBytes}"></progress>
+      </div>
+    </div>
+    ${actionChordCard(
+      "custom_macro",
+      `Run macro ${state.selectedMacro + 1}`,
+      "Start this editable sequence.",
+      macro.trigger,
+      null
+    )}
     <div class="control-card">
-      <label for="macro-cancel">Custom macro cancel control</label>
+      <label for="macro-cancel">Macro ${state.selectedMacro + 1} cancel control</label>
       <select class="select" id="macro-cancel" data-kind="macro-selector" data-field="cancel">
         ${buttonOptions(macro.cancel, true, state.schema.controls)}
       </select>
     </div>`;
 
-  elements.macroSteps.innerHTML = macro.steps.map((step, index) => {
-    if (step.type === "end") {
-      return `<div class="macro-step end"><div class="step-header"><span class="step-number">End marker · step ${index + 1}</span></div><p class="field-help">The firmware requires this canonical final step.</p></div>`;
-    }
-    const overrides = new Set(step.overrides);
-    const outputButtons = new Set(step.output_buttons);
-    return `
-      <div class="macro-step">
-        <div class="step-header">
-          <span class="step-number">State step ${index + 1}</span>
-          <button class="remove-step" type="button" data-remove-step="${index}">Remove</button>
-        </div>
-        <div class="step-grid">
-          ${macroNumber(index, "duration_ms", step.duration_ms, 0, 10000, "Duration (ms)")}
-          ${macroNumber(index, "left_stick.x", step.left_stick.x, -32768, 32767, "Left stick X", !overrides.has("left_stick"))}
-          ${macroNumber(index, "left_stick.y", step.left_stick.y, -32768, 32767, "Left stick Y", !overrides.has("left_stick"))}
-          ${macroNumber(index, "right_stick.x", step.right_stick.x, -32768, 32767, "Right stick X", !overrides.has("right_stick"))}
-          ${macroNumber(index, "right_stick.y", step.right_stick.y, -32768, 32767, "Right stick Y", !overrides.has("right_stick"))}
-          ${macroNumber(index, "triggers.left", step.triggers.left, 0, 65535, "Left trigger", !overrides.has("left_trigger"))}
-          ${macroNumber(index, "triggers.right", step.triggers.right, 0, 65535, "Right trigger", !overrides.has("right_trigger"))}
-        </div>
-        <div class="step-group">
-          <span class="step-group-title">Fields this step overrides</span>
-          <div class="check-grid">
-            ${state.schema.macro_overrides.map((name) => `
-              <label class="checkbox-pill">
-                <input type="checkbox" data-kind="macro-override" data-index="${index}" data-name="${name}"${overrides.has(name) ? " checked" : ""}>
-                <span>${label(name)}</span>
-              </label>`).join("")}
+  elements.macroControls.querySelectorAll("[data-macro-index]").forEach((button) => {
+    button.onclick = () => {
+      state.selectedMacro = Number(button.dataset.macroIndex);
+      renderMacro();
+    };
+  });
+
+  elements.macroSteps.innerHTML = macro.steps.length === 0
+    ? '<div class="macro-step end"><p class="field-help">No steps yet. Add a state step to build this macro.</p></div>'
+    : macro.steps.map((step, index) => {
+      const overrides = new Set(step.overrides);
+      const outputButtons = new Set(step.output_buttons);
+      return `
+        <div class="macro-step">
+          <div class="step-header">
+            <span class="step-number">Macro ${state.selectedMacro + 1} · step ${index + 1} · ${macroStepWireSize(step)} bytes</span>
+            <button class="remove-step" type="button" data-remove-step="${index}">Remove</button>
           </div>
-        </div>
-        <div class="step-group">
-          <span class="step-group-title">Output buttons</span>
-          <div class="check-grid">
-            ${state.schema.buttons.map((button) => `
-              <label class="checkbox-pill">
-                <input type="checkbox" data-kind="macro-output" data-index="${index}" data-name="${button}"${outputButtons.has(button) ? " checked" : ""}${overrides.has("buttons") ? "" : " disabled"}>
-                <span>${label(button)}</span>
-              </label>`).join("")}
+          <div class="step-grid">
+            ${macroNumber(index, "duration_ms", step.duration_ms, 0, 10000, "Duration (ms)")}
+            ${macroNumber(index, "left_stick.x", step.left_stick.x, -32768, 32767, "Left stick X", !overrides.has("left_stick"))}
+            ${macroNumber(index, "left_stick.y", step.left_stick.y, -32768, 32767, "Left stick Y", !overrides.has("left_stick"))}
+            ${macroNumber(index, "right_stick.x", step.right_stick.x, -32768, 32767, "Right stick X", !overrides.has("right_stick"))}
+            ${macroNumber(index, "right_stick.y", step.right_stick.y, -32768, 32767, "Right stick Y", !overrides.has("right_stick"))}
+            ${macroNumber(index, "triggers.left", step.triggers.left, 0, 65535, "Left trigger", !overrides.has("left_trigger"))}
+            ${macroNumber(index, "triggers.right", step.triggers.right, 0, 65535, "Right trigger", !overrides.has("right_trigger"))}
           </div>
-        </div>
-      </div>`;
-  }).join("");
-  const stateStepCount = macro.steps.filter((step) => step.type === "state").length;
-  elements.addMacroStep.disabled = state.busy || stateStepCount >= state.schema.maximum_macro_state_steps;
+          <div class="step-group">
+            <span class="step-group-title">Fields this step overrides</span>
+            <div class="check-grid">
+              ${state.schema.macro_overrides.map((name) => `
+                <label class="checkbox-pill">
+                  <input type="checkbox" data-kind="macro-override" data-index="${index}" data-name="${name}"${overrides.has(name) ? " checked" : ""}>
+                  <span>${label(name)}</span>
+                </label>`).join("")}
+            </div>
+          </div>
+          <div class="step-group">
+            <span class="step-group-title">Output buttons</span>
+            <div class="check-grid">
+              ${state.schema.buttons.map((button) => `
+                <label class="checkbox-pill">
+                  <input type="checkbox" data-kind="macro-output" data-index="${index}" data-name="${button}"${outputButtons.has(button) ? " checked" : ""}${overrides.has("buttons") ? "" : " disabled"}>
+                  <span>${label(button)}</span>
+                </label>`).join("")}
+            </div>
+          </div>
+        </div>`;
+    }).join("");
+  elements.addMacroStep.textContent = `Add step to macro ${state.selectedMacro + 1}`;
+  elements.addMacroStep.disabled = (
+    state.busy || macro.steps.length >= 8 || totalSteps >= 16 ||
+    totalBytes + 3 > 136
+  );
 }
 
 function renderEditor() {
@@ -595,7 +644,7 @@ function handleFormChange(event) {
     const fields = {
       profile_switch: [state.profile, "switching_chord"],
       motion_toggle: [state.profile, "motion_toggle_chord"],
-      custom_macro: [state.profile.macro, "trigger"],
+      custom_macro: [state.profile.macros[state.selectedMacro], "trigger"],
     };
     const [owner, field] = fields[target.dataset.action];
     const defaults = {
@@ -611,16 +660,16 @@ function handleFormChange(event) {
   } else if (kind === "turbo") {
     state.profile.turbo[target.dataset.name] = target.value;
   } else if (kind === "macro-selector") {
-    state.profile.macro[target.dataset.field] = target.value || null;
+    state.profile.macros[state.selectedMacro][target.dataset.field] = target.value || null;
   } else if (kind === "macro-number") {
-    updateNestedStep(state.profile.macro.steps[Number(target.dataset.index)], target.dataset.field, Number(target.value));
+    updateNestedStep(state.profile.macros[state.selectedMacro].steps[Number(target.dataset.index)], target.dataset.field, Number(target.value));
   } else if (kind === "macro-output") {
-    const step = state.profile.macro.steps[Number(target.dataset.index)];
+    const step = state.profile.macros[state.selectedMacro].steps[Number(target.dataset.index)];
     const selected = new Set(step.output_buttons);
     target.checked ? selected.add(target.dataset.name) : selected.delete(target.dataset.name);
     step.output_buttons = state.schema.buttons.filter((name) => selected.has(name));
   } else if (kind === "macro-override") {
-    const step = state.profile.macro.steps[Number(target.dataset.index)];
+    const step = state.profile.macros[state.selectedMacro].steps[Number(target.dataset.index)];
     const selected = new Set(step.overrides);
     target.checked ? selected.add(target.dataset.name) : selected.delete(target.dataset.name);
     step.overrides = state.schema.macro_overrides.filter((name) => selected.has(name));
@@ -662,10 +711,17 @@ elements.resetDraft.addEventListener("click", () => {
 });
 
 elements.addMacroStep.addEventListener("click", () => {
-  const steps = state.profile.macro.steps;
-  const stateCount = steps.filter((step) => step.type === "state").length;
-  if (stateCount >= state.schema.maximum_macro_state_steps) return;
-  steps.splice(steps.length - 1, 0, {
+  const steps = state.profile.macros[state.selectedMacro].steps;
+  const totalSteps = state.profile.macros.reduce(
+    (sum, macro) => sum + macro.steps.length, 0
+  );
+  const totalBytes = state.profile.macros.reduce(
+    (sum, macro) => sum + macro.steps.reduce(
+      (stepSum, step) => stepSum + macroStepWireSize(step), 0
+    ), 0
+  );
+  if (steps.length >= 8 || totalSteps >= 16 || totalBytes + 3 > 136) return;
+  steps.push({
     type: "state",
     overrides: ["buttons"],
     duration_ms: 100,
@@ -681,7 +737,7 @@ elements.addMacroStep.addEventListener("click", () => {
 elements.macroSteps.addEventListener("click", (event) => {
   const button = event.target.closest("[data-remove-step]");
   if (!button) return;
-  state.profile.macro.steps.splice(Number(button.dataset.removeStep), 1);
+  state.profile.macros[state.selectedMacro].steps.splice(Number(button.dataset.removeStep), 1);
   renderMacro();
   updateDirtyState();
 });

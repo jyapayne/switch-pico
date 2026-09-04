@@ -519,25 +519,69 @@ def custom_profile() -> config_manager.ControllerProfile:
         confirmation_policy=2,
         switching_chord=(1 << 6) | (1 << 16),
         motion_toggle_chord=(1 << 5) | (1 << 17),
-        macro_trigger_mask=(1 << 0) | (1 << 16) | (1 << 17),
-        macro_cancel=config_manager.LOGICAL_CONTROLS.index("right_trigger"),
-        macro_steps=(
-            config_manager.MacroStep(
-                0,
-                config_manager.MACRO_OVERRIDE_MASK,
-                config_manager.PROFILE_MAXIMUM_WAIT_MS,
-                (1 << 0) | (1 << 12),
-                -32768,
-                32767,
-                -1000,
-                1000,
-                12345,
-                54321,
+        macros=(
+            config_manager.ControllerMacro(
+                (1 << 0) | (1 << 16) | (1 << 17),
+                config_manager.LOGICAL_CONTROLS.index("right_trigger"),
+                (
+                    config_manager.MacroStep(
+                        0,
+                        config_manager.MACRO_OVERRIDE_MASK,
+                        config_manager.PROFILE_MAXIMUM_WAIT_MS,
+                        (1 << 0) | (1 << 12),
+                        -32768,
+                        32767,
+                        -1000,
+                        1000,
+                        12345,
+                        54321,
+                    ),
+                ),
             ),
-            config_manager.MacroStep.end(),
+            config_manager.ControllerMacro(
+                (1 << 1) | (1 << 2),
+                config_manager.PROFILE_NONE_BUTTON,
+                (
+                    config_manager.MacroStep(
+                        0, 1, 25, 1 << 3, 0, 0, 0, 0, 0, 0
+                    ),
+                ),
+            ),
+            config_manager.ControllerMacro.empty(),
+            config_manager.ControllerMacro.empty(),
         ),
         turbo_modes=(0, 1, 2) + (0,) * 13,
     )
+
+def legacy_profile_wire(
+    schema_version: int,
+    macro_trigger: int = config_manager.PROFILE_NONE_BUTTON,
+    macro_cancel: int = config_manager.PROFILE_NONE_BUTTON,
+) -> bytearray:
+    profile = config_manager.ControllerProfile.default()
+    payload = bytearray(config_manager.PROFILE_SIZE)
+    struct.pack_into(
+        "<HH", payload, 0, schema_version, config_manager.PROFILE_SIZE
+    )
+    payload[4:20] = bytes(range(len(config_manager.LOGICAL_BUTTONS)))
+    payload[20:36] = profile.left_stick.to_bytes()
+    payload[36:52] = profile.right_stick.to_bytes()
+    payload[52:62] = profile.left_trigger.to_bytes()
+    payload[62:72] = profile.right_trigger.to_bytes()
+    if schema_version < config_manager.PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
+        payload[60:62] = b"\x00\x00"
+        payload[70:72] = b"\x00\x00"
+    payload[72:75] = bytes((0xFF, 0xFF, 3))
+    payload[78] = macro_trigger
+    payload[79] = macro_cancel
+    payload[80] = 1
+    if schema_version >= config_manager.PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
+        payload[81] = macro_cancel
+        payload[79] = 0
+    for index in range(config_manager.PROFILE_LEGACY_MACRO_STEP_CAPACITY):
+        payload[100 + index * config_manager.PROFILE_MACRO_STEP_SIZE] = 1
+    return payload
+
 
 
 def test_response_validation() -> None:
@@ -1120,33 +1164,25 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         config_manager.PROFILE_SCHEMA_VERSION,
         config_manager.PROFILE_SIZE,
     )
-    assert encoded[75] == 0x2D
+    assert encoded[75] == 0x21
     assert encoded[60:62] == bytes((17, 0))
     assert encoded[70:72] == bytes((3, 0))
-    assert encoded[81] == config_manager.LOGICAL_CONTROLS.index("right_trigger")
-    assert struct.unpack_from("<H", encoded, 98)[0] == (
+    assert struct.unpack_from("<H", encoded, 78)[0] == (
         profile.motion_toggle_chord & 0xFFFF
     )
+    assert encoded[96:102] == bytes((1, 0, 0x47, 0, 1, 17))
+    assert encoded[102:108] == bytes((6, 0, 0x7C, 17, 1, 5))
     assert encoded[252:] == bytes(4)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
 
     serialized = profile.to_json()
-    assert serialized.startswith('{\n  "schema_version": 4,\n  "size": 256,')
+    assert serialized.startswith('{\n  "schema_version": 5,\n  "size": 256,')
     decoded = config_manager.ControllerProfile.from_json(serialized)
     assert decoded == profile
     assert decoded.to_json() == serialized
-
-    legacy_default_wire = bytearray(default_wire)
-    struct.pack_into(
-        "<H",
-        legacy_default_wire,
-        0,
-        config_manager.PROFILE_LEGACY_SCHEMA_VERSION,
+    legacy_default_wire = legacy_profile_wire(
+        config_manager.PROFILE_LEGACY_SCHEMA_VERSION
     )
-    legacy_default_wire[60:62] = b"\x00\x00"
-    legacy_default_wire[70:72] = b"\x00\x00"
-    legacy_default_wire[78] = config_manager.PROFILE_NONE_BUTTON
-    legacy_default_wire[79] = config_manager.PROFILE_NONE_BUTTON
     legacy_default_wire[81] = 0
     legacy_default_wire[98:100] = b"\x00\x00"
     struct.pack_into(
@@ -1198,26 +1234,18 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         == config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
     )
 
-    previous_wire = bytearray(default_wire)
-    struct.pack_into(
-        "<H",
-        previous_wire,
-        0,
+    previous_wire = legacy_profile_wire(
         config_manager.PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
+        macro_trigger=0,
+        macro_cancel=1,
     )
-    previous_wire[60:62] = b"\x00\x00"
-    previous_wire[70:72] = b"\x00\x00"
-    previous_wire[78] = 0
-    previous_wire[79] = 1
-    previous_wire[81] = 0
-    previous_wire[98:100] = b"\x00\x00"
     migrated_previous = config_manager.ControllerProfile.from_bytes(
         previous_wire
     )
     assert migrated_previous.left_trigger.output == 16
     assert migrated_previous.right_trigger.output == 17
-    assert migrated_previous.macro_trigger_mask == 1
-    assert migrated_previous.macro_cancel == 1
+    assert migrated_previous.macros[0].trigger_mask == 1
+    assert migrated_previous.macros[0].cancel_control == 1
     assert migrated_previous.motion_toggle_chord == 0
     assert migrated_previous.to_bytes()[0] == config_manager.PROFILE_SCHEMA_VERSION
 
@@ -1228,7 +1256,12 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     del legacy_json_object["motion_toggle_chord"]
     del legacy_json_object["triggers"]["left"]["output"]
     del legacy_json_object["triggers"]["right"]["output"]
-    legacy_json_object["macro"]["trigger"] = "south"
+    legacy_json_object.pop("macros")
+    legacy_json_object["macro"] = {
+        "trigger": "south",
+        "cancel": None,
+        "steps": [config_manager.MacroStep.end().to_json_object()],
+    }
     legacy_json_object["triggers"]["left"]["digital_threshold"] = (
         config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
     )
@@ -1247,8 +1280,48 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     assert migrated_json.left_trigger.upper_saturation == 40000
     assert migrated_json.left_trigger.output == 16
     assert migrated_json.right_trigger.output == 17
-    assert migrated_json.macro_trigger_mask == 1
+    assert migrated_json.macros[0].trigger_mask == 1
     assert migrated_json.motion_toggle_chord == 0
+
+
+def test_sparse_macro_capacity_boundaries() -> None:
+    full_step = custom_profile().macros[0].steps[0].to_json_object()
+    button_step = custom_profile().macros[1].steps[0].to_json_object()
+
+    exact = config_manager.ControllerProfile.default().to_json_object()
+    exact["macros"][0]["trigger"] = ["south"]
+    exact["macros"][0]["steps"] = [full_step] * 8
+    exact_profile = config_manager.ControllerProfile.from_json_object(exact)
+    assert sum(
+        len(step.to_sparse_bytes())
+        for macro in exact_profile.macros
+        for step in macro.steps
+    ) == config_manager.PROFILE_MACRO_STREAM_SIZE
+    assert (
+        config_manager.ControllerProfile.from_bytes(exact_profile.to_bytes())
+        == exact_profile
+    )
+
+    sixteen = config_manager.ControllerProfile.default().to_json_object()
+    for index, macro in enumerate(sixteen["macros"]):
+        macro["trigger"] = [config_manager.LOGICAL_CONTROLS[index]]
+        macro["steps"] = [button_step] * 4
+    sixteen_profile = config_manager.ControllerProfile.from_json_object(
+        sixteen
+    )
+    assert sum(len(macro.steps) for macro in sixteen_profile.macros) == 16
+    assert len(sixteen_profile.to_bytes()) == config_manager.PROFILE_SIZE
+
+    overflow = config_manager.ControllerProfile.default().to_json_object()
+    overflow["macros"][0]["trigger"] = ["south"]
+    overflow["macros"][0]["steps"] = [full_step] * 8
+    overflow["macros"][1]["trigger"] = ["east"]
+    overflow["macros"][1]["steps"] = [full_step]
+    with pytest.raises(
+        config_manager.ConfigManagerError,
+        match="136-byte sparse stream",
+    ):
+        config_manager.ControllerProfile.from_json_object(overflow)
 
 
 def test_trigger_threshold_uses_transformed_output_domain() -> None:
