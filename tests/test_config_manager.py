@@ -2121,17 +2121,19 @@ def haptics_response(
     state: int = 0, *, run_id: int = 0, slot: int = 0xFF,
     last_error: int = 0, sent_packets: int = 0,
     first_tone_due_us: int = 0, first_tone_sent_us: int = 0,
-    elapsed_us: int = 0, connection_generation: int = 9,
+    elapsed_us: int = 0, connection_generation: int = 9, mode: int = 0,
+    host_updates: int = 0, dropped_updates: int = 0,
 ) -> bytes:
     return make_response(
         config_manager.OP_HAPTICS_EXPERIMENT,
         struct.pack(
-            "<17I4B", run_id, connection_generation, 100, 105,
+            "<17I8B2I", run_id, connection_generation, 100, 105,
             sent_packets, 2, 3, 109, 4,
             123, 22000, 11001, 9876, first_tone_due_us, first_tone_sent_us,
-            0x76543210, elapsed_us, state, slot, last_error, 0,
+            0x76543210, elapsed_us, state, slot, last_error, 0, mode, 0, 0, 0,
+            host_updates, dropped_updates,
         ),
-        schema=2, generation=run_id,
+        schema=3, generation=run_id,
     )
 
 
@@ -2142,8 +2144,6 @@ class HapticsDevice(FakeDevice):
     ) -> None:
         super().__init__()
         self.haptics_responses = responses
-        self.haptics_reads = 0
-        self.haptics_reads_at_out: list[int] = []
         self.transport_response = transport_response
 
     def ctrl_transfer(
@@ -2167,7 +2167,6 @@ class HapticsDevice(FakeDevice):
         assert index == config_manager.REQUEST_INDEX
         self.requests.append(request)
         if bm_request_type == 0xC0:
-            self.haptics_reads += 1
             response = self.haptics_responses[0]
             if len(self.haptics_responses) > 1:
                 self.haptics_responses.pop(0)
@@ -2185,7 +2184,6 @@ class HapticsDevice(FakeDevice):
         )
         assert crc == zlib.crc32(payload) & 0xFFFFFFFF
         self.out_requests.append((request, payload, encoded))
-        self.haptics_reads_at_out.append(self.haptics_reads)
         return len(encoded)
 
 
@@ -2206,7 +2204,8 @@ def test_haptics_schema_timing_and_wraparound() -> None:
         haptics_response(
             2, run_id=17, slot=2, sent_packets=101,
             first_tone_due_us=0xFFFFFFF0, first_tone_sent_us=0x30,
-            elapsed_us=1100000,
+            elapsed_us=1100000, mode=1,
+            host_updates=0x89ABCDEF, dropped_updates=0x12345678,
         ),
     ])
     snapshot = config_manager.read_haptics_experiment(device)
@@ -2224,35 +2223,54 @@ def test_haptics_schema_timing_and_wraparound() -> None:
     assert snapshot.last_sent_us == 0x76543210
     assert snapshot.elapsed_us == 1100000
     assert snapshot.to_json_object()["first_tone_submission_delay_us"] == 64
+    assert snapshot.mode_name == "gameplay"
+    assert snapshot.host_updates == 0x89ABCDEF
+    assert snapshot.dropped_updates == 0x12345678
 
 
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
         ("schema", "unsupported haptics experiment schema"),
-        ("size", "payload size"),
+        ("short", "payload size"),
+        ("long", "payload size"),
+        ("old_size", "payload size"),
+        ("mode_only_size", "payload size"),
         ("state", "state"),
         ("slot", "slot"),
         ("active_without_slot", "slot"),
-        ("reserved", "reserved"),
+        ("mode", "mode"),
+        ("reserved71", "reserved"),
+        ("reserved73", "reserved"),
+        ("reserved74", "reserved"),
+        ("reserved75", "reserved"),
         ("flags", "reserved"),
     ],
 )
 def test_haptics_rejects_malformed_diagnostics(mutation: str, message: str) -> None:
     payload = bytearray(haptics_response(2, slot=0)[20:])
-    schema, flags = 2, 0
+    schema, flags = 3, 0
     if mutation == "schema":
-        schema = 1
-    elif mutation == "size":
+        schema = 2
+        del payload[72:]
+    elif mutation == "short":
         payload.pop()
+    elif mutation == "long":
+        payload.append(0)
+    elif mutation == "old_size":
+        del payload[72:]
+    elif mutation == "mode_only_size":
+        del payload[76:]
     elif mutation == "state":
         payload[68] = 8
     elif mutation == "slot":
         payload[69] = 4
     elif mutation == "active_without_slot":
         payload[69] = 0xFF
-    elif mutation == "reserved":
-        payload[71] = 1
+    elif mutation == "mode":
+        payload[72] = 2
+    elif mutation.startswith("reserved"):
+        payload[int(mutation.removeprefix("reserved"))] = 1
     else:
         flags = 1
     response = make_response(
@@ -2272,8 +2290,11 @@ def test_haptics_disabled_firmware_is_readable_but_cannot_start(
     status = json.loads(captured.out)
     assert status["state_name"] == "unsupported"
     assert status["firmware_supported"] is False
+    assert status["mode"] == 0
     assert "SWITCH_PICO_HAPTICS_EXPERIMENT=ON" in captured.err
     assert config_manager.main(["haptics-experiment", "start"]) == 1
+    assert "unsupported" in capsys.readouterr().err
+    assert config_manager.main(["haptics-experiment", "gameplay"]) == 1
     assert "unsupported" in capsys.readouterr().err
     assert device.out_requests == []
 
@@ -2296,26 +2317,38 @@ def test_haptics_old_firmware_stall_is_actionable_without_hiding_disconnect(
     assert raised.value is disconnected
 
 
-def test_haptics_start_waits_for_firmware_not_usb_ack(
+@pytest.mark.parametrize(("action", "mode"), [("start", 0), ("gameplay", 1)])
+def test_haptics_arming_waits_for_firmware_not_usb_ack(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    haptics_clock: list[float],
+    haptics_clock: list[float], action: str, mode: int,
 ) -> None:
     device = HapticsDevice([
         haptics_response(3, run_id=40, slot=0),
-        haptics_response(1, run_id=41, slot=0),
-        haptics_response(2, run_id=41, slot=0, sent_packets=1),
+        haptics_response(1, run_id=41, slot=0, mode=mode),
+        haptics_response(2, run_id=41, slot=0, sent_packets=1, mode=mode),
     ])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main(["haptics-experiment", "start"]) == 0
+    assert config_manager.main(["haptics-experiment", action, "--json"]) == 0
     captured = capsys.readouterr()
-    assert device.haptics_reads_at_out == [1]
-    assert device.out_requests[0][1] == b"\x01\x00"
-    assert device.haptics_reads == 3
+    row = json.loads(captured.out)
+    assert row["state_name"] == "running"
+    assert (row["run_id"], row["slot"], row["mode"]) == (41, 0, mode)
+    assert device.out_requests[0][1] == bytes((1 if action == "start" else 2, 0))
     assert haptics_clock[0] >= 0.1
-    assert "pending firmware confirmation" in captured.out
-    assert "Haptics experiment: running" in captured.out
-    assert "not physical actuator" in captured.out
-    assert "1.024 s" in captured.out and "6.144 s" in captured.out
+    if mode == 1:
+        assert "pattern" not in row
+        assert row["gameplay"] == {
+            "sample_rate_hz": 3000,
+            "stereo_frames_per_packet": 64,
+            "lookback_us": pytest.approx(21333.333333333),
+            "command_window_us": 8000,
+            "watchdog_us": 50000,
+            "host_gain": 1.5,
+        }
+        assert row["first_tone_submission_delay_us"] is None
+    else:
+        assert row["pattern"]["duration_us"] == 6144000
+        assert "gameplay" not in row
 
 
 def test_haptics_start_watch_captures_correlated_measurement_series(
@@ -2360,21 +2393,24 @@ def test_haptics_start_watch_captures_correlated_measurement_series(
         (7, 6, "wait for prior output to drain"),
     ],
 )
-def test_haptics_start_reports_asynchronous_rejection(
+def test_haptics_gameplay_reports_asynchronous_rejection(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     haptics_clock: list[float], state: int, error: int, description: str,
 ) -> None:
     device = HapticsDevice([
         haptics_response(),
-        haptics_response(1, run_id=1, slot=0),
-        haptics_response(state, run_id=1, slot=0, last_error=error),
+        haptics_response(1, run_id=1, slot=0, mode=1),
+        haptics_response(state, run_id=1, slot=0, last_error=error, mode=1),
     ])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main(["haptics-experiment", "start"]) == 1
+    assert config_manager.main(["haptics-experiment", "gameplay", "--json"]) == 1
     captured = capsys.readouterr()
     assert description in captured.err
     assert f"last_error={error}" in captured.err
-    assert "Haptics experiment: running" not in captured.out
+    row = json.loads(captured.out)
+    assert (row["run_id"], row["slot"], row["mode"]) == (1, 0, 1)
+    assert row["state"] == state and row["last_error"] == error
+    assert "pattern" not in row
 
 
 def test_haptics_status_watch_reports_connection_loss_after_running(
@@ -2432,32 +2468,37 @@ def test_haptics_watch_is_bounded_and_rejects_run_replacement(
 def test_haptics_busy_start_and_wrong_slot_stop_do_not_mutate_active_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    device = HapticsDevice([haptics_response(2, run_id=1, slot=3)])
+    device = HapticsDevice([haptics_response(2, run_id=1, slot=3, mode=1)])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "start"]) == 1
+    assert "already running" in capsys.readouterr().err
+    assert config_manager.main(["haptics-experiment", "gameplay"]) == 1
     assert "already running" in capsys.readouterr().err
     assert config_manager.main(["haptics-experiment", "stop"]) == 1
     assert "not requested slot 0" in capsys.readouterr().err
     assert device.out_requests == []
 
 
+@pytest.mark.parametrize("mode", [0, 1])
 def test_haptics_stop_waits_for_service_completion(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    haptics_clock: list[float],
+    haptics_clock: list[float], mode: int,
 ) -> None:
     device = HapticsDevice([
-        haptics_response(2, run_id=1, slot=2),
-        haptics_response(2, run_id=1, slot=2),
-        haptics_response(4, run_id=1, slot=2),
+        haptics_response(2, run_id=1, slot=2, mode=mode),
+        haptics_response(2, run_id=1, slot=2, mode=mode),
+        haptics_response(4, run_id=1, slot=2, mode=mode),
     ])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main([
         "haptics-experiment", "stop", "--slot", "2", "--json",
     ]) == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.out)["state_name"] == "stopped"
+    row = json.loads(captured.out)
+    assert row["state_name"] == "stopped"
+    assert (row["run_id"], row["slot"], row["mode"]) == (1, 2, mode)
     assert device.out_requests[0][1] == b"\x00\x02"
-    assert device.haptics_reads == 3
+    assert haptics_clock[0] >= 0.1
 
 
 def test_haptics_invalid_slot_is_rejected_before_discovery(
@@ -2538,14 +2579,15 @@ def test_haptics_profile_decodes_exact_wire_order_and_correlates_live_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = HapticsDevice([
-        haptics_response(2, run_id=17, slot=0, sent_packets=10),
-        haptics_response(2, run_id=17, slot=0, sent_packets=11),
+        haptics_response(2, run_id=17, slot=0, sent_packets=10, mode=1),
+        haptics_response(2, run_id=17, slot=0, sent_packets=11, mode=1),
     ], transport_response=transport_response(active=1))
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "profile", "--json"]) == 0
     row = json.loads(capsys.readouterr().out)
     assert row["run_id"] == 17 and row["connection_generation"] == 9
     assert row["sent_packets"] == 11
+    assert row["mode_name"] == "gameplay" and "pattern" not in row
     transport = row["transport"]
     transport.pop("evidence_note")
     assert transport == {
@@ -2639,13 +2681,14 @@ def test_haptics_profile_accepts_retained_failed_run_with_invalid_handle(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = HapticsDevice(
-        [haptics_response(5, run_id=17, slot=0, last_error=3)],
+        [haptics_response(5, run_id=17, slot=0, last_error=3, mode=1)],
         transport_response=transport_response(connection_handle=0xFFFF),
     )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "profile", "--json"]) == 0
     row = json.loads(capsys.readouterr().out)
     assert row["state_name"] == "disconnected" and row["last_error"] == 3
+    assert row["mode"] == 1 and "pattern" not in row
     assert row["transport"]["connection_handle"] == 0xFFFF
     assert row["transport"]["active"] is False
 
@@ -2689,24 +2732,29 @@ def test_haptics_profile_does_not_hide_usb_disconnect_as_unsupported() -> None:
 
 
 @pytest.mark.parametrize(
-    ("after_run", "after_generation", "probe_run", "probe_generation"),
+    ("after_run", "after_generation", "probe_run", "probe_generation",
+     "after_slot", "after_mode"),
     [
-        (17, 9, 16, 9),   # A stale probe must not attach to the current run.
-        (18, 9, 17, 9),   # A new run starts after reading the probe.
-        (18, 9, 18, 9),   # A new run starts before reading the probe.
-        (17, 10, 17, 9),  # A connection changes after reading the probe.
-        (17, 10, 17, 10), # A connection changes before reading the probe.
-        (17, 9, 17, 8),   # Matching run IDs cannot mask stale connection data.
+        (17, 9, 16, 9, 0, 1),   # A stale probe cannot attach to the current run.
+        (18, 9, 17, 9, 0, 1),   # A new run starts after reading the probe.
+        (18, 9, 18, 9, 0, 1),   # A new run starts before reading the probe.
+        (17, 10, 17, 9, 0, 1),  # A connection changes after reading the probe.
+        (17, 10, 17, 10, 0, 1), # A connection changes before reading the probe.
+        (17, 9, 17, 8, 0, 1),   # A matching run ID cannot mask stale connection data.
+        (17, 9, 17, 9, 1, 1),   # A different slot must not inherit the profile.
+        (17, 9, 17, 9, 0, 0),   # A fixture cannot impersonate gameplay.
     ],
 )
 def test_haptics_profile_never_publishes_cross_run_metrics(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     after_run: int, after_generation: int, probe_run: int, probe_generation: int,
+    after_slot: int, after_mode: int,
 ) -> None:
     device = HapticsDevice([
-        haptics_response(2, run_id=17, slot=0),
+        haptics_response(2, run_id=17, slot=0, mode=1),
         haptics_response(
-            2, run_id=after_run, slot=0, connection_generation=after_generation,
+            2, run_id=after_run, slot=after_slot, connection_generation=after_generation,
+            mode=after_mode,
         ),
     ], transport_response=transport_response(
         run_id=probe_run, connection_generation=probe_generation,
@@ -2715,4 +2763,80 @@ def test_haptics_profile_never_publishes_cross_run_metrics(
     assert config_manager.main(["haptics-experiment", "profile", "--json"]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
+    assert "cannot attribute measurements" in captured.err
+
+
+def test_haptics_gameplay_watch_timeout_leaves_stream_armed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    haptics_clock: list[float],
+) -> None:
+    device = HapticsDevice([
+        haptics_response(3, run_id=8, slot=0),
+        haptics_response(1, run_id=9, slot=3, mode=1),
+        haptics_response(
+            2, run_id=9, slot=3, mode=1, sent_packets=2, host_updates=4,
+            dropped_updates=1,
+        ),
+    ])
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
+    assert config_manager.main([
+        "--timeout", "0.2", "haptics-experiment", "gameplay", "--slot", "3",
+        "--watch", "--json",
+    ]) == 1
+    captured = capsys.readouterr()
+    series = [json.loads(line) for line in captured.out.splitlines()]
+    assert [row["state_name"] for row in series] == ["pending", "running", "running"]
+    assert all((row["run_id"], row["slot"], row["mode"]) == (9, 3, 1) for row in series)
+    assert all("pattern" not in row for row in series)
+    assert all(row["first_tone_submission_delay_us"] is None for row in series)
+    assert series[-1]["host_updates"] == 4 and series[-1]["dropped_updates"] == 1
+    assert haptics_clock[0] == pytest.approx(0.2)
+    assert "still armed" in captured.err and "stop --slot 3" in captured.err
+    assert [request[1] for request in device.out_requests] == [b"\x02\x03"]
+
+
+@pytest.mark.parametrize(
+    ("action", "response_run", "response_slot", "response_mode"),
+    [
+        ("gameplay", 42, 0, 1),
+        ("gameplay", 41, 1, 1),
+        ("gameplay", 41, 0, 0),
+        ("start", 41, 0, 1),
+        ("stop", 40, 0, 0),
+    ],
+)
+def test_haptics_confirmation_never_attributes_another_run_slot_or_mode(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    action: str, response_run: int, response_slot: int, response_mode: int,
+) -> None:
+    stopping = action == "stop"
+    device = HapticsDevice([
+        haptics_response(2 if stopping else 3, run_id=40, slot=0, mode=int(stopping)),
+        haptics_response(
+            4 if stopping else 2, run_id=response_run, slot=response_slot,
+            mode=response_mode,
+        ),
+    ])
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
+    assert config_manager.main(["haptics-experiment", action, "--json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "run changed" in captured.err or "belongs to another" in captured.err
+
+
+def test_haptics_gameplay_watch_rejects_fixture_with_same_run_and_slot(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    haptics_clock: list[float],
+) -> None:
+    device = HapticsDevice([
+        haptics_response(2, run_id=7, slot=0, mode=1),
+        haptics_response(3, run_id=7, slot=0, mode=0),
+    ])
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
+    assert config_manager.main([
+        "haptics-experiment", "status", "--watch", "--json",
+    ]) == 1
+    captured = capsys.readouterr()
+    row = json.loads(captured.out)
+    assert row["state_name"] == "running" and row["mode"] == 1
     assert "cannot attribute measurements" in captured.err

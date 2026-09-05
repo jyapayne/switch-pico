@@ -1,5 +1,6 @@
 #include "input/haptics_experiment.h"
 #include "input/haptics_transport_probe.h"
+#include "input/switch_hd_rumble_synth.h"
 
 #include <btstack.h>
 #include <pico/critical_section.h>
@@ -40,7 +41,7 @@ enum Error : uint8_t {
     kQueuedOutput = 6,
 };
 
-enum class Phase { kIdle, kPattern, kDrain, kRestore };
+enum class Phase { kIdle, kPrepare, kPattern, kDrain, kRestore };
 
 struct Attachment {
     uni_hid_device_t* device = nullptr;
@@ -54,7 +55,14 @@ struct Command {
     uint8_t slot = kNoSlot;
     uint32_t run_id = 0;
     Attachment connection{};
+    uint8_t mode = 0;
 };
+
+struct HostUpdate {
+    uint64_t received_us = 0;
+    SwitchHapticsFrame frame{};
+};
+constexpr uint8_t kHostQueueCapacity = 16;
 
 // Only the attachment identities, mailbox and published snapshot cross cores.
 // No BTstack call (including synchronous reentry) holds this lock.
@@ -65,6 +73,12 @@ uint32_t g_snapshot_request_us = 0;
 Command g_command;
 bool g_busy = false;
 bool g_prepared = false;
+bool g_accept_host = false;
+HostUpdate g_host_queue[kHostQueueCapacity];
+uint8_t g_host_head = 0;
+uint8_t g_host_count = 0;
+uint32_t g_host_updates = 0;
+uint32_t g_host_drops = 0;
 
 // Written on core 1 under the lock; core 0 only reads identities for requests.
 Attachment g_attachments[4];
@@ -89,6 +103,8 @@ uint64_t g_end_us = 0;
 uint64_t g_lifecycle_due_us = 0;
 uint64_t g_request_us = 0;
 uint64_t g_restore_deadline_us = 0;
+SwitchHdRumbleSynth g_synth;
+bool g_synth_started = false;
 
 // round(32 * sin(2*pi*n/30)). A stride of one is 100 Hz at 3 kHz;
 // a stride of two is 200 Hz. Preserve phase across all 12 packets of a tone.
@@ -101,6 +117,28 @@ void cadence_timer(btstack_timer_source_t*);
 void lifecycle_timer(btstack_timer_source_t*);
 void request_send();
 void restore_compatibility(HapticsExperimentState state);
+void start_stream();
+
+bool gameplay() {
+    return g_diagnostics.mode == 1;
+}
+
+void drain_host_updates() {
+    // Bound work even if USB keeps publishing while the BT core drains.
+    for (uint8_t index = 0; index < kHostQueueCapacity; ++index) {
+        HostUpdate update;
+        critical_section_enter_blocking(&g_lock);
+        if (g_host_count == 0) {
+            critical_section_exit(&g_lock);
+            break;
+        }
+        update = g_host_queue[g_host_head];
+        g_host_head = (g_host_head + 1) % kHostQueueCapacity;
+        --g_host_count;
+        critical_section_exit(&g_lock);
+        g_synth.push(update.frame, update.received_us);
+    }
+}
 
 void update_max(uint32_t* value, uint32_t candidate) {
     if (candidate > *value) {
@@ -133,11 +171,17 @@ void publish(bool finished = false) {
     critical_section_enter_blocking(&g_lock);
     // A newly accepted start must not be overwritten by the preceding run.
     if (g_snapshot.run_id == g_diagnostics.run_id) {
+        g_diagnostics.host_updates = g_host_updates;
+        const uint64_t dropped = uint64_t{g_host_drops} +
+                                 (gameplay() && g_synth_started ? g_synth.dropped_updates() : 0);
+        g_diagnostics.dropped_updates =
+            dropped > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(dropped);
         g_snapshot = g_diagnostics;
         g_snapshot_waiting = g_send_requested;
         g_snapshot_request_us = static_cast<uint32_t>(g_request_us);
         if (finished) {
             g_busy = false;
+            g_accept_host = false;
         }
     }
     critical_section_exit(&g_lock);
@@ -207,6 +251,9 @@ void timeout_drain() {
 }
 
 void begin_drain(HapticsExperimentState state, uint64_t deadline_us) {
+    critical_section_enter_blocking(&g_lock);
+    g_accept_host = false;
+    critical_section_exit(&g_lock);
     cancel_timer(&g_cadence_timer, &g_cadence_armed);
     g_phase = Phase::kDrain;
     g_finish_state = state;
@@ -232,6 +279,9 @@ void end_pattern() {
 }
 
 void restore_compatibility(HapticsExperimentState state) {
+    critical_section_enter_blocking(&g_lock);
+    g_accept_host = false;
+    critical_section_exit(&g_lock);
     cancel_timer(&g_cadence_timer, &g_cadence_armed);
     g_send_requested = false;
     g_phase = Phase::kRestore;
@@ -263,6 +313,9 @@ void request_send() {
     g_send_requested = true;
     g_request_in_progress = true;
     ++g_diagnostics.can_send_requests;
+    if (gameplay() && g_phase == Phase::kPattern) {
+        schedule_lifecycle(g_request_us + kDrainTimeoutUs);
+    }
     const uint8_t status =
         l2cap_request_can_send_now_event(g_connection.cid);
     g_request_in_progress = false;
@@ -287,7 +340,7 @@ void request_send() {
                     kPacketNumeratorUs);
                 g_diagnostics.skipped_packets += current + 1 - g_next_packet;
                 g_next_packet = current + 1;
-                if (g_next_packet < kPackets) {
+                if (gameplay() || g_next_packet < kPackets) {
                     schedule_timer(&g_cadence_timer, &g_cadence_armed,
                                    packet_due(g_next_packet));
                 }
@@ -333,7 +386,27 @@ bool HAPTICS_HOT(generate_packet)(uint8_t* report, uint32_t packet,
         frames = 64;
     }
     bool tone = false;
-    if (!silence && packet >= kPrimingPackets && packet < kToneEndPacket) {
+    if (gameplay() && !silence) {
+        drain_host_updates();
+        // One report of causal lookback preserves every 8 ms USB command,
+        // including substeps arriving between 21.333 ms Bluetooth sends.
+        if (packet != 0 && g_diagnostics.sent_packets != 0) {
+            const uint64_t first_sample = uint64_t{packet - 1} * 64;
+            g_synth.render(first_sample, frames, report + sample_offset);
+            for (uint32_t frame = 0; frame < frames; ++frame) {
+                if (report[sample_offset + frame * 2] != 0 ||
+                    report[sample_offset + frame * 2 + 1] != 0) {
+                    tone = true;
+                    if (!g_first_tone_sent) {
+                        g_diagnostics.first_tone_due_us = static_cast<uint32_t>(
+                            g_start_us + ((first_sample + frame) * 1000 + 2) / 3);
+                    }
+                    break;
+                }
+            }
+        }
+    } else if (!gameplay() && !silence && packet >= kPrimingPackets &&
+               packet < kToneEndPacket) {
         const uint32_t relative = packet - kPrimingPackets;
         const uint32_t phase = (relative / kPhasePackets) % 4;
         if (phase == 0 || phase == 2) {
@@ -375,6 +448,16 @@ void cadence_timer(btstack_timer_source_t*) {
         return;
     }
     const uint64_t now_us = time_us_64();
+    if (g_phase == Phase::kPrepare) {
+        if (uni_circular_buffer_is_empty(&g_connection.device->outgoing_buffer)) {
+            start_stream();
+        } else if (now_us >= g_lifecycle_due_us) {
+            finish(HapticsExperimentState::kError, kQueuedOutput);
+        } else {
+            schedule_timer(&g_cadence_timer, &g_cadence_armed, now_us + 2000);
+        }
+        return;
+    }
     if (g_phase == Phase::kPattern) {
         const uint64_t due_us = packet_due(g_next_packet);
         haptics_transport_probe_timer(
@@ -410,8 +493,14 @@ void lifecycle_timer(btstack_timer_source_t*) {
         schedule_lifecycle(g_lifecycle_due_us);
         return;
     }
-    if (g_phase == Phase::kPattern) {
-        end_pattern();
+    if (g_phase == Phase::kPrepare) {
+        finish(HapticsExperimentState::kError, kQueuedOutput);
+    } else if (g_phase == Phase::kPattern) {
+        if (gameplay()) {
+            timeout_drain();
+        } else {
+            end_pattern();
+        }
     } else if (g_phase == Phase::kDrain) {
         timeout_drain();
     } else if (g_phase == Phase::kRestore) {
@@ -426,10 +515,33 @@ void lifecycle_timer(btstack_timer_source_t*) {
     }
 }
 
+void start_stream() {
+    cancel_timer(&g_cadence_timer, &g_cadence_armed);
+    g_start_us = time_us_64();
+    g_end_us = gameplay() ? UINT64_MAX : g_start_us + 6144000;
+    g_diagnostics.start_us = static_cast<uint32_t>(g_start_us);
+    g_diagnostics.first_tone_due_us =
+        gameplay() ? 0 : static_cast<uint32_t>(packet_due(kPrimingPackets));
+    g_diagnostics.state = HapticsExperimentState::kRunning;
+    g_phase = Phase::kPattern;
+    g_next_packet = 0;
+    g_send_requested = false;
+    g_last_was_silence = true;
+    g_first_tone_sent = false;
+    if (gameplay()) {
+        g_synth.reset(g_start_us);
+        g_synth_started = true;
+    }
+    schedule_lifecycle(gameplay() ? g_start_us + kDrainTimeoutUs : g_end_us);
+    request_send();
+}
+
 void start(const Command& command) {
     g_diagnostics = {};
     g_diagnostics.run_id = command.run_id;
     g_diagnostics.slot = command.slot;
+    g_diagnostics.mode = command.action == 2 ? 1 : 0;
+    g_synth_started = false;
     g_connection = command.connection;
     g_diagnostics.connection_generation = g_connection.generation;
     g_start_us = time_us_64();
@@ -465,32 +577,29 @@ void start(const Command& command) {
     // Never discard unrelated LED/control reports or allow them to switch the
     // controller back to compatibility midstream. A queued start is retryable
     // once the ordinary sender has drained it.
-    if (!uni_circular_buffer_is_empty(&device->outgoing_buffer)) {
+    if (!gameplay() && !uni_circular_buffer_is_empty(&device->outgoing_buffer)) {
         finish(HapticsExperimentState::kError, kQueuedOutput);
         return;
     }
     // Cancel any existing parser duration/delayed-start timer before taking
     // over. In the already-disabled case this deliberately emits no report.
     device->report_parser.play_dual_rumble(device, 0, 0, 0, 0);
-    if (!uni_circular_buffer_is_empty(&device->outgoing_buffer)) {
-        finish(HapticsExperimentState::kError, kQueuedOutput);
-        return;
-    }
-    g_start_us = time_us_64();
-    g_end_us = g_start_us + 6144000;
-    g_diagnostics.start_us = static_cast<uint32_t>(g_start_us);
-    g_diagnostics.first_tone_due_us =
-        static_cast<uint32_t>(packet_due(kPrimingPackets));
-    g_diagnostics.state = HapticsExperimentState::kRunning;
-    g_phase = Phase::kPattern;
-    g_next_packet = 0;
-    g_send_requested = false;
-    g_last_was_silence = true;
-    g_first_tone_sent = false;
     btstack_run_loop_set_timer_handler(&g_cadence_timer, cadence_timer);
     btstack_run_loop_set_timer_handler(&g_lifecycle_timer, lifecycle_timer);
-    schedule_lifecycle(g_end_us);
-    request_send();
+    if (!uni_circular_buffer_is_empty(&device->outgoing_buffer)) {
+        if (gameplay()) {
+            // Let connection setup/LED reports drain before taking over.
+            g_phase = Phase::kPrepare;
+            g_diagnostics.state = HapticsExperimentState::kPending;
+            schedule_lifecycle(time_us_64() + kDrainTimeoutUs);
+            schedule_timer(&g_cadence_timer, &g_cadence_armed, time_us_64() + 2000);
+            publish();
+        } else {
+            finish(HapticsExperimentState::kError, kQueuedOutput);
+        }
+        return;
+    }
+    start_stream();
 }
 
 }  // namespace
@@ -504,12 +613,12 @@ void haptics_experiment_prepare() {
 }
 
 bool haptics_experiment_request(uint8_t action, uint8_t slot) {
-    if (action > 1 || slot >= 4) {
+    if (action > 2 || slot >= 4) {
         return false;
     }
     critical_section_enter_blocking(&g_lock);
     bool accepted = true;
-    if (action == 1) {
+    if (action != 0) {
         if (g_busy) {
             accepted = false;
         } else {
@@ -519,19 +628,55 @@ bool haptics_experiment_request(uint8_t action, uint8_t slot) {
             g_snapshot.slot = slot;
             g_snapshot.connection_generation = g_attachments[slot].generation;
             g_snapshot.state = HapticsExperimentState::kPending;
+            g_snapshot.mode = action == 2 ? 1 : 0;
+            g_accept_host = action == 2;
+            g_host_head = 0;
+            g_host_count = 0;
+            g_host_updates = 0;
+            g_host_drops = 0;
             g_snapshot_waiting = false;
             g_busy = true;
-            g_command = {true, action, slot, run_id, g_attachments[slot]};
+            g_command = {true, action, slot, run_id, g_attachments[slot], g_snapshot.mode};
         }
     } else if (g_busy) {
         if (slot != g_snapshot.slot) {
             accepted = false;
         } else {
+            g_accept_host = false;
             // Replaces even an unconsumed start, without a FIFO of commands.
             g_command = {
                 true, action, slot, g_snapshot.run_id,
-                {nullptr, g_snapshot.connection_generation, 0}};
+                {nullptr, g_snapshot.connection_generation, 0}, g_snapshot.mode};
         }
+    }
+    critical_section_exit(&g_lock);
+    return accepted;
+}
+
+bool haptics_experiment_submit(uint8_t slot, uint32_t generation,
+                               uint64_t received_us,
+                               const SwitchHapticsFrame& frame) {
+    if (!g_prepared || slot >= 4 ||
+        frame.actuators[0].sample_count > 3 || frame.actuators[1].sample_count > 3 ||
+        (frame.actuators[0].sample_count == 0 && frame.actuators[1].sample_count == 0)) {
+        return false;
+    }
+    critical_section_enter_blocking(&g_lock);
+    const bool accepted = g_accept_host && g_busy && g_snapshot.mode == 1 &&
+                          g_snapshot.slot == slot &&
+                          g_snapshot.connection_generation == generation &&
+                          g_attachments[slot].device != nullptr &&
+                          g_attachments[slot].generation == generation;
+    if (accepted) {
+        if (g_host_count == kHostQueueCapacity) {
+            g_host_head = (g_host_head + 1) % kHostQueueCapacity;
+            --g_host_count;
+            if (g_host_drops != UINT32_MAX) ++g_host_drops;
+        }
+        const uint8_t index = (g_host_head + g_host_count) % kHostQueueCapacity;
+        g_host_queue[index] = {received_us, frame};
+        ++g_host_count;
+        if (g_host_updates != UINT32_MAX) ++g_host_updates;
     }
     critical_section_exit(&g_lock);
     return accepted;
@@ -603,11 +748,13 @@ void haptics_experiment_poll() {
     if (!command.pending) {
         return;
     }
-    if (command.action == 1) {
+    if (command.action != 0) {
         start(command);
     } else if (g_phase != Phase::kIdle &&
                g_diagnostics.run_id == command.run_id) {
-        if (g_phase == Phase::kRestore) {
+        if (g_phase == Phase::kPrepare) {
+            finish(HapticsExperimentState::kStopped, kNoError);
+        } else if (g_phase == Phase::kRestore) {
             if (g_finish_state != HapticsExperimentState::kError) {
                 g_finish_state = HapticsExperimentState::kStopped;
             }
@@ -624,6 +771,7 @@ void haptics_experiment_poll() {
             g_diagnostics.slot = command.slot;
             g_diagnostics.connection_generation = command.connection.generation;
             g_diagnostics.state = HapticsExperimentState::kStopped;
+            g_diagnostics.mode = command.mode;
             haptics_transport_probe_begin(
                 command.run_id, command.connection.generation, 0xffff);
             haptics_transport_probe_end();
@@ -637,10 +785,40 @@ bool haptics_experiment_owns(const uni_hid_device_t* device) {
            connection_current();
 }
 
+bool haptics_experiment_gameplay_owns(const uni_hid_device_t* device) {
+    return gameplay() && g_phase == Phase::kPattern &&
+           haptics_experiment_owns(device);
+}
+
+bool haptics_experiment_feedback(uni_hid_device_t* device,
+                                 uint8_t low, uint8_t high, uint16_t duration_ms) {
+    if (!haptics_experiment_gameplay_owns(device)) return false;
+    g_synth.feedback(time_us_64(), uint32_t{duration_ms} * 1000, low, high);
+    return true;
+}
+
+void haptics_experiment_suspend_gameplay() {
+    critical_section_enter_blocking(&g_lock);
+    const uint8_t slot = g_busy && g_snapshot.mode == 1 ? g_snapshot.slot : kNoSlot;
+    critical_section_exit(&g_lock);
+    if (slot != kNoSlot) haptics_experiment_request(0, slot);
+}
+
 bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
                                                     uint16_t cid) {
     if (device != g_connection.device || !connection_current() ||
         (g_phase != Phase::kPattern && g_phase != Phase::kDrain)) {
+        return false;
+    }
+    if (gameplay() && g_phase == Phase::kPattern && !g_in_callback &&
+        !uni_circular_buffer_is_empty(&device->outgoing_buffer)) {
+        // Gameplay permits ordinary LED reports, never compatibility rumble.
+        // Yield this credit to the generic FIFO, then request fresh permission.
+        if (cid == g_connection.cid && g_send_requested) {
+            account_wait(time_us_64());
+            g_send_requested = false;
+            schedule_timer(&g_cadence_timer, &g_cadence_armed, time_us_64() + 1000);
+        }
         return false;
     }
     // The generic FIFO is device-wide, not CID-specific. Consume control-CID
@@ -700,7 +878,7 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
         // CAN_SEND_NOW. Never submit a now-obsolete tone after its phase ended.
         ++g_diagnostics.skipped_packets;
         ++g_next_packet;
-        if (g_next_packet < kPackets) {
+        if (gameplay() || g_next_packet < kPackets) {
             schedule_timer(&g_cadence_timer, &g_cadence_armed,
                            packet_due(g_next_packet));
         }
@@ -751,9 +929,12 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
         }
     } else {
         ++g_next_packet;
-        if (g_next_packet < kPackets) {
+        if (gameplay() || g_next_packet < kPackets) {
             schedule_timer(&g_cadence_timer, &g_cadence_armed,
                            packet_due(g_next_packet));
+        }
+        if (gameplay()) {
+            schedule_lifecycle(packet_due(g_next_packet) + kDrainTimeoutUs);
         }
     }
     g_in_callback = false;

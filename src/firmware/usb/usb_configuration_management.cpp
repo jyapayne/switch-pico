@@ -228,6 +228,9 @@ size_t encode_haptics_experiment(uint8_t* output, size_t output_size) {
     payload[68] = static_cast<uint8_t>(diagnostics.state);
     payload[69] = diagnostics.slot;
     payload[70] = diagnostics.last_error;
+    payload[72] = diagnostics.mode;
+    write_u32(&payload[76], diagnostics.host_updates);
+    write_u32(&payload[80], diagnostics.dropped_updates);
     return encode_response(
         Operation::kHapticsExperiment, Status::kOk, 0,
         kHapticsExperimentSchemaVersion, diagnostics.run_id,
@@ -761,7 +764,7 @@ bool process_out_request() {
             return true;
         case Operation::kHapticsExperiment:
             if (request.payload_size != 2 ||
-                payload[0] > 1 ||
+                payload[0] > 2 ||
                 payload[1] >= BLUEPAD32_INPUT_BACKEND_SLOT_COUNT) {
                 return false;
             }

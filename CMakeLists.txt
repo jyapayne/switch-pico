@@ -30,6 +30,11 @@ option(SWITCH_PICO_HAPTICS_EXPERIMENT
        "Enable the host-triggered DualSense PCM transport experiment" OFF)
 option(SWITCH_PICO_HAPTICS_EXPERIMENT_RAM
        "Execute the haptics experiment hot path from SRAM" ON)
+option(SWITCH_PICO_HD_RUMBLE
+       "Auto-arm native Switch HD rumble for a DualSense in slot zero" OFF)
+if(SWITCH_PICO_HD_RUMBLE)
+    set(SWITCH_PICO_HAPTICS_EXPERIMENT ON)
+endif()
 set(SWITCH_PICO_INPUT_BACKEND "UART" CACHE STRING "Controller input backend")
 set_property(CACHE SWITCH_PICO_INPUT_BACKEND PROPERTY STRINGS UART BLUEPAD32)
 if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "UART"
@@ -157,6 +162,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     if(SWITCH_PICO_HAPTICS_EXPERIMENT)
         target_sources(switch-pico PRIVATE
                 ${SWITCH_PICO_SOURCE_DIR}/input/haptics_experiment.cpp
+                ${SWITCH_PICO_SOURCE_DIR}/input/switch_hd_rumble_synth.cpp
                 ${SWITCH_PICO_SOURCE_DIR}/input/haptics_transport_probe.cpp)
         target_compile_definitions(switch-pico PRIVATE
                 SWITCH_PICO_HAPTICS_EXPERIMENT=1
@@ -170,6 +176,9 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
                 "LINKER:--wrap=cyw43_bluetooth_hci_write"
                 "LINKER:--wrap=cyw43_bluetooth_hci_read"
                 "LINKER:--wrap=btstack_run_loop_base_poll_data_sources")
+    endif()
+    if(SWITCH_PICO_HD_RUMBLE)
+        target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_HD_RUMBLE=1)
     endif()
 else()
     target_compile_definitions(switch-pico PRIVATE

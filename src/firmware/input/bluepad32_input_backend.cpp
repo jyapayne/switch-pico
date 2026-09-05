@@ -1256,6 +1256,16 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
     profile_service_task_on_storage_core(now_ms);
 }
 
+void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
+                     uint8_t weak, uint8_t strong) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    if (haptics_experiment_feedback(device, strong, weak, duration_ms)) {
+        return;
+    }
+#endif
+    device->report_parser.play_dual_rumble(device, 0, duration_ms, weak, strong);
+}
+
 void process_rumble_timer(btstack_timer_source_t* timer) {
     __atomic_add_fetch(&g_rumble_timer_ticks, 1, __ATOMIC_RELAXED);
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
@@ -1275,6 +1285,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     const bool xinput_host_mode =
         host_rumble_duration_ms() == kXInputHostRumbleDurationMs;
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    if (xinput_host_mode) haptics_experiment_suspend_gameplay();
     haptics_experiment_poll();
 #endif
 
@@ -1294,10 +1305,11 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         critical_section_enter_blocking(&g_state_lock);
         BackendSlot& slot = g_slots[slot_index];
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-        if (haptics_experiment_owns(slot.device)) {
-            // The experiment owns all output on this connection while active.
-            // Keep the latest XInput state but don't replay stale Switch pulses.
-            slot.rumble_pending = false;
+        if (haptics_experiment_owns(slot.device) &&
+            !haptics_experiment_gameplay_owns(slot.device)) {
+            // Fixture/startup/restoration exclusively own output. Preserve
+            // stateful XInput requests until compatibility restoration ends.
+            if (!xinput_host_mode) slot.rumble_pending = false;
             critical_section_exit(&g_state_lock);
             continue;
         }
@@ -1432,6 +1444,15 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             }
         }
         critical_section_exit(&g_state_lock);
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        if (host_dispatch && haptics_experiment_gameplay_owns(device) &&
+            (envelope.rumble.hd.actuators[0].sample_count != 0 ||
+             envelope.rumble.hd.actuators[1].sample_count != 0)) {
+            // Full timestamped frames already went directly from the USB
+            // producer to the native timeline, even during local feedback.
+            host_dispatch = false;
+        }
+#endif
 
         if (profile_lighting_restore &&
             lighting_target_is_current(
@@ -1452,15 +1473,14 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             device->report_parser.play_dual_rumble != nullptr) {
             __atomic_add_fetch(
                 &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
-            device->report_parser.play_dual_rumble(
-                device, 0, kProfileFeedbackPhaseDurationMs,
-                kProfileFeedbackWeakMagnitude,
-                kProfileFeedbackStrongMagnitude);
+            dispatch_rumble(
+                device, kProfileFeedbackPhaseDurationMs,
+                kProfileFeedbackWeakMagnitude, kProfileFeedbackStrongMagnitude);
         } else if (feedback_dispatch) {
             __atomic_add_fetch(
                 &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
-            device->report_parser.play_dual_rumble(
-                device, 0, feedback.duration_ms,
+            dispatch_rumble(
+                device, feedback.duration_ms,
                 feedback.weak_magnitude, feedback.strong_magnitude);
         } else if (host_dispatch &&
                    device->report_parser.play_dual_rumble != nullptr) {
@@ -1469,8 +1489,8 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             const bool stop =
                 envelope.rumble.low_frequency_magnitude == 0 &&
                 envelope.rumble.high_frequency_magnitude == 0;
-            device->report_parser.play_dual_rumble(
-                device, 0, stop ? 0 : envelope.duration_ms,
+            dispatch_rumble(
+                device, stop ? 0 : envelope.duration_ms,
                 envelope.rumble.high_frequency_magnitude,
                 envelope.rumble.low_frequency_magnitude);
         }
@@ -1645,6 +1665,15 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
         haptics_experiment_attach(
             static_cast<uint8_t>(slot_index), lighting_generation, device);
+#ifdef SWITCH_PICO_HD_RUMBLE
+        if (slot_index == 0 &&
+            host_rumble_duration_ms() != kXInputHostRumbleDurationMs &&
+            connection_identity.vendor_id == 0x054c &&
+            (connection_identity.product_id == 0x0ce6 ||
+             connection_identity.product_id == 0x0df2)) {
+            haptics_experiment_request(2, static_cast<uint8_t>(slot_index));
+        }
+#endif
 #endif
         if (lighting_target_is_current(
                 static_cast<uint8_t>(slot_index),
@@ -2024,10 +2053,19 @@ void bluepad32_input_backend_queue_rumble(
         return;
     }
 
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    const uint64_t received_us = time_us_64();
+    uint32_t native_generation = 0;
+    bool native_candidate = false;
+#endif
     const uint16_t duration_ms = host_rumble_duration_ms();
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device != nullptr) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        native_generation = slot.connection_generation;
+        native_candidate = true;
+#endif
         const RumbleEnvelope envelope{
             slot_index, slot.connection_generation, rumble,
             duration_ms};
@@ -2044,6 +2082,12 @@ void bluepad32_input_backend_queue_rumble(
         }
     }
     critical_section_exit(&g_state_lock);
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    if (native_candidate) {
+        haptics_experiment_submit(
+            slot_index, native_generation, received_us, rumble.hd);
+    }
+#endif
 }
 
 bool bluepad32_input_backend_identify(

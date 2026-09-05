@@ -135,8 +135,8 @@ PROFILE_METADATA_SCHEMA_VERSION = 1
 PROFILE_METADATA_MAX_BYTES = 31
 PROFILE_METADATA_VALUE_SIZE = 32
 PROFILE_METADATA_SIZE = 288
-HAPTICS_EXPERIMENT_SCHEMA_VERSION = 2
-HAPTICS_EXPERIMENT_SIZE = 72
+HAPTICS_EXPERIMENT_SCHEMA_VERSION = 3
+HAPTICS_EXPERIMENT_SIZE = 84
 HAPTICS_EXPERIMENT_SLOT_COUNT = 4
 HAPTICS_TRANSPORT_PROBE_SCHEMA_VERSION = 2
 HAPTICS_TRANSPORT_PROBE_SIZE = 128
@@ -144,6 +144,7 @@ HAPTICS_EXPERIMENT_STATES = (
     "idle", "pending", "running", "completed",
     "stopped", "disconnected", "unsupported", "error",
 )
+HAPTICS_EXPERIMENT_MODES = ("fixture", "gameplay")
 HAPTICS_EXPERIMENT_ERRORS = {
     0: "none",
     1: "unsupported controller or Bluetooth protocol",
@@ -162,6 +163,25 @@ HAPTICS_EXPERIMENT_EVIDENCE_NOTE = (
     "onset or playback; USB ACK only accepts a request. "
     "The initial 1.024 s of priming silence is intentional, not transport delay."
 )
+HAPTICS_GAMEPLAY_EVIDENCE_NOTE = (
+    "Send timestamps measure firmware/HCI submission, not physical actuator "
+    "onset or playback; USB ACK only accepts a request. Gameplay streams "
+    "continuously, including silence without host commands; first-tone "
+    "timestamps remain zero until the first nonzero PCM."
+)
+HAPTICS_GAMEPLAY_ARMING_NOTE = (
+    "PC-controlled gameplay arming does not persist across power cycles. "
+    "Firmware built with SWITCH_PICO_HD_RUMBLE=ON automatically arms only "
+    "slot 0 by default; use gameplay --slot to select another controller."
+)
+HAPTICS_GAMEPLAY_TIMING = {
+    "sample_rate_hz": 3000,
+    "stereo_frames_per_packet": 64,
+    "lookback_us": 64000000 / 3000,
+    "command_window_us": 8000,
+    "watchdog_us": 50000,
+    "host_gain": 1.5,
+}
 HAPTICS_TRANSPORT_PROBE_UNSUPPORTED_HINT = (
     "Firmware does not support haptics transport profile operation 0x41. "
     "Install updated firmware built with SWITCH_PICO_HAPTICS_EXPERIMENT=ON "
@@ -326,10 +346,17 @@ class HapticsExperimentDiagnostics:
     state: int
     slot: int | None
     last_error: int
+    mode: int
+    host_updates: int
+    dropped_updates: int
 
     @property
     def state_name(self) -> str:
         return HAPTICS_EXPERIMENT_STATES[self.state]
+
+    @property
+    def mode_name(self) -> str:
+        return HAPTICS_EXPERIMENT_MODES[self.mode]
 
     @property
     def error_name(self) -> str:
@@ -348,16 +375,23 @@ class HapticsExperimentDiagnostics:
         return (self.first_tone_sent_us - self.first_tone_due_us) & 0xFFFFFFFF
 
     def to_json_object(self) -> dict[str, Any]:
-        return {
+        values = {
             **asdict(self),
             "schema_version": HAPTICS_EXPERIMENT_SCHEMA_VERSION,
             "state_name": self.state_name,
+            "mode_name": self.mode_name,
             "error_name": self.error_name,
             "firmware_supported": self.firmware_supported,
             "first_tone_submission_delay_us": self.first_tone_submission_delay_us,
-            "pattern": HAPTICS_EXPERIMENT_PATTERN,
-            "evidence_note": HAPTICS_EXPERIMENT_EVIDENCE_NOTE,
         }
+        if self.mode == 1:
+            values["gameplay"] = HAPTICS_GAMEPLAY_TIMING
+            values["evidence_note"] = HAPTICS_GAMEPLAY_EVIDENCE_NOTE
+            values["arming_note"] = HAPTICS_GAMEPLAY_ARMING_NOTE
+        else:
+            values["pattern"] = HAPTICS_EXPERIMENT_PATTERN
+            values["evidence_note"] = HAPTICS_EXPERIMENT_EVIDENCE_NOTE
+        return values
 
 
 @dataclass(frozen=True)
@@ -2108,17 +2142,22 @@ def parse_haptics_experiment(envelope: Envelope) -> HapticsExperimentDiagnostics
     state, slot, last_error, reserved = struct.unpack_from(
         "<4B", envelope.payload, 68
     )
-    if envelope.flags != 0 or reserved != 0:
+    mode = envelope.payload[72]
+    host_updates, dropped_updates = struct.unpack_from("<2I", envelope.payload, 76)
+    if envelope.flags != 0 or reserved != 0 or any(envelope.payload[73:76]):
         raise ConfigManagerError("invalid haptics experiment reserved flags")
     if state >= len(HAPTICS_EXPERIMENT_STATES):
         raise ConfigManagerError(f"invalid haptics experiment state {state}")
+    if mode >= len(HAPTICS_EXPERIMENT_MODES):
+        raise ConfigManagerError(f"invalid haptics experiment mode {mode}")
     if slot >= HAPTICS_EXPERIMENT_SLOT_COUNT and not (
         slot == 0xFF and HAPTICS_EXPERIMENT_STATES[state] in ("idle", "unsupported")
     ):
         raise ConfigManagerError(f"invalid haptics experiment slot {slot}")
     return HapticsExperimentDiagnostics(
         *counters, state=state, slot=None if slot == 0xFF else slot,
-        last_error=last_error,
+        last_error=last_error, mode=mode, host_updates=host_updates,
+        dropped_updates=dropped_updates,
     )
 
 
@@ -2178,9 +2217,10 @@ def read_haptics_experiment_profile(
     if (
         (after.run_id, after.connection_generation) != correlation
         or (transport.run_id, transport.connection_generation) != correlation
+        or (after.slot, after.mode) != (before.slot, before.mode)
     ):
         raise ConfigManagerError(
-            "haptics experiment run or connection generation changed or does not "
+            "haptics experiment run, slot, mode, or connection generation changed or does not "
             "match the transport profile; cannot attribute measurements. "
             "Read profile again after the accepted run has started or finished."
         )
@@ -2264,10 +2304,11 @@ def _print_haptics_experiment(
         return
     print(
         f"Haptics experiment: {snapshot.state_name}; run={snapshot.run_id}; "
-        f"slot={snapshot.slot if snapshot.slot is not None else 'none'}"
+        f"slot={snapshot.slot if snapshot.slot is not None else 'none'}; "
+        f"mode={snapshot.mode_name}"
     )
     for name, value in asdict(snapshot).items():
-        if name not in ("state", "slot", "last_error"):
+        if name not in ("state", "slot", "last_error", "mode"):
             print(f"  {name}: {value}")
     print(f"  last_error: {snapshot.last_error} ({snapshot.error_name})")
     delay = snapshot.first_tone_submission_delay_us
@@ -2275,18 +2316,27 @@ def _print_haptics_experiment(
         "  first_tone_submission_delay_us: "
         f"{delay if delay is not None else 'not recorded'}"
     )
-    print(
-        "Pattern: 3 kHz, 64 stereo frames/packet, peak 32/127; "
-        "48 packets priming silence (1.024 s), 4 cycles of "
-        "left 100 Hz / silence / right 200 Hz / silence "
-        "(12 packets = 256 ms each), 48 packets trailing silence (1.024 s); "
-        "288 packets / 6.144 s total. Initial mode handoff carries 32 silent frames."
-    )
+    if snapshot.mode == 1:
+        print(
+            "Gameplay: continuous 3 kHz, 64 stereo frames/packet; "
+            "21333.333 us lookback, 8000 us command window, "
+            "50000 us host-effect watchdog; 1.5x gameplay gain, jointly "
+            "headroom-limited. Silence continues without commands."
+        )
+        print(HAPTICS_GAMEPLAY_ARMING_NOTE)
+    else:
+        print(
+            "Pattern: 3 kHz, 64 stereo frames/packet, peak 32/127; "
+            "48 packets priming silence (1.024 s), 4 cycles of "
+            "left 100 Hz / silence / right 200 Hz / silence "
+            "(12 packets = 256 ms each), 48 packets trailing silence (1.024 s); "
+            "288 packets / 6.144 s total. Initial mode handoff carries 32 silent frames."
+        )
     print(
         "Timestamp fields are low 32-bit Pico uptime microseconds; "
         "differences use unsigned wraparound."
     )
-    print(HAPTICS_EXPERIMENT_EVIDENCE_NOTE, flush=True)
+    print(values["evidence_note"], flush=True)
 
 
 def _watch_haptics_experiment(
@@ -2295,6 +2345,7 @@ def _watch_haptics_experiment(
 ) -> None:
     run_id = snapshot.run_id
     slot = snapshot.slot
+    mode = snapshot.mode
     while True:
         _print_haptics_experiment(snapshot, as_json=as_json)
         _raise_haptics_experiment_failure(snapshot)
@@ -2302,6 +2353,12 @@ def _watch_haptics_experiment(
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if mode == 1:
+                raise ConfigManagerError(
+                    f"haptics gameplay watch reached --timeout; run {run_id} "
+                    "is still armed. Use haptics-experiment stop --slot "
+                    f"{slot} to disarm; watching does not stop the stream."
+                )
             raise ConfigManagerError(
                 f"haptics experiment run {run_id} did not reach a terminal "
                 "state before --timeout; it may still be active, use status "
@@ -2309,7 +2366,7 @@ def _watch_haptics_experiment(
             )
         time.sleep(min(0.1, remaining))
         snapshot = read_haptics_experiment(device)
-        if snapshot.run_id != run_id or snapshot.slot != slot:
+        if (snapshot.run_id, snapshot.slot, snapshot.mode) != (run_id, slot, mode):
             raise ConfigManagerError(
                 "haptics experiment run changed while watching; "
                 "cannot attribute measurements to the requested run"
@@ -2341,7 +2398,8 @@ def _run_haptics_experiment_command(
     if not before.firmware_supported:
         _raise_haptics_experiment_failure(before)
     active = before.state_name in ("pending", "running")
-    if action == "start" and active:
+    starting = action in ("start", "gameplay")
+    if starting and active:
         raise ConfigManagerError(
             f"haptics experiment is already {before.state_name} "
             f"on slot {before.slot}; stop that run before starting another"
@@ -2361,7 +2419,7 @@ def _run_haptics_experiment_command(
             return
     _control_out(
         device, OP_HAPTICS_EXPERIMENT,
-        bytes((1 if action == "start" else 0, args.slot)),
+        bytes(({"start": 1, "gameplay": 2, "stop": 0}[action], args.slot)),
     )
     print(
         f"{action.capitalize()} request accepted; pending firmware confirmation. "
@@ -2369,8 +2427,9 @@ def _run_haptics_experiment_command(
         file=sys.stderr if args.json else sys.stdout, flush=True,
     )
     expected_run_id = (
-        (before.run_id + 1) & 0xFFFFFFFF if action == "start" else before.run_id
+        (before.run_id + 1) & 0xFFFFFFFF if starting else before.run_id
     )
+    expected_mode = (1 if action == "gameplay" else 0) if starting else before.mode
     observed_run = False
     while True:
         snapshot = read_haptics_experiment(device)
@@ -2380,20 +2439,27 @@ def _run_haptics_experiment_command(
                 raise ConfigManagerError(
                     "haptics experiment response belongs to another slot"
                 )
+            if snapshot.mode != expected_mode:
+                raise ConfigManagerError(
+                    "haptics experiment response belongs to another mode"
+                )
             if snapshot.state_name in ("disconnected", "unsupported", "error"):
                 _print_haptics_experiment(snapshot, as_json=args.json)
                 _raise_haptics_experiment_failure(snapshot)
-            if action == "start" and args.watch:
+            if starting and args.watch:
                 _watch_haptics_experiment(
                     device, snapshot, deadline, as_json=args.json
                 )
                 return
-            if snapshot.state_name in ("running", "completed") and action == "start":
+            if starting and (
+                snapshot.state_name == "running"
+                or (action == "start" and snapshot.state_name == "completed")
+            ):
                 _print_haptics_experiment(snapshot, as_json=args.json)
                 if snapshot.state_name == "running":
                     print(
-                        "Firmware reports running; use start --watch or "
-                        "status --watch to capture completion and later failures.",
+                        "Firmware reports running; use status --watch "
+                        "to capture later states and failures.",
                         file=sys.stderr if args.json else sys.stdout,
                     )
                 return
@@ -2405,12 +2471,23 @@ def _run_haptics_experiment_command(
                     f"haptics experiment {action} ended in unexpected "
                     f"state {snapshot.state_name}"
                 )
-        elif action == "stop" or observed_run or snapshot.run_id != before.run_id:
+        elif (
+            action == "stop" or observed_run
+            or (snapshot.run_id, snapshot.slot, snapshot.mode)
+            != (before.run_id, before.slot, before.mode)
+        ):
             raise ConfigManagerError(
                 f"haptics experiment run changed before {action} was confirmed"
             )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if action == "gameplay":
+                raise ConfigManagerError(
+                    "haptics gameplay was not confirmed before --timeout; "
+                    "the stream may still be armed. Use status to inspect it "
+                    f"or haptics-experiment stop --slot {args.slot} to disarm "
+                    "(USB ACK alone does not confirm it)"
+                )
             raise ConfigManagerError(
                 f"haptics experiment {action} was not confirmed before "
                 "--timeout; check status (USB ACK alone does not confirm it)"
@@ -3389,8 +3466,13 @@ def build_parser() -> argparse.ArgumentParser:
     haptics_commands = haptics.add_subparsers(
         dest="haptics_command", required=True
     )
-    for action in ("start", "status", "stop"):
-        experiment = haptics_commands.add_parser(action)
+    for action, help_text in (
+        ("start", "run the finite PCM fixture"),
+        ("gameplay", "arm continuous Nintendo HD-rumble PCM until stopped"),
+        ("status", "read the current fixture or gameplay stream"),
+        ("stop", "stop and disarm the selected stream"),
+    ):
+        experiment = haptics_commands.add_parser(action, help=help_text)
         if action != "status":
             experiment.add_argument(
                 "--slot", type=int, choices=range(HAPTICS_EXPERIMENT_SLOT_COUNT),
@@ -3399,7 +3481,8 @@ def build_parser() -> argparse.ArgumentParser:
         if action != "stop":
             experiment.add_argument(
                 "--watch", action="store_true",
-                help="capture 100 ms status samples until terminal or --timeout",
+                help="capture 100 ms status samples until terminal or --timeout; "
+                     "does not stop an armed gameplay stream",
             )
         experiment.add_argument(
             "--json", action="store_true",

@@ -404,6 +404,28 @@ void test_rumble_scaling_and_confirmation_policy() {
                 UINT8_MAX,
             "full rumble scaling did not saturate at uint8 maximum");
 
+    ControllerRumbleOutput hd_input{};
+    hd_input.hd.actuators[0].sample_count = 2;
+    hd_input.hd.actuators[0].samples[0] = {48, 96, 18000, 10000};
+    hd_input.hd.actuators[0].samples[1] = {49, 97, 31000, 0};
+    hd_input.hd.actuators[1].sample_count = 1;
+    hd_input.hd.actuators[1].samples[0] = {20, 70, 12000, 10000};
+    ControllerProfile hd_profile = profile;
+    hd_profile.strong_rumble_scale = 0;
+    hd_profile.weak_rumble_scale = 128;
+    const auto hd_output = controller_profile_scale_host_rumble(hd_input, hd_profile);
+    require(hd_output.hd.actuators[0].sample_count == 2 &&
+                hd_output.hd.actuators[1].sample_count == 1 &&
+                hd_output.hd.actuators[0].samples[1].low_frequency_index == 49 &&
+                hd_output.hd.actuators[1].samples[0].high_frequency_index == 70,
+            "profile gain lost HD substeps or side-specific frequencies");
+    require(hd_output.hd.actuators[0].samples[0].low_amplitude_q15 == 0 &&
+                hd_output.hd.actuators[1].samples[0].low_amplitude_q15 == 0 &&
+                hd_output.hd.actuators[0].samples[0].high_amplitude_q15 == 5020 &&
+                hd_output.hd.actuators[1].samples[0].high_amplitude_q15 == 5020 &&
+                hd_output.hd.actuators[0].samples[1].high_amplitude_q15 == 0,
+            "profile band gains were not applied to linear HD amplitudes");
+
     profile.confirmation_policy = ControllerProfileConfirmationPolicy::kLed;
     require(controller_profile_confirmation_policy(profile) ==
                 ControllerProfileConfirmationPolicy::kLed,

@@ -1,5 +1,6 @@
 #include "input/haptics_experiment.h"
 #include "input/haptics_transport_probe.h"
+#include "usb/switch/switch_haptics.h"
 
 #include <algorithm>
 #include <array>
@@ -527,7 +528,7 @@ void reconnect_and_pending_generation() {
 
 void support_and_transport_errors() {
     reset();
-    assert(!haptics_experiment_request(2, 0));
+    assert(!haptics_experiment_request(3, 0));
     assert(!haptics_experiment_request(1, 4));
     devices[0].remote_mtu = 142;
     assert(haptics_experiment_request(1, 0));
@@ -595,6 +596,103 @@ void timing_cost_reentrancy_and_wrap() {
     assert(wrapped.last_sent_us == static_cast<uint32_t>(pcm.back().at_us));
     assert(wrapped.elapsed_us >= 6147000 && wrapped.elapsed_us < 6148000);
     assert(wrapped.max_send_gap_us <= 22000 && wrapped.sent_packets == 288);
+}
+
+void gameplay_timeline_and_lifecycle() {
+    reset();
+    SwitchHapticsDecoder decoder;
+    const auto feed = [&](bool left) {
+        const uint32_t active = (1u << 30) | (96u << 23) | (64u << 16) | (64u << 2);
+        const uint32_t words[] = {left ? active : 0x40400100u,
+                                  left ? 0x40400100u : active};
+        uint8_t bytes[8]{};
+        for (unsigned side = 0; side < 2; ++side) {
+            for (unsigned byte = 0; byte < 4; ++byte) {
+                bytes[side * 4 + byte] = static_cast<uint8_t>(words[side] >> (8 * byte));
+            }
+        }
+        const auto decoded = decoder.decode(bytes);
+        assert(haptics_experiment_submit(0, 100, now_us, decoded.hd));
+    };
+    assert(haptics_experiment_request(2, 0));
+    const uint64_t started = now_us;
+    feed(true);  // A sole first command survives the Pending -> Running boundary.
+    haptics_experiment_poll();
+    assert(snapshot().mode == 1 && snapshot().state == HapticsExperimentState::kRunning);
+    assert(haptics_experiment_gameplay_owns(&devices[0]));
+    now_us = started + 8000;
+    feed(false);
+    run_until(due(started, 1) + 1000);
+    assert(pcm.size() == 2 && snapshot().host_updates == 2);
+    unsigned left_nonzero = 0, right_nonzero = 0;
+    for (unsigned frame = 0; frame < 64; ++frame) {
+        const auto left = pcm[1].bytes[10 + frame * 2];
+        const auto right = pcm[1].bytes[11 + frame * 2];
+        if (frame < 24) {
+            assert(right == 0);
+            left_nonzero += left != 0;
+        } else {
+            assert(left == 0);
+            right_nonzero += right != 0;
+        }
+    }
+    assert(left_nonzero > 10 && right_nonzero > 20);
+    SwitchHapticsFrame stale{};
+    stale.actuators[0].sample_count = 1;
+    stale.actuators[0].samples[0].low_amplitude_q15 = 16000;
+    assert(!haptics_experiment_submit(0, 101, now_us, stale));
+    run_until(started + 6300000);
+    assert(snapshot().state == HapticsExperimentState::kRunning);
+    assert(snapshot().sent_packets > 288 && snapshot().skipped_packets == 0);
+    for (unsigned byte = 10; byte < 138; ++byte) assert(pcm.back().bytes[byte] == 0);
+    assert(snapshot().dropped_updates == 0 && generic_sent.empty());
+    assert(haptics_experiment_feedback(&devices[0], 100, 60, 30));
+    run_until(now_us + 22000);
+    assert(generic_sent.empty());  // Local confirmation must not leave PCM mode.
+    assert(haptics_experiment_request(0, 0));
+    haptics_experiment_poll();
+    run_until(now_us + 10000);
+    assert(snapshot().state == HapticsExperimentState::kStopped && snapshot().mode == 1);
+    assert(!haptics_experiment_owns(&devices[0]) && generic_sent.size() == 2);
+}
+
+void gameplay_missing_callback_is_bounded() {
+    reset();
+    delivery = Delivery::kNever;
+    assert(haptics_experiment_request(2, 0));
+    haptics_experiment_poll();
+    run_until(now_us + 105000);
+    assert(snapshot().state == HapticsExperimentState::kError && snapshot().last_error == 4);
+    assert(!haptics_experiment_owns(&devices[0]) && timers.empty());
+}
+
+void gameplay_queued_start_and_command_overflow() {
+    reset();
+    devices[0].credit = false;
+    emit_generic(&devices[0], GenericKind::kLed);
+    assert(haptics_experiment_request(2, 0));
+    haptics_experiment_poll();
+    assert(snapshot().state == HapticsExperimentState::kPending && pcm.empty());
+    run_until(now_us + 10000);
+    devices[0].credit = true;
+    assert(!dispatch(&devices[0], devices[0].conn.control_cid));
+    run_until(now_us + 3000);
+    assert(snapshot().state == HapticsExperimentState::kRunning && pcm.size() == 1);
+    assert(generic_queue.empty() && generic_sent.size() == 1);
+    assert(generic_sent.front().kind == GenericKind::kLed);
+
+    SwitchHapticsFrame frame{};
+    frame.actuators[0].sample_count = 1;
+    frame.actuators[0].samples[0].low_amplitude_q15 = 20000;
+    const size_t sent_before = pcm.size();
+    for (unsigned i = 0; i < 17; ++i) {
+        now_us += 8000;
+        assert(haptics_experiment_submit(0, 100, now_us, frame));
+    }
+    run_until(now_us);
+    assert(snapshot().state == HapticsExperimentState::kRunning);
+    assert(snapshot().host_updates == 17 && snapshot().dropped_updates == 1);
+    assert(snapshot().skipped_packets != 0 && pcm.size() == sent_before + 1);
 }
 
 }  // namespace
@@ -712,5 +810,8 @@ int main(int argc, char** argv) {
     reconnect_and_pending_generation();
     support_and_transport_errors();
     timing_cost_reentrancy_and_wrap();
+    gameplay_timeline_and_lifecycle();
+    gameplay_queued_start_and_command_overflow();
+    gameplay_missing_callback_is_bounded();
     std::cout << "haptics experiment behavioral regressions passed\n";
 }

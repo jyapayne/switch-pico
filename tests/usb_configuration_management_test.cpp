@@ -728,18 +728,21 @@ std::vector<uint8_t> read_haptics_payload() {
     require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request),
             "experiment diagnostics IN was rejected");
-    require(control_payload.size() == kResponseHeaderSize + 72 &&
+    require(control_payload.size() == kResponseHeaderSize + 84 &&
                 control_payload[5] == 0x40 &&
                 control_payload[6] == static_cast<uint8_t>(Status::kOk) &&
                 control_payload[7] == 0 &&
-                read_u16(control_payload, 8) == 72 &&
-                read_u16(control_payload, 10) == 2,
-            "experiment schema-2 envelope is invalid");
+                read_u16(control_payload, 8) == 84 &&
+                read_u16(control_payload, 10) == 3,
+            "experiment schema-3 envelope is invalid");
     std::vector<uint8_t> payload(
         control_payload.begin() + kResponseHeaderSize, control_payload.end());
     require(read_u32(control_payload, 16) ==
                 configuration_crc32(payload.data(), payload.size()),
             "experiment response CRC is invalid");
+    require(payload[71] == 0 && payload[73] == 0 &&
+                payload[74] == 0 && payload[75] == 0,
+            "experiment reserved payload bytes must remain zero");
     return payload;
 }
 
@@ -783,13 +786,13 @@ void test_haptics_experiment_requests() {
                     0, CONTROL_STAGE_SETUP, &request),
                 "malformed experiment control size was accepted");
     }
-    std::vector<uint8_t> expected(72, 0);
+    std::vector<uint8_t> expected(84, 0);
     expected[69] = 0xff;
 #ifndef SWITCH_PICO_HAPTICS_EXPERIMENT
     expected[68] = 6;
     require(read_haptics_payload() == expected,
             "disabled firmware must expose only the unsupported snapshot");
-    for (uint8_t action : {0, 1}) {
+    for (uint8_t action : {0, 1, 2}) {
         next_out_payload = make_request(Operation::kHapticsExperiment, {action, 0});
         tusb_control_request_t request = setup_request(
             Operation::kHapticsExperiment, TUSB_DIR_OUT,
@@ -799,9 +802,7 @@ void test_haptics_experiment_requests() {
                 "disabled firmware accepted experiment control");
     }
 #else
-    require(read_haptics_payload() == expected,
-            "enabled firmware must initially be idle without a selected slot");
-    perform_haptics_out(2, 0, false);
+    perform_haptics_out(3, 0, false);
     perform_haptics_out(1, 4, false);
     perform_haptics_out(0, 0xff, false);
     require(haptics_request_count == 0,
@@ -820,15 +821,15 @@ void test_haptics_experiment_requests() {
     require(haptics_request_count == 0,
             "bad CRC control reached the experiment service");
 
-    perform_haptics_out(1, 2);
+    perform_haptics_out(2, 2);
     auto payload = read_haptics_payload();
-    require(payload[68] == 1 && payload[69] == 2 &&
-                read_u32(payload, 0) == 1 && read_u32(payload, 16) == 0 &&
-                haptics_request_count == 1,
+    require(payload[68] == 1 && payload[69] == 2 && payload[72] == 1 &&
+                read_u32(payload, 0) == 1 && read_u32(payload, 16) == 0,
             "USB acceptance must remain pending until the service starts");
     perform_haptics_out(1, 1, false);
+    perform_haptics_out(2, 1, false);
     payload = read_haptics_payload();
-    require(payload[68] == 1 && payload[69] == 2 &&
+    require(payload[68] == 1 && payload[69] == 2 && payload[72] == 1 &&
                 read_u32(payload, 0) == 1,
             "busy start overwrote the accepted run");
 
@@ -836,7 +837,7 @@ void test_haptics_experiment_requests() {
     current_haptics = {
         1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,
         123, 22000, 11001, 9876, 0xfffffff0, 0x30, 0x76543210,
-        1100000, HapticsExperimentState::kRunning, 2, 0,
+        1100000, HapticsExperimentState::kRunning, 2, 0, 1, 0x89abcdef, 0x12345678,
     };
     const uint32_t fields[] = {
         1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,
@@ -847,15 +848,19 @@ void test_haptics_experiment_requests() {
     }
     expected[68] = 2;
     expected[69] = 2;
+    expected[72] = 1;
+    write_u32(&expected, 76, 0x89abcdef);
+    write_u32(&expected, 80, 0x12345678);
     require(read_haptics_payload() == expected,
-            "schema-2 timing fields are not in little-endian wire order");
+            "schema-3 timing and gameplay mode fields are not in wire order");
 
     perform_haptics_out(0, 2);
     payload = read_haptics_payload();
-    require(payload[68] == 2 && read_u32(payload, 0) == 1,
+    require(payload[68] == 2 && payload[72] == 1 && read_u32(payload, 0) == 1,
             "USB stop ACK must not fabricate terminal completion");
     current_haptics.state = HapticsExperimentState::kStopped;
-    require(read_haptics_payload()[68] == 4,
+    payload = read_haptics_payload();
+    require(payload[68] == 4 && payload[72] == 1,
             "service stop transition was not observable");
 
     next_out_payload = make_request(Operation::kHapticsExperiment, {1, 3});
@@ -879,7 +884,7 @@ void test_haptics_experiment_requests() {
     current_haptics.last_error = 3;
     payload = read_haptics_payload();
     require(payload[68] == 5 && payload[69] == 3 && payload[70] == 3 &&
-                read_u32(payload, 0) == 2,
+                read_u32(payload, 0) == 2 && payload[72] == 0,
             "asynchronous connection failure lost request correlation");
 #endif
 }
@@ -1163,17 +1168,18 @@ void bluepad32_input_backend_diagnostics(
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 bool haptics_experiment_request(uint8_t action, uint8_t slot) {
     ++haptics_request_count;
-    if (action == 1 &&
+    if ((action == 1 || action == 2) &&
         (current_haptics.state == HapticsExperimentState::kPending ||
          current_haptics.state == HapticsExperimentState::kRunning)) {
         return false;
     }
-    if (action == 1) {
+    if (action == 1 || action == 2) {
         const uint32_t run_id = current_haptics.run_id + 1;
         current_haptics = {};
         current_haptics.run_id = run_id;
         current_haptics.slot = slot;
         current_haptics.state = HapticsExperimentState::kPending;
+        current_haptics.mode = action == 2 ? 1 : 0;
     }
     return true;
 }

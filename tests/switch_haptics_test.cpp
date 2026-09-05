@@ -197,6 +197,58 @@ void test_output_report_normalization() {
     }
 }
 
+void test_full_fidelity_states() {
+    const auto check = [](bool condition, const char* message) {
+        if (!condition) {
+            std::cerr << message << '\n';
+            ++failures;
+        }
+    };
+    SwitchHapticsDecoder decoder;
+    auto bytes = payload(type_2(80, 100, 32, 127), type_2(16, 16, 100, 32));
+    auto decoded = decoder.decode(bytes.data());
+    const auto& left = decoded.hd.actuators[0];
+    const auto& right = decoded.hd.actuators[1];
+    check(left.sample_count == 1 && right.sample_count == 1,
+          "full state must retain both independent actuators");
+    check(left.samples[0].low_frequency_index == 32 &&
+              left.samples[0].high_frequency_index == 80 &&
+              right.samples[0].low_frequency_index == 100 &&
+              right.samples[0].high_frequency_index == 16,
+          "per-side frequencies were collapsed");
+    check(left.samples[0].low_amplitude_q15 == 32066 &&
+              right.samples[0].low_amplitude_q15 == 4096,
+          "per-side linear amplitudes were collapsed or incorrectly decoded");
+
+    decoder.reset();
+    bytes = payload(type_2(64, 16, 64, 16), 0x40400100u);
+    decoder.decode(bytes.data());
+    bytes = payload(type_1_three_samples(17, 17, 29, 29, 24, 24), 0x40400100u);
+    decoded = decoder.decode(bytes.data());
+    const auto sequence = decoded.hd.actuators[0];
+    check(sequence.sample_count == 3 &&
+              sequence.samples[0].low_frequency_index == 65 &&
+              sequence.samples[1].low_frequency_index == 66 &&
+              sequence.samples[2].low_frequency_index == 66,
+          "ordered frequency substeps were lost");
+    check(sequence.samples[0].low_amplitude_q15 >
+              sequence.samples[1].low_amplitude_q15 &&
+              sequence.samples[1].low_amplitude_q15 ==
+              sequence.samples[2].low_amplitude_q15,
+          "amplitude substeps were replaced by their peak or final value");
+    decoded = decoder.decode(bytes.data());
+    check(decoded.hd.actuators[0].sample_count == 1 &&
+              decoded.hd.actuators[0].samples[0].low_frequency_index == 66 &&
+              decoded.hd.actuators[0].samples[0].low_amplitude_q15 ==
+              sequence.samples[2].low_amplitude_q15,
+          "repeated compressed commands replayed an old substep sequence");
+    bytes = payload(0, type_2(64, 16, 64, 16));
+    decoded = decoder.decode(bytes.data());
+    check(decoded.hd.actuators[0].samples[0].low_amplitude_q15 == 0 &&
+              decoded.hd.actuators[1].samples[0].low_amplitude_q15 != 0,
+          "neutral on one side stopped the other side");
+}
+
 }  // namespace
 
 int main() {
@@ -207,6 +259,7 @@ int main() {
     test_left_right_peak_combination();
     test_type_3_and_type_4_frames();
     test_malformed_and_reserved_words_preserve_state();
+    test_full_fidelity_states();
     test_output_report_normalization();
 
     if (failures != 0) {

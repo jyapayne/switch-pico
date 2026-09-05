@@ -1,5 +1,5 @@
 #include "usb/switch/switch_haptics.h"
-#include <cmath>
+#include "usb/switch/switch_haptics_amplitudes.h"
 #include <cstring>
 
 namespace {
@@ -149,16 +149,31 @@ void SwitchHapticsDecoder::reset() {
     reset_actuator(actuators_[1]);
 }
 
+void SwitchHapticsDecoder::append_sample(
+    const ActuatorState& state, SwitchHapticsActuatorFrame& output) {
+    if (output.sample_count >= 3) {
+        return;
+    }
+    output.samples[output.sample_count++] = {
+        state.low_frequency, state.high_frequency,
+        SwitchHapticsTables::kAmplitudeQ15[state.low_amplitude],
+        SwitchHapticsTables::kAmplitudeQ15[state.high_amplitude],
+    };
+}
+
 SwitchHapticsDecoder::AmplitudePeak SwitchHapticsDecoder::decode_actuator(
-    ActuatorState& state, uint32_t word) {
+    ActuatorState& state, uint32_t word, SwitchHapticsActuatorFrame& output) {
+    output = {};
     if (word == 0 || word == kNeutralWord) {
         reset_actuator(state);
         state.last_word = word;
         state.have_last_word = true;
+        append_sample(state, output);
         return {0, 0};
     }
 
     if (state.have_last_word && state.last_word == word) {
+        append_sample(state, output);
         return {state.low_amplitude, state.high_amplitude};
     }
     state.last_word = word;
@@ -171,10 +186,12 @@ SwitchHapticsDecoder::AmplitudePeak SwitchHapticsDecoder::decode_actuator(
 
     if (frame_count == 0) {
         state.high_amplitude = 0;
+        append_sample(state, output);
         return {state.low_amplitude, 0};
     }
 
     const auto record_sample = [&]() {
+        append_sample(state, output);
         if (state.low_amplitude > peak.low) {
             peak.low = state.low_amplitude;
         }
@@ -269,37 +286,33 @@ SwitchHapticsDecoder::AmplitudePeak SwitchHapticsDecoder::decode_actuator(
     }
 
     if (!decoded) {
+        append_sample(state, output);
         return {state.low_amplitude, state.high_amplitude};
     }
     return peak;
 }
 
 uint8_t SwitchHapticsDecoder::amplitude_to_magnitude(uint8_t amplitude_index) {
-    if (amplitude_index < 2) {
-        return 0;
-    }
-
-    const double exponent = -8.0 + static_cast<double>(amplitude_index) / 32.0;
-    const double scaled = std::exp2(exponent) * 255.0;
-    unsigned magnitude = static_cast<unsigned>(scaled + 0.5);
-    if (magnitude > 255u) {
-        magnitude = 255u;
-    }
-    return static_cast<uint8_t>(magnitude);
+    return SwitchHapticsTables::kMagnitude[amplitude_index];
 }
 
 ControllerRumbleOutput SwitchHapticsDecoder::decode(const uint8_t payload[8]) {
+    ControllerRumbleOutput output{};
     AmplitudePeak peaks[2] = {
         {actuators_[0].low_amplitude, actuators_[0].high_amplitude},
         {actuators_[1].low_amplitude, actuators_[1].high_amplitude},
     };
 
     if (payload != nullptr) {
-        peaks[0] = decode_actuator(actuators_[0], load_little_endian_word(payload));
-        peaks[1] = decode_actuator(actuators_[1], load_little_endian_word(payload + 4));
+        peaks[0] = decode_actuator(
+            actuators_[0], load_little_endian_word(payload), output.hd.actuators[0]);
+        peaks[1] = decode_actuator(
+            actuators_[1], load_little_endian_word(payload + 4), output.hd.actuators[1]);
     }
 
     const uint8_t low_peak = peaks[0].low > peaks[1].low ? peaks[0].low : peaks[1].low;
     const uint8_t high_peak = peaks[0].high > peaks[1].high ? peaks[0].high : peaks[1].high;
-    return {amplitude_to_magnitude(low_peak), amplitude_to_magnitude(high_peak)};
+    output.low_frequency_magnitude = amplitude_to_magnitude(low_peak);
+    output.high_frequency_magnitude = amplitude_to_magnitude(high_peak);
+    return output;
 }

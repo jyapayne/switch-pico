@@ -416,12 +416,21 @@ uint8_t controller_profile_scale_rumble_magnitude(uint8_t magnitude,
 
 ControllerRumbleOutput controller_profile_scale_host_rumble(
     const ControllerRumbleOutput& input, const ControllerProfile& profile) {
-    return {
-        controller_profile_scale_rumble_magnitude(
-            input.low_frequency_magnitude, profile.strong_rumble_scale),
-        controller_profile_scale_rumble_magnitude(
-            input.high_frequency_magnitude, profile.weak_rumble_scale),
-    };
+    ControllerRumbleOutput output = input;
+    output.low_frequency_magnitude = controller_profile_scale_rumble_magnitude(
+        input.low_frequency_magnitude, profile.strong_rumble_scale);
+    output.high_frequency_magnitude = controller_profile_scale_rumble_magnitude(
+        input.high_frequency_magnitude, profile.weak_rumble_scale);
+    for (SwitchHapticsActuatorFrame& actuator : output.hd.actuators) {
+        for (uint8_t index = 0; index < actuator.sample_count && index < 3; ++index) {
+            SwitchHapticsSample& sample = actuator.samples[index];
+            sample.low_amplitude_q15 = static_cast<uint16_t>(
+                (uint32_t{sample.low_amplitude_q15} * profile.strong_rumble_scale + 127u) / 255u);
+            sample.high_amplitude_q15 = static_cast<uint16_t>(
+                (uint32_t{sample.high_amplitude_q15} * profile.weak_rumble_scale + 127u) / 255u);
+        }
+    }
+    return output;
 }
 
 ControllerProfileConfirmationPolicy controller_profile_confirmation_policy(

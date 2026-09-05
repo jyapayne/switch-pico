@@ -402,6 +402,7 @@ def build(
         ]
     # Experimental images are built explicitly in their own CMake directory.
     definitions.append("-DSWITCH_PICO_HAPTICS_EXPERIMENT=OFF")
+    definitions.append("-DSWITCH_PICO_HD_RUMBLE=OFF")
 
     run_cmd(
         [
