@@ -146,14 +146,20 @@ on the paired input controller with Home, PS, or Xbox and let it reconnect to
 the Pico. Then hold L + R and press its system button to send one wake burst.
 Holding the chord does not retrigger it; release at least one chord button
 before another attempt. Plain Home, PS, or Xbox is forwarded normally and does
-not disturb the radio. Because the wake identity is stable from startup, the
-input controller stays connected through the advertising burst.
+not disturb the radio. Because the wake identity is stable from startup,
+the wake code itself does not disconnect the input controller.
 
-The Pico must remain powered for wireless wake. If the Switch or dock removes
-USB power during sleep, use a powered USB arrangement that preserves the
-Pico-to-Switch data connection. The configured Pico continuously owns the
-captured Joy-Con's public Bluetooth address, so keep that Joy-Con inactive
-while the AIO firmware is running to avoid two radios using one address.
+Hardware testing found that the Switch 2 can briefly remove USB power while
+entering or leaving sleep. A Pico powered only by that port necessarily
+reboots, resetting the CYW43439 and dropping every controller link regardless
+of the wake implementation. Continuous controller connectivity therefore
+requires a properly isolated powered USB hub or another power arrangement
+that keeps the Pico powered without backfeeding the console. Do not use an
+unisolated USB Y-cable.
+
+The configured Pico continuously owns the captured Joy-Con's public Bluetooth
+address, so keep that Joy-Con inactive while the AIO firmware is running to
+avoid two radios using one address.
 
 To target another Switch 2, repeat the capture and configuration steps. To
 disable wake, delete the generated `switch2_wake_config.h`, rebuild the AIO
