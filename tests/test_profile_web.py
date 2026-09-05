@@ -144,6 +144,12 @@ def test_editor_identifies_connected_controller_artwork(
         {"model": "Sony DualSense", "style": "playstation"},
         {"model": "Xbox controller", "style": "xbox"},
     ]
+    assert [identity["label"] for identity in listing["identities"]] == [
+        "Default profile",
+        "Switch Pro · 05:06",
+        "DualSense · 15:16",
+        "Xbox · 50:60",
+    ]
 
 
 def test_editor_reads_writes_and_activates_profiles_atomically(

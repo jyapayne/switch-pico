@@ -14,12 +14,15 @@
       <div class="brand-mark" aria-hidden="true"><span></span><span></span></div>
       <div>
         <p class="eyebrow">Switch Pico</p>
-        <h1>Profile Studio</h1>
+        <h1>Controller Studio</h1>
       </div>
     </div>
-    <div class="connection" id="connectionState" data-state="loading">
-      <span class="connection-dot"></span>
-      <span id="connectionText">Connecting to adapter…</span>
+    <div class="topbar-meta">
+      <p>Map · tune · automate</p>
+      <div class="connection" id="connectionState" data-state="loading">
+        <span class="connection-dot"></span>
+        <span id="connectionText">Connecting to adapter…</span>
+      </div>
     </div>
   </header>
 
@@ -27,21 +30,21 @@
     <aside class="sidebar">
       <div class="sidebar-heading">
         <div>
-          <p class="eyebrow">Controller</p>
-          <h2>Profile library</h2>
+          <p class="eyebrow">Profile bank</p>
+          <h2>Your layouts</h2>
         </div>
         <button class="icon-button" id="refreshButton" type="button" title="Refresh controllers" aria-label="Refresh controllers">↻</button>
       </div>
 
       <label class="field-label" for="identitySelect">Profile owner</label>
       <select id="identitySelect" class="select"></select>
-      <p class="field-help">Choose the global fallback or a paired controller.</p>
+      <p class="field-help">The default applies when a controller has no dedicated layout.</p>
 
       <div class="profile-list" id="profileList" aria-label="Profiles"></div>
 
       <div class="sidebar-note">
         <span class="note-icon">i</span>
-        <p>Every controller has four slots. Start from defaults, tune the draft, then save it atomically to the Pico.</p>
+        <p>Each controller has eight independent slots. Tune a draft here, then save it atomically to the Pico.</p>
       </div>
     </aside>
 

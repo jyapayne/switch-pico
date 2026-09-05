@@ -91,6 +91,25 @@ def _controller_presentation(
         return {"model": "8BitDo controller", "style": "switch"}
     return {"model": "Connected controller", "style": "generic"}
 
+def _controller_label(identity: config_manager.ControllerIdentity) -> str:
+    if identity.is_global_fallback:
+        return "Default profile"
+    presentation = _controller_presentation(identity)
+    friendly_models = {
+        "Nintendo Switch Pro Controller": "Switch Pro",
+        "Sony DualSense": "DualSense",
+        "Sony DualShock 4": "DualShock 4",
+        "Sony controller": "PlayStation Controller",
+        "Xbox controller": "Xbox",
+        "8BitDo controller": "8BitDo",
+        "Connected controller": "Controller",
+    }
+    model = friendly_models.get(presentation["model"], presentation["model"])
+    address_suffix = ":".join(
+        f"{octet:02X}" for octet in identity.address[-2:]
+    )
+    return f"{model} · {address_suffix}"
+
 
 
 class ProfileEditorServer(HTTPServer):
@@ -268,16 +287,7 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
             "identities": [
                 {
                     "index": index,
-                    "label": (
-                        "Global fallback"
-                        if entry.identity.is_global_fallback
-                        else (
-                            f"{entry.identity.transport_text} "
-                            f"{entry.identity.address_text} · "
-                            f"{entry.identity.vendor_id:04X}:"
-                            f"{entry.identity.product_id:04X}"
-                        )
-                    ),
+                    "label": _controller_label(entry.identity),
                     "active_profile": entry.active_profile_index + 1,
                     "controller": _controller_presentation(entry.identity),
                 }
