@@ -150,6 +150,9 @@ def test_editor_identifies_connected_controller_artwork(
         "DualSense · 15:16",
         "Xbox · 50:60",
     ]
+    assert [identity["key"] for identity in listing["identities"]] == [
+        identity.to_bytes().hex() for identity in device.profile_identities
+    ]
 
 
 def test_editor_reads_writes_and_activates_profiles_atomically(
@@ -160,10 +163,31 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
         status, listing = request_json(f"{base_url}/api/profiles")
         assert status == 200
         assert listing["identities"][1]["active_profile"] == 2
+        assert listing["identities"][1]["key"] == (
+            device.stable_identity.to_bytes().hex()
+        )
         assert listing["identities"][1]["controller"] == {
             "model": "Xbox controller",
             "style": "xbox",
         }
+
+        status, playtest = request_json(
+            f"{base_url}/api/profiles/1/8/playtest"
+        )
+        assert status == 200
+        assert playtest["connected"] is True
+        assert playtest["label"] == "Xbox · 50:60"
+        assert playtest["controller"] == {
+            "model": "Xbox controller",
+            "style": "xbox",
+        }
+        assert playtest["buttons"] == [
+            "south",
+            "dpad_up",
+            "dpad_right",
+        ]
+        assert playtest["left_stick"] == {"x": -1234, "y": 2345}
+        assert playtest["triggers"] == {"left": 123, "right": 65000}
 
         status, selected = request_json(f"{base_url}/api/profiles/1/8")
         assert status == 200

@@ -1,5 +1,7 @@
 "use strict";
 
+const PROFILE_OWNER_STORAGE_KEY = "switch-pico.profile-owner";
+
 const state = {
   schema: null,
   identities: [],
@@ -12,6 +14,11 @@ const state = {
   selectedMacro: 0,
   token: "",
   busy: false,
+  adapterConnected: false,
+  playtestRequestActive: false,
+  playtestTimer: 0,
+  libraryRequestActive: false,
+  libraryTimer: 0,
 };
 
 const elements = {
@@ -41,6 +48,14 @@ const elements = {
   macroControls: document.querySelector("#macroControls"),
   macroSteps: document.querySelector("#macroSteps"),
   macroStepsTitle: document.querySelector("#macroStepsTitle"),
+  playtestPanel: document.querySelector("#playtestPanel"),
+  playtestTitle: document.querySelector("#playtestTitle"),
+  playtestStatus: document.querySelector("#playtestStatus"),
+  playtestHelp: document.querySelector("#playtestHelp"),
+  playtestLeftValues: document.querySelector("#playtestLeftValues"),
+  playtestRightValues: document.querySelector("#playtestRightValues"),
+  playtestLeftTriggerLabel: document.querySelector("#playtestLeftTriggerLabel"),
+  playtestRightTriggerLabel: document.querySelector("#playtestRightTriggerLabel"),
   refresh: document.querySelector("#refreshButton"),
   resetDraft: document.querySelector("#resetDraftButton"),
   activate: document.querySelector("#activateButton"),
@@ -91,13 +106,161 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
+const {
+  transformStick,
+  transformTrigger,
+  stickCoordinates,
+  triggerPercent,
+} = ProfilePlaytestMath;
+
+function updateStickPlaytest(side, raw, output, config) {
+  const scope = document.querySelector(`[data-playtest-stick="${side}"]`);
+  const rawPosition = stickCoordinates(raw);
+  const outputPosition = stickCoordinates(output);
+  scope.style.setProperty("--raw-x", `${rawPosition.left}%`);
+  scope.style.setProperty("--raw-y", `${rawPosition.top}%`);
+  scope.style.setProperty("--output-x", `${outputPosition.left}%`);
+  scope.style.setProperty("--output-y", `${outputPosition.top}%`);
+  scope.style.setProperty(
+    "--inner-size",
+    `${Math.max(0, Math.min(100, config.inner_deadzone / 32767 * 100))}%`
+  );
+  scope.style.setProperty(
+    "--outer-size",
+    `${Math.max(0, Math.min(100, config.outer_saturation / 32767 * 100))}%`
+  );
+  const values = `${raw.x}, ${raw.y} → ${output.x}, ${output.y}`;
+  (side === "left" ? elements.playtestLeftValues : elements.playtestRightValues)
+    .textContent = values;
+}
+
+function updateTriggerPlaytest(side, raw, output, config) {
+  const meter = document.querySelector(`[data-playtest-trigger="${side}"]`);
+  const track = meter.querySelector(".trigger-track");
+  track.style.setProperty("--raw", `${triggerPercent(raw)}%`);
+  track.style.setProperty("--output", `${triggerPercent(output)}%`);
+  track.style.setProperty(
+    "--threshold",
+    `${config.digital_threshold / 65535 * 100}%`
+  );
+  meter.querySelector("output").textContent = `${raw} → ${output}`;
+}
+
+function clearPlaytest(message, stateName = "waiting") {
+  elements.playtestPanel.dataset.state = stateName;
+  elements.playtestStatus.textContent =
+    stateName === "error" ? "Unavailable" : "Waiting";
+  elements.playtestTitle.textContent =
+    stateName === "error" ? "Live input unavailable" : "Waiting for controller input";
+  elements.playtestHelp.textContent = message;
+  elements.controllerHotspots.querySelectorAll(".pressed")
+    .forEach((button) => button.classList.remove("pressed"));
+}
+
+function renderPlaytest(sample) {
+  if (!sample.connected) {
+    clearPlaytest(
+      "Connect or move a controller to compare its raw input with this draft."
+    );
+    return;
+  }
+  const rawLeft = sample.left_stick;
+  const rawRight = sample.right_stick;
+  const outputLeft = transformStick(rawLeft, state.profile.sticks.left);
+  const outputRight = transformStick(rawRight, state.profile.sticks.right);
+  const outputLeftTrigger = transformTrigger(
+    sample.triggers.left, state.profile.triggers.left
+  );
+  const outputRightTrigger = transformTrigger(
+    sample.triggers.right, state.profile.triggers.right
+  );
+  updateStickPlaytest(
+    "left", rawLeft, outputLeft, state.profile.sticks.left
+  );
+  updateStickPlaytest(
+    "right", rawRight, outputRight, state.profile.sticks.right
+  );
+  updateTriggerPlaytest(
+    "left", sample.triggers.left, outputLeftTrigger,
+    state.profile.triggers.left
+  );
+  updateTriggerPlaytest(
+    "right", sample.triggers.right, outputRightTrigger,
+    state.profile.triggers.right
+  );
+  const style = sample.controller?.style || currentControllerStyle();
+  elements.playtestLeftTriggerLabel.textContent =
+    controlLabel("left_trigger", style);
+  elements.playtestRightTriggerLabel.textContent =
+    controlLabel("right_trigger", style);
+  const pressed = new Set(sample.buttons);
+  if (sample.triggers.left > 512) pressed.add("left_trigger");
+  if (sample.triggers.right > 512) pressed.add("right_trigger");
+  elements.controllerHotspots.querySelectorAll("[data-controller-button]")
+    .forEach((button) => {
+      button.classList.toggle(
+        "pressed", pressed.has(button.dataset.controllerButton)
+      );
+    });
+  elements.playtestPanel.dataset.state = "live";
+  elements.playtestStatus.textContent = "Live";
+  elements.playtestTitle.textContent = sample.label || "Connected controller";
+  elements.playtestHelp.textContent =
+    "Yellow is raw input; blue is the output produced by this unsaved draft.";
+}
+
+async function pollPlaytest() {
+  window.clearTimeout(state.playtestTimer);
+  if (
+    document.hidden || state.playtestRequestActive ||
+    !state.schema || !state.profile
+  ) {
+    state.playtestTimer = window.setTimeout(pollPlaytest, 250);
+    return;
+  }
+  const identityIndex = state.identityIndex;
+  const profileIndex = state.profileIndex;
+  state.playtestRequestActive = true;
+  try {
+    const sample = await api(
+      `/api/profiles/${identityIndex}/${profileIndex + 1}/playtest`
+    );
+    if (
+      identityIndex === state.identityIndex &&
+      profileIndex === state.profileIndex
+    ) {
+      renderPlaytest(sample);
+    }
+  } catch (error) {
+    if (
+      identityIndex === state.identityIndex &&
+      profileIndex === state.profileIndex
+    ) {
+      clearPlaytest(
+        `${error.message}. Flash current firmware to enable live playtest.`,
+        "error"
+      );
+    }
+  } finally {
+    state.playtestRequestActive = false;
+    state.playtestTimer = window.setTimeout(pollPlaytest, 75);
+  }
+}
+
 function isDirty() {
   return state.profile !== null && canonical(state.profile) !== state.original;
 }
 
 function setConnection(mode, text) {
+  state.adapterConnected = mode === "ready";
   elements.connection.dataset.state = mode;
   elements.connectionText.textContent = text;
+  if (state.profile) {
+    elements.save.disabled =
+      !state.adapterConnected || state.busy || !isDirty();
+    elements.activate.disabled =
+      !state.adapterConnected || state.busy || state.active;
+  }
 }
 
 let toastTimer = 0;
@@ -129,8 +292,10 @@ async function api(path, options = {}) {
 
 function setBusy(busy) {
   state.busy = busy;
-  elements.save.disabled = busy || !isDirty();
-  elements.activate.disabled = busy || state.active;
+  elements.save.disabled =
+    busy || !state.adapterConnected || !isDirty();
+  elements.activate.disabled =
+    busy || !state.adapterConnected || state.active;
   elements.resetDraft.disabled = busy;
   elements.refresh.disabled = busy;
   elements.identity.disabled = busy;
@@ -157,11 +322,101 @@ function setBusy(busy) {
 function updateDirtyState() {
   const dirty = isDirty();
   elements.dirtyBadge.hidden = !dirty;
-  elements.save.disabled = state.busy || !dirty;
+  elements.save.disabled =
+    !state.adapterConnected || state.busy || !dirty;
 }
 
 function confirmDiscard() {
   return !isDirty() || window.confirm("Discard the unsaved changes to this profile?");
+}
+
+function currentOwner() {
+  return state.identities.find(
+    (entry) => entry.index === state.identityIndex
+  ) || null;
+}
+
+function storedOwnerKey() {
+  try {
+    return window.localStorage.getItem(PROFILE_OWNER_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function persistOwnerKey(key) {
+  try {
+    window.localStorage.setItem(PROFILE_OWNER_STORAGE_KEY, key);
+  } catch {
+    // Storage can be unavailable in private or hardened browser contexts.
+  }
+}
+
+function identitySignature(identities) {
+  return identities.map((entry) => (
+    `${entry.index}:${entry.key}:${entry.label}:` +
+    `${entry.controller.model}:${entry.controller.style}`
+  )).join("|");
+}
+
+function syncLibraryMetadata(identities, restoreStoredOwner = false) {
+  const oldOwner = currentOwner();
+  const oldSignature = identitySignature(state.identities);
+  const preferredKey = (
+    restoreStoredOwner ? storedOwnerKey() : oldOwner?.key
+  ) || storedOwnerKey();
+  state.identities = identities;
+  const nextOwner = (
+    identities.find((entry) => entry.key === preferredKey) ||
+    identities[0] ||
+    null
+  );
+  state.identityIndex = nextOwner?.index ?? 0;
+  if (nextOwner) persistOwnerKey(nextOwner.key);
+
+  const ownerChanged = oldOwner?.key !== nextOwner?.key;
+  const identitiesChanged =
+    oldSignature !== identitySignature(state.identities);
+  const activeChanged =
+    oldOwner?.active_profile !== nextOwner?.active_profile;
+  if (state.schema && (identitiesChanged || ownerChanged)) {
+    renderIdentities();
+  }
+  if (state.schema && (activeChanged || ownerChanged)) {
+    renderProfileList();
+  }
+  if (state.profile) {
+    state.active =
+      nextOwner?.active_profile === state.profileIndex + 1;
+    elements.activeBadge.hidden = !state.active;
+    elements.activate.disabled =
+      !state.adapterConnected || state.busy || state.active;
+  }
+  return ownerChanged;
+}
+
+async function pollLibraryMetadata() {
+  window.clearTimeout(state.libraryTimer);
+  if (
+    document.hidden || state.busy ||
+    state.libraryRequestActive || !state.schema
+  ) {
+    state.libraryTimer =
+      window.setTimeout(pollLibraryMetadata, 500);
+    return;
+  }
+  state.libraryRequestActive = true;
+  try {
+    const payload = await api("/api/profiles");
+    syncLibraryMetadata(payload.identities);
+    setConnection("ready", "Adapter connected");
+  } catch {
+    setConnection("error", "Adapter disconnected");
+  } finally {
+    state.libraryRequestActive = false;
+    state.libraryTimer =
+      window.setTimeout(pollLibraryMetadata, 750);
+  }
 }
 
 function renderIdentities() {
@@ -169,12 +424,12 @@ function renderIdentities() {
     .map((entry) => `<option value="${entry.index}">${escapeHtml(entry.label)}</option>`)
     .join("");
   elements.identity.value = String(state.identityIndex);
-  const owner = state.identities[state.identityIndex];
+  const owner = currentOwner();
   elements.profileOwner.textContent = owner ? owner.label : "No controller";
 }
 
 function renderProfileList() {
-  const owner = state.identities[state.identityIndex];
+  const owner = currentOwner();
   elements.profileList.innerHTML = Array.from({ length: state.schema.profile_capacity }, (_, index) => {
     const selected = index === state.profileIndex;
     const active = owner && owner.active_profile === index + 1;
@@ -587,7 +842,8 @@ function renderMacro() {
 function renderEditor() {
   elements.profileTitle.textContent = `Profile ${state.profileIndex + 1}`;
   elements.activeBadge.hidden = !state.active;
-  elements.activate.disabled = state.busy || state.active;
+  elements.activate.disabled =
+    !state.adapterConnected || state.busy || state.active;
   renderIdentities();
   renderProfileList();
   renderButtonMap();
@@ -601,6 +857,7 @@ function renderEditor() {
 }
 
 async function loadProfile() {
+  clearPlaytest("Loading the selected controller profile.");
   setBusy(true);
   elements.form.hidden = true;
   elements.loading.hidden = false;
@@ -627,10 +884,7 @@ async function loadLibrary() {
   setBusy(true);
   try {
     const payload = await api("/api/profiles");
-    state.identities = payload.identities;
-    if (!state.identities.some((entry) => entry.index === state.identityIndex)) {
-      state.identityIndex = 0;
-    }
+    syncLibraryMetadata(payload.identities, true);
     await loadProfile();
   } catch (error) {
     setConnection("error", "Adapter unavailable");
@@ -716,6 +970,8 @@ elements.identity.addEventListener("change", async () => {
     return;
   }
   state.identityIndex = Number(elements.identity.value);
+  const owner = currentOwner();
+  if (owner) persistOwnerKey(owner.key);
   state.profileIndex = 0;
   await loadProfile();
 });
@@ -813,6 +1069,8 @@ async function start() {
     state.schema = schema;
     state.token = schema.mutation_token;
     await loadLibrary();
+    pollPlaytest();
+    pollLibraryMetadata();
   } catch (error) {
     setConnection("error", "Editor failed to start");
     elements.loading.querySelector("p").textContent = error.message;

@@ -1888,6 +1888,27 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
     g_last_snapshot_generation[slot_index] = state_generation;
 }
 
+void bluepad32_input_backend_playtest_snapshot(
+    uint8_t slot_index, Bluepad32PlaytestSnapshot* out) {
+    if (out == nullptr) {
+        return;
+    }
+    *out = {};
+    if (!valid_slot(slot_index) || !g_initialized) {
+        return;
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    const BackendSlot& slot = g_slots[slot_index];
+    out->active = slot.active;
+    out->connection_generation = slot.connection_generation;
+    out->state_generation = slot.state_generation;
+    out->identity = slot.identity;
+    out->physical_button_mask = slot.pre_hotkey_button_mask;
+    out->state = slot.state;
+    critical_section_exit(&g_state_lock);
+}
+
 bool bluepad32_input_backend_toggle_motion(
     uint8_t slot_index, uint32_t connection_generation) {
     if (!g_initialized || !valid_slot(slot_index)) {

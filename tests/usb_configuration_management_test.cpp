@@ -14,6 +14,8 @@ ConfigurationServiceSnapshot current_configuration{};
 ProfileServiceListSnapshot current_profile_list{};
 ProfileServiceSelectedSnapshot current_profile_selected{};
 ProfileServiceTransactionSnapshot current_profile_transaction{};
+Bluepad32PlaytestSnapshot current_playtest[
+    BLUEPAD32_INPUT_BACKEND_SLOT_COUNT]{};
 AdapterUsbMode current_active_mode = AdapterUsbMode::kSwitchProbe;
 uint8_t current_capabilities =
     USB_OUTPUT_CAPABILITY_INPUT | USB_OUTPUT_CAPABILITY_RUMBLE |
@@ -62,6 +64,11 @@ void write_u16(std::vector<uint8_t>* output, size_t offset,
                uint16_t value) {
     (*output)[offset] = static_cast<uint8_t>(value);
     (*output)[offset + 1] = static_cast<uint8_t>(value >> 8);
+}
+
+uint16_t read_u16(const std::vector<uint8_t>& input, size_t offset) {
+    return static_cast<uint16_t>(input[offset]) |
+           static_cast<uint16_t>(input[offset + 1] << 8);
 }
 
 void write_u32(std::vector<uint8_t>* output, size_t offset,
@@ -483,6 +490,56 @@ void test_profile_vendor_requests() {
                 control_payload[kResponseHeaderSize + 3] == 1,
             "selected profile response was not encoded");
 
+    current_playtest[2] = {};
+    current_playtest[2].active = true;
+    current_playtest[2].connection_generation = 0x11223344;
+    current_playtest[2].state_generation = 0x55667788;
+    current_playtest[2].identity = expected_identity;
+    current_playtest[2].physical_button_mask = 0x8001;
+    current_playtest[2].state.left_stick_x = -1234;
+    current_playtest[2].state.left_stick_y = 2345;
+    current_playtest[2].state.right_stick_x = INT16_MIN;
+    current_playtest[2].state.right_stick_y = INT16_MAX;
+    current_playtest[2].state.left_trigger = 123;
+    current_playtest[2].state.right_trigger = 65000;
+    current_playtest[2].state.motion_sample_count = 1;
+    current_playtest[2].state.motion_samples[0] =
+        {1, -2, 3, -4, 5, -6};
+    request = setup_request(
+        Operation::kProfilePlaytest, TUSB_DIR_IN,
+        kMaximumResponseSize);
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload.size() ==
+                    kResponseHeaderSize + kProfilePlaytestPayloadSize &&
+                control_payload[5] ==
+                    static_cast<uint8_t>(Operation::kProfilePlaytest) &&
+                control_payload[7] == 3 &&
+                control_payload[10] ==
+                    kProfilePlaytestSchemaVersion &&
+                control_payload[kResponseHeaderSize] == 3 &&
+                control_payload[kResponseHeaderSize + 1] == 2 &&
+                read_u16(control_payload, kResponseHeaderSize + 2) ==
+                    0x8001 &&
+                read_u32(control_payload, kResponseHeaderSize + 4) ==
+                    0x11223344 &&
+                read_u32(control_payload, kResponseHeaderSize + 8) ==
+                    0x55667788 &&
+                static_cast<int16_t>(read_u16(
+                    control_payload, kResponseHeaderSize + 26)) ==
+                    -1234 &&
+                read_u16(control_payload, kResponseHeaderSize + 36) ==
+                    65000 &&
+                static_cast<int16_t>(read_u16(
+                    control_payload, kResponseHeaderSize + 50)) == -6,
+            "profile playtest response lost live controller state");
+    current_playtest[2].active = false;
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload[kResponseHeaderSize] == 0 &&
+                control_payload[kResponseHeaderSize + 1] == 0xff,
+            "disconnected profile playtest was not encoded");
+
     current_profile_transaction = {};
     current_profile_transaction.metadata.state =
         ProfileServiceState::kReady;
@@ -752,6 +809,11 @@ uint32_t bluepad32_input_backend_clear_pairings() {
 void bluepad32_input_backend_pairing_snapshot(
     Bluepad32PairingSnapshot* out) {
     *out = current_pairings;
+}
+
+void bluepad32_input_backend_playtest_snapshot(
+    uint8_t slot, Bluepad32PlaytestSnapshot* out) {
+    *out = current_playtest[slot];
 }
 
 void bluepad32_input_backend_diagnostics(

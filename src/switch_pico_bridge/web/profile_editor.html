@@ -19,7 +19,7 @@
     </div>
     <div class="topbar-meta">
       <p>Map · tune · automate</p>
-      <div class="connection" id="connectionState" data-state="loading">
+      <div class="connection" id="connectionState" data-state="loading" role="status" aria-live="polite">
         <span class="connection-dot"></span>
         <span id="connectionText">Connecting to adapter…</span>
       </div>
@@ -151,6 +151,77 @@
             </div>
             <p>Values use the controller's normalized integer range.</p>
           </div>
+          <div class="playtest-panel" id="playtestPanel" data-state="waiting">
+            <div class="playtest-heading">
+              <div>
+                <p class="eyebrow">Live playtest</p>
+                <h4 id="playtestTitle">Waiting for controller input</h4>
+              </div>
+              <span class="playtest-status" id="playtestStatus">Waiting</span>
+            </div>
+            <p class="playtest-help" id="playtestHelp">
+              Select a connected controller to compare its raw input with this draft.
+            </p>
+            <div class="playtest-grid">
+              <article class="playtest-card">
+                <div class="playtest-card-heading">
+                  <strong>Left stick</strong>
+                  <span id="playtestLeftValues">0, 0 → 0, 0</span>
+                </div>
+                <div class="stick-scope" data-playtest-stick="left">
+                  <span class="stick-ring stick-ring-outer"></span>
+                  <span class="stick-ring stick-ring-inner"></span>
+                  <span class="stick-axis stick-axis-x"></span>
+                  <span class="stick-axis stick-axis-y"></span>
+                  <i class="stick-dot stick-dot-raw" title="Raw input"></i>
+                  <i class="stick-dot stick-dot-output" title="Draft output"></i>
+                </div>
+              </article>
+              <article class="playtest-card">
+                <div class="playtest-card-heading">
+                  <strong>Right stick</strong>
+                  <span id="playtestRightValues">0, 0 → 0, 0</span>
+                </div>
+                <div class="stick-scope" data-playtest-stick="right">
+                  <span class="stick-ring stick-ring-outer"></span>
+                  <span class="stick-ring stick-ring-inner"></span>
+                  <span class="stick-axis stick-axis-x"></span>
+                  <span class="stick-axis stick-axis-y"></span>
+                  <i class="stick-dot stick-dot-raw" title="Raw input"></i>
+                  <i class="stick-dot stick-dot-output" title="Draft output"></i>
+                </div>
+              </article>
+              <article class="playtest-card trigger-playtest">
+                <div class="playtest-card-heading">
+                  <strong>Triggers</strong>
+                  <span>Raw → draft output</span>
+                </div>
+                <div class="trigger-meter" data-playtest-trigger="left">
+                  <span id="playtestLeftTriggerLabel">LT</span>
+                  <div class="trigger-track">
+                    <i class="trigger-bar trigger-bar-raw"></i>
+                    <i class="trigger-bar trigger-bar-output"></i>
+                    <b class="trigger-threshold" title="Digital threshold"></b>
+                  </div>
+                  <output>0 → 0</output>
+                </div>
+                <div class="trigger-meter" data-playtest-trigger="right">
+                  <span id="playtestRightTriggerLabel">RT</span>
+                  <div class="trigger-track">
+                    <i class="trigger-bar trigger-bar-raw"></i>
+                    <i class="trigger-bar trigger-bar-output"></i>
+                    <b class="trigger-threshold" title="Digital threshold"></b>
+                  </div>
+                  <output>0 → 0</output>
+                </div>
+                <div class="playtest-legend">
+                  <span><i class="legend-raw"></i>Raw</span>
+                  <span><i class="legend-output"></i>Draft output</span>
+                  <span><i class="legend-threshold"></i>Digital threshold</span>
+                </div>
+              </article>
+            </div>
+          </div>
           <div class="analog-grid" id="analogFields"></div>
         </section>
 
@@ -201,6 +272,7 @@
   </main>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/playtest.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

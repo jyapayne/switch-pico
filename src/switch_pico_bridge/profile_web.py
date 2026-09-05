@@ -18,6 +18,10 @@ _MAXIMUM_REQUEST_BYTES = 64 * 1024
 _ASSET_TYPES = {
     "/": ("profile_editor.html", "text/html; charset=utf-8"),
     "/app.js": ("profile_editor.js", "text/javascript; charset=utf-8"),
+    "/playtest.js": (
+        "profile_playtest.js",
+        "text/javascript; charset=utf-8",
+    ),
     "/style.css": ("profile_editor.css", "text/css; charset=utf-8"),
     "/assets/controller-switch-pro.svg": (
         "assets/controller-switch-pro.svg",
@@ -128,11 +132,17 @@ class ProfileEditorServer(HTTPServer):
         self.device_address = device_address
         self.operation_timeout = timeout
         self.mutation_token = secrets.token_urlsafe(32)
+        self._device: config_manager.UsbDevice | None = None
 
     def find_device(self) -> config_manager.UsbDevice:
-        return config_manager.find_pico(
-            self.bus, self.device_address, self.operation_timeout
-        )
+        if self._device is None:
+            self._device = config_manager.find_pico(
+                self.bus, self.device_address, self.operation_timeout
+            )
+        return self._device
+
+    def invalidate_device(self) -> None:
+        self._device = None
 
 
 class ProfileEditorHandler(BaseHTTPRequestHandler):
@@ -199,6 +209,9 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                 self._api_call(
                     lambda: self._read_profile(identity_index, profile_index)
                 )
+                return
+            if action == "playtest":
+                self._api_call(self._read_playtest)
                 return
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -288,6 +301,7 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                 {
                     "index": index,
                     "label": _controller_label(entry.identity),
+                    "key": entry.identity.to_bytes().hex(),
                     "active_profile": entry.active_profile_index + 1,
                     "controller": _controller_presentation(entry.identity),
                 }
@@ -305,6 +319,22 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
             "profile": profile.to_json_object(),
             "active": entries[identity_index].active_profile_index == profile_index,
         }
+
+    def _read_playtest(self) -> dict[str, Any]:
+        device = self.profile_server.find_device()
+        playtest = config_manager.read_profile_playtest(device)
+        result = playtest.to_json_object()
+        result["controller"] = (
+            _controller_presentation(playtest.identity)
+            if playtest.identity is not None
+            else None
+        )
+        result["label"] = (
+            _controller_label(playtest.identity)
+            if playtest.identity is not None
+            else None
+        )
+        return result
 
     def _read_json_body(self) -> str:
         try:
@@ -358,6 +388,7 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         except config_manager.ConfigManagerError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except usb.core.USBError as exc:
+            self.profile_server.invalidate_device()
             self._send_json(
                 {"error": f"USB access failed: {exc}"},
                 status=HTTPStatus.SERVICE_UNAVAILABLE,

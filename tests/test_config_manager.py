@@ -112,6 +112,14 @@ class FakeDevice:
         self.pending_profile_mutation: tuple[int, bytes, int] | None = None
         self.profile_transaction_pending_reads = 0
         self.profile_status_responses: list[tuple[int, int]] = []
+        self.playtest_connected = True
+        self.playtest_slot = 1
+        self.playtest_connection_generation = 17
+        self.playtest_state_generation = 93
+        self.playtest_button_mask = 0x9001
+        self.playtest_sticks = (-1234, 2345, -30000, 30000)
+        self.playtest_triggers = (123, 65000)
+        self.playtest_motion = (1, -2, 3, -4, 5, -6)
 
     def _pairing_payload(self) -> bytes:
         payload = bytearray([len(self.records), 0, 0, 0])
@@ -156,6 +164,27 @@ class FakeDevice:
             self.profile_generation,
             zlib.crc32(stored) & 0xFFFFFFFF,
         )
+
+    def _profile_playtest_payload(self) -> tuple[bytes, int]:
+        payload = bytearray(config_manager.PROFILE_PLAYTEST_SIZE)
+        payload[1] = 0xFF
+        if not self.playtest_connected:
+            return bytes(payload), 0
+        flags = 0x03 if self.playtest_motion is not None else 0x01
+        payload[0] = flags
+        payload[1] = self.playtest_slot
+        struct.pack_into("<HII", payload, 2, self.playtest_button_mask,
+                         self.playtest_connection_generation,
+                         self.playtest_state_generation)
+        payload[12:26] = self.stable_identity.to_bytes()
+        struct.pack_into(
+            "<hhhhHH", payload, 26, *self.playtest_sticks,
+            *self.playtest_triggers
+        )
+        payload[38] = 1 if self.playtest_motion is not None else 0
+        if self.playtest_motion is not None:
+            struct.pack_into("<hhhhhh", payload, 40, *self.playtest_motion)
+        return bytes(payload), flags
 
     def _queue_profile_mutation(self, operation: int, payload: bytes) -> None:
         assert len(payload) == 19
@@ -296,6 +325,15 @@ class FakeDevice:
                 if self.bad_profile_response_crc:
                     response[-1] ^= 1
                 return bytes(response)
+            if request == config_manager.OP_PROFILE_PLAYTEST:
+                payload, flags = self._profile_playtest_payload()
+                return make_response(
+                    request,
+                    payload,
+                    flags=flags,
+                    schema=config_manager.PROFILE_PLAYTEST_SCHEMA_VERSION,
+                    generation=self.playtest_state_generation,
+                )
             if request == config_manager.OP_PROFILE_TRANSACTION_STATUS:
                 if self.profile_transaction_status == config_manager.STATUS_PENDING:
                     if self.profile_transaction_pending_reads:
@@ -1416,6 +1454,61 @@ def test_profile_list_select_read_and_chunked_commit() -> None:
         config_manager.read_profile(device, device.stable_identity, 2)
         == profile
     )
+
+
+def test_profile_playtest_decodes_raw_controller_state() -> None:
+    device = FakeDevice()
+    playtest = config_manager.read_profile_playtest(device)
+    assert playtest == config_manager.ProfilePlaytest(
+        connected=True,
+        slot_index=1,
+        connection_generation=17,
+        state_generation=93,
+        identity=device.stable_identity,
+        button_mask=0x9001,
+        left_stick=(-1234, 2345),
+        right_stick=(-30000, 30000),
+        triggers=(123, 65000),
+        motion=(1, -2, 3, -4, 5, -6),
+    )
+    assert playtest.to_json_object()["buttons"] == [
+        "south",
+        "dpad_up",
+        "dpad_right",
+    ]
+
+    device.playtest_connected = False
+    disconnected = config_manager.read_profile_playtest(device)
+    assert disconnected == config_manager.ProfilePlaytest(
+        connected=False,
+        slot_index=None,
+        connection_generation=0,
+        state_generation=0,
+        identity=None,
+        button_mask=0,
+        left_stick=(0, 0),
+        right_stick=(0, 0),
+        triggers=(0, 0),
+        motion=None,
+    )
+    device.playtest_connected = True
+    payload, flags = device._profile_playtest_payload()
+    malformed = bytearray(payload)
+    malformed[38] = 0
+    envelope = config_manager.parse_response(
+        make_response(
+            config_manager.OP_PROFILE_PLAYTEST,
+            malformed,
+            flags=flags,
+            schema=config_manager.PROFILE_PLAYTEST_SCHEMA_VERSION,
+        ),
+        config_manager.OP_PROFILE_PLAYTEST,
+    )
+    with pytest.raises(
+        config_manager.ConfigManagerError,
+        match="invalid connected playtest payload",
+    ):
+        config_manager.parse_profile_playtest(envelope)
 
 
 def test_profile_reset_and_activate_wait_for_correlated_transactions(

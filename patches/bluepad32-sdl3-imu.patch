@@ -102,7 +102,13 @@ index a22ef26..3d5ecef 100644
              ins->gyro_calib_data[2].sens_numer = speed_2x * DS5_GYRO_RES_PER_DEG_S;
              ins->gyro_calib_data[2].sens_denom =
                  abs(r->gyro_roll_plus - r->gyro_roll_bias) + abs(r->gyro_roll_minus - r->gyro_roll_bias);
-@@ -622,7 +622,7 @@ void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t* d, const uint8_t* r
+@@ -618,11 +618,11 @@ void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+     if (r->buttons[2] & 0x01)
+         ctl->gamepad.misc_buttons |= MISC_BUTTON_SYSTEM;  // PS
+-    if (r->buttons[2] & 0x04)
+-        ctl->gamepad.misc_buttons |= MISC_BUTTON_CAPTURE;  // "mute" button
++    if (r->buttons[2] & 0x02)
++        ctl->gamepad.misc_buttons |= MISC_BUTTON_CAPTURE;  // Touchpad click
  
      // Gyro
      for (size_t i = 0; i < ARRAY_SIZE(r->gyro); i++) {

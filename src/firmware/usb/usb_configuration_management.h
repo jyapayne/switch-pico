@@ -21,6 +21,8 @@ constexpr size_t kPairingPayloadHeaderSize = 4;
 constexpr size_t kMaximumRequestSize = 64;
 constexpr size_t kProfileListPayloadSize =
     1 + PROFILE_SERVICE_LIST_CAPACITY * 16;
+constexpr uint16_t kProfilePlaytestSchemaVersion = 1;
+constexpr size_t kProfilePlaytestPayloadSize = 52;
 constexpr size_t kMaximumResponseSize =
     kResponseHeaderSize + kProfileListPayloadSize;
 constexpr size_t kMaximumChunkSize =
@@ -52,6 +54,7 @@ enum class Operation : uint8_t {
     kProfileReset = 0x36,
     kProfileActivate = 0x37,
     kProfileTransactionStatus = 0x38,
+    kProfilePlaytest = 0x39,
 };
 
 enum class Status : uint8_t {
@@ -84,6 +87,9 @@ size_t encode_profile_list(const ProfileServiceListSnapshot& snapshot,
                            uint8_t* output, size_t output_size);
 size_t encode_profile_read(const ProfileServiceSelectedSnapshot& snapshot,
                            uint8_t* output, size_t output_size);
+size_t encode_profile_playtest(
+    uint8_t slot, const Bluepad32PlaytestSnapshot& snapshot,
+    uint8_t* output, size_t output_size);
 size_t encode_profile_transaction(
     const ProfileServiceTransactionSnapshot& snapshot,
     uint8_t* output, size_t output_size);

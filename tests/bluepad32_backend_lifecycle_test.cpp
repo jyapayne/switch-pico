@@ -785,6 +785,19 @@ void test_rejections() {
     require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count == 3,
             "valid slot input must remain observable");
+    g_last_snapshot_generation[0] = 0;
+    Bluepad32PlaytestSnapshot playtest{};
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(playtest.active && playtest.state_generation != 0 &&
+                playtest.state.motion_sample_count == 3,
+            "playtest snapshot did not expose current raw input");
+    bluepad32_input_backend_report_sent(0);
+    require(read_controller_state(0, &snapshot) &&
+                snapshot.motion_sample_count == 3,
+            "playtest snapshot consumed report-path motion");
+    bluepad32_input_backend_playtest_snapshot(4, &playtest);
+    require(!playtest.active && playtest.state_generation == 0,
+            "playtest snapshot accepted slot 4");
     require(!read_controller_state(4, &snapshot),
             "public snapshot must reject slot 4");
     bluepad32_input_backend_report_sent(4);
@@ -2136,6 +2149,16 @@ void test_protocol_neutral_analog_state() {
                 peer_state.left_trigger == 16399 &&
                 peer_state.right_trigger == 49199,
             "slot 0 digital trigger fallback changed slot 1");
+    input.gamepad.misc_buttons = MISC_BUTTON_CAPTURE;
+    platform_on_controller_data(&controller, &input);
+    require(read_controller_state(0, &state) &&
+                state.button_capture,
+            "touchpad/capture input did not reach the logical capture button");
+    input.gamepad.misc_buttons = 0;
+    platform_on_controller_data(&controller, &input);
+    require(read_controller_state(0, &state) &&
+                !state.button_capture,
+            "released touchpad/capture input remained pressed");
 }
 
 void test_host_rumble_mode_duration() {

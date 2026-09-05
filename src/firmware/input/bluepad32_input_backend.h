@@ -62,6 +62,17 @@ struct Bluepad32SlotSnapshot {
     ControllerState state;
 };
 
+// Side-effect-free raw input snapshot for management telemetry. Unlike the
+// report-path snapshot, reading this does not consume motion samples.
+struct Bluepad32PlaytestSnapshot {
+    bool active = false;
+    uint32_t connection_generation = 0;
+    uint32_t state_generation = 0;
+    ControllerIdentity identity{};
+    uint16_t physical_button_mask = 0;
+    ControllerState state{};
+};
+
 struct Bluepad32BackendDiagnostics {
     uint32_t initialization_stage;
     uint32_t rumble_timer_ticks;
@@ -86,6 +97,8 @@ void bluepad32_input_backend_open_pairing_window();
 uint32_t bluepad32_input_backend_clear_pairings();
 void bluepad32_input_backend_snapshot(uint8_t slot,
                                       Bluepad32SlotSnapshot* out);
+void bluepad32_input_backend_playtest_snapshot(
+    uint8_t slot, Bluepad32PlaytestSnapshot* out);
 void bluepad32_input_backend_request_pairing_snapshot();
 void bluepad32_input_backend_pairing_snapshot(
     Bluepad32PairingSnapshot* out);
@@ -101,7 +114,7 @@ void bluepad32_input_backend_queue_rumble(
 // Enqueue bounded local profile confirmation for the matching live connection
 // generation. The two-entry per-slot FIFO preserves initial-then-switch
 // ordering. Profile lighting is transient and restored to the steady slot
-// indication after the final gap. Profile numbers are one-based (1..4).
+// indication after the final gap. Profile numbers are one-based (1..8).
 void bluepad32_input_backend_queue_profile_feedback(
     uint8_t slot, uint32_t connection_generation,
     uint8_t active_profile_number,

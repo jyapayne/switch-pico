@@ -115,6 +115,18 @@ def test_prepare_patches_copy_and_preserves_pristine_source(
     assert source_status(source) == ""
 
 
+def test_prepare_applies_patch_inside_parent_repository(
+    bluepad32_fixture: tuple[Path, Path, Path, Path],
+) -> None:
+    root, source, patch, output = bluepad32_fixture
+    run_git(root, "init")
+
+    prepare_bluepad32(source, patch, output)
+
+    assert (output / "test.txt").read_text(encoding="utf-8") == "line 1\nline 2\n"
+    assert source_status(source) == ""
+
+
 def test_prepare_replaces_existing_output_idempotently(
     bluepad32_fixture: tuple[Path, Path, Path, Path],
 ) -> None:

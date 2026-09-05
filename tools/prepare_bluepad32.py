@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -22,10 +23,16 @@ def resolve_paths(repo_root: Path | None = None) -> tuple[Path, Path, Path]:
     )
 
 
-def _run(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -94,6 +101,12 @@ def _copy_and_patch(source_path: Path, patch_path: Path, output_path: Path) -> N
         result = _run(
             ["git", "apply", "--no-index", str(patch_path.resolve())],
             cwd=staging_path,
+            env={
+                **os.environ,
+                "GIT_CEILING_DIRECTORIES": str(
+                    staging_path.resolve().parent
+                ),
+            },
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or "git apply failed"

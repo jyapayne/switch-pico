@@ -287,6 +287,66 @@ size_t encode_profile_list(const ProfileServiceListSnapshot& snapshot,
         payload, offset, output, output_size);
 }
 
+size_t encode_profile_playtest(
+    uint8_t slot, const Bluepad32PlaytestSnapshot& snapshot,
+    uint8_t* output, size_t output_size) {
+    uint8_t payload[kProfilePlaytestPayloadSize]{};
+    payload[1] = 0xff;
+    if (snapshot.active) {
+        if (slot >= BLUEPAD32_INPUT_BACKEND_SLOT_COUNT ||
+            !controller_identity_encode(
+                snapshot.identity, &payload[12],
+                CONTROLLER_IDENTITY_ENCODED_SIZE) ||
+            snapshot.state.motion_sample_count >
+                CONTROLLER_MOTION_SAMPLE_CAPACITY) {
+            return 0;
+        }
+        payload[0] = 1;
+        payload[1] = slot;
+        write_u16(&payload[2], snapshot.physical_button_mask);
+        write_u32(&payload[4], snapshot.connection_generation);
+        write_u32(&payload[8], snapshot.state_generation);
+        write_u16(
+            &payload[26],
+            static_cast<uint16_t>(snapshot.state.left_stick_x));
+        write_u16(
+            &payload[28],
+            static_cast<uint16_t>(snapshot.state.left_stick_y));
+        write_u16(
+            &payload[30],
+            static_cast<uint16_t>(snapshot.state.right_stick_x));
+        write_u16(
+            &payload[32],
+            static_cast<uint16_t>(snapshot.state.right_stick_y));
+        write_u16(&payload[34], snapshot.state.left_trigger);
+        write_u16(&payload[36], snapshot.state.right_trigger);
+        payload[38] = snapshot.state.motion_sample_count;
+        if (snapshot.state.motion_sample_count != 0) {
+            payload[0] |= 2;
+            const ControllerMotionSample& motion =
+                snapshot.state.motion_samples[
+                    snapshot.state.motion_sample_count - 1u];
+            write_u16(&payload[40],
+                      static_cast<uint16_t>(motion.accel_x));
+            write_u16(&payload[42],
+                      static_cast<uint16_t>(motion.accel_y));
+            write_u16(&payload[44],
+                      static_cast<uint16_t>(motion.accel_z));
+            write_u16(&payload[46],
+                      static_cast<uint16_t>(motion.gyro_x));
+            write_u16(&payload[48],
+                      static_cast<uint16_t>(motion.gyro_y));
+            write_u16(&payload[50],
+                      static_cast<uint16_t>(motion.gyro_z));
+        }
+    }
+    return encode_response(
+        Operation::kProfilePlaytest, Status::kOk, payload[0],
+        kProfilePlaytestSchemaVersion,
+        snapshot.active ? snapshot.state_generation : 0,
+        payload, sizeof(payload), output, output_size);
+}
+
 size_t encode_profile_read(const ProfileServiceSelectedSnapshot& snapshot,
                            uint8_t* output, size_t output_size) {
     Status status = profile_service_status(snapshot.metadata);
@@ -620,6 +680,30 @@ bool usb_configuration_management_vendor_control(
             profile_service_selected_snapshot(&snapshot);
             response_size = encode_profile_read(
                 snapshot, response, sizeof(response));
+            break;
+        }
+        case Operation::kProfilePlaytest: {
+            ProfileServiceSelectedSnapshot selected{};
+            profile_service_selected_snapshot(&selected);
+            Bluepad32PlaytestSnapshot playtest{};
+            uint8_t selected_slot = 0xff;
+            for (uint8_t slot = 0;
+                 slot < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++slot) {
+                Bluepad32PlaytestSnapshot candidate{};
+                bluepad32_input_backend_playtest_snapshot(
+                    slot, &candidate);
+                if (!candidate.active ||
+                    (!controller_identity_is_global(selected.identity) &&
+                     !controller_identity_equal(
+                         selected.identity, candidate.identity))) {
+                    continue;
+                }
+                playtest = candidate;
+                selected_slot = slot;
+                break;
+            }
+            response_size = encode_profile_playtest(
+                selected_slot, playtest, response, sizeof(response));
             break;
         }
         case Operation::kProfileTransactionStatus: {

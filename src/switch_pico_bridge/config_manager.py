@@ -59,6 +59,7 @@ OP_PROFILE_COMMIT = 0x35
 OP_PROFILE_RESET = 0x36
 OP_PROFILE_ACTIVATE = 0x37
 OP_PROFILE_TRANSACTION_STATUS = 0x38
+OP_PROFILE_PLAYTEST = 0x39
 
 STATUS_OK = 0
 STATUS_PENDING = 1
@@ -120,6 +121,9 @@ PROFILE_MACRO_STEP_SIZE = 19
 PROFILE_MAXIMUM_WAIT_MS = 10000
 PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD = 0x8000
 PROFILE_DEFAULT_DIGITAL_THRESHOLD = 22934
+PROFILE_PLAYTEST_SCHEMA_VERSION = 1
+PROFILE_PLAYTEST_SIZE = 52
+PROFILE_PLAYTEST_SLOT_COUNT = 4
 
 LOGICAL_BUTTONS = (
     "south",
@@ -506,6 +510,57 @@ class ProfileListEntry:
             PROFILE_CAPACITY - 1,
         )
 
+
+@dataclass(frozen=True)
+class ProfilePlaytest:
+    connected: bool
+    slot_index: int | None
+    connection_generation: int
+    state_generation: int
+    identity: ControllerIdentity | None
+    button_mask: int
+    left_stick: tuple[int, int]
+    right_stick: tuple[int, int]
+    triggers: tuple[int, int]
+    motion: tuple[int, int, int, int, int, int] | None
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            "connected": self.connected,
+            "slot": self.slot_index,
+            "connection_generation": self.connection_generation,
+            "state_generation": self.state_generation,
+            "identity": (
+                {
+                    "address": self.identity.address_text,
+                    "vendor_id": self.identity.vendor_id,
+                    "product_id": self.identity.product_id,
+                }
+                if self.identity is not None
+                else None
+            ),
+            "buttons": _button_mask_to_json(self.button_mask),
+            "left_stick": {
+                "x": self.left_stick[0],
+                "y": self.left_stick[1],
+            },
+            "right_stick": {
+                "x": self.right_stick[0],
+                "y": self.right_stick[1],
+            },
+            "triggers": {
+                "left": self.triggers[0],
+                "right": self.triggers[1],
+            },
+            "motion": (
+                {
+                    "accel": list(self.motion[:3]),
+                    "gyro": list(self.motion[3:]),
+                }
+                if self.motion is not None
+                else None
+            ),
+        }
 
 @dataclass(frozen=True)
 class StickConfig:
@@ -2067,6 +2122,58 @@ def read_profile(
 ) -> ControllerProfile:
     select_profile(device, identity, profile_index)
     return read_selected_profile(device)
+
+
+def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
+    _raise_status(envelope)
+    if (
+        envelope.schema_version != PROFILE_PLAYTEST_SCHEMA_VERSION
+        or len(envelope.payload) != PROFILE_PLAYTEST_SIZE
+    ):
+        raise ConfigManagerError("invalid profile playtest payload")
+    payload = envelope.payload
+    flags = payload[0]
+    if flags & ~0x03 or flags != envelope.flags or payload[39] != 0:
+        raise ConfigManagerError("invalid profile playtest flags")
+    connected = bool(flags & 0x01)
+    has_motion = bool(flags & 0x02)
+    motion_count = payload[38]
+    if not connected:
+        if flags != 0 or payload[1] != 0xFF or any(payload[2:]):
+            raise ConfigManagerError("invalid disconnected playtest payload")
+        return ProfilePlaytest(
+            False, None, 0, 0, None, 0,
+            (0, 0), (0, 0), (0, 0), None,
+        )
+    if (
+        payload[1] >= PROFILE_PLAYTEST_SLOT_COUNT
+        or not 0 <= motion_count <= 3
+        or has_motion != (motion_count != 0)
+    ):
+        raise ConfigManagerError("invalid connected playtest payload")
+    identity = ControllerIdentity.from_bytes(payload[12:26])
+    left_x, left_y, right_x, right_y, left_trigger, right_trigger = (
+        struct.unpack_from("<hhhhHH", payload, 26)
+    )
+    motion_values = struct.unpack_from("<hhhhhh", payload, 40)
+    if not has_motion and any(motion_values):
+        raise ConfigManagerError("playtest motion sample was not declared")
+    return ProfilePlaytest(
+        connected=True,
+        slot_index=payload[1],
+        connection_generation=struct.unpack_from("<I", payload, 4)[0],
+        state_generation=struct.unpack_from("<I", payload, 8)[0],
+        identity=identity,
+        button_mask=struct.unpack_from("<H", payload, 2)[0],
+        left_stick=(left_x, left_y),
+        right_stick=(right_x, right_y),
+        triggers=(left_trigger, right_trigger),
+        motion=motion_values if has_motion else None,
+    )
+
+
+def read_profile_playtest(device: UsbDevice) -> ProfilePlaytest:
+    return parse_profile_playtest(_control_in(device, OP_PROFILE_PLAYTEST))
 
 
 def read_profile_transaction_status(device: UsbDevice) -> TransactionStatus:
