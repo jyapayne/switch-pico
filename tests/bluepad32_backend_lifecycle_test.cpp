@@ -47,6 +47,7 @@ int cyw43_init_calls = 0;
 int uni_init_calls = 0;
 int switch2_wake_initializations = 0;
 int switch2_wake_requests = 0;
+bool switch2_connections_ready = true;
 int device_disconnect_calls = 0;
 uni_hid_device_t* last_disconnected_device = nullptr;
 uni_hid_device_t* lookup_devices[8]{};
@@ -448,6 +449,10 @@ uint32_t btstack_run_loop_get_time_ms() {
 void switch2_wake_initialize() {
     ++switch2_wake_initializations;
 }
+bool switch2_wake_ready_for_connections() {
+    return switch2_connections_ready;
+}
+
 
 
 bool switch2_wake_request() {
@@ -2392,6 +2397,26 @@ void test_flash_core_start_contract() {
 
 
 
+void test_wake_identity_gates_connections() {
+    switch2_connections_ready = false;
+    bluepad32_input_backend_init();
+    platform_on_init_complete();
+    require(switch2_wake_initializations == 1 &&
+                g_connection_policy_state ==
+                    ConnectionPolicyState::Uninitialized &&
+                scan_starts == 0 && classic_scan_starts == 0 &&
+                !incoming_connections,
+            "controller discovery started before wake identity was ready");
+
+    switch2_connections_ready = true;
+    process_rumble_timer(&g_rumble_timer);
+    require(g_connection_policy_state == ConnectionPolicyState::Open &&
+                scan_starts == 1 && classic_scan_starts == 1 &&
+                incoming_connections,
+            "controller discovery did not start after wake identity setup");
+}
+
+
 void test_system_button_wake_trigger() {
     start_pairing_backend();
     uni_hid_device_t controller = device(0);
@@ -2486,6 +2511,8 @@ int main(int argc, char** argv) {
         test_configuration_timer_rearms_before_storage_work();
     } else if (scenario == "flash-core-start") {
         test_flash_core_start_contract();
+    } else if (scenario == "wake-identity-gate") {
+        test_wake_identity_gates_connections();
     } else if (scenario == "system-wake") {
         test_system_button_wake_trigger();
     } else if (scenario == "flash-core-failure") {

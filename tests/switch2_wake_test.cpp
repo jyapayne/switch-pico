@@ -153,97 +153,97 @@ void require_opcode(size_t index, uint16_t opcode) {
             "unexpected HCI command sequence");
 }
 
-void test_temporary_identity_wake_and_restore() {
+void test_stable_identity_wake() {
     switch2_wake_initialize();
     Switch2WakeDiagnostics diagnostics{};
     switch2_wake_diagnostics(&diagnostics);
-    require(diagnostics.configured && !diagnostics.busy && !g_timer_armed,
-            "configured wake module did not initialize dormant");
-    require(switch2_wake_request() && !switch2_wake_request(),
-            "wake requests were not bounded while busy");
+    require(diagnostics.configured && diagnostics.busy &&
+                !switch2_wake_ready_for_connections() &&
+                !switch2_wake_request(),
+            "controller connections or wake escaped startup identity setup");
 
     run_task();
     require_opcode(0, 0xfc01);
     const uint8_t wake_address[] = {0x98, 0xE2, 0x55, 0x07, 0xDF, 0x00};
     require(memcmp(submitted[0].address, wake_address, 6) == 0,
-            "wake address did not reach the radio command");
+            "stable wake address did not reach the radio command");
     complete(0xfc01);
-
     run_task();
-    require_opcode(1, 0x2006);
-    require(submitted[1].interval_min == 0x20 &&
-                submitted[1].interval_max == 0x20 &&
-                submitted[1].advertising_type == 3 &&
-                submitted[1].own_address_type == 0 &&
-                submitted[1].channel_map == 7 &&
-                submitted[1].filter_policy == 0,
+    require_opcode(1, 0x1009);
+    complete(0x1009, 0, wake_address);
+    require(switch2_wake_ready_for_connections() && !g_timer_armed,
+            "verified stable identity did not admit connections and go idle");
+
+    switch2_wake_diagnostics(&diagnostics);
+    require(!diagnostics.busy && switch2_wake_request() &&
+                !switch2_wake_request(),
+            "wake requests were not bounded while busy");
+    run_task();
+    require_opcode(2, 0x2006);
+    require(submitted[2].interval_min == 0x20 &&
+                submitted[2].interval_max == 0x20 &&
+                submitted[2].advertising_type == 3 &&
+                submitted[2].own_address_type == 0 &&
+                submitted[2].channel_map == 7 &&
+                submitted[2].filter_policy == 0,
             "known-working advertising parameters changed");
     complete(0x2006);
 
     run_task();
-    require_opcode(2, 0x2008);
-    require(submitted[2].data_length == 31 &&
-                submitted[2].data[16] == 0x81,
+    require_opcode(3, 0x2008);
+    require(submitted[3].data_length == 31 &&
+                submitted[3].data[16] == 0x81,
             "captured wake payload was not submitted intact");
     complete(0x2008);
 
     run_task();
-    require_opcode(3, 0x200a);
-    require(submitted[3].enabled == 1,
+    require_opcode(4, 0x200a);
+    require(submitted[4].enabled == 1,
             "wake advertising was not enabled");
     complete(0x200a);
     require(g_timer_armed && installed_timer->timeout_ms == 2000,
             "wake burst did not schedule one exact stop deadline");
     now_ms = 1999;
     run_task();
-    require(submitted_count == 4,
+    require(submitted_count == 5,
             "wake burst stopped before two seconds");
     now_ms = 2000;
     run_task();
-    require_opcode(4, 0x200a);
-    require(submitted[4].enabled == 0,
+    require_opcode(5, 0x200a);
+    require(submitted[5].enabled == 0,
             "wake advertising was not disabled");
     complete(0x200a);
-
-    run_task();
-    require_opcode(5, 0xfc01);
-    require(memcmp(submitted[5].address, original_address, 6) == 0,
-            "Pico gameplay identity was not restored");
-    complete(0xfc01);
 
     switch2_wake_diagnostics(&diagnostics);
     require(!diagnostics.busy && diagnostics.accepted_requests == 1 &&
                 diagnostics.completed_bursts == 1 &&
                 diagnostics.failures == 0 && !g_timer_armed,
-            "completed wake did not restore a dormant gameplay state");
+            "completed wake did not return to a dormant idle state");
+    require(submitted_count == 6,
+            "wake burst changed the public identity after startup");
 }
 
-void test_failed_setup_restores_gameplay_identity() {
+void test_failed_wake_keeps_stable_identity() {
     require(switch2_wake_request(),
             "idle module rejected a second wake request");
     run_task();
-    require_opcode(6, 0xfc01);
-    complete(0xfc01);
-    run_task();
-    require_opcode(7, 0x2006);
+    require_opcode(6, 0x2006);
     complete(0x2006, 0x12);
     run_task();
-    require_opcode(8, 0xfc01);
-    require(memcmp(submitted[8].address, original_address, 6) == 0,
-            "wake setup failure did not restore the gameplay identity");
-    complete(0xfc01);
+    require(submitted_count == 7,
+            "wake setup failure issued an address reset");
 
     Switch2WakeDiagnostics diagnostics{};
     switch2_wake_diagnostics(&diagnostics);
     require(!diagnostics.busy && diagnostics.failures == 1 &&
-                !g_timer_armed,
-            "wake failure did not recover to dormant gameplay");
+                switch2_wake_ready_for_connections(),
+            "wake failure disrupted the stable controller identity");
 }
 
 }  // namespace
 
 int main() {
-    test_temporary_identity_wake_and_restore();
-    test_failed_setup_restores_gameplay_identity();
+    test_stable_identity_wake();
+    test_failed_wake_keeps_stable_identity();
     return 0;
 }

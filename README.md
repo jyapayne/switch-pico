@@ -77,12 +77,11 @@ captured from a Joy-Con 2 already paired with that Switch 2. The generated
 configuration is console-specific and is intentionally ignored by Git.
 
 The implementation replays the captured, unencrypted Switch 2 BLE wake
-advertisement for two seconds at a 20 ms base interval. The CYW43439 has one
-controller-wide public Bluetooth address, so the firmware temporarily changes
-from the Pico's normal identity to the captured Joy-Con identity for the wake
-burst and restores it afterward. The explicit chord confines the resulting
-input-controller disconnect to an intentional wake attempt. This follows the
-packet format documented by
+advertisement for two seconds at a 20 ms base interval. The configured AIO
+firmware adopts the captured Joy-Con's public Bluetooth address once during
+startup, before Bluepad32 admits controller connections. Wake bursts then
+require no identity change and do not disconnect the input controller. This
+follows the packet format documented by
 [`ndeadly/switch2_controller_research`](https://github.com/ndeadly/switch2_controller_research/blob/master/bluetooth_interface.md)
 and the capture/replay approach demonstrated by
 [`alexvnesta/switch2controller`](https://github.com/alexvnesta/switch2controller)
@@ -131,6 +130,10 @@ Then:
    python3 build.py --aio
    ```
 
+6. The Pico now has a new stable Bluetooth host address. Clear its old
+   Bluepad32 bonds by holding BOOTSEL for ten seconds, then open a pairing
+   window and pair each input controller again. This is a one-time re-pair.
+
 
 The capture tool also accepts a saved serial log:
 
@@ -143,24 +146,20 @@ on the paired input controller with Home, PS, or Xbox and let it reconnect to
 the Pico. Then hold L + R and press its system button to send one wake burst.
 Holding the chord does not retrigger it; release at least one chord button
 before another attempt. Plain Home, PS, or Xbox is forwarded normally and does
-not disturb the radio.
-
-The input controller disconnects during the intentional wake burst because
-the CYW43439 cannot retain its normal public identity while transmitting the
-captured controller's public identity. It can reconnect after the Pico restores
-its address. Avoiding that disconnect requires a second BLE radio dedicated to
-wake transmission; keeping the captured identity throughout gameplay caused
-severe Classic Bluetooth latency in hardware testing.
+not disturb the radio. Because the wake identity is stable from startup, the
+input controller stays connected through the advertising burst.
 
 The Pico must remain powered for wireless wake. If the Switch or dock removes
 USB power during sleep, use a powered USB arrangement that preserves the
-Pico-to-Switch data connection. Keep the captured Joy-Con inactive during the
-two-second wake burst to avoid two radios using one address.
+Pico-to-Switch data connection. The configured Pico continuously owns the
+captured Joy-Con's public Bluetooth address, so keep that Joy-Con inactive
+while the AIO firmware is running to avoid two radios using one address.
 
 To target another Switch 2, repeat the capture and configuration steps. To
-disable wake, delete the generated `switch2_wake_config.h` and rebuild the AIO
-firmware. Restore the full-flash backup only if you need to recover the exact
-pre-capture firmware and persistent state.
+disable wake, delete the generated `switch2_wake_config.h`, rebuild the AIO
+firmware, clear the Pico's bonds, and pair the input controllers to its restored
+factory address. Restore the full-flash backup only if you need to recover the
+exact pre-capture firmware and persistent state.
 
 ### Pairing up to four controllers
 

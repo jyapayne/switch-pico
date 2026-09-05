@@ -31,19 +31,18 @@ const bd_addr_t kUnusedPeerAddress{};
 
 enum class Phase : uint8_t {
     kDisabled,
+    kSetStableAddress,
+    kVerifyStableAddress,
     kIdle,
-    kSetWakeAddress,
     kSetParameters,
     kSetData,
     kEnableAdvertising,
     kAdvertising,
     kDisableAdvertising,
-    kRestoreAddress,
     kFailed,
 };
 
 Phase g_phase = Phase::kDisabled;
-bd_addr_t g_original_address{};
 btstack_packet_callback_registration_t g_event_registration{};
 btstack_timer_source_t g_timer{};
 uint16_t g_pending_opcode = 0;
@@ -54,8 +53,8 @@ uint32_t g_completed_bursts = 0;
 uint32_t g_failures = 0;
 bool g_initialized = false;
 bool g_configured = false;
+bool g_identity_ready = false;
 bool g_timer_armed = false;
-bool g_address_changed = false;
 bool g_advertising = false;
 
 bool deadline_reached(uint32_t now, uint32_t deadline) {
@@ -129,10 +128,13 @@ bool configured_packet_valid() {
 void recover_from_failure() {
     ++g_failures;
     g_pending_opcode = 0;
-    if (g_advertising) {
+    if (g_phase == Phase::kSetStableAddress ||
+        g_phase == Phase::kVerifyStableAddress) {
+        // Wake stays disabled, but controller input must remain available.
+        g_identity_ready = true;
+        g_phase = Phase::kFailed;
+    } else if (g_advertising) {
         g_phase = Phase::kDisableAdvertising;
-    } else if (g_address_changed) {
-        g_phase = Phase::kRestoreAddress;
     } else {
         g_phase = Phase::kIdle;
     }
@@ -150,11 +152,15 @@ void submit_phase_command(uint32_t now_ms) {
 
     uint8_t result = ERROR_CODE_SUCCESS;
     switch (g_phase) {
-        case Phase::kSetWakeAddress:
+        case Phase::kSetStableAddress:
             begin_command(kWritePublicAddress.opcode, now_ms);
 #if SWITCH2_WAKE_CONFIGURED
             result = hci_send_cmd(&kWritePublicAddress, kWakeAddress);
 #endif
+            break;
+        case Phase::kVerifyStableAddress:
+            begin_command(hci_read_bd_addr.opcode, now_ms);
+            result = hci_send_cmd(&hci_read_bd_addr);
             break;
         case Phase::kSetParameters:
             begin_command(hci_le_set_advertising_parameters.opcode, now_ms);
@@ -180,10 +186,6 @@ void submit_phase_command(uint32_t now_ms) {
             result = hci_send_cmd(
                 &hci_le_set_advertise_enable,
                 g_phase == Phase::kEnableAdvertising ? 1 : 0);
-            break;
-        case Phase::kRestoreAddress:
-            begin_command(kWritePublicAddress.opcode, now_ms);
-            result = hci_send_cmd(&kWritePublicAddress, g_original_address);
             break;
         default:
             return;
@@ -213,9 +215,27 @@ void handle_command_complete(uint8_t* packet, uint16_t size) {
     }
 
     switch (g_phase) {
-        case Phase::kSetWakeAddress:
-            g_address_changed = true;
-            g_phase = Phase::kSetParameters;
+        case Phase::kSetStableAddress:
+            g_phase = Phase::kVerifyStableAddress;
+            break;
+        case Phase::kVerifyStableAddress:
+#if SWITCH2_WAKE_CONFIGURED
+            if (size < 12) {
+                recover_from_failure();
+                schedule_for_phase(btstack_run_loop_get_time_ms());
+                return;
+            }
+            for (size_t index = 0; index < sizeof(kWakeAddress); ++index) {
+                if (packet[6 + index] !=
+                    kWakeAddress[sizeof(kWakeAddress) - 1 - index]) {
+                    recover_from_failure();
+                    schedule_for_phase(btstack_run_loop_get_time_ms());
+                    return;
+                }
+            }
+#endif
+            g_identity_ready = true;
+            g_phase = Phase::kIdle;
             break;
         case Phase::kSetParameters:
             g_phase = Phase::kSetData;
@@ -231,10 +251,6 @@ void handle_command_complete(uint8_t* packet, uint16_t size) {
             break;
         case Phase::kDisableAdvertising:
             g_advertising = false;
-            g_phase = Phase::kRestoreAddress;
-            break;
-        case Phase::kRestoreAddress:
-            g_address_changed = false;
             ++g_completed_bursts;
             g_phase = Phase::kIdle;
             break;
@@ -277,26 +293,32 @@ void switch2_wake_initialize() {
     g_initialized = true;
 #if SWITCH2_WAKE_CONFIGURED
     if (!configured_packet_valid()) {
+        g_identity_ready = true;
         g_phase = Phase::kFailed;
         ++g_failures;
         return;
     }
     g_configured = true;
-    gap_local_bd_addr(g_original_address);
     g_event_registration.callback = handle_hci_event;
     hci_add_event_handler(&g_event_registration);
     btstack_run_loop_set_timer_handler(&g_timer, task);
-    g_phase = Phase::kIdle;
+    g_phase = Phase::kSetStableAddress;
+    schedule_task(0);
+#else
+    g_identity_ready = true;
 #endif
 }
 
+bool switch2_wake_ready_for_connections() {
+    return g_identity_ready;
+}
 
 bool switch2_wake_request() {
     if (g_phase != Phase::kIdle) {
         return false;
     }
     ++g_accepted_requests;
-    g_phase = Phase::kSetWakeAddress;
+    g_phase = Phase::kSetParameters;
     schedule_task(0);
     return true;
 }

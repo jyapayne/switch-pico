@@ -1076,6 +1076,7 @@ void process_pairing_snapshot_request() {
 }
 
 void apply_connection_policy();
+void recompute_connection_status();
 
 void process_clear_pairings(uint32_t now_ms) {
     uni_hid_device_t* devices[kSlotCount]{};
@@ -1258,7 +1259,14 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 
     process_clear_pairings(now_ms);
     process_pairing_snapshot_request();
-    if (update_pairing_window(now_ms)) {
+    const bool wake_identity_ready =
+        switch2_wake_ready_for_connections();
+    if (g_connection_policy_state ==
+            ConnectionPolicyState::Uninitialized &&
+        wake_identity_ready) {
+        recompute_connection_status();
+    }
+    if (update_pairing_window(now_ms) && wake_identity_ready) {
         apply_connection_policy();
     }
     const bool xinput_host_mode =
@@ -1492,7 +1500,9 @@ void platform_on_init_complete() {
         &g_configuration_timer, kConfigurationPollIntervalMs);
     btstack_run_loop_add_timer(&g_configuration_timer);
     __atomic_store_n(&g_initialization_stage, 6, __ATOMIC_RELEASE);
-    recompute_connection_status();
+    if (switch2_wake_ready_for_connections()) {
+        recompute_connection_status();
+    }
 }
 
 uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name,

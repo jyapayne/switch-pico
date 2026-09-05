@@ -51,6 +51,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "clear-pairings",
             "configuration-timer",
             "flash-core-start",
+            "wake-identity-gate",
             "system-wake",
             "flash-core-failure",
         ):
