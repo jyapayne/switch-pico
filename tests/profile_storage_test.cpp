@@ -249,12 +249,55 @@ void test_interrupted_and_corrupt_append_recovery() {
           "corrupt newest record displaced the previous record");
 }
 
+void test_profile_names_and_aliases_recover() {
+  erase_all();
+  const ControllerIdentity stable = identity(7);
+  ProfileStorage storage;
+  require(storage.initialize(fake_io()), "metadata catalog did not initialize");
+  require(storage.set_alias(stable, "Player one", 10) ==
+              ProfileStorageResult::kOk &&
+              storage.set_profile_name(stable, 0, "Zelda", 5) ==
+                  ProfileStorageResult::kOk &&
+              storage.set_profile_name(stable, 7, "Desktop", 7) ==
+                  ProfileStorageResult::kOk,
+          "profile metadata did not append");
+  char value[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+  require(storage.get_alias(stable, value, sizeof(value)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(value, "Player one") == 0,
+          "controller alias did not read back");
+
+  flash.fail_after_programs = flash.programs + 1;
+  require(storage.set_alias(stable, "Interrupted", 11) ==
+              ProfileStorageResult::kIoError,
+          "interrupted alias append reported success");
+  flash.fail_after_programs = -1;
+  ProfileStorage reloaded;
+  require(reloaded.initialize(fake_io()) &&
+              reloaded.get_alias(stable, value, sizeof(value)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(value, "Player one") == 0,
+          "interrupted alias displaced the previous value");
+  require(reloaded.get_profile_name(stable, 0, value, sizeof(value)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(value, "Zelda") == 0 &&
+              reloaded.get_profile_name(stable, 7, value, sizeof(value)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(value, "Desktop") == 0,
+          "profile names did not survive reload");
+}
+
 void test_compaction_preserves_latest_records() {
   erase_all();
   const ControllerIdentity global = controller_identity_global();
   ProfileStorage storage;
   require(storage.initialize(fake_io()), "catalog did not initialize");
   ControllerProfile profile = controller_profile_default(global, 0);
+  require(storage.set_alias(global, "Fallback", 8) ==
+                  ProfileStorageResult::kOk &&
+              storage.set_profile_name(global, 0, "Compacted", 9) ==
+                  ProfileStorageResult::kOk,
+          "compaction metadata did not append");
   for (uint16_t write = 1; write <= 260; ++write) {
     profile.weak_rumble_scale = static_cast<uint8_t>(write);
     require(storage.set(global, 0, profile) == ProfileStorageResult::kOk,
@@ -264,11 +307,19 @@ void test_compaction_preserves_latest_records() {
           "full arena did not compact into its peer");
   ProfileStorage reloaded;
   ControllerProfile recovered{};
+  char metadata[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
   require(reloaded.initialize(fake_io()) &&
               reloaded.get(global, 0, &recovered) ==
                   ProfileStorageResult::kOk &&
-              recovered.weak_rumble_scale == static_cast<uint8_t>(260),
-          "compaction did not preserve the latest profile");
+              recovered.weak_rumble_scale == static_cast<uint8_t>(260) &&
+              reloaded.get_alias(global, metadata, sizeof(metadata)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(metadata, "Fallback") == 0 &&
+              reloaded.get_profile_name(global, 0, metadata,
+                                        sizeof(metadata)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(metadata, "Compacted") == 0,
+          "compaction did not preserve profiles and metadata");
 }
 
 void test_legacy_migration_is_atomic_and_complete() {
@@ -306,6 +357,7 @@ int main() {
   test_empty_catalog_and_eight_profiles();
   test_identity_capacity_and_defaults();
   test_interrupted_and_corrupt_append_recovery();
+  test_profile_names_and_aliases_recover();
   test_compaction_preserves_latest_records();
   test_legacy_migration_is_atomic_and_complete();
   std::cout << "profile storage tests passed\n";

@@ -95,6 +95,15 @@ class FakeDevice:
             for identity in self.profile_identities
             for index in range(config_manager.PROFILE_CAPACITY)
         }
+        self.profile_aliases = {
+            identity.to_bytes(): "" for identity in self.profile_identities
+        }
+        self.profile_names = {
+            (identity.to_bytes(), index): ""
+            for identity in self.profile_identities
+            for index in range(config_manager.PROFILE_CAPACITY)
+        }
+        self.identified_identities: list[bytes] = []
         self.selected_profile = (self.global_identity.to_bytes(), 0)
         self.profile_generation = 7
         self.profile_transaction_id = 0
@@ -111,6 +120,8 @@ class FakeDevice:
         self.profile_chunk_sizes: list[int] = []
         self.pending_profile_mutation: tuple[int, bytes, int] | None = None
         self.profile_transaction_pending_reads = 0
+        self.playtest_battery = 251
+        self.playtest_capabilities = 0x0F
         self.profile_status_responses: list[tuple[int, int]] = []
         self.playtest_connected = True
         self.playtest_slot = 1
@@ -143,8 +154,29 @@ class FakeDevice:
     def _profile_list_payload(self) -> bytes:
         payload = bytearray([len(self.profile_identities)])
         for identity in self.profile_identities:
-            payload.extend(identity.to_bytes())
-            payload.extend((self.active_profiles[identity.to_bytes()], 0))
+            identity_bytes = identity.to_bytes()
+            alias = self.profile_aliases.get(identity_bytes, "").encode("utf-8")
+            payload.extend(identity_bytes)
+            payload.extend((self.active_profiles[identity_bytes], 0, len(alias)))
+            payload.extend(alias)
+            payload.extend(bytes(config_manager.PROFILE_METADATA_MAX_BYTES - len(alias)))
+        return bytes(payload)
+
+    def _profile_metadata_payload(self) -> bytes:
+        identity, _ = self.selected_profile
+        values = [
+            self.profile_aliases.get(identity, ""),
+            *(
+                self.profile_names.get((identity, index), "")
+                for index in range(config_manager.PROFILE_CAPACITY)
+            ),
+        ]
+        payload = bytearray()
+        for value in values:
+            encoded = value.encode("utf-8")
+            payload.extend((len(encoded),))
+            payload.extend(encoded)
+            payload.extend(bytes(config_manager.PROFILE_METADATA_MAX_BYTES - len(encoded)))
         return bytes(payload)
 
     def _profile_transaction_payload(self) -> bytes:
@@ -182,8 +214,10 @@ class FakeDevice:
             *self.playtest_triggers
         )
         payload[38] = 1 if self.playtest_motion is not None else 0
+        payload[39] = self.playtest_battery
+        payload[40] = self.playtest_capabilities
         if self.playtest_motion is not None:
-            struct.pack_into("<hhhhhh", payload, 40, *self.playtest_motion)
+            struct.pack_into("<hhhhhh", payload, 42, *self.playtest_motion)
         return bytes(payload), flags
 
     def _queue_profile_mutation(self, operation: int, payload: bytes) -> None:
@@ -333,6 +367,13 @@ class FakeDevice:
                     flags=flags,
                     schema=config_manager.PROFILE_PLAYTEST_SCHEMA_VERSION,
                     generation=self.playtest_state_generation,
+                )
+            if request == config_manager.OP_PROFILE_METADATA_READ:
+                return make_response(
+                    request,
+                    self._profile_metadata_payload(),
+                    schema=config_manager.PROFILE_METADATA_SCHEMA_VERSION,
+                    generation=self.profile_generation,
                 )
             if request == config_manager.OP_PROFILE_TRANSACTION_STATUS:
                 if self.profile_transaction_status == config_manager.STATUS_PENDING:
@@ -513,6 +554,26 @@ class FakeDevice:
                 <= self.profile_transaction_index
                 < config_manager.PROFILE_CAPACITY
             )
+        elif request == config_manager.OP_PROFILE_METADATA_SET:
+            self.profile_transaction_id = struct.unpack_from("<I", payload)[0]
+            identity = payload[4:18]
+            profile_index = payload[18]
+            value_size = payload[19]
+            value = payload[20 : 20 + value_size].decode("utf-8")
+            assert len(payload) == 20 + value_size
+            if profile_index == config_manager.PROFILE_NONE_BUTTON:
+                self.profile_aliases[identity] = value
+            else:
+                self.profile_names[(identity, profile_index)] = value
+            self.profile_transaction_identity = identity
+            self.profile_transaction_index = profile_index
+            self.profile_transaction_payload = bytearray()
+            self.profile_transaction_expected_size = 0
+            self.profile_transaction_expected_crc = 0
+            self.profile_generation += 1
+            self.profile_transaction_status = config_manager.STATUS_OK
+        elif request == config_manager.OP_PROFILE_IDENTIFY:
+            self.identified_identities.append(payload)
         else:
             raise AssertionError(f"unexpected OUT request {request}")
         return len(encoded)
@@ -1456,6 +1517,32 @@ def test_profile_list_select_read_and_chunked_commit() -> None:
     )
 
 
+def test_profile_metadata_and_identify_round_trip() -> None:
+    device = FakeDevice()
+    identity = device.stable_identity
+    alias_status = config_manager.set_profile_metadata(
+        device, identity, config_manager.PROFILE_NONE_BUTTON,
+        "Desk pad", 1.0,
+    )
+    name_status = config_manager.set_profile_metadata(
+        device, identity, 7, "Desktop", 1.0,
+    )
+    metadata = config_manager.read_profile_metadata(device, identity, 7)
+    assert alias_status.status == config_manager.STATUS_OK
+    assert name_status.stored_generation == alias_status.stored_generation + 1
+    assert metadata.alias == "Desk pad"
+    assert metadata.profile_names[7] == "Desktop"
+    assert config_manager.list_profiles(device)[1].alias == "Desk pad"
+
+    config_manager.identify_controller(device, identity)
+    assert device.identified_identities == [identity.to_bytes()]
+    with pytest.raises(
+        config_manager.ConfigManagerError,
+        match="no controller to identify",
+    ):
+        config_manager.identify_controller(device, device.global_identity)
+
+
 def test_profile_playtest_decodes_raw_controller_state() -> None:
     device = FakeDevice()
     playtest = config_manager.read_profile_playtest(device)
@@ -1469,6 +1556,8 @@ def test_profile_playtest_decodes_raw_controller_state() -> None:
         left_stick=(-1234, 2345),
         right_stick=(-30000, 30000),
         triggers=(123, 65000),
+        battery=251,
+        capabilities=0x0F,
         motion=(1, -2, 3, -4, 5, -6),
     )
     assert playtest.to_json_object()["buttons"] == [
@@ -1489,6 +1578,8 @@ def test_profile_playtest_decodes_raw_controller_state() -> None:
         left_stick=(0, 0),
         right_stick=(0, 0),
         triggers=(0, 0),
+        battery=0,
+        capabilities=0,
         motion=None,
     )
     device.playtest_connected = True

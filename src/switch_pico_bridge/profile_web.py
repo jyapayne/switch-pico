@@ -95,7 +95,11 @@ def _controller_presentation(
         return {"model": "8BitDo controller", "style": "switch"}
     return {"model": "Connected controller", "style": "generic"}
 
-def _controller_label(identity: config_manager.ControllerIdentity) -> str:
+def _controller_label(
+    identity: config_manager.ControllerIdentity, alias: str = ""
+) -> str:
+    if alias:
+        return alias
     if identity.is_global_fallback:
         return "Default profile"
     presentation = _controller_presentation(identity)
@@ -218,26 +222,60 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         if not self._allow_mutation():
             return
-        selection = self._parse_profile_path(urlsplit(self.path).path)
-        if selection is None or selection[2] is not None:
+        path = urlsplit(self.path).path
+        identity_selection = self._parse_identity_path(path)
+        if identity_selection is not None:
+            identity_index, action = identity_selection
+            if action == "alias":
+                self._api_call(lambda: self._set_alias(identity_index))
+                return
+        selection = self._parse_profile_path(path)
+        if selection is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        identity_index, profile_index, _ = selection
-        self._api_call(
-            lambda: self._write_profile(identity_index, profile_index)
-        )
+        identity_index, profile_index, action = selection
+        if action is None:
+            self._api_call(
+                lambda: self._write_profile(identity_index, profile_index)
+            )
+            return
+        if action == "name":
+            self._api_call(
+                lambda: self._set_profile_name(
+                    identity_index, profile_index
+                )
+            )
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         if not self._allow_mutation():
             return
-        selection = self._parse_profile_path(urlsplit(self.path).path)
-        if selection is None or selection[2] != "activate":
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        identity_index, profile_index, _ = selection
-        self._api_call(
-            lambda: self._activate_profile(identity_index, profile_index)
-        )
+        path = urlsplit(self.path).path
+        identity_selection = self._parse_identity_path(path)
+        if identity_selection is not None:
+            identity_index, action = identity_selection
+            if action == "identify":
+                self._api_call(lambda: self._identify(identity_index))
+                return
+        selection = self._parse_profile_path(path)
+        if selection is not None:
+            identity_index, profile_index, action = selection
+            if action == "activate":
+                self._api_call(
+                    lambda: self._activate_profile(
+                        identity_index, profile_index
+                    )
+                )
+                return
+            if action == "copy":
+                self._api_call(
+                    lambda: self._copy_profile(
+                        identity_index, profile_index
+                    )
+                )
+                return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def _local_host_header(self) -> bool:
         host = self.headers.get("Host", "")
@@ -279,6 +317,21 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         action = parts[4] if len(parts) == 5 else None
         return identity_index, profile_number - 1, action
 
+    @staticmethod
+    def _parse_identity_path(path: str) -> tuple[int, str] | None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 4 or parts[:2] != ["api", "identities"]:
+            return None
+        try:
+            identity_index = int(parts[2])
+        except ValueError:
+            return None
+        return (
+            (identity_index, parts[3])
+            if identity_index >= 0
+            else None
+        )
+
     def _entries_and_identity(
         self, device: config_manager.UsbDevice, identity_index: int
     ) -> tuple[
@@ -300,10 +353,11 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
             "identities": [
                 {
                     "index": index,
-                    "label": _controller_label(entry.identity),
+                    "label": _controller_label(entry.identity, entry.alias),
                     "key": entry.identity.to_bytes().hex(),
                     "active_profile": entry.active_profile_index + 1,
                     "controller": _controller_presentation(entry.identity),
+                    "alias": entry.alias,
                 }
                 for index, entry in enumerate(entries)
             ]
@@ -315,8 +369,12 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         device = self.profile_server.find_device()
         entries, identity = self._entries_and_identity(device, identity_index)
         profile = config_manager.read_profile(device, identity, profile_index)
+        metadata = config_manager.read_selected_profile_metadata(device)
         return {
             "profile": profile.to_json_object(),
+            "name": metadata.profile_names[profile_index],
+            "profile_names": list(metadata.profile_names),
+            "alias": metadata.alias,
             "active": entries[identity_index].active_profile_index == profile_index,
         }
 
@@ -349,6 +407,14 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
             )
         return self.rfile.read(length).decode("utf-8")
 
+    def _read_json_object(self) -> dict[str, Any]:
+        value = json.loads(self._read_json_body())
+        if not isinstance(value, dict):
+            raise config_manager.ConfigManagerError(
+                "request body must be a JSON object"
+            )
+        return value
+
     def _write_profile(
         self, identity_index: int, profile_index: int
     ) -> dict[str, Any]:
@@ -365,6 +431,86 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         return {
             "stored_generation": status.stored_generation,
             "stored_crc": f"{status.stored_crc:08x}",
+        }
+
+    def _set_profile_name(
+        self, identity_index: int, profile_index: int
+    ) -> dict[str, Any]:
+        value = self._read_json_object().get("value")
+        if not isinstance(value, str):
+            raise config_manager.ConfigManagerError(
+                "profile name must be text"
+            )
+        device = self.profile_server.find_device()
+        _, identity = self._entries_and_identity(device, identity_index)
+        status = config_manager.set_profile_metadata(
+            device, identity, profile_index, value,
+            self.profile_server.operation_timeout,
+        )
+        return {"stored_generation": status.stored_generation}
+
+    def _set_alias(self, identity_index: int) -> dict[str, Any]:
+        value = self._read_json_object().get("value")
+        if not isinstance(value, str):
+            raise config_manager.ConfigManagerError(
+                "controller alias must be text"
+            )
+        device = self.profile_server.find_device()
+        _, identity = self._entries_and_identity(device, identity_index)
+        status = config_manager.set_profile_metadata(
+            device, identity, config_manager.PROFILE_NONE_BUTTON,
+            value, self.profile_server.operation_timeout,
+        )
+        return {
+            "stored_generation": status.stored_generation,
+            "label": _controller_label(identity, value),
+        }
+
+    def _identify(self, identity_index: int) -> dict[str, Any]:
+        device = self.profile_server.find_device()
+        _, identity = self._entries_and_identity(device, identity_index)
+        config_manager.identify_controller(device, identity)
+        return {"identified": True}
+
+    def _copy_profile(
+        self, identity_index: int, profile_index: int
+    ) -> dict[str, Any]:
+        destination = self._read_json_object()
+        destination_identity_index = destination.get("identity_index")
+        destination_profile_number = destination.get("profile_number")
+        if (
+            type(destination_identity_index) is not int
+            or type(destination_profile_number) is not int
+            or not 1 <= destination_profile_number <=
+                config_manager.PROFILE_CAPACITY
+        ):
+            raise config_manager.ConfigManagerError(
+                "copy destination is invalid"
+            )
+        device = self.profile_server.find_device()
+        _, source_identity = self._entries_and_identity(
+            device, identity_index
+        )
+        profile = config_manager.read_profile(
+            device, source_identity, profile_index
+        )
+        metadata = config_manager.read_selected_profile_metadata(device)
+        _, destination_identity = self._entries_and_identity(
+            device, destination_identity_index
+        )
+        target_profile = destination_profile_number - 1
+        profile_status = config_manager.write_profile(
+            device, destination_identity, target_profile, profile,
+            self.profile_server.operation_timeout,
+        )
+        name_status = config_manager.set_profile_metadata(
+            device, destination_identity, target_profile,
+            metadata.profile_names[profile_index],
+            self.profile_server.operation_timeout,
+        )
+        return {
+            "stored_generation": name_status.stored_generation,
+            "profile_generation": profile_status.stored_generation,
         }
 
     def _activate_profile(

@@ -29,8 +29,8 @@ REQUEST_INDEX = 0x0001
 PROTOCOL_VERSION = 1
 REQUEST_HEADER_SIZE = 16
 RESPONSE_HEADER_SIZE = 20
-MAXIMUM_REQUEST_SIZE = 64
-MAXIMUM_RESPONSE_SIZE = 293
+MAXIMUM_REQUEST_SIZE = 80
+MAXIMUM_RESPONSE_SIZE = 837
 MAXIMUM_CHUNK_SIZE = 40
 USB_TIMEOUT_MS = 1000
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 15.0
@@ -60,6 +60,9 @@ OP_PROFILE_RESET = 0x36
 OP_PROFILE_ACTIVATE = 0x37
 OP_PROFILE_TRANSACTION_STATUS = 0x38
 OP_PROFILE_PLAYTEST = 0x39
+OP_PROFILE_METADATA_READ = 0x3A
+OP_PROFILE_METADATA_SET = 0x3B
+OP_PROFILE_IDENTIFY = 0x3C
 
 STATUS_OK = 0
 STATUS_PENDING = 1
@@ -110,7 +113,7 @@ PROFILE_CAPACITY = 8
 PROFILE_IDENTITY_CAPACITY = 16
 PROFILE_LIST_CAPACITY = PROFILE_IDENTITY_CAPACITY + 1
 CONTROLLER_IDENTITY_SIZE = 14
-PROFILE_LIST_ROW_SIZE = 16
+PROFILE_LIST_ROW_SIZE = 48
 PROFILE_NONE_BUTTON = 0xFF
 PROFILE_MACRO_COUNT = 4
 PROFILE_MACRO_STEP_CAPACITY = 16
@@ -121,9 +124,13 @@ PROFILE_MACRO_STEP_SIZE = 19
 PROFILE_MAXIMUM_WAIT_MS = 10000
 PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD = 0x8000
 PROFILE_DEFAULT_DIGITAL_THRESHOLD = 22934
-PROFILE_PLAYTEST_SCHEMA_VERSION = 1
-PROFILE_PLAYTEST_SIZE = 52
+PROFILE_PLAYTEST_SCHEMA_VERSION = 2
+PROFILE_PLAYTEST_SIZE = 54
 PROFILE_PLAYTEST_SLOT_COUNT = 4
+PROFILE_METADATA_SCHEMA_VERSION = 1
+PROFILE_METADATA_MAX_BYTES = 31
+PROFILE_METADATA_VALUE_SIZE = 32
+PROFILE_METADATA_SIZE = 288
 
 LOGICAL_BUTTONS = (
     "south",
@@ -497,6 +504,7 @@ class ControllerIdentity:
 class ProfileListEntry:
     identity: ControllerIdentity
     active_profile_index: int
+    alias: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, ControllerIdentity):
@@ -509,6 +517,35 @@ class ProfileListEntry:
             0,
             PROFILE_CAPACITY - 1,
         )
+        if type(self.alias) is not str or "\x00" in self.alias or len(
+            self.alias.encode("utf-8")
+        ) > PROFILE_METADATA_MAX_BYTES:
+            raise ConfigManagerError(
+                "controller alias must contain at most 31 UTF-8 bytes"
+            )
+
+
+@dataclass(frozen=True)
+class ProfileMetadata:
+    alias: str
+    profile_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.profile_names) != PROFILE_CAPACITY:
+            raise ConfigManagerError("profile metadata must contain eight names")
+        for label, value in (
+            ("controller alias", self.alias),
+            *(
+                (f"profile {index + 1} name", name)
+                for index, name in enumerate(self.profile_names)
+            ),
+        ):
+            if type(value) is not str or "\x00" in value or len(
+                value.encode("utf-8")
+            ) > PROFILE_METADATA_MAX_BYTES:
+                raise ConfigManagerError(
+                    f"{label} must contain at most 31 UTF-8 bytes"
+                )
 
 
 @dataclass(frozen=True)
@@ -522,6 +559,8 @@ class ProfilePlaytest:
     left_stick: tuple[int, int]
     right_stick: tuple[int, int]
     triggers: tuple[int, int]
+    battery: int
+    capabilities: int
     motion: tuple[int, int, int, int, int, int] | None
 
     def to_json_object(self) -> dict[str, Any]:
@@ -533,6 +572,7 @@ class ProfilePlaytest:
             "identity": (
                 {
                     "address": self.identity.address_text,
+                    "transport": self.identity.transport_text,
                     "vendor_id": self.identity.vendor_id,
                     "product_id": self.identity.product_id,
                 }
@@ -552,6 +592,16 @@ class ProfilePlaytest:
                 "left": self.triggers[0],
                 "right": self.triggers[1],
             },
+            "battery": (
+                round((self.battery - 1) / 250 * 100)
+                if self.battery != 0
+                else None
+            ),
+            "capabilities": [
+                name for bit, name in enumerate(
+                    ("rumble", "lightbar", "player_leds", "motion")
+                ) if self.capabilities & (1 << bit)
+            ],
             "motion": (
                 {
                     "accel": list(self.motion[:3]),
@@ -2060,8 +2110,18 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
             envelope.payload[offset : offset + CONTROLLER_IDENTITY_SIZE]
         )
         active_profile_index = envelope.payload[offset + 14]
-        if envelope.payload[offset + 15] != 0:
-            raise ConfigManagerError("profile-list reserved field is nonzero")
+        alias_size = envelope.payload[offset + 16]
+        alias_payload = envelope.payload[offset + 17 : offset + 48]
+        if (
+            envelope.payload[offset + 15] != 0
+            or alias_size > PROFILE_METADATA_MAX_BYTES
+            or any(alias_payload[alias_size:])
+        ):
+            raise ConfigManagerError("invalid profile-list metadata")
+        try:
+            alias = alias_payload[:alias_size].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigManagerError("invalid profile-list alias") from exc
         if index == 0 and not identity.is_global_fallback:
             raise ConfigManagerError(
                 "profile list does not begin with global fallback"
@@ -2071,7 +2131,7 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
         if identity in identities:
             raise ConfigManagerError("duplicate identity in profile list")
         identities.add(identity)
-        entries.append(ProfileListEntry(identity, active_profile_index))
+        entries.append(ProfileListEntry(identity, active_profile_index, alias))
     return tuple(entries)
 
 
@@ -2124,6 +2184,93 @@ def read_profile(
     return read_selected_profile(device)
 
 
+def _decode_profile_metadata_value(
+    payload: bytes, offset: int, label: str
+) -> str:
+    size = payload[offset]
+    encoded = payload[offset + 1 : offset + PROFILE_METADATA_VALUE_SIZE]
+    if size > PROFILE_METADATA_MAX_BYTES or any(encoded[size:]):
+        raise ConfigManagerError(f"invalid {label} metadata")
+    try:
+        return encoded[:size].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigManagerError(f"invalid {label} UTF-8") from exc
+
+
+def parse_profile_metadata(envelope: Envelope) -> ProfileMetadata:
+    _raise_status(envelope)
+    if (
+        envelope.schema_version != PROFILE_METADATA_SCHEMA_VERSION
+        or len(envelope.payload) != PROFILE_METADATA_SIZE
+    ):
+        raise ConfigManagerError("invalid profile metadata payload")
+    alias = _decode_profile_metadata_value(
+        envelope.payload, 0, "controller alias"
+    )
+    names = tuple(
+        _decode_profile_metadata_value(
+            envelope.payload,
+            (index + 1) * PROFILE_METADATA_VALUE_SIZE,
+            f"profile {index + 1} name",
+        )
+        for index in range(PROFILE_CAPACITY)
+    )
+    return ProfileMetadata(alias, names)
+
+
+def read_selected_profile_metadata(device: UsbDevice) -> ProfileMetadata:
+    return parse_profile_metadata(
+        _control_in(device, OP_PROFILE_METADATA_READ)
+    )
+
+
+def read_profile_metadata(
+    device: UsbDevice,
+    identity: ControllerIdentity,
+    profile_index: int = 0,
+) -> ProfileMetadata:
+    select_profile(device, identity, profile_index)
+    return read_selected_profile_metadata(device)
+
+
+def set_profile_metadata(
+    device: UsbDevice,
+    identity: ControllerIdentity,
+    profile_index: int,
+    value: str,
+    timeout: float,
+) -> TransactionStatus:
+    if profile_index != PROFILE_NONE_BUTTON:
+        _validate_profile_index(profile_index)
+    if type(value) is not str or "\x00" in value:
+        raise ConfigManagerError("profile metadata must be text")
+    encoded = value.encode("utf-8")
+    if len(encoded) > PROFILE_METADATA_MAX_BYTES:
+        raise ConfigManagerError(
+            "profile metadata must contain at most 31 UTF-8 bytes"
+        )
+    transaction_id = _host_transaction_id()
+    _control_out(
+        device,
+        OP_PROFILE_METADATA_SET,
+        struct.pack("<I", transaction_id)
+        + identity.to_bytes()
+        + bytes((profile_index, len(encoded)))
+        + encoded,
+    )
+    return _wait_for_profile_transaction(
+        device, transaction_id, timeout
+    )
+
+
+def identify_controller(
+    device: UsbDevice, identity: ControllerIdentity
+) -> None:
+    if identity.is_global_fallback:
+        raise ConfigManagerError("default profile has no controller to identify")
+    _control_out(device, OP_PROFILE_IDENTIFY, identity.to_bytes())
+
+
 def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
     _raise_status(envelope)
     if (
@@ -2133,7 +2280,7 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
         raise ConfigManagerError("invalid profile playtest payload")
     payload = envelope.payload
     flags = payload[0]
-    if flags & ~0x03 or flags != envelope.flags or payload[39] != 0:
+    if flags & ~0x03 or flags != envelope.flags or payload[41] != 0:
         raise ConfigManagerError("invalid profile playtest flags")
     connected = bool(flags & 0x01)
     has_motion = bool(flags & 0x02)
@@ -2143,7 +2290,7 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
             raise ConfigManagerError("invalid disconnected playtest payload")
         return ProfilePlaytest(
             False, None, 0, 0, None, 0,
-            (0, 0), (0, 0), (0, 0), None,
+            (0, 0), (0, 0), (0, 0), 0, 0, None,
         )
     if (
         payload[1] >= PROFILE_PLAYTEST_SLOT_COUNT
@@ -2155,7 +2302,7 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
     left_x, left_y, right_x, right_y, left_trigger, right_trigger = (
         struct.unpack_from("<hhhhHH", payload, 26)
     )
-    motion_values = struct.unpack_from("<hhhhhh", payload, 40)
+    motion_values = struct.unpack_from("<hhhhhh", payload, 42)
     if not has_motion and any(motion_values):
         raise ConfigManagerError("playtest motion sample was not declared")
     return ProfilePlaytest(
@@ -2168,6 +2315,8 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
         left_stick=(left_x, left_y),
         right_stick=(right_x, right_y),
         triggers=(left_trigger, right_trigger),
+        battery=payload[39],
+        capabilities=payload[40],
         motion=motion_values if has_motion else None,
     )
 

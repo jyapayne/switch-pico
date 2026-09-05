@@ -767,6 +767,19 @@ void test_rejections() {
             "valid device must occupy its indexed slot");
     require(platform_on_device_ready(&collision) == UNI_ERROR_NO_SLOTS,
             "different device cannot replace an occupied slot");
+    g_slots[0].identity.stable = true;
+    g_slots[0].identity.transport = ControllerTransport::kClassic;
+    g_slots[0].identity.address[5] = 1;
+    Bluepad32SlotSnapshot identity_snapshot{};
+    bluepad32_input_backend_snapshot(0, &identity_snapshot);
+    require(bluepad32_input_backend_identify(
+                identity_snapshot.identity) &&
+                g_slots[0].pending_profile_feedback_count == 1 &&
+                !bluepad32_input_backend_identify(
+                    controller_identity_global()),
+            "Identify did not target only the selected live controller");
+    g_slots[0].pending_profile_feedback_count = 0;
+    g_slots[0].pending_profile_feedback[0] = {};
 
     uni_controller_t collision_data{};
     collision_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
@@ -785,12 +798,15 @@ void test_rejections() {
     require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count == 3,
             "valid slot input must remain observable");
+    slot_zero.controller.battery = 201;
     g_last_snapshot_generation[0] = 0;
     Bluepad32PlaytestSnapshot playtest{};
     bluepad32_input_backend_playtest_snapshot(0, &playtest);
     require(playtest.active && playtest.state_generation != 0 &&
-                playtest.state.motion_sample_count == 3,
-            "playtest snapshot did not expose current raw input");
+                playtest.state.motion_sample_count == 3 &&
+                playtest.battery == 201 &&
+                (playtest.capabilities & 0x08u) != 0,
+            "playtest snapshot did not expose input capabilities");
     bluepad32_input_backend_report_sent(0);
     require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count == 3,

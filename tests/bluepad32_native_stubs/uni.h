@@ -98,6 +98,7 @@ struct uni_gamepad_t {
 struct uni_controller_t {
     int klass;
     uni_gamepad_t gamepad;
+    uint8_t battery;
 };
 
 struct uni_hid_device_t;
@@ -138,6 +139,7 @@ struct uni_hid_device_t {
     uni_bt_conn_t conn;
     int idx;
     bool gamepad;
+    uni_controller_t controller;
     uni_report_parser_t report_parser;
     int rumble_calls;
     uint8_t last_high;

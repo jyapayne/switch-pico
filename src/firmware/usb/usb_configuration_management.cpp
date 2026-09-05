@@ -100,6 +100,13 @@ bool valid_out_size(Operation operation, size_t size) {
         case Operation::kProfileReset:
         case Operation::kProfileActivate:
             return size == kRequestHeaderSize + 19;
+        case Operation::kProfileMetadataSet:
+            return size >= kRequestHeaderSize + 20 &&
+                   size <= kRequestHeaderSize + 20 +
+                               PROFILE_SERVICE_METADATA_MAX_BYTES;
+        case Operation::kProfileIdentify:
+            return size == kRequestHeaderSize +
+                               CONTROLLER_IDENTITY_ENCODED_SIZE;
         case Operation::kPairingRefresh:
         case Operation::kPairingClear:
             return size == kRequestHeaderSize;
@@ -271,15 +278,20 @@ size_t encode_profile_list(const ProfileServiceListSnapshot& snapshot,
     payload[0] = snapshot.count;
     size_t offset = 1;
     for (uint8_t index = 0; index < snapshot.count; ++index) {
+        const size_t alias_size = strlen(snapshot.rows[index].alias);
         if (!controller_identity_encode(snapshot.rows[index].identity,
                                         &payload[offset],
                                         CONTROLLER_IDENTITY_ENCODED_SIZE) ||
             snapshot.rows[index].active_profile >=
-                CONTROLLER_PROFILE_COUNT) {
+                CONTROLLER_PROFILE_COUNT ||
+            alias_size > PROFILE_SERVICE_METADATA_MAX_BYTES) {
             return 0;
         }
         payload[offset + 14] = snapshot.rows[index].active_profile;
-        offset += 16;
+        payload[offset + 16] = static_cast<uint8_t>(alias_size);
+        memcpy(&payload[offset + 17], snapshot.rows[index].alias,
+               alias_size);
+        offset += kProfileListRowSize;
     }
     return encode_response(
         Operation::kProfileList, profile_service_status(snapshot.metadata),
@@ -306,38 +318,30 @@ size_t encode_profile_playtest(
         write_u16(&payload[2], snapshot.physical_button_mask);
         write_u32(&payload[4], snapshot.connection_generation);
         write_u32(&payload[8], snapshot.state_generation);
-        write_u16(
-            &payload[26],
-            static_cast<uint16_t>(snapshot.state.left_stick_x));
-        write_u16(
-            &payload[28],
-            static_cast<uint16_t>(snapshot.state.left_stick_y));
-        write_u16(
-            &payload[30],
-            static_cast<uint16_t>(snapshot.state.right_stick_x));
-        write_u16(
-            &payload[32],
-            static_cast<uint16_t>(snapshot.state.right_stick_y));
+        write_u16(&payload[26],
+                  static_cast<uint16_t>(snapshot.state.left_stick_x));
+        write_u16(&payload[28],
+                  static_cast<uint16_t>(snapshot.state.left_stick_y));
+        write_u16(&payload[30],
+                  static_cast<uint16_t>(snapshot.state.right_stick_x));
+        write_u16(&payload[32],
+                  static_cast<uint16_t>(snapshot.state.right_stick_y));
         write_u16(&payload[34], snapshot.state.left_trigger);
         write_u16(&payload[36], snapshot.state.right_trigger);
         payload[38] = snapshot.state.motion_sample_count;
+        payload[39] = snapshot.battery;
+        payload[40] = snapshot.capabilities;
         if (snapshot.state.motion_sample_count != 0) {
             payload[0] |= 2;
             const ControllerMotionSample& motion =
                 snapshot.state.motion_samples[
                     snapshot.state.motion_sample_count - 1u];
-            write_u16(&payload[40],
-                      static_cast<uint16_t>(motion.accel_x));
-            write_u16(&payload[42],
-                      static_cast<uint16_t>(motion.accel_y));
-            write_u16(&payload[44],
-                      static_cast<uint16_t>(motion.accel_z));
-            write_u16(&payload[46],
-                      static_cast<uint16_t>(motion.gyro_x));
-            write_u16(&payload[48],
-                      static_cast<uint16_t>(motion.gyro_y));
-            write_u16(&payload[50],
-                      static_cast<uint16_t>(motion.gyro_z));
+            write_u16(&payload[42], static_cast<uint16_t>(motion.accel_x));
+            write_u16(&payload[44], static_cast<uint16_t>(motion.accel_y));
+            write_u16(&payload[46], static_cast<uint16_t>(motion.accel_z));
+            write_u16(&payload[48], static_cast<uint16_t>(motion.gyro_x));
+            write_u16(&payload[50], static_cast<uint16_t>(motion.gyro_y));
+            write_u16(&payload[52], static_cast<uint16_t>(motion.gyro_z));
         }
     }
     return encode_response(
@@ -366,6 +370,41 @@ size_t encode_profile_read(const ProfileServiceSelectedSnapshot& snapshot,
         Operation::kProfileRead, status, 0,
         CONTROLLER_PROFILE_SCHEMA_VERSION, snapshot.metadata.generation,
         payload, payload_size, output, output_size);
+}
+
+size_t encode_profile_metadata(
+    const ProfileServiceMetadataSnapshot& snapshot,
+    uint8_t* output, size_t output_size) {
+    Status status = profile_service_status(snapshot.metadata);
+    if (status == Status::kOk) {
+        status = transaction_status(snapshot.status);
+    }
+    uint8_t payload[kProfileMetadataPayloadSize]{};
+    if (snapshot.valid) {
+        const char* values[CONTROLLER_PROFILE_COUNT + 1] = {
+            snapshot.alias,
+            snapshot.profile_names[0], snapshot.profile_names[1],
+            snapshot.profile_names[2], snapshot.profile_names[3],
+            snapshot.profile_names[4], snapshot.profile_names[5],
+            snapshot.profile_names[6], snapshot.profile_names[7],
+        };
+        for (size_t index = 0;
+             index < CONTROLLER_PROFILE_COUNT + 1; ++index) {
+            const size_t size = strlen(values[index]);
+            if (size > PROFILE_SERVICE_METADATA_MAX_BYTES) {
+                return 0;
+            }
+            const size_t offset =
+                index * (PROFILE_SERVICE_METADATA_MAX_BYTES + 1);
+            payload[offset] = static_cast<uint8_t>(size);
+            memcpy(&payload[offset + 1], values[index], size);
+        }
+    }
+    return encode_response(
+        Operation::kProfileMetadataRead, status, 0,
+        kProfileMetadataSchemaVersion, snapshot.metadata.generation,
+        payload, snapshot.valid ? sizeof(payload) : 0,
+        output, output_size);
 }
 
 size_t encode_profile_transaction(
@@ -585,6 +624,41 @@ bool process_out_request() {
                    status == ConfigurationTransactionStatus::kUnchanged ||
                    status == ConfigurationTransactionStatus::kCommitted;
         }
+        case Operation::kProfileMetadataSet: {
+            const uint32_t transaction_id =
+                static_cast<uint32_t>(payload[0]) |
+                (static_cast<uint32_t>(payload[1]) << 8) |
+                (static_cast<uint32_t>(payload[2]) << 16) |
+                (static_cast<uint32_t>(payload[3]) << 24);
+            ControllerIdentity identity{};
+            const uint8_t profile_index = payload[18];
+            const size_t value_size = payload[19];
+            if (transaction_id == 0 ||
+                (profile_index != CONTROLLER_PROFILE_ALL &&
+                 profile_index >= CONTROLLER_PROFILE_COUNT) ||
+                value_size > PROFILE_SERVICE_METADATA_MAX_BYTES ||
+                request.payload_size != 20 + value_size ||
+                !controller_identity_decode(
+                    &payload[4], CONTROLLER_IDENTITY_ENCODED_SIZE,
+                    &identity)) {
+                return false;
+            }
+            const ConfigurationTransactionStatus status =
+                profile_service_set_metadata(
+                    transaction_id, identity, profile_index,
+                    reinterpret_cast<const char*>(&payload[20]),
+                    value_size);
+            return status == ConfigurationTransactionStatus::kPending ||
+                   status == ConfigurationTransactionStatus::kUnchanged ||
+                   status == ConfigurationTransactionStatus::kCommitted;
+        }
+        case Operation::kProfileIdentify: {
+            ControllerIdentity identity{};
+            return controller_identity_decode(
+                       payload, CONTROLLER_IDENTITY_ENCODED_SIZE,
+                       &identity) &&
+                   bluepad32_input_backend_identify(identity);
+        }
         case Operation::kPairingRefresh:
             bluepad32_input_backend_request_pairing_snapshot();
             return true;
@@ -704,6 +778,13 @@ bool usb_configuration_management_vendor_control(
             }
             response_size = encode_profile_playtest(
                 selected_slot, playtest, response, sizeof(response));
+            break;
+        }
+        case Operation::kProfileMetadataRead: {
+            ProfileServiceMetadataSnapshot snapshot{};
+            profile_service_metadata_snapshot(&snapshot);
+            response_size = encode_profile_metadata(
+                snapshot, response, sizeof(response));
             break;
         }
         case Operation::kProfileTransactionStatus: {

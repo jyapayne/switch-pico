@@ -536,6 +536,33 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.error { border-color: var(--rose); }
 
+.identity-tools .field-label { margin-top: 18px; }
+.identity-actions { display: flex; gap: 8px; margin-top: 9px; }
+.identity-actions .button { flex: 1; padding-inline: 8px; }
+.controller-details { min-height: 18px; margin-top: 8px; color: var(--subtle); font-size: 0.67rem; }
+.profile-name-editor { display: grid; grid-template-columns: minmax(140px, 240px) auto; align-items: end; gap: 8px; margin-top: 12px; }
+.profile-name-editor label { grid-column: 1 / -1; color: var(--muted); font-size: 0.66rem; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
+.profile-name-editor input { min-height: 40px; padding: 8px 11px; color: var(--ink); border: 1px solid var(--control-line); border-radius: 10px; background: var(--input); }
+.panel-heading-actions { display: flex; align-items: flex-end; flex-direction: column; gap: 8px; }
+.panel-heading-actions p { max-width: 440px; color: var(--muted); font-size: 0.78rem; line-height: 1.55; text-align: right; }
+.section-reset { padding: 0; color: var(--sky); border: 0; background: transparent; font-size: 0.68rem; font-weight: 760; }
+.section-reset:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.curve-editor { display: grid; grid-template-columns: minmax(120px, 0.8fr) minmax(150px, 1.2fr); gap: 14px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--line-soft); border-radius: 13px; background: #0a1120; }
+.curve-editor svg { width: 100%; min-height: 110px; overflow: visible; border-left: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.curve-editor path { fill: none; vector-effect: non-scaling-stroke; }
+.curve-guide { stroke: var(--subtle); stroke-dasharray: 3 3; opacity: 0.45; }
+.curve-line { stroke: var(--blue); stroke-width: 2.5; }
+.curve-marker { fill: var(--amber); stroke: #0a1120; stroke-width: 2; opacity: 0; transition: opacity 120ms ease; }
+.curve-marker.visible { opacity: 1; }
+.curve-controls { display: flex; flex-direction: column; gap: 10px; }
+.curve-controls label { color: var(--muted); font-size: 0.67rem; font-weight: 720; }
+.curve-controls output { float: right; color: var(--ink); }
+.curve-controls input[type="range"] { display: block; margin-top: 8px; }
+.copy-side { min-height: 34px; margin-top: auto; padding-block: 6px; }
+.copy-dialog { width: min(440px, calc(100% - 28px)); padding: 24px; color: var(--ink); border: 1px solid var(--line); border-radius: 18px; background: var(--surface-solid); box-shadow: var(--shadow); }
+.copy-dialog::backdrop { background: rgba(2, 5, 13, 0.76); }
+.copy-dialog h3 { margin-bottom: 18px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
 @media (max-width: 1120px) {
   .workspace { grid-template-columns: 250px minmax(0, 1fr); }
   .profile-list { grid-template-columns: 1fr; }
@@ -558,6 +585,7 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   .mini-active { margin-left: 0; }
   .editor-header, .panel-heading { align-items: flex-start; flex-direction: column; }
   .header-actions { justify-content: flex-start; }
+  .curve-editor { grid-template-columns: 1fr; }
   .section-nav { top: 8px; }
   .builtin-actions, .analog-grid, .feedback-grid, .macro-controls { grid-template-columns: 1fr; }
   .playtest-grid { grid-template-columns: 1fr; }
@@ -575,6 +603,9 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   .connection { max-width: 48%; padding: 7px 9px; font-size: 0.68rem; }
   .workspace { width: min(100% - 16px, 480px); }
   .sidebar, .panel, .editor-header { border-radius: 17px; }
+  .profile-name-editor { grid-template-columns: 1fr; }
+  .panel-heading-actions { align-items: flex-start; }
+  .panel-heading-actions p { text-align: left; }
   .sidebar, .panel { padding: 18px; }
   .trigger-meter { grid-template-columns: 25px minmax(100px, 1fr); }
   .trigger-meter output { grid-column: 2; text-align: left; }

@@ -8,12 +8,15 @@ const state = {
   identityIndex: 0,
   profileIndex: 0,
   profile: null,
+  profileNames: Array(8).fill(""),
   original: "",
+  pendingName: false,
   active: false,
   selectedButton: "south",
   selectedMacro: 0,
   token: "",
   busy: false,
+  identifyAvailable: false,
   adapterConnected: false,
   playtestRequestActive: false,
   playtestTimer: 0,
@@ -27,9 +30,15 @@ const elements = {
   identity: document.querySelector("#identitySelect"),
   profileList: document.querySelector("#profileList"),
   profileOwner: document.querySelector("#profileOwner"),
+  controllerAlias: document.querySelector("#controllerAlias"),
+  controllerDetails: document.querySelector("#controllerDetails"),
+  saveAlias: document.querySelector("#saveAliasButton"),
+  identify: document.querySelector("#identifyButton"),
   profileTitle: document.querySelector("#profileTitle"),
   activeBadge: document.querySelector("#activeBadge"),
   dirtyBadge: document.querySelector("#dirtyBadge"),
+  profileName: document.querySelector("#profileName"),
+  saveProfileName: document.querySelector("#saveProfileNameButton"),
   loading: document.querySelector("#loadingCard"),
   form: document.querySelector("#profileForm"),
   controllerCanvas: document.querySelector("#controllerCanvas"),
@@ -61,6 +70,14 @@ const elements = {
   activate: document.querySelector("#activateButton"),
   save: document.querySelector("#saveButton"),
   addMacroStep: document.querySelector("#addMacroStepButton"),
+  copyProfile: document.querySelector("#copyProfileButton"),
+  exportProfile: document.querySelector("#exportProfileButton"),
+  importProfile: document.querySelector("#importProfileButton"),
+  importProfileFile: document.querySelector("#importProfileFile"),
+  copyDialog: document.querySelector("#copyDialog"),
+  copyIdentity: document.querySelector("#copyIdentity"),
+  copySlot: document.querySelector("#copySlot"),
+  confirmCopy: document.querySelector("#confirmCopyButton"),
   toast: document.querySelector("#toast"),
 };
 
@@ -146,7 +163,30 @@ function updateTriggerPlaytest(side, raw, output, config) {
   meter.querySelector("output").textContent = `${raw} → ${output}`;
 }
 
+function updateCurveMarker(group, side, input) {
+  const panel = document.querySelector(
+    `[data-analog-group="${group}"][data-analog-side="${side}"]`
+  );
+  if (!panel) return;
+  const normalized = Math.max(0, Math.min(1, input));
+  const config = state.profile[group][side];
+  const output = ProfilePlaytestMath.transformTrigger(
+    Math.round(normalized * 65535),
+    {
+      lower_deadzone: 0,
+      upper_saturation: 65535,
+      curve_q8_8: config.curve_q8_8,
+    }
+  ) / 65535;
+  const marker = panel.querySelector(".curve-marker");
+  marker.setAttribute("cx", String(normalized * 100));
+  marker.setAttribute("cy", String(60 - output * 60));
+  marker.classList.add("visible");
+}
+
 function clearPlaytest(message, stateName = "waiting") {
+  state.identifyAvailable = false;
+  elements.identify.disabled = true;
   elements.playtestPanel.dataset.state = stateName;
   elements.playtestStatus.textContent =
     stateName === "error" ? "Unavailable" : "Waiting";
@@ -155,6 +195,8 @@ function clearPlaytest(message, stateName = "waiting") {
   elements.playtestHelp.textContent = message;
   elements.controllerHotspots.querySelectorAll(".pressed")
     .forEach((button) => button.classList.remove("pressed"));
+  document.querySelectorAll(".curve-marker.visible")
+    .forEach((marker) => marker.classList.remove("visible"));
 }
 
 function renderPlaytest(sample) {
@@ -188,6 +230,16 @@ function renderPlaytest(sample) {
     "right", sample.triggers.right, outputRightTrigger,
     state.profile.triggers.right
   );
+  updateCurveMarker(
+    "sticks", "left",
+    Math.max(Math.abs(rawLeft.x), Math.abs(rawLeft.y)) / 32767
+  );
+  updateCurveMarker(
+    "sticks", "right",
+    Math.max(Math.abs(rawRight.x), Math.abs(rawRight.y)) / 32767
+  );
+  updateCurveMarker("triggers", "left", sample.triggers.left / 65535);
+  updateCurveMarker("triggers", "right", sample.triggers.right / 65535);
   const style = sample.controller?.style || currentControllerStyle();
   elements.playtestLeftTriggerLabel.textContent =
     controlLabel("left_trigger", style);
@@ -204,7 +256,25 @@ function renderPlaytest(sample) {
     });
   elements.playtestPanel.dataset.state = "live";
   elements.playtestStatus.textContent = "Live";
+  const owner = currentOwner();
+  const sourceAddress = sample.identity?.address
+    ?.replaceAll(":", "").toLowerCase();
+  state.identifyAvailable = Boolean(
+    owner && owner.index !== 0 && sourceAddress &&
+    owner.key.includes(sourceAddress) &&
+    sample.capabilities?.some((capability) =>
+      ["rumble", "lightbar", "player_leds"].includes(capability)
+    )
+  );
+  elements.identify.disabled = state.busy || !state.identifyAvailable;
   elements.playtestTitle.textContent = sample.label || "Connected controller";
+  const details = [
+    sample.controller?.model,
+    sample.identity?.transport,
+    sample.battery === null ? null : `${sample.battery}% battery`,
+    ...(sample.capabilities || []).map(label),
+  ].filter(Boolean);
+  elements.controllerDetails.textContent = details.join(" · ");
   elements.playtestHelp.textContent =
     "Yellow is raw input; blue is the output produced by this unsaved draft.";
 }
@@ -248,7 +318,8 @@ async function pollPlaytest() {
 }
 
 function isDirty() {
-  return state.profile !== null && canonical(state.profile) !== state.original;
+  return state.profile !== null &&
+    (canonical(state.profile) !== state.original || state.pendingName);
 }
 
 function setConnection(mode, text) {
@@ -299,6 +370,16 @@ function setBusy(busy) {
   elements.resetDraft.disabled = busy;
   elements.refresh.disabled = busy;
   elements.identity.disabled = busy;
+  elements.identify.disabled = busy || !state.identifyAvailable;
+  elements.profileName.disabled = busy;
+  elements.saveProfileName.disabled = busy || !state.adapterConnected;
+  elements.controllerAlias.disabled =
+    busy || currentOwner()?.index === 0;
+  elements.saveAlias.disabled =
+    busy || !state.adapterConnected || currentOwner()?.index === 0;
+  elements.copyProfile.disabled = busy || !state.adapterConnected;
+  elements.importProfile.disabled = busy;
+  elements.exportProfile.disabled = busy;
   if (state.schema && state.profile) {
     const macro = state.profile.macros[state.selectedMacro];
     const totalSteps = state.profile.macros.reduce(
@@ -435,7 +516,7 @@ function renderProfileList() {
     const active = owner && owner.active_profile === index + 1;
     return `
       <button class="profile-button${selected ? " selected" : ""}" type="button" data-profile-index="${index}">
-        <span class="profile-number"><span>${index + 1}</span>Profile ${index + 1}</span>
+        <span class="profile-number"><span>${index + 1}</span>${escapeHtml(state.profileNames[index] || `Profile ${index + 1}`)}</span>
         ${active ? '<span class="mini-active">Active</span>' : ""}
       </button>`;
   }).join("");
@@ -601,28 +682,48 @@ const analogDefinitions = [
     ["center_y", "Center Y", -32768, 32767],
     ["inner_deadzone", "Inner deadzone", 0, 32767],
     ["outer_saturation", "Outer saturation", 1, 32767],
-    ["curve_q8_8", "Curve (Q8.8)", 1, 65535],
   ]],
   ["sticks", "right", "Right stick", [
     ["center_x", "Center X", -32768, 32767],
     ["center_y", "Center Y", -32768, 32767],
     ["inner_deadzone", "Inner deadzone", 0, 32767],
     ["outer_saturation", "Outer saturation", 1, 32767],
-    ["curve_q8_8", "Curve (Q8.8)", 1, 65535],
   ]],
   ["triggers", "left", "Left trigger", [
     ["lower_deadzone", "Lower deadzone", 0, 65535],
     ["upper_saturation", "Upper saturation", 1, 65535],
-    ["curve_q8_8", "Curve (Q8.8)", 1, 65535],
     ["digital_threshold", "Digital threshold", 0, 65535],
   ]],
   ["triggers", "right", "Right trigger", [
     ["lower_deadzone", "Lower deadzone", 0, 65535],
     ["upper_saturation", "Upper saturation", 1, 65535],
-    ["curve_q8_8", "Curve (Q8.8)", 1, 65535],
     ["digital_threshold", "Digital threshold", 0, 65535],
   ]],
 ];
+
+const curvePresets = {
+  quick: 128,
+  linear: 256,
+  precise: 512,
+  deliberate: 768,
+};
+
+function curvePreset(value) {
+  return Object.entries(curvePresets)
+    .find(([, preset]) => preset === value)?.[0] || "custom";
+}
+
+function curvePath(curve) {
+  return Array.from({ length: 21 }, (_, index) => {
+    const input = Math.round(index / 20 * 65535);
+    const output = ProfilePlaytestMath.transformTrigger(input, {
+      lower_deadzone: 0,
+      upper_saturation: 65535,
+      curve_q8_8: curve,
+    });
+    return `${index === 0 ? "M" : "L"} ${index * 5} ${60 - output / 65535 * 60}`;
+  }).join(" ");
+}
 
 function renderAnalog() {
   elements.analog.innerHTML = analogDefinitions.map(([group, side, title, fields]) => {
@@ -636,8 +737,27 @@ function renderAnalog() {
           </label>`).join("")}
       </div>` : "";
     return `
-      <div class="subpanel">
+      <div class="subpanel" data-analog-group="${group}" data-analog-side="${side}">
         <div class="subpanel-heading"><h4>${title}</h4><span>${group === "sticks" ? "Signed axes · 32767 full scale" : "Unsigned · 65535 full scale"}</span></div>
+        <div class="curve-editor">
+          <svg viewBox="0 0 100 60" role="img" aria-label="${title} response curve">
+            <path class="curve-guide" d="M 0 60 L 100 0"></path>
+            <path class="curve-line" d="${curvePath(config.curve_q8_8)}"></path>
+            <circle class="curve-marker" cx="0" cy="60" r="3"></circle>
+          </svg>
+          <div class="curve-controls">
+            <label>Response preset
+              <select class="select" data-kind="curve-preset" data-group="${group}" data-side="${side}">
+                ${Object.keys(curvePresets).map((preset) => `<option value="${preset}"${curvePreset(config.curve_q8_8) === preset ? " selected" : ""}>${label(preset)}</option>`).join("")}
+                <option value="custom"${curvePreset(config.curve_q8_8) === "custom" ? " selected" : ""}>Custom</option>
+              </select>
+            </label>
+            <label>Fine adjustment <output>${config.curve_q8_8}</output>
+              <input type="range" min="1" max="2048" step="1" value="${config.curve_q8_8}" data-kind="curve-range" data-group="${group}" data-side="${side}">
+            </label>
+            <button class="button button-ghost copy-side" type="button" data-copy-analog="${group}" data-source-side="${side}">Apply to ${side === "left" ? "right" : "left"}</button>
+          </div>
+        </div>
         <div class="number-grid">
           ${fields.map(([field, fieldLabel, min, max]) => `
             <div class="number-field${field === "digital_threshold" ? " wide" : ""}">
@@ -840,10 +960,22 @@ function renderMacro() {
 }
 
 function renderEditor() {
-  elements.profileTitle.textContent = `Profile ${state.profileIndex + 1}`;
+  elements.profileTitle.textContent =
+    state.profileNames[state.profileIndex] || `Profile ${state.profileIndex + 1}`;
   elements.activeBadge.hidden = !state.active;
   elements.activate.disabled =
     !state.adapterConnected || state.busy || state.active;
+  elements.profileName.value = state.profileNames[state.profileIndex] || "";
+  const owner = currentOwner();
+  elements.controllerAlias.value = owner?.alias || "";
+  elements.identify.disabled =
+    state.busy || !state.identifyAvailable;
+  elements.controllerAlias.disabled = !owner || owner.index === 0;
+  elements.saveAlias.disabled =
+    !state.adapterConnected || !owner || owner.index === 0;
+  elements.controllerDetails.textContent = owner && owner.index !== 0
+    ? owner.controller.model
+    : "Used when no dedicated controller profile exists.";
   renderIdentities();
   renderProfileList();
   renderButtonMap();
@@ -867,6 +999,10 @@ async function loadProfile() {
     const payload = await api(`/api/profiles/${state.identityIndex}/${state.profileIndex + 1}`);
     state.profile = payload.profile;
     state.original = canonical(payload.profile);
+    state.pendingName = false;
+    state.profileNames = payload.profile_names;
+    const owner = currentOwner();
+    if (owner) owner.alias = payload.alias;
     state.active = payload.active;
     setConnection("ready", "Adapter connected");
     renderEditor();
@@ -910,6 +1046,22 @@ function handleFormChange(event) {
     state.profile[target.dataset.group][target.dataset.side][target.dataset.field] = Number(target.value);
   } else if (kind === "analog-bool") {
     state.profile[target.dataset.group][target.dataset.side][target.dataset.field] = target.checked;
+  } else if (kind === "curve-preset") {
+    if (target.value !== "custom") {
+      state.profile[target.dataset.group][target.dataset.side].curve_q8_8 =
+        curvePresets[target.value];
+      renderAnalog();
+    }
+  } else if (kind === "curve-range") {
+    const config = state.profile[target.dataset.group][target.dataset.side];
+    config.curve_q8_8 = Number(target.value);
+    const editor = target.closest(".curve-editor");
+    editor.querySelector("output").textContent = target.value;
+    editor.querySelector(".curve-line").setAttribute(
+      "d", curvePath(config.curve_q8_8)
+    );
+    editor.querySelector("[data-kind='curve-preset']").value =
+      curvePreset(config.curve_q8_8);
   } else if (kind === "rumble-range") {
     state.profile.rumble[target.dataset.field] = Number(target.value);
     document.querySelector(`#rumble-${target.dataset.field}-value`).value = target.value;
@@ -926,9 +1078,7 @@ function handleFormChange(event) {
       profile_switch: state.schema.default_switching_chord,
       motion_toggle: state.schema.default_motion_toggle_chord,
     }[target.dataset.action];
-    const current = owner[field].length === 0 && defaults
-      ? defaults
-      : owner[field];
+    const current = owner[field].length === 0 && defaults ? defaults : owner[field];
     const selected = new Set(current);
     target.checked ? selected.add(target.dataset.name) : selected.delete(target.dataset.name);
     owner[field] = state.schema.controls.filter((name) => selected.has(name));
@@ -960,6 +1110,18 @@ function handleFormChange(event) {
   updateDirtyState();
 }
 
+elements.analog.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-copy-analog]");
+  if (!button) return;
+  const group = button.dataset.copyAnalog;
+  const source = button.dataset.sourceSide;
+  const destination = source === "left" ? "right" : "left";
+  state.profile[group][destination] = clone(state.profile[group][source]);
+  renderAnalog();
+  updateDirtyState();
+  toast(`${label(source)} ${label(group)} settings applied to ${destination}.`);
+});
+
 elements.form.addEventListener("input", handleFormChange);
 elements.form.addEventListener("change", handleFormChange);
 
@@ -973,6 +1135,7 @@ elements.identity.addEventListener("change", async () => {
   const owner = currentOwner();
   if (owner) persistOwnerKey(owner.key);
   state.profileIndex = 0;
+  state.profileNames = Array(state.schema.profile_capacity).fill("");
   await loadProfile();
 });
 
@@ -1019,6 +1182,180 @@ elements.macroSteps.addEventListener("click", (event) => {
   updateDirtyState();
 });
 
+elements.saveProfileName.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    const value = elements.profileName.value.trim();
+    const result = await api(
+      `/api/profiles/${state.identityIndex}/${state.profileIndex + 1}/name`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+      }
+    );
+    state.profileNames[state.profileIndex] = value;
+    state.pendingName = false;
+    renderEditor();
+    toast(`Profile name saved · generation ${result.stored_generation}`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+elements.saveAlias.addEventListener("click", async () => {
+  const owner = currentOwner();
+  if (!owner) return;
+  setBusy(true);
+  try {
+    const value = elements.controllerAlias.value.trim();
+    const result = await api(`/api/identities/${owner.index}/alias`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    owner.alias = value;
+    owner.label = result.label;
+    renderIdentities();
+    toast(`Controller alias saved · generation ${result.stored_generation}`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+elements.identify.addEventListener("click", async () => {
+  const owner = currentOwner();
+  if (!owner || owner.index === 0) return;
+  setBusy(true);
+  try {
+    await api(`/api/identities/${owner.index}/identify`, { method: "POST" });
+    toast("Identification pulse sent.");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+elements.exportProfile.addEventListener("click", () => {
+  const name = state.profileNames[state.profileIndex] ||
+    `profile-${state.profileIndex + 1}`;
+  const blob = new Blob([
+    JSON.stringify({ name, profile: state.profile }, null, 2),
+  ], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+});
+
+elements.importProfile.addEventListener("click", () => {
+  elements.importProfileFile.click();
+});
+
+elements.importProfileFile.addEventListener("change", async () => {
+  const [file] = elements.importProfileFile.files;
+  if (!file) return;
+  try {
+    const imported = JSON.parse(await file.text());
+    if (
+      typeof imported.name === "string" &&
+      new TextEncoder().encode(imported.name).length > 31
+    ) {
+      throw new Error("Profile name exceeds 31 UTF-8 bytes");
+    }
+    state.profile = clone(imported.profile || imported);
+    if (typeof imported.name === "string") {
+      state.profileNames[state.profileIndex] = imported.name;
+      state.pendingName = true;
+    }
+    renderEditor();
+    toast("Profile imported into the unsaved draft.");
+  } catch (error) {
+    toast(`Import failed: ${error.message}`, true);
+  } finally {
+    elements.importProfileFile.value = "";
+  }
+});
+
+elements.copyProfile.addEventListener("click", () => {
+  elements.copyIdentity.innerHTML = state.identities.map((identity) => (
+    `<option value="${identity.index}">${escapeHtml(identity.label)}</option>`
+  )).join("");
+  elements.copyIdentity.value = String(state.identityIndex);
+  elements.copySlot.innerHTML = Array.from(
+    { length: state.schema.profile_capacity },
+    (_, index) => `<option value="${index + 1}">Profile ${index + 1}</option>`
+  ).join("");
+  elements.copySlot.value = String(
+    Math.min(state.schema.profile_capacity, state.profileIndex + 2)
+  );
+  elements.copyDialog.showModal();
+});
+
+elements.confirmCopy.addEventListener("click", async (event) => {
+  event.preventDefault();
+  setBusy(true);
+  try {
+    const result = await api(
+      `/api/profiles/${state.identityIndex}/${state.profileIndex + 1}/copy`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          identity_index: Number(elements.copyIdentity.value),
+          profile_number: Number(elements.copySlot.value),
+        }),
+      }
+    );
+    if (Number(elements.copyIdentity.value) === state.identityIndex) {
+      state.profileNames[Number(elements.copySlot.value) - 1] =
+        state.profileNames[state.profileIndex];
+      renderProfileList();
+    }
+    elements.copyDialog.close();
+    toast(`Profile copied · generation ${result.stored_generation}`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+document.querySelectorAll("[data-reset-section]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const defaults = state.schema.default_profile;
+    const section = button.dataset.resetSection;
+    if (section === "mapping") {
+      state.profile.button_map = clone(defaults.button_map);
+      state.profile.triggers.left.output = defaults.triggers.left.output;
+      state.profile.triggers.right.output = defaults.triggers.right.output;
+    } else if (section === "analog") {
+      state.profile.sticks = clone(defaults.sticks);
+      const leftOutput = state.profile.triggers.left.output;
+      const rightOutput = state.profile.triggers.right.output;
+      state.profile.triggers = clone(defaults.triggers);
+      state.profile.triggers.left.output = leftOutput;
+      state.profile.triggers.right.output = rightOutput;
+    } else if (section === "feedback") {
+      state.profile.rumble = clone(defaults.rumble);
+    } else if (section === "turbo") {
+      state.profile.turbo = clone(defaults.turbo);
+    } else if (section === "macro") {
+      state.profile.switching_chord = clone(defaults.switching_chord);
+      state.profile.motion_toggle_chord = clone(defaults.motion_toggle_chord);
+      state.profile.macros = clone(defaults.macros);
+    }
+    renderEditor();
+    toast(`${label(section)} reset in the unsaved draft.`);
+  });
+});
+
 elements.save.addEventListener("click", async () => {
   if (!elements.form.reportValidity()) return;
   setBusy(true);
@@ -1028,6 +1365,19 @@ elements.save.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state.profile),
     });
+    if (state.pendingName) {
+      await api(
+        `/api/profiles/${state.identityIndex}/${state.profileIndex + 1}/name`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            value: state.profileNames[state.profileIndex],
+          }),
+        }
+      );
+      state.pendingName = false;
+    }
     state.original = canonical(state.profile);
     updateDirtyState();
     toast(`Saved atomically · generation ${result.stored_generation} · CRC ${result.stored_crc}`);

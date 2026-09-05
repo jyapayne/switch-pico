@@ -8,6 +8,7 @@
 
 constexpr uint8_t PROFILE_SERVICE_LIST_CAPACITY =
     CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1;
+constexpr size_t PROFILE_SERVICE_METADATA_MAX_BYTES = 31;
 
 enum class ProfileServiceState : uint8_t {
     kLoading = 0,
@@ -23,6 +24,7 @@ struct ProfileServiceMetadata {
 
 struct ProfileServiceListRow {
     ControllerIdentity identity{};
+    char alias[PROFILE_SERVICE_METADATA_MAX_BYTES + 1]{};
     uint8_t active_profile = 0;
 };
 
@@ -40,6 +42,17 @@ struct ProfileServiceSelectedSnapshot {
     ControllerIdentity identity{};
     uint8_t profile_index = 0;
     ControllerProfile profile{};
+};
+
+struct ProfileServiceMetadataSnapshot {
+    ProfileServiceMetadata metadata{};
+    bool valid = false;
+    ConfigurationTransactionStatus status =
+        ConfigurationTransactionStatus::kIdle;
+    ControllerIdentity identity{};
+    char alias[PROFILE_SERVICE_METADATA_MAX_BYTES + 1]{};
+    char profile_names[CONTROLLER_PROFILE_COUNT]
+                      [PROFILE_SERVICE_METADATA_MAX_BYTES + 1]{};
 };
 
 struct ProfileServiceActiveProfileSnapshot {
@@ -79,6 +92,9 @@ ConfigurationTransactionStatus profile_service_reset(
 ConfigurationTransactionStatus profile_service_activate(
     uint32_t transaction_id, const ControllerIdentity& identity,
     uint8_t profile_index);
+ConfigurationTransactionStatus profile_service_set_metadata(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t profile_index, const char* value, size_t value_size);
 // Queue a controller-originated activation without replacing the host-visible
 // transaction snapshot. transaction_id must be nonzero with its high bit set.
 ConfigurationTransactionStatus profile_service_activate_internal(
@@ -88,6 +104,8 @@ ConfigurationTransactionStatus profile_service_activate_internal(
 void profile_service_list_snapshot(ProfileServiceListSnapshot* output);
 void profile_service_selected_snapshot(
     ProfileServiceSelectedSnapshot* output);
+void profile_service_metadata_snapshot(
+    ProfileServiceMetadataSnapshot* output);
 void profile_service_transaction_snapshot(
     ProfileServiceTransactionSnapshot* output);
 uint32_t profile_service_database_generation();

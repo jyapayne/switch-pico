@@ -15,6 +15,18 @@ constexpr size_t PROFILE_STORAGE_SUPERBLOCK_SIZE = PROFILE_STORAGE_PAGE_SIZE;
 constexpr size_t PROFILE_STORAGE_RECORD_SIZE = 2 * PROFILE_STORAGE_PAGE_SIZE;
 constexpr size_t PROFILE_STORAGE_RECORDS_OFFSET = PROFILE_STORAGE_SECTOR_SIZE;
 constexpr uint32_t PROFILE_STORAGE_NO_RECORD = UINT32_MAX;
+constexpr uint8_t PROFILE_STORAGE_METADATA_MAX_BYTES = 31;
+constexpr size_t PROFILE_STORAGE_METADATA_PAYLOAD_SIZE =
+    PROFILE_STORAGE_METADATA_MAX_BYTES + 1;
+constexpr size_t PROFILE_STORAGE_MAX_LIVE_RECORDS =
+    (CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1) *
+    (CONTROLLER_PROFILE_COUNT + 3);
+constexpr size_t PROFILE_STORAGE_RECORD_CAPACITY =
+    (PROFILE_STORAGE_ARENA_SIZE - PROFILE_STORAGE_RECORDS_OFFSET) /
+    PROFILE_STORAGE_RECORD_SIZE;
+static_assert(PROFILE_STORAGE_MAX_LIVE_RECORDS <=
+              PROFILE_STORAGE_RECORD_CAPACITY,
+              "all live profile records must fit during compaction");
 
 // Layout of the retired v1/v2 whole-database store. The indexed catalog reads
 // this region once during migration; new firmware never writes it.
@@ -64,6 +76,10 @@ struct ProfileStorageIdentityIndex {
   uint32_t active_generation = 0;
   uint32_t profile_generation[CONTROLLER_PROFILE_COUNT]{};
   uint32_t profile_record[CONTROLLER_PROFILE_COUNT]{};
+  uint32_t alias_generation = 0;
+  uint32_t alias_record = PROFILE_STORAGE_NO_RECORD;
+  uint32_t profile_names_generation = 0;
+  uint32_t profile_names_record = PROFILE_STORAGE_NO_RECORD;
 };
 
 uint32_t profile_storage_crc32(const uint8_t *data, size_t size);
@@ -82,6 +98,18 @@ public:
                              uint8_t profile_index);
   ProfileStorageResult activate(const ControllerIdentity &identity,
                                 uint8_t profile_index);
+  ProfileStorageResult get_alias(
+      const ControllerIdentity &identity, char *output,
+      size_t output_size) const;
+  ProfileStorageResult set_alias(
+      const ControllerIdentity &identity, const char *value,
+      size_t value_size);
+  ProfileStorageResult get_profile_name(
+      const ControllerIdentity &identity, uint8_t profile_index,
+      char *output, size_t output_size) const;
+  ProfileStorageResult set_profile_name(
+      const ControllerIdentity &identity, uint8_t profile_index,
+      const char *value, size_t value_size);
 
   uint8_t identity_count() const;
   const ProfileStorageIdentityIndex *identity(uint8_t index) const;
@@ -95,6 +123,8 @@ private:
     kReset = 2,
     kResetAll = 3,
     kActivate = 4,
+    kAlias = 5,
+    kProfileNames = 6,
   };
 
   bool scan_arena(uint8_t arena, uint32_t *epoch, uint32_t *generation,
@@ -102,6 +132,8 @@ private:
                   ProfileStorageIdentityIndex *index,
                   uint8_t *identity_count) const;
   bool read_profile_record(uint32_t record, ControllerProfile *output) const;
+  bool read_metadata_record(uint32_t record, char *output,
+                            size_t output_size) const;
   ProfileStorageResult append(RecordType type,
                               const ControllerIdentity &identity,
                               uint8_t profile_index, const uint8_t *payload,

@@ -141,6 +141,16 @@ Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `
 
 The editor selects Switch Pro, DualSense, or Xbox artwork from the connected controller's USB VID/PID and places each remappable control directly over the matching physical button. Controller artwork is from [AL2009man/Gamepad-Asset-Pack](https://github.com/AL2009man/Gamepad-Asset-Pack) under its MIT license; the bundled license and source revision are recorded beside the assets.
 
+Profile names and controller aliases are stored as independently checksummed
+catalog metadata, so naming does not change the 256-byte profile format. The
+editor can rename and copy profiles across controllers and slots, import or
+export JSON backups, and reset one section without discarding the rest of the
+draft. Its response-curve cards provide named presets, exact Q8.8 fine
+adjustment, live curve markers, and one-click application to the opposite
+stick or trigger. Connected-controller details include transport, battery,
+and supported feedback/motion capabilities; **Identify** sends one bounded
+rumble/light pulse only to the selected live controller.
+
 `profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns eight persistent profiles and one active index. The JSON export/import commands remain available for version-controlled or scripted profiles. Profile numbers shown to users are `1` through `8`; `--identity` uses the zero-based index from `profiles list`.
 
 `pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses. `pairings clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
@@ -601,16 +611,16 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 683,128 bytes | 4 MiB |
+| Executable flash image | 695,592 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Linked SRAM | 97,600 bytes | 520 KiB |
+| Linked SRAM | 99,040 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 965,752 bytes (23.03%)
-of flash, leaving 3,228,552 bytes (3.08 MiB). Linked SRAM consumes 18.33%,
-leaving 434,880 bytes of link-time headroom.
+The executable plus persistent reservations consume 978,216 bytes (23.32%)
+of flash, leaving 3,216,088 bytes (3.07 MiB). Linked SRAM consumes 18.60%,
+leaving 433,440 bytes of link-time headroom.
 
 Profiles use two 128 KiB append-only arenas. Each independently published
 record contains one identity/profile key, generation, schema, length, and CRC.

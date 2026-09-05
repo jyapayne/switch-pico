@@ -14,6 +14,7 @@ ConfigurationServiceSnapshot current_configuration{};
 ProfileServiceListSnapshot current_profile_list{};
 ProfileServiceSelectedSnapshot current_profile_selected{};
 ProfileServiceTransactionSnapshot current_profile_transaction{};
+ProfileServiceMetadataSnapshot current_profile_metadata{};
 Bluepad32PlaytestSnapshot current_playtest[
     BLUEPAD32_INPUT_BACKEND_SLOT_COUNT]{};
 AdapterUsbMode current_active_mode = AdapterUsbMode::kSwitchProbe;
@@ -52,6 +53,11 @@ uint32_t profile_reset_transaction_id = 0;
 uint32_t profile_commit_transaction_id = 0;
 bool profile_activate_requested = false;
 uint32_t profile_activate_transaction_id = 0;
+bool profile_metadata_requested = false;
+uint32_t profile_metadata_transaction_id = 0;
+uint8_t profile_metadata_index = 0;
+std::string profile_metadata_value;
+bool identify_requested = false;
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -454,12 +460,12 @@ void test_profile_vendor_requests() {
         Operation::kProfileList, TUSB_DIR_IN, kMaximumResponseSize);
     require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
-                control_payload.size() == kResponseHeaderSize + 33 &&
+                control_payload.size() == kResponseHeaderSize + 97 &&
                 control_payload[5] ==
                     static_cast<uint8_t>(Operation::kProfileList) &&
                 control_payload[10] == CONTROLLER_PROFILE_SCHEMA_VERSION &&
                 control_payload[kResponseHeaderSize] == 2 &&
-                control_payload[kResponseHeaderSize + 31] == 2,
+                control_payload[kResponseHeaderSize + 63] == 2,
             "profile list response was not encoded");
 
     current_profile_selected = {};
@@ -502,6 +508,8 @@ void test_profile_vendor_requests() {
     current_playtest[2].state.right_stick_y = INT16_MAX;
     current_playtest[2].state.left_trigger = 123;
     current_playtest[2].state.right_trigger = 65000;
+    current_playtest[2].battery = 201;
+    current_playtest[2].capabilities = 0x0f;
     current_playtest[2].state.motion_sample_count = 1;
     current_playtest[2].state.motion_samples[0] =
         {1, -2, 3, -4, 5, -6};
@@ -531,7 +539,9 @@ void test_profile_vendor_requests() {
                 read_u16(control_payload, kResponseHeaderSize + 36) ==
                     65000 &&
                 static_cast<int16_t>(read_u16(
-                    control_payload, kResponseHeaderSize + 50)) == -6,
+                    control_payload, kResponseHeaderSize + 52)) == -6 &&
+                control_payload[kResponseHeaderSize + 39] == 201 &&
+                control_payload[kResponseHeaderSize + 40] == 0x0f,
             "profile playtest response lost live controller state");
     current_playtest[2].active = false;
     require(usb_configuration_management_vendor_control(
@@ -539,6 +549,52 @@ void test_profile_vendor_requests() {
                 control_payload[kResponseHeaderSize] == 0 &&
                 control_payload[kResponseHeaderSize + 1] == 0xff,
             "disconnected profile playtest was not encoded");
+    current_profile_metadata = {};
+    current_profile_metadata.metadata.state = ProfileServiceState::kReady;
+    current_profile_metadata.metadata.generation = 10;
+    current_profile_metadata.status =
+        ConfigurationTransactionStatus::kCommitted;
+    current_profile_metadata.valid = true;
+    memcpy(current_profile_metadata.alias, "Desk pad", 9);
+    memcpy(current_profile_metadata.profile_names[7], "Desktop", 8);
+    request = setup_request(
+        Operation::kProfileMetadataRead, TUSB_DIR_IN,
+        kMaximumResponseSize);
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload.size() ==
+                    kResponseHeaderSize + kProfileMetadataPayloadSize &&
+                control_payload[kResponseHeaderSize] == 8 &&
+                memcmp(&control_payload[kResponseHeaderSize + 1],
+                       "Desk pad", 8) == 0 &&
+                control_payload[
+                    kResponseHeaderSize +
+                    8 * (PROFILE_SERVICE_METADATA_MAX_BYTES + 1)] == 7,
+            "profile metadata response was not encoded");
+
+    std::vector<uint8_t> metadata(27);
+    write_u32(&metadata, 0, 0x12345678);
+    require(controller_identity_encode(
+                expected_identity, &metadata[4],
+                CONTROLLER_IDENTITY_ENCODED_SIZE),
+            "metadata identity did not encode");
+    metadata[18] = 7;
+    metadata[19] = 7;
+    memcpy(&metadata[20], "Desktop", 7);
+    perform_out(Operation::kProfileMetadataSet, metadata);
+    require(profile_metadata_requested &&
+                profile_metadata_transaction_id == 0x12345678 &&
+                profile_metadata_index == 7 &&
+                profile_metadata_value == "Desktop",
+            "profile metadata mutation was not dispatched");
+
+    std::vector<uint8_t> identify(CONTROLLER_IDENTITY_ENCODED_SIZE);
+    require(controller_identity_encode(
+                expected_identity, identify.data(), identify.size()),
+            "identify identity did not encode");
+    perform_out(Operation::kProfileIdentify, identify);
+    require(identify_requested,
+            "controller Identify request was not dispatched");
 
     current_profile_transaction = {};
     current_profile_transaction.metadata.state =
@@ -735,6 +791,17 @@ ConfigurationTransactionStatus profile_service_select(
     return ConfigurationTransactionStatus::kPending;
 }
 
+ConfigurationTransactionStatus profile_service_set_metadata(
+    uint32_t transaction_id, const ControllerIdentity& identity,
+    uint8_t selected_profile, const char* value, size_t value_size) {
+    profile_metadata_requested = true;
+    profile_metadata_transaction_id = transaction_id;
+    profile_identity = identity;
+    profile_metadata_index = selected_profile;
+    profile_metadata_value.assign(value, value + value_size);
+    return ConfigurationTransactionStatus::kPending;
+}
+
 ConfigurationTransactionStatus profile_service_begin(
     uint32_t transaction_id, const ControllerIdentity& identity,
     uint8_t selected_profile, uint16_t schema_version,
@@ -761,6 +828,17 @@ ConfigurationTransactionStatus profile_service_commit(
     uint32_t transaction_id) {
     profile_commit_transaction_id = transaction_id;
     return ConfigurationTransactionStatus::kPending;
+}
+
+void profile_service_metadata_snapshot(
+    ProfileServiceMetadataSnapshot* output) {
+    *output = current_profile_metadata;
+}
+
+bool bluepad32_input_backend_identify(
+    const ControllerIdentity&) {
+    identify_requested = true;
+    return true;
 }
 
 ConfigurationTransactionStatus profile_service_reset(

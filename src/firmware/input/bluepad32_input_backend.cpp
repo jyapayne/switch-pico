@@ -1906,6 +1906,14 @@ void bluepad32_input_backend_playtest_snapshot(
     out->identity = slot.identity;
     out->physical_button_mask = slot.pre_hotkey_button_mask;
     out->state = slot.state;
+    if (slot.device != nullptr) {
+        out->battery = slot.device->controller.battery;
+        out->capabilities =
+            (slot.device->report_parser.play_dual_rumble != nullptr ? 1u : 0u) |
+            (slot.device->report_parser.set_lightbar_color != nullptr ? 2u : 0u) |
+            (slot.device->report_parser.set_player_leds != nullptr ? 4u : 0u) |
+            (slot.state.motion_sample_count != 0 ? 8u : 0u);
+    }
     critical_section_exit(&g_state_lock);
 }
 
@@ -1970,6 +1978,37 @@ void bluepad32_input_backend_queue_rumble(
         }
     }
     critical_section_exit(&g_state_lock);
+}
+
+bool bluepad32_input_backend_identify(
+    const ControllerIdentity& identity) {
+    if (!g_initialized || !identity.stable ||
+        controller_identity_is_global(identity)) {
+        return false;
+    }
+    bool queued = false;
+    critical_section_enter_blocking(&g_state_lock);
+    for (BackendSlot& slot : g_slots) {
+        if (!slot.active ||
+            !controller_identity_equal(slot.identity, identity)) {
+            continue;
+        }
+        const ProfileFeedbackEnvelope feedback{
+            slot.connection_generation, 1,
+            ControllerProfileConfirmationPolicy::kRumbleAndLed};
+        if (slot.pending_profile_feedback_count <
+            kProfileFeedbackQueueCapacity) {
+            slot.pending_profile_feedback[
+                slot.pending_profile_feedback_count++] = feedback;
+        } else {
+            slot.pending_profile_feedback[
+                kProfileFeedbackQueueCapacity - 1u] = feedback;
+        }
+        queued = true;
+        break;
+    }
+    critical_section_exit(&g_state_lock);
+    return queued;
 }
 
 void bluepad32_input_backend_queue_profile_feedback(

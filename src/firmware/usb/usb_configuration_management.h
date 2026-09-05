@@ -18,16 +18,22 @@ constexpr size_t kRequestHeaderSize = 16;
 constexpr size_t kResponseHeaderSize = 20;
 constexpr size_t kPairingRecordSize = 8;
 constexpr size_t kPairingPayloadHeaderSize = 4;
-constexpr size_t kMaximumRequestSize = 64;
+constexpr size_t kMaximumRequestSize = 80;
+constexpr size_t kProfileListRowSize =
+    16 + PROFILE_SERVICE_METADATA_MAX_BYTES + 1;
 constexpr size_t kProfileListPayloadSize =
-    1 + PROFILE_SERVICE_LIST_CAPACITY * 16;
-constexpr uint16_t kProfilePlaytestSchemaVersion = 1;
-constexpr size_t kProfilePlaytestPayloadSize = 52;
+    1 + PROFILE_SERVICE_LIST_CAPACITY * kProfileListRowSize;
+constexpr uint16_t kProfilePlaytestSchemaVersion = 2;
+constexpr size_t kProfilePlaytestPayloadSize = 54;
+constexpr size_t kProfileMetadataPayloadSize =
+    (CONTROLLER_PROFILE_COUNT + 1) *
+    (PROFILE_SERVICE_METADATA_MAX_BYTES + 1);
+constexpr uint16_t kProfileMetadataSchemaVersion = 1;
 constexpr size_t kMaximumResponseSize =
     kResponseHeaderSize + kProfileListPayloadSize;
 constexpr size_t kMaximumChunkSize =
     kMaximumRequestSize - kRequestHeaderSize - 8;
-static_assert(kMaximumResponseSize == 293,
+static_assert(kMaximumResponseSize == 837,
               "profile list no longer fits the EP0 response buffer");
 
 enum class Operation : uint8_t {
@@ -55,6 +61,9 @@ enum class Operation : uint8_t {
     kProfileActivate = 0x37,
     kProfileTransactionStatus = 0x38,
     kProfilePlaytest = 0x39,
+    kProfileMetadataRead = 0x3a,
+    kProfileMetadataSet = 0x3b,
+    kProfileIdentify = 0x3c,
 };
 
 enum class Status : uint8_t {
@@ -92,6 +101,9 @@ size_t encode_profile_playtest(
     uint8_t* output, size_t output_size);
 size_t encode_profile_transaction(
     const ProfileServiceTransactionSnapshot& snapshot,
+    uint8_t* output, size_t output_size);
+size_t encode_profile_metadata(
+    const ProfileServiceMetadataSnapshot& snapshot,
     uint8_t* output, size_t output_size);
 
 }  // namespace UsbConfigurationManagement

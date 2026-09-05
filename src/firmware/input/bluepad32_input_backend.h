@@ -70,6 +70,8 @@ struct Bluepad32PlaytestSnapshot {
     uint32_t state_generation = 0;
     ControllerIdentity identity{};
     uint16_t physical_button_mask = 0;
+    uint8_t battery = 0;
+    uint8_t capabilities = 0;
     ControllerState state{};
 };
 
@@ -111,6 +113,8 @@ bool bluepad32_input_backend_toggle_motion(
     uint8_t slot, uint32_t connection_generation);
 void bluepad32_input_backend_queue_rumble(
     uint8_t slot, const ControllerRumbleOutput& rumble);
+bool bluepad32_input_backend_identify(
+    const ControllerIdentity& identity);
 // Enqueue bounded local profile confirmation for the matching live connection
 // generation. The two-entry per-slot FIFO preserves initial-then-switch
 // ordering. Profile lighting is transient and restored to the steady slot

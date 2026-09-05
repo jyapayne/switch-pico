@@ -188,6 +188,10 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
         ]
         assert playtest["left_stick"] == {"x": -1234, "y": 2345}
         assert playtest["triggers"] == {"left": 123, "right": 65000}
+        assert playtest["battery"] == 100
+        assert playtest["capabilities"] == [
+            "rumble", "lightbar", "player_leds", "motion"
+        ]
 
         status, selected = request_json(f"{base_url}/api/profiles/1/8")
         assert status == 200
@@ -209,6 +213,53 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
             == custom_profile()
         )
         assert device.profile_chunk_sizes == [40, 40, 40, 40, 40, 40, 16]
+        status, renamed = request_json(
+            f"{base_url}/api/profiles/1/8/name",
+            method="PUT",
+            value={"value": "Desktop"},
+            token=token,
+        )
+        assert status == 200
+        assert renamed["stored_generation"] == 9
+        assert device.profile_names[
+            (device.stable_identity.to_bytes(), 7)
+        ] == "Desktop"
+
+        status, aliased = request_json(
+            f"{base_url}/api/identities/1/alias",
+            method="PUT",
+            value={"value": "Desk pad"},
+            token=token,
+        )
+        assert status == 200
+        assert aliased["label"] == "Desk pad"
+
+        status, identified = request_json(
+            f"{base_url}/api/identities/1/identify",
+            method="POST",
+            token=token,
+        )
+        assert status == 200
+        assert identified == {"identified": True}
+        assert device.identified_identities == [
+            device.stable_identity.to_bytes()
+        ]
+
+        status, copied = request_json(
+            f"{base_url}/api/profiles/1/8/copy",
+            method="POST",
+            value={"identity_index": 1, "profile_number": 4},
+            token=token,
+        )
+        assert status == 200
+        assert copied["stored_generation"] == 12
+        assert device.profiles[
+            (device.stable_identity.to_bytes(), 3)
+        ] == custom_profile().to_bytes()
+        assert device.profile_names[
+            (device.stable_identity.to_bytes(), 3)
+        ] == "Desktop"
+
 
         status, activated = request_json(
             f"{base_url}/api/profiles/1/8/activate",
@@ -217,7 +268,7 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
         )
 
     assert status == 200
-    assert activated["stored_generation"] == 9
+    assert activated["stored_generation"] == 13
     assert device.active_profiles[device.stable_identity.to_bytes()] == 7
 
 

@@ -9,11 +9,15 @@ namespace {
 
 constexpr uint32_t kMinimumCommitIntervalMs = 1000;
 constexpr uint32_t kInternalTransactionIdMask = 0x80000000u;
+static_assert(PROFILE_SERVICE_METADATA_MAX_BYTES ==
+              PROFILE_STORAGE_METADATA_MAX_BYTES);
 
 enum class PendingCommandType : uint8_t {
   kNone = 0,
   kReset = 1,
   kActivate = 2,
+  kSetAlias = 3,
+  kSetProfileName = 4,
 };
 
 struct PendingCommand {
@@ -21,6 +25,8 @@ struct PendingCommand {
   uint32_t transaction_id = 0;
   ControllerIdentity identity{};
   uint8_t profile_index = 0;
+  uint8_t value_size = 0;
+  char value[PROFILE_SERVICE_METADATA_MAX_BYTES]{};
 };
 
 struct ProfileTransaction {
@@ -68,6 +74,11 @@ void refresh_list_locked() {
       continue;
     }
     ProfileServiceListRow &row = g_list.rows[g_list.count++];
+    if (g_storage.get_alias(
+            entry->identity, row.alias,
+            sizeof(row.alias)) != ProfileStorageResult::kOk) {
+      row.alias[0] = '\0';
+    }
     row.identity = entry->identity;
     row.active_profile = entry->active_profile;
   }
@@ -268,8 +279,14 @@ void profile_service_task_on_storage_core(uint32_t now_ms) {
   } else if (command.type == PendingCommandType::kActivate) {
     storage_result =
         g_storage.activate(command.identity, command.profile_index);
+  } else if (command.type == PendingCommandType::kSetAlias) {
+    storage_result = g_storage.set_alias(
+        command.identity, command.value, command.value_size);
+  } else if (command.type == PendingCommandType::kSetProfileName) {
+    storage_result = g_storage.set_profile_name(
+        command.identity, command.profile_index,
+        command.value, command.value_size);
   }
-
   const ConfigurationTransactionStatus status =
       storage_result_status(storage_result);
   if (status == ConfigurationTransactionStatus::kCommitted) {
@@ -495,6 +512,58 @@ profile_service_activate(uint32_t transaction_id,
   return ConfigurationTransactionStatus::kPending;
 }
 
+ConfigurationTransactionStatus profile_service_set_metadata(
+    uint32_t transaction_id, const ControllerIdentity &identity,
+    uint8_t profile_index, const char *value, size_t value_size) {
+  if (!g_prepared) {
+    profile_service_prepare();
+  }
+  critical_section_enter_blocking(&g_lock);
+  if (g_command.type != PendingCommandType::kNone ||
+      g_internal_activation.type != PendingCommandType::kNone ||
+      g_transaction.snapshot.status ==
+          ConfigurationTransactionStatus::kReceiving ||
+      g_transaction.snapshot.status ==
+          ConfigurationTransactionStatus::kPending) {
+    critical_section_exit(&g_lock);
+    return ConfigurationTransactionStatus::kBusy;
+  }
+  g_transaction = {};
+  g_transaction.snapshot.transaction_id = transaction_id;
+  g_transaction.identity = identity;
+  g_transaction.profile_index = profile_index;
+  bool malformed =
+      transaction_id == 0 ||
+      (transaction_id & kInternalTransactionIdMask) != 0 ||
+      !valid_identity(identity) ||
+      (profile_index != CONTROLLER_PROFILE_ALL &&
+       profile_index >= CONTROLLER_PROFILE_COUNT) ||
+      value_size > PROFILE_SERVICE_METADATA_MAX_BYTES ||
+      (value_size != 0 && value == nullptr);
+  for (size_t index = 0; index < value_size && !malformed; ++index) {
+    malformed = value[index] == '\0';
+  }
+  if (malformed) {
+    g_transaction.snapshot.status =
+        ConfigurationTransactionStatus::kMalformed;
+    critical_section_exit(&g_lock);
+    return ConfigurationTransactionStatus::kMalformed;
+  }
+  g_transaction.snapshot.status = ConfigurationTransactionStatus::kPending;
+  g_command.transaction_id = transaction_id;
+  g_command.type = profile_index == CONTROLLER_PROFILE_ALL
+                       ? PendingCommandType::kSetAlias
+                       : PendingCommandType::kSetProfileName;
+  g_command.identity = identity;
+  g_command.profile_index = profile_index;
+  g_command.value_size = static_cast<uint8_t>(value_size);
+  if (value_size != 0) {
+    memcpy(g_command.value, value, value_size);
+  }
+  critical_section_exit(&g_lock);
+  return ConfigurationTransactionStatus::kPending;
+}
+
 ConfigurationTransactionStatus
 profile_service_activate_internal(uint32_t transaction_id,
                                   const ControllerIdentity &identity,
@@ -540,6 +609,37 @@ void profile_service_selected_snapshot(ProfileServiceSelectedSnapshot *output) {
   }
   critical_section_enter_blocking(&g_lock);
   *output = g_selected;
+  critical_section_exit(&g_lock);
+}
+
+void profile_service_metadata_snapshot(
+    ProfileServiceMetadataSnapshot *output) {
+  if (output == nullptr) {
+    return;
+  }
+  *output = {};
+  critical_section_enter_blocking(&g_lock);
+  output->metadata = g_metadata;
+  output->identity = g_selected.identity;
+  output->status = g_selected.status;
+  bool valid =
+      g_metadata.state == ProfileServiceState::kReady &&
+      g_storage.get_alias(
+          g_selected.identity, output->alias,
+          sizeof(output->alias)) == ProfileStorageResult::kOk;
+  for (uint8_t profile = 0;
+       profile < CONTROLLER_PROFILE_COUNT && valid; ++profile) {
+    valid = g_storage.get_profile_name(
+                g_selected.identity, profile,
+                output->profile_names[profile],
+                sizeof(output->profile_names[profile])) ==
+            ProfileStorageResult::kOk;
+  }
+  output->valid = valid;
+  if (!valid && output->status ==
+                    ConfigurationTransactionStatus::kCommitted) {
+    output->status = ConfigurationTransactionStatus::kStorageError;
+  }
   critical_section_exit(&g_lock);
 }
 

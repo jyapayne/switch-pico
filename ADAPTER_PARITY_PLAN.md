@@ -585,10 +585,10 @@ Storage design:
 - decode only the fallback and active profile for each observed identity
 - keep report-path profile access allocation-free with bounded snapshots
 
-The completed AIO image uses 683,128 bytes of 4 MiB flash and reserves 256
+The completed AIO image uses 695,592 bytes of 4 MiB flash and reserves 256
 KiB for the two profile arenas. Total flash use plus configuration, bonds,
-and the RP2350 terminal sector is 965,752 bytes (23.03%). Linked SRAM is
-97,600 of 532,480 bytes; the profile catalog index is 1,556 bytes.
+and the RP2350 terminal sector is 978,216 bytes (23.32%). Linked SRAM is
+99,040 of 532,480 bytes; the profile catalog index is 1,828 bytes.
 
 Acceptance:
 
@@ -612,6 +612,78 @@ Completion evidence:
 - all 109 tests pass; UART, AIO, and feasibility firmware build
 - the browser editor renders and selects all eight slots
 - Pico 2 W hardware read and activated profile 8, then restored profile 1
+
+### Candidate profile and Profile Studio enhancements — Set A complete
+
+The live playtest, eight-slot catalog, controller-native labels, automatic
+active-profile synchronization, and all Set A usability work are complete.
+Set B and Set C remain candidates; their order reflects user value and
+dependency, not a commitment to implement every item.
+
+| Priority | Candidate | Intended scope | Dependency or principal risk |
+|---|---|---|---|
+| A1 — Complete | Named and copyable profiles | Store a short profile name; rename, duplicate to another slot or controller, expose JSON import/export in the browser, and reset one section without replacing the entire profile. Names use catalog metadata records, so the 256-byte input profile remains stable. | Implemented with atomic metadata records and existing profile transactions; no report-path cost. |
+| A2 — Complete | Visual response-curve editor | Replace raw `curve_q8_8` as the primary control with a graph, named presets, fine adjustment, live raw/output markers, and “apply to other side” for sticks or triggers. Retain the exact fixed-point value as the wire representation. | Implemented entirely in Profile Studio; existing profiles round-trip unchanged. |
+| A3 — Complete | Controller aliases and Identify action | Allow names such as “Living-room DualSense”; show battery, transport, and capabilities as secondary details; provide an Identify button that briefly rumbles or lights only the selected live controller. | Implemented with catalog alias records, capability-gated live telemetry, and a bounded non-persistent Identify command. |
+| B1 | Direct profile shortcuts | Assign a modifier plus face button or D-pad direction to select profiles 1–8 directly while retaining the existing cycle chord. Publish feedback only after the activation record commits. | Profile schema/runtime change; chord precedence and consumption must remain deterministic. |
+| B2 | One Shift layer per profile | While a configured modifier is held or toggled, apply one alternate button map over the base profile. Start with buttons only; do not layer analog transforms, Turbo, or macros initially. | Profile schema change and explicit precedence between base mapping, Shift, Turbo, and macros. |
+| B3 | Macro authoring tools | Record live controller input, insert, duplicate, remove, and drag-reorder steps; preview playback; show time and sparse-byte cost on every edit. Later add once, while-held, toggle, and bounded-repeat playback modes. | Editing tools fit the current format; new playback modes require schema/runtime work and must remain within the shared 16-step/136-byte budget. |
+| B4 | Configurable Turbo and finite Burst | Add a bounded repeat rate, duty cycle, and finite Burst count while retaining hold Turbo and Auto Burst. Support shared defaults with optional per-button overrides rather than duplicating full settings sixteen times. | Profile schema/runtime change; scheduling must preserve the existing deterministic phase accumulator. |
+| C1 | Motion calibration and tuning | Expose live gyro/accelerometer values, bias calibration, axis orientation/inversion, sensitivity, drift threshold, smoothing, and hold/toggle activation. Preserve native Switch motion units rather than introducing gyro-to-stick emulation first. | Controller-specific validation and physical motion testing; filters must not add report latency. |
+| C2 | Feedback preview and profile lighting | Add non-persistent weak/strong rumble tests, profile-switch preview, and player LED/lightbar preview. Optionally persist an RGB profile color where the controller supports it. | New bounded management command; unsupported output capabilities must be visibly disabled. |
+
+Set A completion evidence:
+
+- profile names and controller aliases survive catalog reload, interrupted
+  writes, and arena compaction without changing the 256-byte profile schema
+- profiles copy across identities and slots through existing validated atomic
+  transactions; browser JSON import/export and per-section resets operate on
+  unsaved drafts
+- four response-curve graphs expose named presets, exact Q8.8 fine adjustment,
+  live curve markers, and one-click linked-side application
+- live controller details expose transport, normalized battery percentage, and
+  rumble/lightbar/player-LED/motion capabilities
+- Identify queues one bounded feedback pulse only for the matching live stable
+  identity
+
+Recommended delivery order:
+
+1. A1 profile metadata, duplication, and browser backup controls.
+2. A2 curve visualization and linked-side editing.
+3. A3 controller aliases, battery/capability details, and Identify.
+4. B1 direct profile shortcuts.
+5. B3 macro recording and editing before adding new playback semantics.
+6. B2 one bounded Shift layer.
+7. B4 configurable Turbo and finite Burst.
+8. C1 motion calibration.
+9. C2 feedback preview and custom lighting.
+
+Design constraints:
+
+- Do not add automatic per-game switching on console paths; the Pico cannot
+  reliably observe the active game.
+- Do not add arbitrary scripts or an unbounded stack of action layers.
+- Keep every report-path operation allocation-free and bounded.
+- Keep live telemetry read-only, non-overlapping, and paused while the editor
+  is hidden.
+- Preserve unsaved drafts across metadata refreshes and transient USB
+  disconnects.
+- Gate every controller-specific input or output by reported capabilities.
+- Add a new profile schema only when persistent runtime behavior changes;
+  UI-only presets and catalog metadata must not churn the profile wire format.
+
+Research basis:
+
+- 8BitDo Ultimate Software: mapping, stick/trigger tuning, vibration, macros,
+  profiles, and Turbo/Burst modes — https://support.8bitdo.com/ultimate/pro2.html
+- DualSense Edge profiles: names, copies, direct shortcuts, curve presets,
+  linked trigger settings, and live playtest —
+  https://www.playstation.com/en-us/support/hardware/set-up-edge-controller/
+- Steam Input action-set layers: temporary mapping overlays and precedence
+  risks —
+  https://partner.steamgames.com/doc/features/steam_controller/action_set_layers
+- Xbox Elite Shift: modifier-driven alternate mappings —
+  https://support.xbox.com/en-US/help/hardware-network/controller/shift-elite-series-2
 
 ### Phase 8 — Performance and release qualification
 

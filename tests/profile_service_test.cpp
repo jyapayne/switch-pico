@@ -188,14 +188,46 @@ void test_eight_profile_transactions_and_active_cache() {
               active.profile.strong_rumble_scale == UINT8_MAX,
           "reset-all did not restore defaults and activation");
 
+  require(profile_service_set_metadata(
+              5, connected, CONTROLLER_PROFILE_ALL,
+              "Desk pad", 8) ==
+              ConfigurationTransactionStatus::kPending,
+          "controller alias was not queued");
+  profile_service_task_on_storage_core(6000);
+  require(transaction_snapshot().transaction.status ==
+              ConfigurationTransactionStatus::kCommitted,
+          "controller alias did not persist");
+  require(profile_service_set_metadata(
+              6, connected, 6, "Desktop", 7) ==
+              ConfigurationTransactionStatus::kPending,
+          "profile name was not queued");
+  profile_service_task_on_storage_core(7000);
+  require(profile_service_select(connected, 6) ==
+              ConfigurationTransactionStatus::kCommitted,
+          "named profile was not selected");
+  ProfileServiceMetadataSnapshot metadata{};
+  profile_service_metadata_snapshot(&metadata);
+  require(metadata.valid && strcmp(metadata.alias, "Desk pad") == 0 &&
+              strcmp(metadata.profile_names[6], "Desktop") == 0,
+          "profile metadata snapshot lost persisted values");
+
   ProfileStorage reloaded;
   ControllerProfile persisted{};
+  char stored_metadata[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
   require(
       reloaded.initialize(fake_io()) && reloaded.find(connected) != nullptr &&
           reloaded.find(connected)->active_profile == 6 &&
           reloaded.get(connected, 6, &persisted) == ProfileStorageResult::kOk &&
-          persisted.weak_rumble_scale == 61,
-      "service mutations did not survive catalog reload");
+          persisted.weak_rumble_scale == 61 &&
+          reloaded.get_alias(connected, stored_metadata,
+                             sizeof(stored_metadata)) ==
+              ProfileStorageResult::kOk &&
+          strcmp(stored_metadata, "Desk pad") == 0 &&
+          reloaded.get_profile_name(connected, 6, stored_metadata,
+                                    sizeof(stored_metadata)) ==
+              ProfileStorageResult::kOk &&
+          strcmp(stored_metadata, "Desktop") == 0,
+      "service mutations and metadata did not survive catalog reload");
 }
 
 void test_profile_bounds_and_transaction_namespace() {

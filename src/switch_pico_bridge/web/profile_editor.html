@@ -39,6 +39,15 @@
       <label class="field-label" for="identitySelect">Profile owner</label>
       <select id="identitySelect" class="select"></select>
       <p class="field-help">The default applies when a controller has no dedicated layout.</p>
+      <div class="identity-tools">
+        <label class="field-label" for="controllerAlias">Controller alias</label>
+        <input class="number-input" id="controllerAlias" maxlength="31" placeholder="Optional nickname">
+        <div class="identity-actions">
+          <button class="button button-secondary" id="saveAliasButton" type="button">Save alias</button>
+          <button class="button button-ghost" id="identifyButton" type="button">Identify</button>
+        </div>
+        <p class="controller-details" id="controllerDetails"></p>
+      </div>
 
       <div class="profile-list" id="profileList" aria-label="Profiles"></div>
 
@@ -57,8 +66,17 @@
             <span class="active-badge" id="activeBadge" hidden>Active</span>
             <span class="dirty-badge" id="dirtyBadge" hidden>Unsaved</span>
           </div>
+          <div class="profile-name-editor">
+            <label for="profileName">Profile name</label>
+            <input id="profileName" maxlength="31" placeholder="Optional name">
+            <button class="button button-secondary" id="saveProfileNameButton" type="button">Rename</button>
+          </div>
         </div>
         <div class="header-actions">
+          <button class="button button-ghost" id="copyProfileButton" type="button">Copy</button>
+          <button class="button button-ghost" id="exportProfileButton" type="button">Export</button>
+          <button class="button button-ghost" id="importProfileButton" type="button">Import</button>
+          <input id="importProfileFile" type="file" accept="application/json,.json" hidden>
           <button class="button button-ghost" id="resetDraftButton" type="button">Start from defaults</button>
           <button class="button button-secondary" id="activateButton" type="button">Make active</button>
           <button class="button button-primary" id="saveButton" type="button">Save to Pico</button>
@@ -85,7 +103,7 @@
               <p class="eyebrow">01 · Controls</p>
               <h3>Button mapping</h3>
             </div>
-            <p>Choose what each physical button should produce.</p>
+            <div class="panel-heading-actions"><p>Choose what each physical button should produce.</p><button class="section-reset" type="button" data-reset-section="mapping">Reset section</button></div>
           </div>
           <div class="controller-mapper">
             <div class="controller-canvas" id="controllerCanvas" data-style="generic">
@@ -149,7 +167,7 @@
               <p class="eyebrow">02 · Response</p>
               <h3>Sticks &amp; triggers</h3>
             </div>
-            <p>Values use the controller's normalized integer range.</p>
+            <div class="panel-heading-actions"><p>Values use the controller's normalized integer range.</p><button class="section-reset" type="button" data-reset-section="analog">Reset section</button></div>
           </div>
           <div class="playtest-panel" id="playtestPanel" data-state="waiting">
             <div class="playtest-heading">
@@ -231,7 +249,7 @@
               <p class="eyebrow">03 · Identity</p>
               <h3>Feedback</h3>
             </div>
-            <p>Scale rumble and choose profile-change confirmation.</p>
+            <div class="panel-heading-actions"><p>Scale rumble and choose profile-change confirmation.</p><button class="section-reset" type="button" data-reset-section="feedback">Reset section</button></div>
           </div>
           <div class="subpanel" id="rumbleFields"></div>
         </section>
@@ -242,7 +260,7 @@
               <p class="eyebrow">04 · Repeat</p>
               <h3>Turbo behavior</h3>
             </div>
-            <p>Off, hold-to-repeat, or press-once Auto Burst per button.</p>
+            <div class="panel-heading-actions"><p>Off, hold-to-repeat, or press-once Auto Burst per button.</p><button class="section-reset" type="button" data-reset-section="turbo">Reset section</button></div>
           </div>
           <div class="mapping-grid compact" id="turboFields"></div>
         </section>
@@ -253,6 +271,7 @@
               <p class="eyebrow">05 · Actions</p>
               <h3>Bindings &amp; custom macro</h3>
             </div>
+            <div class="panel-heading-actions"><button class="section-reset" type="button" data-reset-section="macro">Reset section</button></div>
           </div>
           <div class="builtin-actions" id="builtinActions"></div>
           <div class="macro-controls" id="macroControls"></div>
@@ -271,6 +290,20 @@
     </section>
   </main>
 
+  <dialog class="copy-dialog" id="copyDialog">
+    <form method="dialog">
+      <p class="eyebrow">Duplicate profile</p>
+      <h3>Choose a destination</h3>
+      <label class="field-label" for="copyIdentity">Controller</label>
+      <select class="select" id="copyIdentity"></select>
+      <label class="field-label" for="copySlot">Profile slot</label>
+      <select class="select" id="copySlot"></select>
+      <div class="dialog-actions">
+        <button class="button button-ghost" value="cancel">Cancel</button>
+        <button class="button button-primary" id="confirmCopyButton" value="default">Copy profile</button>
+      </div>
+    </form>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/playtest.js" defer></script>
   <script src="/app.js" defer></script>
