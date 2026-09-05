@@ -56,9 +56,13 @@
 #define MAX_NR_WHITELIST_ENTRIES 16
 #define MAX_NR_LE_DEVICE_DB_ENTRIES 16
 
-// Keep controller buffers and controller-to-host flow control enabled to avoid
-// overrunning the shared CYW43 bus.
+// Retain the normal firmware's conservative outgoing credit cap. The PCM
+// experiment uses the controller's advertised ACL capacity (8 on CYW43439);
+// BTstack still clamps to the real HCI Read Buffer Size response.
+#ifndef SWITCH_PICO_HAPTICS_EXPERIMENT
 #define MAX_NR_CONTROLLER_ACL_BUFFERS 3
+#endif
+// Incoming flow control remains enabled; do not overrun the shared CYW43 bus.
 #define MAX_NR_CONTROLLER_SCO_PACKETS 3
 #define ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL
 #define HCI_HOST_ACL_PACKET_LEN 1024

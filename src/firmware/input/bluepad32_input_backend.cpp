@@ -1,6 +1,9 @@
 #include "input/bluepad32_input_backend.h"
 #include "input/controller_hotkey_config.h"
 #include "input/switch2_wake.h"
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#include "input/haptics_experiment.h"
+#endif
 #include "configuration/configuration_service.h"
 #include "profile/profile_service.h"
 #include <limits.h>
@@ -1271,6 +1274,9 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     }
     const bool xinput_host_mode =
         host_rumble_duration_ms() == kXInputHostRumbleDurationMs;
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    haptics_experiment_poll();
+#endif
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         RumbleEnvelope envelope{};
@@ -1287,6 +1293,15 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 
         critical_section_enter_blocking(&g_state_lock);
         BackendSlot& slot = g_slots[slot_index];
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        if (haptics_experiment_owns(slot.device)) {
+            // The experiment owns all output on this connection while active.
+            // Keep the latest XInput state but don't replay stale Switch pulses.
+            slot.rumble_pending = false;
+            critical_section_exit(&g_state_lock);
+            continue;
+        }
+#endif
         if (slot.retained_host_rumble_valid &&
             (!xinput_host_mode ||
              slot.retained_host_rumble.duration_ms !=
@@ -1556,6 +1571,9 @@ void platform_on_device_connected(uni_hid_device_t* device) {
 }
 
 void platform_on_device_disconnected(uni_hid_device_t* device) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    haptics_experiment_detach(device);
+#endif
     const int slot_index = slot_for_device(device);
     if (slot_index < 0) {
         return;
@@ -1624,6 +1642,10 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         return UNI_ERROR_NO_SLOTS;
     }
     if (became_active) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        haptics_experiment_attach(
+            static_cast<uint8_t>(slot_index), lighting_generation, device);
+#endif
         if (lighting_target_is_current(
                 static_cast<uint8_t>(slot_index),
                 lighting_generation, device)) {
@@ -1733,6 +1755,13 @@ uni_platform* get_platform() {
 
 }  // namespace
 
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+extern "C" bool uni_platform_on_l2cap_can_send_now(
+        uni_hid_device_t* device, uint16_t cid) {
+    return haptics_experiment_on_can_send_now(device, cid);
+}
+#endif
+
 void bluepad32_input_backend_init() {
     if (g_initialized) {
         return;
@@ -1741,6 +1770,9 @@ void bluepad32_input_backend_init() {
     critical_section_init(&g_state_lock);
     configuration_service_prepare();
     profile_service_prepare();
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    haptics_experiment_prepare();
+#endif
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
         BackendSlot& slot = g_slots[slot_index];
         slot = {};

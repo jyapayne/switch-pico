@@ -5,6 +5,10 @@
 #include "adapter/adapter_host_probe.h"
 #include "adapter/adapter_reboot.h"
 #include "adapter/adapter_usb_mode.h"
+#include "input/haptics_experiment.h"
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#include "input/haptics_transport_probe.h"
+#endif
 #include "tusb.h"
 #include "usb/usb_output_driver.h"
 
@@ -110,6 +114,12 @@ bool valid_out_size(Operation operation, size_t size) {
         case Operation::kPairingRefresh:
         case Operation::kPairingClear:
             return size == kRequestHeaderSize;
+        case Operation::kHapticsExperiment:
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+            return size == kRequestHeaderSize + 2;
+#else
+            return false;
+#endif
         default:
             return false;
     }
@@ -188,6 +198,89 @@ size_t encode_runtime_diagnostics(uint8_t* output, size_t output_size) {
     return encode_response(Operation::kRuntimeDiagnostics, Status::kOk,
                            0, 0, 0, payload, sizeof(payload), output,
                            output_size);
+}
+
+size_t encode_haptics_experiment(uint8_t* output, size_t output_size) {
+    HapticsExperimentDiagnostics diagnostics{};
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    haptics_experiment_snapshot(&diagnostics);
+#else
+    diagnostics.state = HapticsExperimentState::kUnsupported;
+#endif
+    uint8_t payload[kHapticsExperimentPayloadSize]{};
+    write_u32(&payload[0], diagnostics.run_id);
+    write_u32(&payload[4], diagnostics.connection_generation);
+    write_u32(&payload[8], diagnostics.start_us);
+    write_u32(&payload[12], diagnostics.generated_packets);
+    write_u32(&payload[16], diagnostics.sent_packets);
+    write_u32(&payload[20], diagnostics.skipped_packets);
+    write_u32(&payload[24], diagnostics.send_failures);
+    write_u32(&payload[28], diagnostics.can_send_requests);
+    write_u32(&payload[32], diagnostics.synchronous_callbacks);
+    write_u32(&payload[36], diagnostics.max_generate_us);
+    write_u32(&payload[40], diagnostics.max_send_gap_us);
+    write_u32(&payload[44], diagnostics.max_lateness_us);
+    write_u32(&payload[48], diagnostics.max_request_wait_us);
+    write_u32(&payload[52], diagnostics.first_tone_due_us);
+    write_u32(&payload[56], diagnostics.first_tone_sent_us);
+    write_u32(&payload[60], diagnostics.last_sent_us);
+    write_u32(&payload[64], diagnostics.elapsed_us);
+    payload[68] = static_cast<uint8_t>(diagnostics.state);
+    payload[69] = diagnostics.slot;
+    payload[70] = diagnostics.last_error;
+    return encode_response(
+        Operation::kHapticsExperiment, Status::kOk, 0,
+        kHapticsExperimentSchemaVersion, diagnostics.run_id,
+        payload, sizeof(payload), output, output_size);
+}
+
+size_t encode_haptics_transport_probe(uint8_t* output, size_t output_size) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    HapticsTransportProbe probe{};
+    haptics_transport_probe_snapshot(&probe);
+    uint8_t payload[kHapticsTransportProbePayloadSize]{};
+    write_u32(&payload[0], probe.run_id);
+    write_u32(&payload[4], probe.connection_generation);
+    write_u32(&payload[8], probe.connection_handle);
+    write_u32(&payload[12], probe.timer_wakes);
+    write_u32(&payload[16], probe.max_timer_lateness_us);
+    write_u32(&payload[20], probe.total_timer_lateness_us);
+    write_u32(&payload[24], probe.send_calls);
+    write_u32(&payload[28], probe.max_send_us);
+    write_u32(&payload[32], probe.total_send_us);
+    write_u32(&payload[36], probe.write_calls);
+    write_u32(&payload[40], probe.max_write_us);
+    write_u32(&payload[44], probe.total_write_us);
+    write_u32(&payload[48], probe.read_calls);
+    write_u32(&payload[52], probe.read_packets);
+    write_u32(&payload[56], probe.max_read_us);
+    write_u32(&payload[60], probe.total_read_us);
+    write_u32(&payload[64], probe.poll_calls);
+    write_u32(&payload[68], probe.max_poll_us);
+    write_u32(&payload[72], probe.total_poll_us);
+    write_u32(&payload[76], probe.completion_events);
+    write_u32(&payload[80], probe.completed_packets);
+    write_u32(&payload[84], probe.max_completion_gap_us);
+    write_u32(&payload[88], probe.max_outstanding_acl);
+    write_u32(&payload[92], probe.min_free_acl);
+    write_u32(&payload[96], probe.first_tone_send_return_us);
+    write_u32(&payload[100], probe.active);
+    write_u32(&payload[104], probe.max_permission_wait_us);
+    write_u32(&payload[108], probe.total_permission_wait_us);
+    write_u32(&payload[112], probe.permission_callbacks);
+    write_u32(&payload[116], probe.max_poll_gap_us);
+    write_u32(&payload[120], probe.controller_acl_packet_bytes);
+    write_u32(&payload[124], probe.controller_acl_packet_count);
+    return encode_response(
+        Operation::kHapticsTransportProbe, Status::kOk, 0,
+        kHapticsTransportProbeSchemaVersion, probe.run_id,
+        payload, sizeof(payload), output, output_size);
+#else
+    return encode_response(
+        Operation::kHapticsTransportProbe, Status::kUnsupportedSchema, 0,
+        kHapticsTransportProbeSchemaVersion, 0,
+        nullptr, 0, output, output_size);
+#endif
 }
 
 }  // namespace
@@ -438,6 +531,7 @@ uint8_t g_request_buffer[
 UsbConfigurationManagement::Operation g_pending_operation =
     UsbConfigurationManagement::Operation::kInfo;
 bool g_out_pending = false;
+bool g_out_processed = false;
 size_t g_pending_request_size = 0;
 
 bool process_out_request() {
@@ -665,6 +759,17 @@ bool process_out_request() {
         case Operation::kPairingClear:
             bluepad32_input_backend_clear_pairings();
             return true;
+        case Operation::kHapticsExperiment:
+            if (request.payload_size != 2 ||
+                payload[0] > 1 ||
+                payload[1] >= BLUEPAD32_INPUT_BACKEND_SLOT_COUNT) {
+                return false;
+            }
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+            return haptics_experiment_request(payload[0], payload[1]);
+#else
+            return false;
+#endif
         default:
             return false;
     }
@@ -675,6 +780,11 @@ bool process_out_request() {
 bool usb_configuration_management_vendor_control(
     uint8_t rhport, uint8_t stage,
     tusb_control_request_t const* request) {
+    if (stage == CONTROL_STAGE_SETUP) {
+        g_out_pending = false;
+        g_out_processed = false;
+        g_pending_request_size = 0;
+    }
     if (adapter_host_probe_vendor_control(rhport, stage, request)) {
         return true;
     }
@@ -689,6 +799,10 @@ bool usb_configuration_management_vendor_control(
 
     const Operation operation =
         static_cast<Operation>(request->bRequest);
+    if (operation == Operation::kHapticsTransportProbe &&
+        request->bmRequestType_bit.direction != TUSB_DIR_IN) {
+        return false;
+    }
     if (stage == CONTROL_STAGE_ACK) {
         if (request->bmRequestType_bit.direction == TUSB_DIR_IN) {
             return true;
@@ -697,9 +811,22 @@ bool usb_configuration_management_vendor_control(
             return false;
         }
         g_out_pending = false;
+        if (operation == Operation::kHapticsExperiment) {
+            return g_out_processed;
+        }
         return process_out_request();
     }
     if (stage == CONTROL_STAGE_DATA) {
+        if (operation == Operation::kHapticsExperiment &&
+            request->bmRequestType_bit.direction == TUSB_DIR_OUT) {
+            if (!g_out_pending || operation != g_pending_operation ||
+                g_out_processed) {
+                return false;
+            }
+            // Reject before the USB status ACK, and never enqueue twice.
+            g_out_processed = process_out_request();
+            return g_out_processed;
+        }
         return true;
     }
     if (stage != CONTROL_STAGE_SETUP) {
@@ -713,6 +840,7 @@ bool usb_configuration_management_vendor_control(
         g_pending_operation = operation;
         g_pending_request_size = request->wLength;
         g_out_pending = true;
+        g_out_processed = false;
         return tud_control_xfer(rhport, request, g_request_buffer,
                                 request->wLength);
     }
@@ -741,6 +869,14 @@ bool usb_configuration_management_vendor_control(
         case Operation::kRuntimeDiagnostics:
             response_size =
                 encode_runtime_diagnostics(response, sizeof(response));
+            break;
+        case Operation::kHapticsExperiment:
+            response_size =
+                encode_haptics_experiment(response, sizeof(response));
+            break;
+        case Operation::kHapticsTransportProbe:
+            response_size =
+                encode_haptics_transport_probe(response, sizeof(response));
             break;
         case Operation::kProfileList: {
             ProfileServiceListSnapshot snapshot{};

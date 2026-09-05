@@ -400,6 +400,8 @@ def build(
             "-DPICO_BOARD=pico",
             "-DSWITCH_PICO_INPUT_BACKEND=UART",
         ]
+    # Experimental images are built explicitly in their own CMake directory.
+    definitions.append("-DSWITCH_PICO_HAPTICS_EXPERIMENT=OFF")
 
     run_cmd(
         [

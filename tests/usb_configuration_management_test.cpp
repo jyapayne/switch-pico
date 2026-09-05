@@ -6,6 +6,10 @@
 
 #include <tusb.h>
 #include "usb/usb_output_driver.h"
+#include "input/haptics_experiment.h"
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#include "input/haptics_transport_probe.h"
+#endif
 
 namespace {
 
@@ -58,6 +62,11 @@ uint32_t profile_metadata_transaction_id = 0;
 uint8_t profile_metadata_index = 0;
 std::string profile_metadata_value;
 bool identify_requested = false;
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+HapticsExperimentDiagnostics current_haptics{};
+uint32_t haptics_request_count = 0;
+HapticsTransportProbe current_transport{};
+#endif
 
 void require(bool condition, const char* message) {
     if (!condition) {
@@ -712,6 +721,258 @@ void test_profile_vendor_requests() {
             "short profile selection request was accepted");
 }
 
+std::vector<uint8_t> read_haptics_payload() {
+    using namespace UsbConfigurationManagement;
+    tusb_control_request_t request = setup_request(
+        Operation::kHapticsExperiment, TUSB_DIR_IN, kMaximumResponseSize);
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request),
+            "experiment diagnostics IN was rejected");
+    require(control_payload.size() == kResponseHeaderSize + 72 &&
+                control_payload[5] == 0x40 &&
+                control_payload[6] == static_cast<uint8_t>(Status::kOk) &&
+                control_payload[7] == 0 &&
+                read_u16(control_payload, 8) == 72 &&
+                read_u16(control_payload, 10) == 2,
+            "experiment schema-2 envelope is invalid");
+    std::vector<uint8_t> payload(
+        control_payload.begin() + kResponseHeaderSize, control_payload.end());
+    require(read_u32(control_payload, 16) ==
+                configuration_crc32(payload.data(), payload.size()),
+            "experiment response CRC is invalid");
+    return payload;
+}
+
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+void perform_haptics_out(uint8_t action, uint8_t slot, bool accepted = true) {
+    using namespace UsbConfigurationManagement;
+    next_out_payload = make_request(Operation::kHapticsExperiment, {action, slot});
+    tusb_control_request_t request = setup_request(
+        Operation::kHapticsExperiment, TUSB_DIR_OUT,
+        static_cast<uint16_t>(next_out_payload.size()));
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request),
+            "experiment OUT setup was rejected");
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_DATA, &request) == accepted,
+            "experiment must reject invalid or busy requests before status ACK");
+    const uint32_t requests_after_data = haptics_request_count;
+    if (accepted) {
+        require(!usb_configuration_management_vendor_control(
+                    0, CONTROL_STAGE_DATA, &request) &&
+                    haptics_request_count == requests_after_data,
+                "duplicate DATA replayed experiment control");
+    }
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_ACK, &request) == accepted,
+            "experiment ACK did not preserve DATA-stage result");
+    require(!usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_ACK, &request) &&
+                haptics_request_count == requests_after_data,
+            "ACK replayed experiment control");
+}
+#endif
+
+void test_haptics_experiment_requests() {
+    using namespace UsbConfigurationManagement;
+    for (uint16_t payload_size : {0, 1, 3}) {
+        tusb_control_request_t request = setup_request(
+            Operation::kHapticsExperiment, TUSB_DIR_OUT,
+            kRequestHeaderSize + payload_size);
+        require(!usb_configuration_management_vendor_control(
+                    0, CONTROL_STAGE_SETUP, &request),
+                "malformed experiment control size was accepted");
+    }
+    std::vector<uint8_t> expected(72, 0);
+    expected[69] = 0xff;
+#ifndef SWITCH_PICO_HAPTICS_EXPERIMENT
+    expected[68] = 6;
+    require(read_haptics_payload() == expected,
+            "disabled firmware must expose only the unsupported snapshot");
+    for (uint8_t action : {0, 1}) {
+        next_out_payload = make_request(Operation::kHapticsExperiment, {action, 0});
+        tusb_control_request_t request = setup_request(
+            Operation::kHapticsExperiment, TUSB_DIR_OUT,
+            static_cast<uint16_t>(next_out_payload.size()));
+        require(!usb_configuration_management_vendor_control(
+                    0, CONTROL_STAGE_SETUP, &request),
+                "disabled firmware accepted experiment control");
+    }
+#else
+    require(read_haptics_payload() == expected,
+            "enabled firmware must initially be idle without a selected slot");
+    perform_haptics_out(2, 0, false);
+    perform_haptics_out(1, 4, false);
+    perform_haptics_out(0, 0xff, false);
+    require(haptics_request_count == 0,
+            "malformed control reached the experiment service");
+
+    next_out_payload = make_request(Operation::kHapticsExperiment, {1, 2});
+    next_out_payload.back() ^= 1;
+    tusb_control_request_t request = setup_request(
+        Operation::kHapticsExperiment, TUSB_DIR_OUT,
+        static_cast<uint16_t>(next_out_payload.size()));
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                !usb_configuration_management_vendor_control(
+                    0, CONTROL_STAGE_DATA, &request),
+            "bad experiment request CRC was accepted");
+    require(haptics_request_count == 0,
+            "bad CRC control reached the experiment service");
+
+    perform_haptics_out(1, 2);
+    auto payload = read_haptics_payload();
+    require(payload[68] == 1 && payload[69] == 2 &&
+                read_u32(payload, 0) == 1 && read_u32(payload, 16) == 0 &&
+                haptics_request_count == 1,
+            "USB acceptance must remain pending until the service starts");
+    perform_haptics_out(1, 1, false);
+    payload = read_haptics_payload();
+    require(payload[68] == 1 && payload[69] == 2 &&
+                read_u32(payload, 0) == 1,
+            "busy start overwrote the accepted run");
+
+    // Model the independently progressing Core 1 service, not a USB echo.
+    current_haptics = {
+        1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,
+        123, 22000, 11001, 9876, 0xfffffff0, 0x30, 0x76543210,
+        1100000, HapticsExperimentState::kRunning, 2, 0,
+    };
+    const uint32_t fields[] = {
+        1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,
+        123, 22000, 11001, 9876, 0xfffffff0, 0x30, 0x76543210, 1100000,
+    };
+    for (size_t index = 0; index < 17; ++index) {
+        write_u32(&expected, index * 4, fields[index]);
+    }
+    expected[68] = 2;
+    expected[69] = 2;
+    require(read_haptics_payload() == expected,
+            "schema-2 timing fields are not in little-endian wire order");
+
+    perform_haptics_out(0, 2);
+    payload = read_haptics_payload();
+    require(payload[68] == 2 && read_u32(payload, 0) == 1,
+            "USB stop ACK must not fabricate terminal completion");
+    current_haptics.state = HapticsExperimentState::kStopped;
+    require(read_haptics_payload()[68] == 4,
+            "service stop transition was not observable");
+
+    next_out_payload = make_request(Operation::kHapticsExperiment, {1, 3});
+    request = setup_request(
+        Operation::kHapticsExperiment, TUSB_DIR_OUT,
+        static_cast<uint16_t>(next_out_payload.size()));
+    const uint32_t requests_before_cancel = haptics_request_count;
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request),
+            "canceled experiment setup was rejected");
+    read_haptics_payload();  // A new SETUP cancels the previous OUT transfer.
+    require(!usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_DATA, &request) &&
+                !usb_configuration_management_vendor_control(
+                    0, CONTROL_STAGE_ACK, &request) &&
+                haptics_request_count == requests_before_cancel,
+            "canceled experiment request reused stale payload");
+
+    perform_haptics_out(1, 3);
+    current_haptics.state = HapticsExperimentState::kDisconnected;
+    current_haptics.last_error = 3;
+    payload = read_haptics_payload();
+    require(payload[68] == 5 && payload[69] == 3 && payload[70] == 3 &&
+                read_u32(payload, 0) == 2,
+            "asynchronous connection failure lost request correlation");
+#endif
+}
+
+void test_haptics_transport_probe_requests() {
+    using namespace UsbConfigurationManagement;
+    for (uint16_t length : {0, 16, 18, 120}) {
+        tusb_control_request_t request = setup_request(
+            Operation::kHapticsTransportProbe, TUSB_DIR_OUT, length);
+        for (uint8_t stage : {
+                 CONTROL_STAGE_SETUP, CONTROL_STAGE_DATA, CONTROL_STAGE_ACK}) {
+            require(!usb_configuration_management_vendor_control(
+                        0, stage, &request),
+                    "IN-only transport probe accepted an OUT transfer");
+        }
+    }
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    current_transport.run_id = 0x10203040;
+    current_transport.connection_generation = 0x50607080;
+    current_transport.connection_handle = 0xffff;
+    current_transport.timer_wakes = 4;
+    current_transport.max_timer_lateness_us = 5;
+    current_transport.total_timer_lateness_us = 6;
+    current_transport.send_calls = 7;
+    current_transport.max_send_us = 8;
+    current_transport.total_send_us = 9;
+    current_transport.write_calls = 10;
+    current_transport.max_write_us = 11;
+    current_transport.total_write_us = 12;
+    current_transport.read_calls = 13;
+    current_transport.read_packets = 14;
+    current_transport.max_read_us = 15;
+    current_transport.total_read_us = 16;
+    current_transport.poll_calls = 17;
+    current_transport.max_poll_us = 18;
+    current_transport.total_poll_us = 19;
+    current_transport.completion_events = 20;
+    current_transport.completed_packets = 21;
+    current_transport.max_completion_gap_us = 22;
+    current_transport.max_outstanding_acl = 23;
+    current_transport.min_free_acl = 24;
+    current_transport.first_tone_send_return_us = 0xfffffff0;
+    current_transport.active = 1;
+    current_transport.max_permission_wait_us = 27;
+    current_transport.total_permission_wait_us = 0xffffffff;
+    current_transport.permission_callbacks = 29;
+    current_transport.max_poll_gap_us = 30;
+    current_transport.controller_acl_packet_bytes = 1021;
+    current_transport.controller_acl_packet_count = 10;
+#endif
+    tusb_control_request_t request = setup_request(
+        Operation::kHapticsTransportProbe, TUSB_DIR_IN, kMaximumResponseSize);
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request),
+            "transport probe IN was rejected");
+    require(control_payload.size() >= kResponseHeaderSize,
+            "transport probe response header is truncated");
+    require(control_payload[5] == 0x41 && control_payload[7] == 0 &&
+                read_u16(control_payload, 10) == 2,
+            "transport probe operation, flags, or schema are invalid");
+    const std::vector<uint8_t> payload(
+        control_payload.begin() + kResponseHeaderSize, control_payload.end());
+    require(read_u32(control_payload, 16) ==
+                configuration_crc32(payload.data(), payload.size()),
+            "transport probe response CRC is invalid");
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    require(control_payload.size() == kResponseHeaderSize + 128 &&
+                read_u16(control_payload, 8) == 128 &&
+                control_payload[6] == static_cast<uint8_t>(Status::kOk) &&
+                read_u32(control_payload, 12) == 0x10203040,
+            "transport probe schema-2 envelope is invalid");
+    const uint32_t fields[] = {
+        0x10203040, 0x50607080, 0xffff, 4, 5, 6, 7, 8, 9, 10,
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        0xfffffff0, 1, 27, 0xffffffff, 29, 30,
+        1021, 10,
+    };
+    std::vector<uint8_t> expected(128);
+    for (size_t index = 0; index < 32; ++index) {
+        write_u32(&expected, index * 4, fields[index]);
+    }
+    require(payload == expected,
+            "transport probe fields are not in explicit little-endian wire order");
+#else
+    require(control_payload.size() == kResponseHeaderSize &&
+                read_u16(control_payload, 8) == 0 &&
+                read_u32(control_payload, 12) == 0 &&
+                control_payload[6] ==
+                    static_cast<uint8_t>(Status::kUnsupportedSchema),
+            "disabled firmware must report the transport probe as unsupported");
+#endif
+}
+
 }  // namespace
 
 uint32_t configuration_crc32(const uint8_t* data, size_t size) {
@@ -899,6 +1160,33 @@ void bluepad32_input_backend_diagnostics(
     *out = current_diagnostics;
 }
 
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+bool haptics_experiment_request(uint8_t action, uint8_t slot) {
+    ++haptics_request_count;
+    if (action == 1 &&
+        (current_haptics.state == HapticsExperimentState::kPending ||
+         current_haptics.state == HapticsExperimentState::kRunning)) {
+        return false;
+    }
+    if (action == 1) {
+        const uint32_t run_id = current_haptics.run_id + 1;
+        current_haptics = {};
+        current_haptics.run_id = run_id;
+        current_haptics.slot = slot;
+        current_haptics.state = HapticsExperimentState::kPending;
+    }
+    return true;
+}
+
+void haptics_experiment_snapshot(HapticsExperimentDiagnostics* output) {
+    *output = current_haptics;
+}
+
+void haptics_transport_probe_snapshot(HapticsTransportProbe* output) {
+    *output = current_transport;
+}
+#endif
+
 bool adapter_reboot_to_bootsel() {
     bootsel_reboot_requested = true;
     return true;
@@ -941,5 +1229,7 @@ int main() {
     test_vendor_requests();
     test_mode_vendor_requests();
     test_profile_vendor_requests();
+    test_haptics_experiment_requests();
+    test_haptics_transport_probe_requests();
     return 0;
 }

@@ -6,13 +6,14 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import math
 import secrets
 import struct
 import sys
 import time
 import zlib
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -63,9 +64,12 @@ OP_PROFILE_PLAYTEST = 0x39
 OP_PROFILE_METADATA_READ = 0x3A
 OP_PROFILE_METADATA_SET = 0x3B
 OP_PROFILE_IDENTIFY = 0x3C
+OP_HAPTICS_EXPERIMENT = 0x40
+OP_HAPTICS_TRANSPORT_PROBE = 0x41
 
 STATUS_OK = 0
 STATUS_PENDING = 1
+STATUS_UNSUPPORTED_SCHEMA = 3
 STATUS_NAMES = {
     2: "malformed request",
     3: "unsupported schema",
@@ -131,6 +135,63 @@ PROFILE_METADATA_SCHEMA_VERSION = 1
 PROFILE_METADATA_MAX_BYTES = 31
 PROFILE_METADATA_VALUE_SIZE = 32
 PROFILE_METADATA_SIZE = 288
+HAPTICS_EXPERIMENT_SCHEMA_VERSION = 2
+HAPTICS_EXPERIMENT_SIZE = 72
+HAPTICS_EXPERIMENT_SLOT_COUNT = 4
+HAPTICS_TRANSPORT_PROBE_SCHEMA_VERSION = 2
+HAPTICS_TRANSPORT_PROBE_SIZE = 128
+HAPTICS_EXPERIMENT_STATES = (
+    "idle", "pending", "running", "completed",
+    "stopped", "disconnected", "unsupported", "error",
+)
+HAPTICS_EXPERIMENT_ERRORS = {
+    0: "none",
+    1: "unsupported controller or Bluetooth protocol",
+    2: "insufficient Bluetooth MTU",
+    3: "controller connection missing or lost",
+    4: "Bluetooth can-send or stop timed out",
+    5: "Bluetooth request or send failed",
+    6: "queued controller output; wait for prior output to drain, then retry",
+}
+HAPTICS_EXPERIMENT_ENABLE_HINT = (
+    "Install firmware built with SWITCH_PICO_HAPTICS_EXPERIMENT=ON "
+    "and connect a DualSense or DualSense Edge over Bluetooth Classic."
+)
+HAPTICS_EXPERIMENT_EVIDENCE_NOTE = (
+    "Send timestamps measure firmware/HCI submission, not physical actuator "
+    "onset or playback; USB ACK only accepts a request. "
+    "The initial 1.024 s of priming silence is intentional, not transport delay."
+)
+HAPTICS_TRANSPORT_PROBE_UNSUPPORTED_HINT = (
+    "Firmware does not support haptics transport profile operation 0x41. "
+    "Install updated firmware built with SWITCH_PICO_HAPTICS_EXPERIMENT=ON "
+    "and transport-probe support; haptics-experiment status still uses 0x40."
+)
+HAPTICS_TRANSPORT_PROBE_EVIDENCE_NOTE = (
+    "Durations are inclusive and may overlap or nest (poll/read/send/write); "
+    "do not sum their totals. first_tone_send_return_us is the low 32-bit "
+    "Pico uptime timestamp after l2cap_send returns successfully, not physical "
+    "actuator onset or playback. ACL extrema are observed samples, not an "
+    "exact occupancy timeline; completion counters select this connection "
+    "handle. Running snapshots are correlated to one run, not one instant."
+)
+HAPTICS_EXPERIMENT_PATTERN = {
+    "sample_rate_hz": 3000,
+    "stereo_frames_per_packet": 64,
+    "peak_amplitude": 32,
+    "priming_silence_packets": 48,
+    "cycles": 4,
+    "phases": [
+        {"channel": "left", "frequency_hz": 100, "packets": 12},
+        {"channel": "silence", "packets": 12},
+        {"channel": "right", "frequency_hz": 200, "packets": 12},
+        {"channel": "silence", "packets": 12},
+    ],
+    "trailing_silence_packets": 48,
+    "total_packets": 288,
+    "initial_mode_packet_stereo_frames": 32,
+    "duration_us": 6144000,
+}
 
 LOGICAL_BUTTONS = (
     "south",
@@ -241,6 +302,106 @@ class RuntimeDiagnostics:
     rumble_capable_slots: int
     feedback_pending_slots: int
     rumble_pending_slots: int
+
+
+@dataclass(frozen=True)
+class HapticsExperimentDiagnostics:
+    run_id: int
+    connection_generation: int
+    start_us: int
+    generated_packets: int
+    sent_packets: int
+    skipped_packets: int
+    send_failures: int
+    can_send_requests: int
+    synchronous_callbacks: int
+    max_generate_us: int
+    max_send_gap_us: int
+    max_lateness_us: int
+    max_request_wait_us: int
+    first_tone_due_us: int
+    first_tone_sent_us: int
+    last_sent_us: int
+    elapsed_us: int
+    state: int
+    slot: int | None
+    last_error: int
+
+    @property
+    def state_name(self) -> str:
+        return HAPTICS_EXPERIMENT_STATES[self.state]
+
+    @property
+    def error_name(self) -> str:
+        return HAPTICS_EXPERIMENT_ERRORS.get(
+            self.last_error, f"unknown error {self.last_error}"
+        )
+
+    @property
+    def firmware_supported(self) -> bool:
+        return not (self.state_name == "unsupported" and self.slot is None)
+
+    @property
+    def first_tone_submission_delay_us(self) -> int | None:
+        if self.first_tone_sent_us == 0:
+            return None
+        return (self.first_tone_sent_us - self.first_tone_due_us) & 0xFFFFFFFF
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "schema_version": HAPTICS_EXPERIMENT_SCHEMA_VERSION,
+            "state_name": self.state_name,
+            "error_name": self.error_name,
+            "firmware_supported": self.firmware_supported,
+            "first_tone_submission_delay_us": self.first_tone_submission_delay_us,
+            "pattern": HAPTICS_EXPERIMENT_PATTERN,
+            "evidence_note": HAPTICS_EXPERIMENT_EVIDENCE_NOTE,
+        }
+
+
+@dataclass(frozen=True)
+class HapticsTransportProbe:
+    run_id: int
+    connection_generation: int
+    connection_handle: int
+    timer_wakes: int
+    max_timer_lateness_us: int
+    total_timer_lateness_us: int
+    send_calls: int
+    max_send_us: int
+    total_send_us: int
+    write_calls: int
+    max_write_us: int
+    total_write_us: int
+    read_calls: int
+    read_packets: int
+    max_read_us: int
+    total_read_us: int
+    poll_calls: int
+    max_poll_us: int
+    total_poll_us: int
+    completion_events: int
+    completed_packets: int
+    max_completion_gap_us: int
+    max_outstanding_acl: int
+    min_free_acl: int
+    first_tone_send_return_us: int
+    active: bool
+    max_permission_wait_us: int
+    total_permission_wait_us: int
+    permission_callbacks: int
+    max_poll_gap_us: int
+    controller_acl_packet_bytes: int
+    controller_acl_packet_count: int
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "schema_version": HAPTICS_TRANSPORT_PROBE_SCHEMA_VERSION,
+            "evidence_note": HAPTICS_TRANSPORT_PROBE_EVIDENCE_NOTE,
+        }
+
 
 @dataclass(frozen=True)
 class AdapterConfiguration:
@@ -1934,6 +2095,329 @@ def read_runtime_diagnostics(device: UsbDevice) -> RuntimeDiagnostics:
     )
 
 
+def parse_haptics_experiment(envelope: Envelope) -> HapticsExperimentDiagnostics:
+    _raise_status(envelope)
+    if envelope.schema_version != HAPTICS_EXPERIMENT_SCHEMA_VERSION:
+        raise ConfigManagerError(
+            f"unsupported haptics experiment schema {envelope.schema_version}; "
+            "update the host tool and experiment firmware together"
+        )
+    if len(envelope.payload) != HAPTICS_EXPERIMENT_SIZE:
+        raise ConfigManagerError("invalid haptics experiment payload size")
+    counters = struct.unpack_from("<17I", envelope.payload)
+    state, slot, last_error, reserved = struct.unpack_from(
+        "<4B", envelope.payload, 68
+    )
+    if envelope.flags != 0 or reserved != 0:
+        raise ConfigManagerError("invalid haptics experiment reserved flags")
+    if state >= len(HAPTICS_EXPERIMENT_STATES):
+        raise ConfigManagerError(f"invalid haptics experiment state {state}")
+    if slot >= HAPTICS_EXPERIMENT_SLOT_COUNT and not (
+        slot == 0xFF and HAPTICS_EXPERIMENT_STATES[state] in ("idle", "unsupported")
+    ):
+        raise ConfigManagerError(f"invalid haptics experiment slot {slot}")
+    return HapticsExperimentDiagnostics(
+        *counters, state=state, slot=None if slot == 0xFF else slot,
+        last_error=last_error,
+    )
+
+
+def read_haptics_experiment(device: UsbDevice) -> HapticsExperimentDiagnostics:
+    try:
+        envelope = _control_in(device, OP_HAPTICS_EXPERIMENT)
+    except usb.core.USBError as exc:
+        if exc.errno == 32 or exc.backend_error_code == -9:
+            raise ConfigManagerError(
+                "firmware does not support haptics experiment operation 0x40. "
+                + HAPTICS_EXPERIMENT_ENABLE_HINT
+            ) from exc
+        raise
+    return parse_haptics_experiment(envelope)
+
+
+def parse_haptics_transport_probe(envelope: Envelope) -> HapticsTransportProbe:
+    if envelope.status == STATUS_UNSUPPORTED_SCHEMA:
+        raise ConfigManagerError(HAPTICS_TRANSPORT_PROBE_UNSUPPORTED_HINT)
+    _raise_status(envelope)
+    if envelope.schema_version != HAPTICS_TRANSPORT_PROBE_SCHEMA_VERSION:
+        raise ConfigManagerError(
+            f"unsupported haptics transport probe schema {envelope.schema_version}; "
+            "update the host tool and experiment firmware together"
+        )
+    if len(envelope.payload) != HAPTICS_TRANSPORT_PROBE_SIZE:
+        raise ConfigManagerError("invalid haptics transport probe payload size")
+    if envelope.flags != 0:
+        raise ConfigManagerError("invalid haptics transport probe reserved flags")
+    fields = struct.unpack("<32I", envelope.payload)
+    if fields[2] > 0xFFFF:
+        raise ConfigManagerError("invalid haptics transport probe connection handle")
+    if fields[25] not in (0, 1):
+        raise ConfigManagerError("invalid haptics transport probe active boolean")
+    if envelope.generation != fields[0]:
+        raise ConfigManagerError("haptics transport probe envelope run ID mismatch")
+    return HapticsTransportProbe(*fields[:25], bool(fields[25]), *fields[26:])
+
+
+def read_haptics_transport_probe(device: UsbDevice) -> HapticsTransportProbe:
+    try:
+        envelope = _control_in(device, OP_HAPTICS_TRANSPORT_PROBE)
+    except usb.core.USBError as exc:
+        if exc.errno == 32 or exc.backend_error_code == -9:
+            raise ConfigManagerError(HAPTICS_TRANSPORT_PROBE_UNSUPPORTED_HINT) from exc
+        raise
+    return parse_haptics_transport_probe(envelope)
+
+
+def read_haptics_experiment_profile(
+    device: UsbDevice,
+) -> tuple[HapticsExperimentDiagnostics, HapticsTransportProbe]:
+    before = read_haptics_experiment(device)
+    transport = read_haptics_transport_probe(device)
+    after = read_haptics_experiment(device)
+    correlation = (before.run_id, before.connection_generation)
+    if (
+        (after.run_id, after.connection_generation) != correlation
+        or (transport.run_id, transport.connection_generation) != correlation
+    ):
+        raise ConfigManagerError(
+            "haptics experiment run or connection generation changed or does not "
+            "match the transport profile; cannot attribute measurements. "
+            "Read profile again after the accepted run has started or finished."
+        )
+    return after, transport
+
+
+def _print_haptics_experiment_profile(
+    snapshot: HapticsExperimentDiagnostics, transport: HapticsTransportProbe,
+    *, as_json: bool,
+) -> None:
+    if as_json:
+        values = snapshot.to_json_object()
+        values["transport"] = transport.to_json_object()
+        values["host_monotonic_s"] = time.monotonic()
+        print(json.dumps(values, sort_keys=True), flush=True)
+        return
+    _print_haptics_experiment(snapshot, as_json=False)
+    print(
+        f"Transport profile: run={transport.run_id}; "
+        f"connection_generation={transport.connection_generation}; "
+        f"handle=0x{transport.connection_handle:04x}; active={transport.active}"
+    )
+    for label, calls, maximum, total in (
+        ("timer lateness", transport.timer_wakes,
+         transport.max_timer_lateness_us, transport.total_timer_lateness_us),
+        ("permission wait", transport.permission_callbacks,
+         transport.max_permission_wait_us, transport.total_permission_wait_us),
+        ("l2cap_send", transport.send_calls,
+         transport.max_send_us, transport.total_send_us),
+        ("HCI write", transport.write_calls,
+         transport.max_write_us, transport.total_write_us),
+        ("HCI read", transport.read_calls,
+         transport.max_read_us, transport.total_read_us),
+        ("data-source poll", transport.poll_calls,
+         transport.max_poll_us, transport.total_poll_us),
+    ):
+        print(f"  {label}: calls={calls}, max_us={maximum}, total_us={total}")
+    print(f"  read_packets: {transport.read_packets}")
+    print(
+        f"  completions: events={transport.completion_events}, "
+        f"packets={transport.completed_packets}, "
+        f"max_gap_us={transport.max_completion_gap_us}"
+    )
+    print(f"  max_poll_gap_us: {transport.max_poll_gap_us}")
+    print(
+        f"  observed ACL slots: max_outstanding={transport.max_outstanding_acl}, "
+        f"min_free={transport.min_free_acl}"
+    )
+    print(f"  first_tone_send_return_us: {transport.first_tone_send_return_us}")
+    print(
+        f"  controller advertised ACL: {transport.controller_acl_packet_count} "
+        f"packets of {transport.controller_acl_packet_bytes} bytes"
+    )
+    print(HAPTICS_TRANSPORT_PROBE_EVIDENCE_NOTE, flush=True)
+
+
+def _raise_haptics_experiment_failure(
+    snapshot: HapticsExperimentDiagnostics,
+) -> None:
+    if not snapshot.firmware_supported:
+        raise ConfigManagerError(
+            "haptics experiment is unsupported in this firmware. "
+            + HAPTICS_EXPERIMENT_ENABLE_HINT
+        )
+    if snapshot.state_name in ("disconnected", "unsupported", "error"):
+        raise ConfigManagerError(
+            f"haptics experiment run {snapshot.run_id} "
+            f"{snapshot.state_name}: {snapshot.error_name} "
+            f"(last_error={snapshot.last_error}); "
+            "check the selected controller connection and experiment status"
+        )
+
+
+def _print_haptics_experiment(
+    snapshot: HapticsExperimentDiagnostics, *, as_json: bool,
+) -> None:
+    values = snapshot.to_json_object()
+    if as_json:
+        values["host_monotonic_s"] = time.monotonic()
+        print(json.dumps(values, sort_keys=True), flush=True)
+        return
+    print(
+        f"Haptics experiment: {snapshot.state_name}; run={snapshot.run_id}; "
+        f"slot={snapshot.slot if snapshot.slot is not None else 'none'}"
+    )
+    for name, value in asdict(snapshot).items():
+        if name not in ("state", "slot", "last_error"):
+            print(f"  {name}: {value}")
+    print(f"  last_error: {snapshot.last_error} ({snapshot.error_name})")
+    delay = snapshot.first_tone_submission_delay_us
+    print(
+        "  first_tone_submission_delay_us: "
+        f"{delay if delay is not None else 'not recorded'}"
+    )
+    print(
+        "Pattern: 3 kHz, 64 stereo frames/packet, peak 32/127; "
+        "48 packets priming silence (1.024 s), 4 cycles of "
+        "left 100 Hz / silence / right 200 Hz / silence "
+        "(12 packets = 256 ms each), 48 packets trailing silence (1.024 s); "
+        "288 packets / 6.144 s total. Initial mode handoff carries 32 silent frames."
+    )
+    print(
+        "Timestamp fields are low 32-bit Pico uptime microseconds; "
+        "differences use unsigned wraparound."
+    )
+    print(HAPTICS_EXPERIMENT_EVIDENCE_NOTE, flush=True)
+
+
+def _watch_haptics_experiment(
+    device: UsbDevice, snapshot: HapticsExperimentDiagnostics,
+    deadline: float, *, as_json: bool,
+) -> None:
+    run_id = snapshot.run_id
+    slot = snapshot.slot
+    while True:
+        _print_haptics_experiment(snapshot, as_json=as_json)
+        _raise_haptics_experiment_failure(snapshot)
+        if snapshot.state_name not in ("pending", "running"):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ConfigManagerError(
+                f"haptics experiment run {run_id} did not reach a terminal "
+                "state before --timeout; it may still be active, use status "
+                "or stop --slot " + str(slot)
+            )
+        time.sleep(min(0.1, remaining))
+        snapshot = read_haptics_experiment(device)
+        if snapshot.run_id != run_id or snapshot.slot != slot:
+            raise ConfigManagerError(
+                "haptics experiment run changed while watching; "
+                "cannot attribute measurements to the requested run"
+            )
+
+
+def _run_haptics_experiment_command(
+    device: UsbDevice, args: argparse.Namespace,
+) -> None:
+    if args.haptics_command == "profile":
+        snapshot, transport = read_haptics_experiment_profile(device)
+        _print_haptics_experiment_profile(snapshot, transport, as_json=args.json)
+        return
+    before = read_haptics_experiment(device)
+    deadline = time.monotonic() + args.timeout
+    action = args.haptics_command
+    if action == "status":
+        if not before.firmware_supported:
+            _print_haptics_experiment(before, as_json=args.json)
+            print(HAPTICS_EXPERIMENT_ENABLE_HINT, file=sys.stderr)
+        elif args.watch:
+            _watch_haptics_experiment(
+                device, before, deadline, as_json=args.json
+            )
+        else:
+            _print_haptics_experiment(before, as_json=args.json)
+            _raise_haptics_experiment_failure(before)
+        return
+    if not before.firmware_supported:
+        _raise_haptics_experiment_failure(before)
+    active = before.state_name in ("pending", "running")
+    if action == "start" and active:
+        raise ConfigManagerError(
+            f"haptics experiment is already {before.state_name} "
+            f"on slot {before.slot}; stop that run before starting another"
+        )
+    if action == "stop":
+        if active and before.slot != args.slot:
+            raise ConfigManagerError(
+                f"haptics experiment is active on slot {before.slot}, "
+                f"not requested slot {args.slot}"
+            )
+        if not active:
+            _print_haptics_experiment(before, as_json=args.json)
+            print(
+                "No active haptics experiment to stop.",
+                file=sys.stderr if args.json else sys.stdout,
+            )
+            return
+    _control_out(
+        device, OP_HAPTICS_EXPERIMENT,
+        bytes((1 if action == "start" else 0, args.slot)),
+    )
+    print(
+        f"{action.capitalize()} request accepted; pending firmware confirmation. "
+        "USB ACK is not evidence of stream start, completion, or playback.",
+        file=sys.stderr if args.json else sys.stdout, flush=True,
+    )
+    expected_run_id = (
+        (before.run_id + 1) & 0xFFFFFFFF if action == "start" else before.run_id
+    )
+    observed_run = False
+    while True:
+        snapshot = read_haptics_experiment(device)
+        if snapshot.run_id == expected_run_id:
+            observed_run = True
+            if snapshot.slot != args.slot:
+                raise ConfigManagerError(
+                    "haptics experiment response belongs to another slot"
+                )
+            if snapshot.state_name in ("disconnected", "unsupported", "error"):
+                _print_haptics_experiment(snapshot, as_json=args.json)
+                _raise_haptics_experiment_failure(snapshot)
+            if action == "start" and args.watch:
+                _watch_haptics_experiment(
+                    device, snapshot, deadline, as_json=args.json
+                )
+                return
+            if snapshot.state_name in ("running", "completed") and action == "start":
+                _print_haptics_experiment(snapshot, as_json=args.json)
+                if snapshot.state_name == "running":
+                    print(
+                        "Firmware reports running; use start --watch or "
+                        "status --watch to capture completion and later failures.",
+                        file=sys.stderr if args.json else sys.stdout,
+                    )
+                return
+            if snapshot.state_name in ("stopped", "completed") and action == "stop":
+                _print_haptics_experiment(snapshot, as_json=args.json)
+                return
+            if snapshot.state_name not in ("pending", "running"):
+                raise ConfigManagerError(
+                    f"haptics experiment {action} ended in unexpected "
+                    f"state {snapshot.state_name}"
+                )
+        elif action == "stop" or observed_run or snapshot.run_id != before.run_id:
+            raise ConfigManagerError(
+                f"haptics experiment run changed before {action} was confirmed"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ConfigManagerError(
+                f"haptics experiment {action} was not confirmed before "
+                "--timeout; check status (USB ACK alone does not confirm it)"
+            )
+        time.sleep(min(0.1, remaining))
+
+
 def read_configuration(device: UsbDevice) -> AdapterConfiguration:
     envelope = _control_in(device, OP_CONFIGURATION_READ)
     _raise_status(envelope)
@@ -2899,6 +3383,35 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "diagnostics", help="show live Bluetooth and rumble pipeline counters"
     )
+    haptics = commands.add_parser(
+        "haptics-experiment", help="control the opt-in DualSense PCM experiment"
+    )
+    haptics_commands = haptics.add_subparsers(
+        dest="haptics_command", required=True
+    )
+    for action in ("start", "status", "stop"):
+        experiment = haptics_commands.add_parser(action)
+        if action != "status":
+            experiment.add_argument(
+                "--slot", type=int, choices=range(HAPTICS_EXPERIMENT_SLOT_COUNT),
+                default=0, help="connected controller slot (default: 0)",
+            )
+        if action != "stop":
+            experiment.add_argument(
+                "--watch", action="store_true",
+                help="capture 100 ms status samples until terminal or --timeout",
+            )
+        experiment.add_argument(
+            "--json", action="store_true",
+            help="emit JSON diagnostics (one object per sample with --watch)",
+        )
+    profile = haptics_commands.add_parser(
+        "profile", help="read a run-correlated transport timing snapshot"
+    )
+    profile.add_argument(
+        "--json", action="store_true",
+        help="emit diagnostics with a nested transport profile object",
+    )
     reboot = commands.add_parser(
         "reboot", help="reboot into a firmware or ROM target"
     )
@@ -2993,6 +3506,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.timeout <= 0:
         print("error: --timeout must be positive", file=sys.stderr)
         return 2
+    if args.command == "haptics-experiment" and not math.isfinite(args.timeout):
+        print("error: --timeout must be finite", file=sys.stderr)
+        return 2
     if (
         args.command == "config"
         and args.config_command == "reset"
@@ -3081,6 +3597,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Rumble-pending slots: "
                 f"{diagnostics.rumble_pending_slots}"
             )
+        elif args.command == "haptics-experiment":
+            _run_haptics_experiment_command(device, args)
         elif args.command == "reboot":
             request_bootsel_reboot(device)
             print("Rebooting into USB BOOTSEL mode.")

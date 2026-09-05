@@ -26,6 +26,10 @@ endif()
 option(SWITCH_PICO_LOG "Enable UART debug logging" OFF)
 option(SWITCH_PICO_ADAPTER_FEASIBILITY
        "Build the automatic Switch/XInput feasibility prototype" OFF)
+option(SWITCH_PICO_HAPTICS_EXPERIMENT
+       "Enable the host-triggered DualSense PCM transport experiment" OFF)
+option(SWITCH_PICO_HAPTICS_EXPERIMENT_RAM
+       "Execute the haptics experiment hot path from SRAM" ON)
 set(SWITCH_PICO_INPUT_BACKEND "UART" CACHE STRING "Controller input backend")
 set_property(CACHE SWITCH_PICO_INPUT_BACKEND PROPERTY STRINGS UART BLUEPAD32)
 if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "UART"
@@ -44,6 +48,11 @@ if(SWITCH_PICO_ADAPTER_FEASIBILITY
         AND NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     message(FATAL_ERROR
             "SWITCH_PICO_ADAPTER_FEASIBILITY requires the BLUEPAD32 backend")
+endif()
+if(SWITCH_PICO_HAPTICS_EXPERIMENT
+        AND NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
+    message(FATAL_ERROR
+            "SWITCH_PICO_HAPTICS_EXPERIMENT requires the BLUEPAD32 backend")
 endif()
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -135,14 +144,33 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     else()
         set(SWITCH2_WAKE_CONFIGURED_VALUE 0)
     endif()
+    # The experiment yields after one received packet; its transport wrapper
+    # explicitly reschedules remaining input so timers run between packets.
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
             SWITCH_PICO_USB_OUTPUT_MODES=1
             PICO_FLASH_ASSUME_CORE1_SAFE=0
-            PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT=16
+            PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT=$<IF:$<BOOL:${SWITCH_PICO_HAPTICS_EXPERIMENT}>,1,16>
             SWITCH2_WAKE_CONFIGURED=${SWITCH2_WAKE_CONFIGURED_VALUE}
     )
+    if(SWITCH_PICO_HAPTICS_EXPERIMENT)
+        target_sources(switch-pico PRIVATE
+                ${SWITCH_PICO_SOURCE_DIR}/input/haptics_experiment.cpp
+                ${SWITCH_PICO_SOURCE_DIR}/input/haptics_transport_probe.cpp)
+        target_compile_definitions(switch-pico PRIVATE
+                SWITCH_PICO_HAPTICS_EXPERIMENT=1
+                SWITCH_PICO_HAPTICS_EXPERIMENT_RAM=$<BOOL:${SWITCH_PICO_HAPTICS_EXPERIMENT_RAM}>)
+        target_compile_definitions(bluepad32 PRIVATE
+                SWITCH_PICO_HAPTICS_EXPERIMENT=1)
+        # These boundaries are defined in different SDK translation units from
+        # their callers. GNU ld --wrap intercepts unresolved symbol references;
+        # an LTO build must verify actual caller edges, not just wrapper symbols.
+        target_link_options(switch-pico PRIVATE
+                "LINKER:--wrap=cyw43_bluetooth_hci_write"
+                "LINKER:--wrap=cyw43_bluetooth_hci_read"
+                "LINKER:--wrap=btstack_run_loop_base_poll_data_sources")
+    endif()
 else()
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_HID_INSTANCE_COUNT=1
