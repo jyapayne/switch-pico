@@ -4,12 +4,12 @@
 
 #include <btstack.h>
 
-#if !defined(SWITCH2_WAKE_CONFIGURED)
-#if __has_include("platform/pico/switch2_wake_config.h")
-#include "platform/pico/switch2_wake_config.h"
-#else
+#ifndef SWITCH2_WAKE_CONFIGURED
 #define SWITCH2_WAKE_CONFIGURED 0
 #endif
+#if SWITCH2_WAKE_CONFIGURED && \
+    !defined(SWITCH2_WAKE_SOURCE_ADDRESS_BYTES)
+#include "platform/pico/switch2_wake_config.h"
 #endif
 
 namespace {

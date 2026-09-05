@@ -125,12 +125,23 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${SWITCH_PICO_SOURCE_DIR}/usb/usb_configuration_management.cpp
             ${SWITCH_PICO_SOURCE_DIR}/usb/xinput/xinput_driver.cpp
     )
+    set(SWITCH2_WAKE_CONFIG
+        ${SWITCH_PICO_SOURCE_DIR}/platform/pico/switch2_wake_config.h)
+    set_property(
+        DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${SWITCH2_WAKE_CONFIG})
+    if(EXISTS ${SWITCH2_WAKE_CONFIG})
+        set(SWITCH2_WAKE_CONFIGURED_VALUE 1)
+    else()
+        set(SWITCH2_WAKE_CONFIGURED_VALUE 0)
+    endif()
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
             SWITCH_PICO_USB_OUTPUT_MODES=1
             PICO_FLASH_ASSUME_CORE1_SAFE=0
             PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT=16
+            SWITCH2_WAKE_CONFIGURED=${SWITCH2_WAKE_CONFIGURED_VALUE}
     )
 else()
     target_compile_definitions(switch-pico PRIVATE
