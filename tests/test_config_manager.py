@@ -2343,7 +2343,8 @@ def test_haptics_arming_waits_for_firmware_not_usb_ack(
             "lookback_us": pytest.approx(21333.333333333),
             "command_window_us": 8000,
             "watchdog_us": 50000,
-            "host_gain": 1.5,
+            "band_gains": {"low": 2.0, "high": 2.0},
+            "response_exponent": 0.8,
         }
         assert row["first_tone_submission_delay_us"] is None
     else:

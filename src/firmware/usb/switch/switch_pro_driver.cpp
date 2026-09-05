@@ -47,6 +47,8 @@ struct SwitchProContext {
     SwitchProReport switch_report{};
     uint8_t last_report_counter = 0;
     uint32_t last_report_timer = 0;
+    uint32_t last_imu_report_timer = 0;  // Logical 15 ms cadence, not ACK timing.
+    bool last_report_was_reply = false;
     bool is_ready = false;
     bool is_initialized = false;
     bool is_report_queued = false;
@@ -430,6 +432,8 @@ static void reset_context_runtime(SwitchProContext& context, uint32_t now,
     update_switch_report_from_state(context);
     context.last_report_counter = 0;
     context.last_report_timer = now;
+    context.last_imu_report_timer = now;
+    context.last_report_was_reply = false;
     context.is_ready = ready_before_mount;
     context.is_initialized = ready_before_mount;
     context.is_report_queued = false;
@@ -466,8 +470,9 @@ static bool send_report(uint8_t instance, SwitchProContext& context,
                         uint16_t report_length) {
     bool result =
         tud_hid_n_report(instance, report_id, report_data, report_length);
-    ++context.last_report_counter;
-    if (!result) {
+    if (result) {
+        ++context.last_report_counter;
+    } else {
         LOG_PRINTF("[HID %u] send_report failed id=%u len=%u\n", instance,
                    report_id, report_length);
     }
@@ -832,59 +837,76 @@ bool switch_pro_task(uint8_t instance) {
         return false;
     }
 
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    bool report_sent = false;
-    bool regular_report_sent = false;
-
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
     update_switch_report_from_state(*context);
-
     if (tud_suspended()) {
         tud_remote_wakeup();
     }
-
-    if (context->is_report_queued) {
-        if ((now - context->last_report_timer) >
-            SWITCH_PRO_KEEPALIVE_TIMER) {
-            if (tud_hid_n_ready(instance) &&
-                send_report(instance, *context, 0, context->report_buffer,
+    // Busy USB is not a sent sample. Keep the overdue deadline and the
+    // unconsumed sensor state so the next ready opportunity uses fresh input.
+    if (!tud_hid_n_ready(instance)) {
+        return false;
+    }
+    const bool imu_due = context->is_ready &&
+        (now - context->last_imu_report_timer) >= SWITCH_PRO_IMU_REPORT_TIMER;
+    const bool prefer_imu = imu_due && context->last_report_was_reply &&
+        context->report_buffer[0] == REPORT_OUTPUT_21;
+    if (context->is_report_queued && !prefer_imu) {
+        if ((now - context->last_report_timer) > SWITCH_PRO_KEEPALIVE_TIMER) {
+            // A due IMU report may have interleaved since this ACK was built.
+            if (context->report_buffer[0] == REPORT_OUTPUT_21) {
+                context->report_buffer[1] = context->last_report_counter;
+            }
+            if (send_report(instance, *context, 0, context->report_buffer,
                             SWITCH_PRO_ENDPOINT_SIZE)) {
                 context->is_report_queued = false;
                 context->last_report_timer = now;
+                context->last_report_was_reply =
+                    context->report_buffer[0] == REPORT_OUTPUT_21;
             }
         }
-        report_sent = true;
+        return false;
     }
 
-    if (context->is_ready && !report_sent) {
-        if ((now - context->last_report_timer) >=
-            SWITCH_PRO_IMU_REPORT_TIMER) {
-            // One timer tick per 5ms IMU frame; three frames per report.
-            fill_imu_report_data(*context, context->input_state, now);
-            context->switch_report.timestamp += 3;
-            if (tud_hid_n_ready(instance) &&
-                send_report(instance, *context, 0, &context->switch_report,
-                            sizeof(context->switch_report))) {
-                context->input_state.motion_sample_count = 0;
-                regular_report_sent = true;
-            }
+    if (imu_due) {
+        const uint32_t periods =
+            (now - context->last_imu_report_timer) / SWITCH_PRO_IMU_REPORT_TIMER;
+        const MotionQuaternion previous_quaternion = context->motion_quaternion;
+        const uint8_t previous_timestamp = context->switch_report.timestamp;
+        uint8_t previous_imu[sizeof(context->switch_report.imuData)];
+        memcpy(previous_imu, context->switch_report.imuData, sizeof(previous_imu));
+        fill_imu_report_data(*context, context->input_state, now);
+        context->switch_report.timestamp += static_cast<uint8_t>(periods * 3);
+        if (send_report(instance, *context, 0, &context->switch_report,
+                        sizeof(context->switch_report))) {
+            context->input_state.motion_sample_count = 0;
+            // Stay on the 15 ms clock across 8 ms USB polling quantization.
+            // Long stalls skip obsolete periods, never replay a motion burst.
+            context->last_imu_report_timer += periods * SWITCH_PRO_IMU_REPORT_TIMER;
             context->last_report_timer = now;
+            context->last_report_was_reply = false;
+            return true;
         }
-    } else if (!context->is_initialized) {
-        send_identify(*context);
-        if (tud_hid_n_ready(instance)) {
-            bool result = tud_hid_n_report(
-                instance, 0, context->report_buffer,
-                SWITCH_PRO_ENDPOINT_SIZE);
-            if (result) {
-                context->is_initialized = true;
-            } else {
-                LOG_PRINTF("[HID %u] send_report failed id=0 len=%u\n",
-                           instance, SWITCH_PRO_ENDPOINT_SIZE);
-            }
-        }
-        context->last_report_timer = now;
+        // Readiness can change before queuing. Failed transmission must not
+        // advance quaternion integration or expose an unsent timestamp.
+        context->motion_quaternion = previous_quaternion;
+        context->switch_report.timestamp = previous_timestamp;
+        memcpy(context->switch_report.imuData, previous_imu, sizeof(previous_imu));
+        return false;
     }
-    return regular_report_sent;
+
+    if (!context->is_initialized) {
+        send_identify(*context);
+        if (tud_hid_n_report(instance, 0, context->report_buffer,
+                             SWITCH_PRO_ENDPOINT_SIZE)) {
+            context->is_initialized = true;
+            context->last_report_timer = now;
+        } else {
+            LOG_PRINTF("[HID %u] send_report failed id=0 len=%u\n", instance,
+                       SWITCH_PRO_ENDPOINT_SIZE);
+        }
+    }
+    return false;
 }
 
 bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,

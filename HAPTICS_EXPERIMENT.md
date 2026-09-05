@@ -56,7 +56,7 @@ The synthesizer has independent left/right low/high phase accumulators. Frequenc
 
 One report interval (21.333 ms) of causal lookback preserves commands received between Bluetooth sends without predicting future input. Fixed 16-entry cross-core and synthesis command histories contain decoded states, not PCM. Overflow is counted; stale sample intervals are skipped, not replayed as a backlog. `host_updates` and `dropped_updates` expose command ingestion and loss.
 
-Native gameplay gain is **1.5x after profile scaling**, following console feedback that the initial gain was weak. When the requested combined band weights exceed output headroom, both are reduced proportionally. This retains band balance and bounds samples to signed PCM range without clipping waveform peaks. Zero profile gains remain zero. Local profile confirmations retain their previous strength and temporarily override, rather than erase, the current host timeline.
+Native gameplay uses balanced **2x low/high gain after profile scaling**, followed by a gentle **0.8-power curve** on the combined amplitude. This lifts quiet and medium effects while retaining their low/high ratio. The curve is a 257-entry lookup with integer interpolation, not per-sample floating-point math. Combined output weights are capped at 65535, preventing coefficient overflow and waveform clipping. Zero remains zero. Frequencies, timing, and local-confirmation strength are unchanged. This response replaced the initial 1.5x gain and a low-band-only experiment after user comparison.
 
 The gameplay stream continues with silence while idle. It is stopped on disconnect, explicit stop, or a stalled send-permission watchdog; it yields to compatibility behavior in XInput mode. Existing LED feedback can drain without switching the controller out of native haptics. Continuous idle streaming trades power for avoiding repeated audio-mode startup.
 
@@ -212,4 +212,20 @@ Stop and re-arm were also exercised: stop confirmation was observed in about 19.
 
 Final focused verification: **148 tests passed**, covering decoder fidelity, frequency/phase behavior, substeps, gain/headroom, watchdogs, overflow, startup/stop, profile gain/feedback, host controls, existing backend lifecycle, UART and build helpers. HD gameplay, normal all-in-one, deterministic experiment, and Pico/UART firmware builds succeeded. Configuration remained generation 9 / CRC `b740995b`; wake identity, clock and voltage were not changed.
 
-The stronger HD gameplay image remains loaded and armed. This is a translation to DualSense actuators, not a promise of identical Nintendo force response. Physical onset still needs synchronized measurement. The user subsequently reported slight IMU aiming lag; that is being investigated separately from this completed haptics integration.
+The HD gameplay image auto-arms on connection. This is a translation to DualSense actuators, not a promise of identical Nintendo force response. Physical onset still needs synchronized measurement. Follow-on IMU and rumble-response refinements are recorded below.
+
+### IMU scheduling correction
+
+After HD integration was committed as `6188fcb`, the user reported a small aiming lag. The USB scheduler had two avoidable delays: unsuccessful motion sends advanced the shared timer, and control replies reset the same timer used for motion. It also mutated quaternion/timestamp state before successful USB submission.
+
+The scheduler now uses an independent logical 15 ms motion clock, checks endpoint readiness before integrating, retries overdue data at the next ready opportunity, and rolls back motion state if queuing fails. Successful sends advance the logical clock rather than drifting with 8 ms USB polling. Long stalls skip missed periods instead of replaying a catch-up burst. Control replies and overdue motion get bounded service without one starving the other. No gyro scaling or smoothing was changed.
+
+New regressions failed on the old implementation and passed with the correction. Live USB checks measured about 15 ms average motion-report spacing, including during control-reply traffic; four deliberate backpressure trials recovered with successive-read gaps of about 7.96–7.98 ms. The user retested aiming on the Switch and reported it was “pretty good now.”
+
+### Accepted rumble response
+
+The user described the 1.5x mix as thin/hollow and lacking body. A 2x low / 1.5x high comparison was still insufficient; the user requested more high-band response and selected a fuller amplitude curve. The final balanced 2x / 0.8-power response was tested on the device and in the same game, and the user selected **“Fuller and good.”**
+
+The final USB-driven test delivered all **513 host commands**, with **zero dropped updates**, **zero Bluetooth skips**, and **zero send failures**. Controller input continued with 1,408 reports during the test. Maximum observed packet generation was 687 us and report gap 23,925 us. Local-feedback gain, frequencies, the 50 ms watchdog, the 21.333 ms lookback, and controller buffering remain unchanged.
+
+Final checks: **151 focused tests passed**. HD gameplay, deterministic experiment, normal all-in-one, and Pico/UART builds succeeded. The accepted response and IMU scheduler correction are flashed; image files are `build-hd-rumble/switch-pico.elf` and `.uf2`. The stream remains armed. These follow-on refinements are separate from the committed HD integration.

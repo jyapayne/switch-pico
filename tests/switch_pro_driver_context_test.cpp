@@ -714,6 +714,102 @@ void test_uart_parser_is_pure() {
            "failed UART parse modified its output reference");
 }
 
+void test_motion_backpressure_retries_without_advancing_state() {
+    for (bool rejected_transfer : {false, true}) {
+        initialize_contexts();
+        send_feature(0, TOGGLE_IMU, 2);
+        send_feature(1, TOGGLE_IMU, 2);
+        now_ms = 6;
+        switch_pro_task(0);
+        switch_pro_task(1);
+        ControllerState moving{};
+        moving.motion_sample_count = 1;
+        moving.motion_samples[0] = {100, 200, 300, 20000, 0, 0};
+        switch_pro_set_input(0, moving, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+        switch_pro_set_input(1, moving, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                             SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+        const auto before = get_current_report(0, "missing pre-send report");
+        hid_ready[0] = rejected_transfer;
+        hid_report_succeeds[0] = !rejected_transfer;
+        now_ms = 21;
+        expect(!switch_pro_task(0), "blocked motion transfer was counted as sent");
+        const auto blocked = get_current_report(0, "missing blocked report");
+        expect(blocked.timestamp == before.timestamp &&
+                   std::memcmp(blocked.imuData, before.imuData, sizeof(blocked.imuData)) == 0,
+               "blocked motion advanced timestamp or quaternion payload");
+        hid_ready[0] = true;
+        hid_report_succeeds[0] = true;
+        now_ms = 22;
+        expect(switch_pro_task(0), "overdue motion waited another 15 ms after USB became ready");
+        expect(switch_pro_task(1), "reference motion did not send");
+        const auto recovered = copy_switch_report(latest_regular_report(0));
+        const auto reference = copy_switch_report(latest_regular_report(1));
+        expect(recovered.timestamp == reference.timestamp &&
+                   std::memcmp(recovered.imuData, reference.imuData, sizeof(reference.imuData)) == 0,
+               "retry integrated an unsent quaternion sample twice");
+        now_ms = 23;
+        expect(!switch_pro_task(0), "retry recovery emitted motion faster than its 15 ms cadence");
+    }
+}
+
+void test_control_replies_do_not_postpone_motion() {
+    initialize_contexts();
+    send_feature(0, TOGGLE_IMU, 1);
+    now_ms = 6;
+    switch_pro_task(0);
+    ControllerState moving{};
+    moving.motion_sample_count = 1;
+    moving.motion_samples[0].gyro_z = 1000;
+    switch_pro_set_input(0, moving, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+    now_ms = 21;
+    expect(switch_pro_task(0), "initial motion report missing");
+    send_feature(0, GET_CONTROLLER_STATE, 0);
+    now_ms = 35;
+    expect(!switch_pro_task(0), "control response counted as motion");
+    moving.motion_samples[0].gyro_z = 2000;
+    switch_pro_set_input(0, moving, SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
+                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
+    now_ms = 36;
+    expect(switch_pro_task(0), "control response postponed the independent motion deadline");
+    const auto current = copy_switch_report(latest_regular_report(0));
+    expect(read_int16_le(current.imuData + 10) == 2000 && current.timestamp == 6,
+           "overdue motion did not use the freshest input");
+
+    initialize_contexts();
+    now_ms = 15;
+    send_feature(0, GET_CONTROLLER_STATE, 0);
+    switch_pro_task(0);
+    now_ms = 16;
+    send_feature(0, GET_CONTROLLER_STATE, 0);
+    expect(switch_pro_task(0), "successive control replies starved overdue motion");
+    now_ms = 22;
+    expect(!switch_pro_task(0), "pending control response counted as motion");
+    expect(sent_reports[sent_report_count - 1].data[0] == REPORT_OUTPUT_21,
+           "motion fairness discarded the pending control reply");
+}
+
+void test_motion_cadence_survives_usb_poll_quantization() {
+    initialize_contexts();
+    for (now_ms = 1; now_ms <= 120; ++now_ms) {
+        hid_ready[0] = now_ms % 8 == 0;
+        switch_pro_task(0);
+    }
+    expect(reports_for_instance(0) == 8,
+           "8 ms USB polling stretched the 15 ms motion clock");
+    const auto report = copy_switch_report(latest_regular_report(0));
+    expect(report.timestamp == 24, "motion clock did not represent 24 samples in 120 ms");
+    hid_ready[0] = true;
+    now_ms = 121;
+    expect(!switch_pro_task(0), "motion sent an extra unscheduled sample group");
+    now_ms = 300;
+    expect(switch_pro_task(0), "motion did not recover after a long USB stall");
+    const auto recovered = copy_switch_report(latest_regular_report(0));
+    expect(recovered.timestamp == 60, "motion timer did not skip missing periods");
+    expect(!switch_pro_task(0), "motion replayed a stale catch-up burst");
+}
+
 }  // namespace
 
 extern "C" absolute_time_t get_absolute_time(void) {
@@ -765,6 +861,9 @@ int main() {
     test_protocol_neutral_trigger_threshold();
     test_custom_trigger_thresholds_are_isolated();
     test_uart_parser_is_pure();
+    test_motion_backpressure_retries_without_advancing_state();
+    test_control_replies_do_not_postpone_motion();
+    test_motion_cadence_survives_usb_poll_quantization();
     if (failures != 0) {
         std::cerr << failures << " driver context test(s) failed\n";
         return 1;

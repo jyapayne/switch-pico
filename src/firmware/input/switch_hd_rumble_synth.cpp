@@ -1,4 +1,5 @@
 #include "input/switch_hd_rumble_synth.h"
+#include "input/switch_hd_rumble_envelope.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -80,19 +81,23 @@ int32_t sine(uint32_t phase) {
 
 void apply_host_gain(uint16_t& low, uint16_t& high) {
     if ((low | high) == 0) return;
-    // Native gameplay calibration: 1.5x after profile gains. Limit both bands
-    // together to the mixer's headroom, preserving their ratio and avoiding
-    // waveform clipping. Local confirmations retain their original gain.
-    const uint32_t boosted_low = (uint32_t{low} * 3 + 1) / 2;
-    const uint32_t boosted_high = (uint32_t{high} * 3 + 1) / 2;
-    const uint32_t total = boosted_low + boosted_high;
-    if (total > 65536u) {
-        low = static_cast<uint16_t>(boosted_low * 65536u / total);
-        high = static_cast<uint16_t>(boosted_high * 65536u / total);
-    } else {
-        low = static_cast<uint16_t>(boosted_low);
-        high = static_cast<uint16_t>(boosted_high);
+    const uint32_t weighted_low = uint32_t{low} * 2;
+    const uint32_t weighted_high = uint32_t{high} * 2;
+    const uint32_t total = weighted_low + weighted_high;
+    uint32_t target = 65535u;
+    if (total < 65535u) {
+        // A gentle 0.8-power curve lifts quiet/mid-level effects. Apply it
+        // jointly so band balance is unchanged, not separately to each voice.
+        const uint32_t index = total >> 8;
+        const uint32_t fraction = total & 255u;
+        const uint32_t first = SwitchHdRumbleEnvelope::kLevel[index];
+        const uint32_t difference = SwitchHdRumbleEnvelope::kLevel[index + 1] - first;
+        target = first + ((difference * fraction + 128u) >> 8);
     }
+    // Product <= 65536*65535 fits uint32; floor rounding keeps the combined
+    // weights <= 65535 and each weight representable in uint16. No clipping.
+    low = static_cast<uint16_t>(weighted_low * target / total);
+    high = static_cast<uint16_t>(weighted_high * target / total);
 }
 
 uint8_t mix(uint32_t low_phase, uint32_t high_phase,

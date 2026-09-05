@@ -42,7 +42,11 @@ std::vector<uint8_t> render(SwitchHdRumbleSynth& synth, uint64_t first,
 }
 
 double wave(double cycles, uint16_t amplitude = 32768) {
-    return 95.25 * std::sin(kTau * cycles) * amplitude / 32768;
+    return 127.0 * std::sin(kTau * cycles) * std::pow(amplitude / 32768.0, 0.8);
+}
+
+double feedback_wave(double cycles, uint16_t amplitude = 32768) {
+    return 63.5 * std::sin(kTau * cycles) * amplitude / 32768;
 }
 
 template <typename Function>
@@ -110,7 +114,7 @@ void test_physical_frequency_and_channels() {
                     }
                 }
                 expect(std::abs(peak_frequency - frequency) <= 0.5 &&
-                           peak_amplitude > 92 && peak_amplitude < 99,
+                           peak_amplitude > 123 && peak_amplitude < 132,
                        "DFT peak matches physical frequency including extreme indices");
             }
         }
@@ -124,10 +128,10 @@ void test_linear_mix_headroom() {
     frame.actuators[1] = one_side(1, state(64, 32768, 64, 32768)).actuators[1];
     synth.push(frame, 0);
     const auto pcm = render(synth, 0, 150);
-    expect_wave(pcm, 0, [](size_t n) { return 2 * wave(160.0 * n / 3000) / 1.5; },
+    expect_wave(pcm, 0, [](size_t n) { return wave(160.0 * n / 3000); },
                 "coherent full-scale bands use headroom without waveform clipping");
     expect_wave(pcm, 1, [](size_t n) {
-        return (wave(160.0 * n / 3000) + wave(320.0 * n / 3000)) / 1.5;
+        return (wave(160.0 * n / 3000) + wave(320.0 * n / 3000)) / 2;
     }, "full-scale two-band balance is preserved by the joint gain ceiling");
     int sum = 0;
     for (size_t n = 0; n < pcm.size() / 2; ++n) {
@@ -141,7 +145,15 @@ void test_linear_mix_headroom() {
     expect_wave(render(synth, 0, 150), 0, [](size_t n) {
         return 127.0 * (2 * std::sin(kTau * 160.0 * n / 3000) +
                         std::sin(kTau * 320.0 * n / 3000)) / 3;
-    }, "headroom-limited boost retains a 2:1 band amplitude ratio");
+    }, "joint limiting preserves the two-band amplitude ratio");
+
+    synth.reset(0);
+    synth.push(one_side(0, state(64, 8192, 64, 4096)), 0);
+    expect_wave(render(synth, 0, 150), 0, [](size_t n) {
+        const double peak = 127.0 * std::pow(0.375, 0.8);
+        return peak * (2 * std::sin(kTau * 160.0 * n / 3000) +
+                       std::sin(kTau * 320.0 * n / 3000)) / 3;
+    }, "quiet-effect curve preserves band balance instead of independently boosting voices");
 
     synth.reset(0);
     synth.push(one_side(0, state(127, 0, 127, 0)), 0);
@@ -235,14 +247,14 @@ void test_feedback_returns_to_live_host() {
     auto pcm = render(synth, 0, 64);
     expect_wave(pcm, 0, [](size_t n) {
         if (n >= 16 && n < 30) {
-            return wave(320.0 * n / 3000) / 1.5;
+            return feedback_wave(320.0 * n / 3000);
         }
         const double cycles = n < 24 ? n * 160.0 / 3000
                                      : (24 * 160.0 + (n - 24) * 320.0) / 3000;
         return wave(cycles, n < 24 ? 32768 : 16384);
     }, "partial feedback expiry returns to live host state and host phase");
     expect_wave(pcm, 1, [](size_t n) {
-        return n >= 16 && n < 30 ? wave(320.0 * n / 3000) / 1.5 : 0;
+        return n >= 16 && n < 30 ? feedback_wave(320.0 * n / 3000) : 0;
     }, "feedback overrides both sides only for its actual duration");
 
     synth.reset(0);
@@ -254,10 +266,10 @@ void test_feedback_returns_to_live_host() {
     pcm = render(synth, 0, 60);
     expect_wave(pcm, 0, [](size_t n) {
         if (n < 12) {
-            return wave(160.0 * n / 3000, static_cast<uint16_t>((128u * 32768 + 127) / 255)) / 1.5;
+            return feedback_wave(160.0 * n / 3000, static_cast<uint16_t>((128u * 32768 + 127) / 255));
         }
         const bool feedback = n >= 24 && n < 36;
-        return wave((feedback ? 320.0 : 160.0) * n / 3000) / (feedback ? 1.5 : 1);
+        return feedback ? feedback_wave(320.0 * n / 3000) : wave(160.0 * n / 3000);
     }, "zero magnitudes and zero duration cancel override without cancelling host");
 
     synth.reset(0);
@@ -265,7 +277,7 @@ void test_feedback_returns_to_live_host() {
     synth.feedback(0, 80000, 0, 255);
     pcm = render(synth, 0, 270);
     expect_wave(pcm, 0, [](size_t n) {
-        return n < 240 ? wave(320.0 * n / 3000) / 1.5 : 0;
+        return n < 240 ? feedback_wave(320.0 * n / 3000) : 0;
     }, "feedback expiry cannot resurrect an expired host effect");
 }
 
@@ -301,7 +313,7 @@ void test_late_commands_and_clock_rollover() {
     pcm = render(synth, 0, 30);
     expect_wave(pcm, 0, [](size_t n) {
         if (n >= 12 && n < 15) {
-            return wave(320.0 * n / 3000) / 1.5;
+            return feedback_wave(320.0 * n / 3000);
         }
         return wave(160.0 * n / 3000, n < 9 ? 32768 : 16384);
     }, "64-bit microsecond clock rollover preserves order and duration");
@@ -330,7 +342,7 @@ void test_stall_and_overflow() {
            "fresh effect after giant stall is accepted");
     const auto fresh = render(skipped, far + 64, 150);
     const double fresh_amplitude = spectral_amplitude(fresh, 0, 160);
-    expect(fresh_amplitude > 93 && fresh_amplitude < 98,
+    expect(fresh_amplitude > 124 && fresh_amplitude < 131,
            "fresh 160 Hz effect resumes at full band amplitude after giant stall");
     expect_wave(fresh, 1, [](size_t) { return 0; },
                 "resuming after stall does not activate the other actuator");

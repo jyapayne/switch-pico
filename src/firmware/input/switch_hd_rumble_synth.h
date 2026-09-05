@@ -7,8 +7,8 @@
 // Single-core, allocation-free 3 kHz stereo PCM timeline. All times use the same
 // 64-bit microsecond clock; unsigned clock rollover is supported for intervals
 // shorter than 2^63 us. reset() establishes sample zero and zero oscillator phase.
-// Host PCM gets 1.5x gain after profile scaling, jointly limited to available
-// mixer headroom so two-band balance is preserved. Feedback gain is unchanged.
+// Host PCM gets balanced 2x gain and a joint 0.8-power amplitude curve after
+// profile scaling, bounded to mixer headroom. Feedback gain remains unchanged.
 class SwitchHdRumbleSynth {
 public:
     void reset(uint64_t epoch_us);

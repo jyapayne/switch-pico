@@ -180,7 +180,8 @@ HAPTICS_GAMEPLAY_TIMING = {
     "lookback_us": 64000000 / 3000,
     "command_window_us": 8000,
     "watchdog_us": 50000,
-    "host_gain": 1.5,
+    "band_gains": {"low": 2.0, "high": 2.0},
+    "response_exponent": 0.8,
 }
 HAPTICS_TRANSPORT_PROBE_UNSUPPORTED_HINT = (
     "Firmware does not support haptics transport profile operation 0x41. "
@@ -2320,8 +2321,9 @@ def _print_haptics_experiment(
         print(
             "Gameplay: continuous 3 kHz, 64 stereo frames/packet; "
             "21333.333 us lookback, 8000 us command window, "
-            "50000 us host-effect watchdog; 1.5x gameplay gain, jointly "
-            "headroom-limited. Silence continues without commands."
+            "50000 us host-effect watchdog; balanced 2x gameplay gain with a "
+            "0.8-power response curve, jointly headroom-limited. "
+            "Silence continues without commands."
         )
         print(HAPTICS_GAMEPLAY_ARMING_NOTE)
     else:
