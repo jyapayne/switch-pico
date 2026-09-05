@@ -5,6 +5,7 @@
 
 #include <uni.h>
 #include "platform/pico/controller_color_config.h"
+#include "input/switch2_wake.h"
 
 namespace {
 
@@ -44,6 +45,8 @@ bool expect_configuration_timer_prearmed = false;
 uint32_t expected_configuration_timer_add_count = 0;
 int cyw43_init_calls = 0;
 int uni_init_calls = 0;
+int switch2_wake_initializations = 0;
+int switch2_wake_requests = 0;
 int device_disconnect_calls = 0;
 uni_hid_device_t* last_disconnected_device = nullptr;
 uni_hid_device_t* lookup_devices[8]{};
@@ -442,6 +445,19 @@ uint32_t btstack_run_loop_get_time_ms() {
 }
 
 
+void switch2_wake_initialize() {
+    ++switch2_wake_initializations;
+}
+
+
+bool switch2_wake_request() {
+    ++switch2_wake_requests;
+    return true;
+}
+
+void switch2_wake_diagnostics(Switch2WakeDiagnostics*) {
+}
+
 #include "core/controller_identity.cpp"
 #include "input/bluepad32_input_backend.cpp"
 
@@ -548,7 +564,8 @@ void start_backend() {
                     kClassicLinkSupervisionTimeout &&
                 !bondable && accepted_stk_methods == 0 &&
                 !ssp_auto_accept && pairing_event_handler != nullptr &&
-                identity_event_handler != nullptr,
+                identity_event_handler != nullptr &&
+                switch2_wake_initializations == 1,
             "initialization must register Classic and BLE identity policy");
 }
 void start_pairing_backend() {
@@ -2373,6 +2390,51 @@ void test_flash_core_start_contract() {
             "backend start must remain idempotent");
 }
 
+
+
+void test_system_button_wake_trigger() {
+    start_pairing_backend();
+    uni_hid_device_t controller = device(0);
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+            "wake trigger controller did not become ready");
+
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    platform_on_controller_data(&controller, &input);
+    require(switch2_wake_requests == 0,
+            "neutral input requested a wake burst");
+
+    input.gamepad.misc_buttons = MISC_BUTTON_SYSTEM;
+    platform_on_controller_data(&controller, &input);
+    require(switch2_wake_requests == 0,
+            "plain system button requested a wake burst");
+
+    input.gamepad.buttons = BUTTON_SHOULDER_L | BUTTON_SHOULDER_R;
+    platform_on_controller_data(&controller, &input);
+    platform_on_controller_data(&controller, &input);
+    require(switch2_wake_requests == 1,
+            "held L+R+System chord did not produce exactly one wake request");
+
+    input.gamepad.buttons = 0;
+    input.gamepad.misc_buttons = 0;
+    platform_on_controller_data(&controller, &input);
+    input.gamepad.buttons = BUTTON_SHOULDER_L | BUTTON_SHOULDER_R;
+    platform_on_controller_data(&controller, &input);
+    require(switch2_wake_requests == 1,
+            "L+R without System requested wake");
+    input.gamepad.misc_buttons = MISC_BUTTON_SYSTEM;
+    platform_on_controller_data(&controller, &input);
+    require(switch2_wake_requests == 2,
+            "second L+R+System chord edge did not request wake");
+
+    input.gamepad.buttons = 0;
+    input.gamepad.misc_buttons = MISC_BUTTON_CAPTURE;
+    platform_on_controller_data(&controller, &input);
+    require(switch2_wake_requests == 2,
+            "non-system misc button requested wake");
+}
+
+
 void test_flash_core_init_fatal() {
     bluepad32_input_backend_init();
     flash_core_init_result = false;
@@ -2424,6 +2486,8 @@ int main(int argc, char** argv) {
         test_configuration_timer_rearms_before_storage_work();
     } else if (scenario == "flash-core-start") {
         test_flash_core_start_contract();
+    } else if (scenario == "system-wake") {
+        test_system_button_wake_trigger();
     } else if (scenario == "flash-core-failure") {
         test_flash_core_init_fatal();
     } else {

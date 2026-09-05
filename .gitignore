@@ -14,3 +14,4 @@ __pycache__
 pytest-*/*
 build-*/*
 .ignore
+src/firmware/platform/pico/switch2_wake_config.h

@@ -111,6 +111,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${SWITCH_PICO_SOURCE_DIR}/configuration/configuration_transaction.cpp
             ${SWITCH_PICO_SOURCE_DIR}/core/controller_identity.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/bluepad32_input_backend.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/input/switch2_wake.cpp
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/bootsel_pairing_button.cpp
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/pico_configuration_storage.cpp
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/pico_profile_storage.cpp

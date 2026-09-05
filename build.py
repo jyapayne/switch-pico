@@ -15,6 +15,8 @@ CONFIG_FILE = FIRMWARE_SOURCE_DIR / "platform" / "pico" / "controller_color_conf
 BUILD_DIR = SCRIPT_DIR / "build"
 AIO_BUILD_DIR = SCRIPT_DIR / "build-aio"
 FEASIBILITY_BUILD_DIR = SCRIPT_DIR / "build-feasibility"
+WAKE_CAPTURE_SOURCE_DIR = SCRIPT_DIR / "tools" / "switch2_wake_capture"
+WAKE_CAPTURE_BUILD_DIR = SCRIPT_DIR / "build-wake-capture"
 FIRMWARE_DIR = SCRIPT_DIR / "firmware"
 FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico.elf"
 FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico.uf2"
@@ -25,6 +27,12 @@ FEASIBILITY_FIRMWARE_ELF_PATH = (
 )
 FEASIBILITY_FIRMWARE_UF2_PATH = (
     FIRMWARE_DIR / "switch-pico-adapter-feasibility.uf2"
+)
+WAKE_CAPTURE_FIRMWARE_ELF_PATH = (
+    FIRMWARE_DIR / "switch-pico-wake-capture.elf"
+)
+WAKE_CAPTURE_FIRMWARE_UF2_PATH = (
+    FIRMWARE_DIR / "switch-pico-wake-capture.uf2"
 )
 
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
@@ -38,7 +46,12 @@ MACROS = tuple(
 
 CMAKE_CACHE_PATHS = tuple(
     build_dir / "CMakeCache.txt"
-    for build_dir in (BUILD_DIR, AIO_BUILD_DIR, FEASIBILITY_BUILD_DIR)
+    for build_dir in (
+        BUILD_DIR,
+        AIO_BUILD_DIR,
+        FEASIBILITY_BUILD_DIR,
+        WAKE_CAPTURE_BUILD_DIR,
+    )
 )
 TOOLCHAIN_COMPILER = (
     "arm-none-eabi-gcc.exe" if os.name == "nt" else "arm-none-eabi-gcc"
@@ -279,6 +292,11 @@ def parse_args():
         action="store_true",
         help="Build and flash the Pico 2 W automatic Switch/XInput prototype.",
     )
+    mode_group.add_argument(
+        "--wake-capture",
+        action="store_true",
+        help="Build and flash the automatic Switch 2 wake capture firmware.",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--random-grip-color",
@@ -290,7 +308,10 @@ def parse_args():
         metavar="RRGGBB",
         help="Set every emulated controller slot to the provided hex color.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.wake_capture and (args.random_grip_color or args.grip_color):
+        parser.error("wake capture firmware does not use grip-color options")
+    return args
 
 def random_hex_color():
     return "".join(f"{random.randrange(256):02X}" for _ in range(3))
@@ -409,6 +430,39 @@ def build(
     print(f"Copied UF2: {firmware_uf2_path}")
 
 
+def build_wake_capture():
+    elf_path = WAKE_CAPTURE_BUILD_DIR / "switch2-wake-capture.elf"
+    uf2_path = WAKE_CAPTURE_BUILD_DIR / "switch2-wake-capture.uf2"
+    run_cmd(
+        [
+            "cmake",
+            "-S",
+            str(WAKE_CAPTURE_SOURCE_DIR),
+            "-B",
+            str(WAKE_CAPTURE_BUILD_DIR),
+            "-DPICO_BOARD=pico2_w",
+        ]
+    )
+    run_cmd(["cmake", "--build", str(WAKE_CAPTURE_BUILD_DIR)])
+    missing_artifacts = [
+        path for path in (elf_path, uf2_path) if not path.is_file()
+    ]
+    if missing_artifacts:
+        missing = ", ".join(str(path) for path in missing_artifacts)
+        sys.stderr.write(
+            f"Error: Wake capture build did not produce: {missing}\n"
+        )
+        sys.exit(1)
+    FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(elf_path, WAKE_CAPTURE_FIRMWARE_ELF_PATH)
+    shutil.copy2(uf2_path, WAKE_CAPTURE_FIRMWARE_UF2_PATH)
+    print(f"Built wake capture ELF: {elf_path}")
+    print(f"Built wake capture UF2: {uf2_path}")
+    print(f"Copied ELF: {WAKE_CAPTURE_FIRMWARE_ELF_PATH}")
+    print(f"Copied UF2: {WAKE_CAPTURE_FIRMWARE_UF2_PATH}")
+    return elf_path
+
+
 def flash(elf_path, allow_elf_override):
     picotool = resolve_picotool()
     if not elf_path.exists():
@@ -428,6 +482,10 @@ def main():
     except BuildEnvironmentError as exc:
         sys.stderr.write(f"Error: {exc}\n")
         sys.exit(1)
+    if args.wake_capture:
+        wake_capture_elf = build_wake_capture()
+        flash(wake_capture_elf, allow_elf_override=False)
+        return
 
     color = None
 

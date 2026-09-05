@@ -66,6 +66,102 @@ The default `python3 build.py` command and `firmware/switch-pico.*` artifacts re
 
 Both `build.py --aio` and direct AIO CMake configuration copy the pinned Bluepad32 source into the active build directory and apply `patches/bluepad32-sdl3-imu.patch` there before compiling. The patch makes supported motion controllers use SDL3-equivalent axes and fixed-point units before conversion to Nintendo samples. The `external/bluepad32` submodule remains pristine; patch or source-revision drift fails configuration.
 
+### Switch 2 wake from L + R + Home, PS, or Xbox
+
+The AIO firmware can wake a sleeping Switch 2 when a connected controller's
+physical **L + R + System** chord becomes held: L + R + Home on
+Nintendo-style controllers, L1 + R1 + PS on PlayStation controllers, or
+LB + RB + Xbox on Xbox controllers. Plain Home, PS, or Xbox remains a normal
+button and does not start wake advertising. Setup needs one wake advertisement
+captured from a Joy-Con 2 already paired with that Switch 2. The generated
+configuration is console-specific and is intentionally ignored by Git.
+
+The implementation replays the captured, unencrypted Switch 2 BLE wake
+advertisement for two seconds at a 20 ms base interval. The CYW43439 has one
+controller-wide public Bluetooth address, so the firmware temporarily changes
+from the Pico's normal identity to the captured Joy-Con identity for the wake
+burst and restores it afterward. The explicit chord confines the resulting
+input-controller disconnect to an intentional wake attempt. This follows the
+packet format documented by
+[`ndeadly/switch2_controller_research`](https://github.com/ndeadly/switch2_controller_research/blob/master/bluetooth_interface.md)
+and the capture/replay approach demonstrated by
+[`alexvnesta/switch2controller`](https://github.com/alexvnesta/switch2controller)
+and the MIT-licensed
+[`Switch2-Wake-Beacon-ESPHome`](https://github.com/sickyj/Switch2-Wake-Beacon-ESPHome).
+
+Back up the complete Pico flash before replacing the AIO firmware with the
+temporary capture image:
+
+```sh
+picotool save -a -v switch-pico-before-wake-capture.uf2
+```
+
+Then:
+
+1. Connect the Pico 2 W to the computer and build/flash the one-shot capture
+   firmware:
+
+   ```sh
+   python3 build.py --wake-capture
+   ```
+
+   This also publishes `firmware/switch-pico-wake-capture.elf` and
+   `firmware/switch-pico-wake-capture.uf2`.
+
+2. Start the configuration tool. It auto-detects a single Pico USB serial
+   port; use `--port /dev/ttyACM0` when more than one Pico is attached:
+
+   ```sh
+   python3 tools/configure_switch2_wake.py
+   ```
+
+3. Detach a Joy-Con 2 that is already paired with the target Switch 2, put the
+   console to sleep, and press that Joy-Con's Home button. Do not press its
+   sync button. The capture firmware accepts the first public `ADV_IND` packet
+   with Nintendo's Switch 2 wake flag and nonzero console address, stops
+   scanning automatically, lights the onboard LED solid, and repeats the
+   captured record until the tool receives it.
+
+4. The tool validates the packet and atomically writes
+   `src/firmware/platform/pico/switch2_wake_config.h`.
+
+5. Restore the AIO firmware with the generated wake configuration:
+
+   ```sh
+   python3 build.py --aio
+   ```
+
+
+The capture tool also accepts a saved serial log:
+
+```sh
+python3 tools/configure_switch2_wake.py --input switch2-joycon-capture.log
+```
+
+With the configured AIO firmware powered while the console sleeps, first turn
+on the paired input controller with Home, PS, or Xbox and let it reconnect to
+the Pico. Then hold L + R and press its system button to send one wake burst.
+Holding the chord does not retrigger it; release at least one chord button
+before another attempt. Plain Home, PS, or Xbox is forwarded normally and does
+not disturb the radio.
+
+The input controller disconnects during the intentional wake burst because
+the CYW43439 cannot retain its normal public identity while transmitting the
+captured controller's public identity. It can reconnect after the Pico restores
+its address. Avoiding that disconnect requires a second BLE radio dedicated to
+wake transmission; keeping the captured identity throughout gameplay caused
+severe Classic Bluetooth latency in hardware testing.
+
+The Pico must remain powered for wireless wake. If the Switch or dock removes
+USB power during sleep, use a powered USB arrangement that preserves the
+Pico-to-Switch data connection. Keep the captured Joy-Con inactive during the
+two-second wake burst to avoid two radios using one address.
+
+To target another Switch 2, repeat the capture and configuration steps. To
+disable wake, delete the generated `switch2_wake_config.h` and rebuild the AIO
+firmware. Restore the full-flash backup only if you need to recover the exact
+pre-capture firmware and persistent state.
+
 ### Pairing up to four controllers
 
 1. Flash and connect the Pico 2 W to the Switch.

@@ -1,5 +1,6 @@
 #include "input/bluepad32_input_backend.h"
 #include "input/controller_hotkey_config.h"
+#include "input/switch2_wake.h"
 #include "configuration/configuration_service.h"
 #include "profile/profile_service.h"
 #include <limits.h>
@@ -500,6 +501,8 @@ ConnectionStatus compute_connection_status() {
                           : ConnectionStatus::Scanning;
 }
 
+
+
 void publish_device_state(uint8_t slot, uni_hid_device_t* device,
                           uint16_t pre_hotkey_button_mask,
                           const ControllerState& state) {
@@ -631,6 +634,21 @@ constexpr uint16_t logical_button_bit(
     ControllerProfileLogicalButton button) {
     return static_cast<uint16_t>(
         1u << static_cast<uint8_t>(button));
+}
+bool wake_chord_rising_edge(uint8_t slot, uni_hid_device_t* device,
+                            uint16_t button_mask) {
+    const uint16_t chord =
+        logical_button_bit(ControllerProfileLogicalButton::kLeftShoulder) |
+        logical_button_bit(ControllerProfileLogicalButton::kRightShoulder) |
+        logical_button_bit(ControllerProfileLogicalButton::kSystem);
+    critical_section_enter_blocking(&g_state_lock);
+    const BackendSlot& previous = g_slots[slot];
+    const bool rising =
+        previous.active && previous.device == device &&
+        (button_mask & chord) == chord &&
+        (previous.pre_hotkey_button_mask & chord) != chord;
+    critical_section_exit(&g_state_lock);
+    return rising;
 }
 
 constexpr uint16_t logical_button_mask(
@@ -1462,6 +1480,7 @@ void platform_on_init_complete() {
     g_identity_event_callback.callback = handle_btstack_event;
     sm_add_event_handler(&g_identity_event_callback);
     hci_add_event_handler(&g_pairing_event_callback);
+    switch2_wake_initialize();
     refresh_pairing_snapshot();
     // Keep Bluepad32 autoconnect active whenever at least one slot is free.
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
@@ -1624,6 +1643,11 @@ void platform_on_controller_data(uni_hid_device_t* device,
     uni_gamepad_t gamepad = controller->gamepad;
     const uint16_t pre_hotkey_button_mask =
         logical_button_mask(gamepad);
+    if (wake_chord_rising_edge(
+            static_cast<uint8_t>(slot_index), device,
+            pre_hotkey_button_mask)) {
+        switch2_wake_request();
+    }
     const HotkeyDecision hotkeys = update_controller_hotkeys(
         static_cast<uint8_t>(slot_index), device);
     const uint16_t output_button_mask = pre_hotkey_button_mask;

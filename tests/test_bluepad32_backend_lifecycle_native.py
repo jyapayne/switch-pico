@@ -51,6 +51,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "clear-pairings",
             "configuration-timer",
             "flash-core-start",
+            "system-wake",
             "flash-core-failure",
         ):
             subprocess.run([str(executable), scenario], check=True, cwd=root)
