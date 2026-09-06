@@ -74,6 +74,18 @@ ConfigurationStorageIo fake_io(FakeFlash* flash) {
     };
 }
 
+ControllerIdentity nintendo_identity(uint8_t address_suffix,
+                                     uint16_t product_id = 0x2009) {
+    ControllerIdentity identity{};
+    identity.stable = true;
+    identity.transport = ControllerTransport::kClassic;
+    identity.address[0] = 0x02;
+    identity.address[5] = address_suffix;
+    identity.vendor_id = 0x057e;
+    identity.product_id = product_id;
+    return identity;
+}
+
 void test_schema_encoding() {
     AdapterConfiguration configuration{};
     configuration.pairing_window_seconds = 90;
@@ -81,8 +93,8 @@ void test_schema_encoding() {
     uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
     require(adapter_configuration_encode(configuration, payload,
                                          sizeof(payload)),
-            "valid v2 configuration did not encode");
-    const uint8_t expected[] = {
+            "valid v3 configuration did not encode");
+    const uint8_t expected[ADAPTER_CONFIGURATION_ENCODED_SIZE] = {
         90,
         0,
         static_cast<uint8_t>(AdapterRequestedMode::kXInput),
@@ -93,15 +105,16 @@ void test_schema_encoding() {
         0,
     };
     require(memcmp(payload, expected, sizeof(expected)) == 0,
-            "v2 configuration bytes are not canonical");
+            "v3 configuration bytes are not canonical");
 
     AdapterConfiguration decoded{};
     require(adapter_configuration_decode(
                 ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
                 sizeof(payload), &decoded) &&
                 decoded.pairing_window_seconds == 90 &&
-                decoded.requested_mode == AdapterRequestedMode::kXInput,
-            "v2 configuration did not round trip");
+                decoded.requested_mode == AdapterRequestedMode::kXInput &&
+                decoded.native_switch_controller_count == 0,
+            "v3 configuration did not round trip");
 
     const AdapterRequestedMode valid_modes[] = {
         AdapterRequestedMode::kAuto,
@@ -136,12 +149,15 @@ void test_schema_encoding() {
             "availability API could not enable future modes");
 
     const uint8_t legacy[] = {120, 0, 0, 0};
+    decoded.native_switch_controller_count = 1;
+    decoded.native_switch_controllers[0] = nintendo_identity(1);
     require(adapter_configuration_decode(
                 ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION, legacy,
                 sizeof(legacy), &decoded) &&
                 decoded.pairing_window_seconds == 120 &&
-                decoded.requested_mode == AdapterRequestedMode::kAuto,
-            "v1 configuration did not migrate to auto");
+                decoded.requested_mode == AdapterRequestedMode::kAuto &&
+                decoded.native_switch_controller_count == 0,
+            "v1 configuration did not migrate without approvals");
     uint8_t malformed_legacy[sizeof(legacy)];
     memcpy(malformed_legacy, legacy, sizeof(legacy));
     malformed_legacy[3] = 1;
@@ -154,6 +170,30 @@ void test_schema_encoding() {
                 sizeof(legacy) - 1, &decoded),
             "v1 record with wrong size was accepted");
 
+    const uint8_t v2[] = {
+        120, 0, static_cast<uint8_t>(AdapterRequestedMode::kMac), 0, 0, 0, 0, 0,
+    };
+    require(adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION, v2, sizeof(v2),
+                &decoded) &&
+                decoded.pairing_window_seconds == 120 &&
+                decoded.requested_mode == AdapterRequestedMode::kMac &&
+                decoded.native_switch_controller_count == 0,
+            "v2 migration changed settings or granted native rumble");
+    for (size_t index = 3; index < sizeof(v2); ++index) {
+        uint8_t malformed[sizeof(v2)];
+        memcpy(malformed, v2, sizeof(v2));
+        malformed[index] = 1;
+        require(!adapter_configuration_decode(
+                    ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION, malformed,
+                    sizeof(malformed), &decoded),
+                "v2 nonzero reserved byte was accepted");
+    }
+    require(!adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION, v2, sizeof(v2) - 1,
+                &decoded),
+            "v2 record with wrong size was accepted");
+
     for (size_t index = 3; index < sizeof(payload); ++index) {
         uint8_t malformed[sizeof(payload)];
         memcpy(malformed, payload, sizeof(payload));
@@ -161,7 +201,7 @@ void test_schema_encoding() {
         require(!adapter_configuration_decode(
                     ADAPTER_CONFIGURATION_SCHEMA_VERSION, malformed,
                     sizeof(malformed), &decoded),
-                "v2 nonzero reserved byte was accepted");
+                "v3 nonzero reserved or unused byte was accepted");
     }
     uint8_t invalid_mode[sizeof(payload)];
     memcpy(invalid_mode, payload, sizeof(payload));
@@ -173,13 +213,13 @@ void test_schema_encoding() {
     require(!adapter_configuration_decode(
                 ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
                 sizeof(payload) - 1, &decoded),
-            "short v2 record was accepted");
+            "short v3 record was accepted");
     uint8_t oversized[ADAPTER_CONFIGURATION_ENCODED_SIZE + 1]{};
     memcpy(oversized, payload, sizeof(payload));
     require(!adapter_configuration_decode(
                 ADAPTER_CONFIGURATION_SCHEMA_VERSION, oversized,
                 sizeof(oversized), &decoded),
-            "oversized v2 record was accepted");
+            "oversized v3 record was accepted");
 
     configuration.pairing_window_seconds = 9;
     require(!adapter_configuration_encode(configuration, payload,
@@ -194,7 +234,193 @@ void test_schema_encoding() {
     configuration.requested_mode = AdapterRequestedMode::kAuto;
     require(!adapter_configuration_encode(configuration, oversized,
                                           sizeof(oversized)),
-            "v2 encoder accepted a noncanonical output size");
+            "v3 encoder accepted a noncanonical output size");
+}
+
+void test_native_switch_approval_identity_and_canonical_encoding() {
+    const ControllerIdentity pro = nintendo_identity(3);
+    const ControllerIdentity left = nintendo_identity(1, 0x2006);
+    const ControllerIdentity right = nintendo_identity(2, 0x2007);
+    AdapterConfiguration configuration{};
+    require(!adapter_configuration_native_switch_approved(configuration, pro),
+            "a supported model was approved without an explicit identity");
+    configuration.native_switch_controller_count = 3;
+    configuration.native_switch_controllers[0] = pro;
+    configuration.native_switch_controllers[1] = left;
+    configuration.native_switch_controllers[2] = right;
+    uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+    require(adapter_configuration_encode(configuration, payload, sizeof(payload)),
+            "original Switch controller approvals did not encode");
+    AdapterConfiguration decoded{};
+    require(adapter_configuration_decode(payload, sizeof(payload), &decoded) &&
+                adapter_configuration_native_switch_approved(decoded, pro) &&
+                adapter_configuration_native_switch_approved(decoded, left) &&
+                adapter_configuration_native_switch_approved(decoded, right) &&
+                !adapter_configuration_native_switch_approved(
+                    decoded, nintendo_identity(4)) &&
+                !adapter_configuration_native_switch_approved(
+                    decoded, nintendo_identity(3, 0x2006)),
+            "approval did not remain specific to the complete controller identity");
+
+    configuration.native_switch_controllers[0] = right;
+    configuration.native_switch_controllers[1] = pro;
+    configuration.native_switch_controllers[2] = left;
+    uint8_t reordered[sizeof(payload)]{};
+    require(adapter_configuration_encode(configuration, reordered,
+                                         sizeof(reordered)) &&
+                memcmp(payload, reordered, sizeof(payload)) == 0,
+            "approval insertion order changed the persisted bytes or CRC");
+
+    configuration.native_switch_controller_count = 0;
+    require(!adapter_configuration_native_switch_approved(configuration, pro) &&
+                adapter_configuration_encode(configuration, reordered,
+                                             sizeof(reordered)) &&
+                adapter_configuration_decode(reordered, sizeof(reordered),
+                                             &decoded) &&
+                !adapter_configuration_native_switch_approved(decoded, pro),
+            "revoked array entries remained approved after encode and decode");
+
+    configuration.native_switch_controller_count =
+        ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY;
+    for (size_t index = 0;
+         index < configuration.native_switch_controller_count; ++index) {
+        configuration.native_switch_controllers[index] =
+            nintendo_identity(static_cast<uint8_t>(
+                configuration.native_switch_controller_count - index));
+    }
+    require(adapter_configuration_encode(configuration, payload, sizeof(payload)) &&
+                adapter_configuration_decode(payload, sizeof(payload), &decoded) &&
+                adapter_configuration_native_switch_approved(
+                    decoded, nintendo_identity(1)) &&
+                adapter_configuration_native_switch_approved(
+                    decoded, nintendo_identity(16)),
+            "a full approval array lost its boundary identities");
+    ++configuration.native_switch_controller_count;
+    require(!adapter_configuration_encode(configuration, payload, sizeof(payload)) &&
+                !adapter_configuration_native_switch_approved(configuration, pro),
+            "an oversized approval array was accepted");
+    payload[3] = configuration.native_switch_controller_count;
+    require(!adapter_configuration_decode(payload, sizeof(payload), &decoded),
+            "an oversized encoded approval count was accepted");
+}
+
+void test_native_switch_approval_rejects_invalid_records() {
+    AdapterConfiguration configuration{};
+    configuration.native_switch_controller_count = 2;
+    configuration.native_switch_controllers[0] = nintendo_identity(1);
+    configuration.native_switch_controllers[1] = nintendo_identity(2);
+    uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+    require(adapter_configuration_encode(configuration, payload, sizeof(payload)),
+            "approval validation fixture did not encode");
+    configuration.native_switch_controllers[1] =
+        configuration.native_switch_controllers[0];
+    uint8_t malformed[sizeof(payload)]{};
+    require(!adapter_configuration_encode(configuration, malformed,
+                                          sizeof(malformed)),
+            "duplicate approval identities encoded");
+    memcpy(malformed, payload, sizeof(payload));
+    constexpr size_t first = ADAPTER_CONFIGURATION_HEADER_SIZE;
+    constexpr size_t second = first + CONTROLLER_IDENTITY_ENCODED_SIZE;
+    memcpy(malformed + second, malformed + first,
+           CONTROLLER_IDENTITY_ENCODED_SIZE);
+    AdapterConfiguration decoded{};
+    require(!adapter_configuration_decode(malformed, sizeof(malformed), &decoded),
+            "duplicate encoded approval identities were accepted");
+    memcpy(malformed + first, payload + second, CONTROLLER_IDENTITY_ENCODED_SIZE);
+    memcpy(malformed + second, payload + first, CONTROLLER_IDENTITY_ENCODED_SIZE);
+    require(!adapter_configuration_decode(malformed, sizeof(malformed), &decoded),
+            "noncanonical approval ordering was accepted");
+
+    configuration.native_switch_controller_count = 1;
+    ControllerIdentity invalid[] = {
+        controller_identity_global(), nintendo_identity(1),
+        nintendo_identity(1), nintendo_identity(1), nintendo_identity(1, 0x2069),
+    };
+    invalid[1].stable = false;
+    invalid[2].transport = ControllerTransport::kBle;
+    invalid[3].vendor_id = 0x1234;
+    for (const ControllerIdentity& identity : invalid) {
+        configuration.native_switch_controllers[0] = identity;
+        require(!adapter_configuration_encode(configuration, malformed,
+                                              sizeof(malformed)) &&
+                    !adapter_configuration_native_switch_approved(
+                        configuration, identity),
+                "global, unstable, BLE, or ineligible controller was approved");
+    }
+    const uint8_t invalid_fields[][2] = {
+        {0, 0}, {0, 2}, {1, 0}, {1, 2}, {1, 3}, {3, 1},
+        {10, 0x34}, {12, 0x69},
+    };
+    for (const auto& field : invalid_fields) {
+        memcpy(malformed, payload, sizeof(payload));
+        malformed[first + field[0]] = field[1];
+        require(!adapter_configuration_decode(malformed, sizeof(malformed),
+                                              &decoded),
+                "malformed or ineligible encoded identity was accepted");
+    }
+    memcpy(malformed, payload, sizeof(payload));
+    malformed[sizeof(malformed) - 1] = 1;
+    require(!adapter_configuration_decode(malformed, sizeof(malformed), &decoded),
+            "nonzero unused approval bytes were accepted");
+}
+
+void test_legacy_migration_power_loss() {
+    const uint16_t versions[] = {
+        ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION,
+        ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION,
+    };
+    for (uint16_t version : versions) {
+        const bool v2 = version == ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION;
+        const uint8_t legacy[] = {
+            90, 0, static_cast<uint8_t>(v2 ? AdapterRequestedMode::kXInput
+                                         : AdapterRequestedMode::kAuto),
+            0, 0, 0, 0, 0,
+        };
+        const size_t legacy_size = v2 ? ADAPTER_CONFIGURATION_V2_ENCODED_SIZE
+                                     : ADAPTER_CONFIGURATION_LEGACY_ENCODED_SIZE;
+        FakeFlash flash;
+        ConfigurationStorage store;
+        require(store.initialize(fake_io(&flash)) &&
+                    store.commit(version, legacy, legacy_size) ==
+                        ConfigurationStorageResult::kOk,
+                "legacy migration seed did not persist");
+        AdapterConfiguration migrated{};
+        uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+        require(adapter_configuration_decode(version, legacy, legacy_size,
+                                             &migrated) &&
+                    adapter_configuration_encode(migrated, payload,
+                                                 sizeof(payload)),
+                "legacy settings did not convert to schema3");
+        flash.fail_after_programs = flash.successful_programs;
+        require(store.commit(ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
+                             sizeof(payload)) ==
+                    ConfigurationStorageResult::kIoError,
+                "failed migration reported success");
+        flash.fail_after_programs = -1;
+        ConfigurationStorage recovered;
+        require(recovered.initialize(fake_io(&flash)) &&
+                    recovered.snapshot().schema_version == version &&
+                    recovered.snapshot().payload_size == legacy_size &&
+                    memcmp(recovered.snapshot().payload, legacy, legacy_size) == 0,
+                "migration power loss destroyed the legacy settings");
+        require(recovered.commit(ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
+                                 sizeof(payload)) ==
+                    ConfigurationStorageResult::kOk,
+                "migration retry failed");
+        ConfigurationStorage rebooted;
+        AdapterConfiguration decoded{};
+        require(rebooted.initialize(fake_io(&flash)) &&
+                    rebooted.snapshot().schema_version ==
+                        ADAPTER_CONFIGURATION_SCHEMA_VERSION &&
+                    adapter_configuration_decode(
+                        rebooted.snapshot().schema_version,
+                        rebooted.snapshot().payload,
+                        rebooted.snapshot().payload_size, &decoded) &&
+                    decoded.pairing_window_seconds == 90 &&
+                    decoded.requested_mode == migrated.requested_mode &&
+                    decoded.native_switch_controller_count == 0,
+                "migration retry changed settings or granted rumble approval");
+    }
 }
 
 void test_two_copy_recovery() {
@@ -320,12 +546,34 @@ void test_transaction_validation() {
                 CONFIGURATION_STORAGE_MAX_PAYLOAD_SIZE + 1, crc) ==
                 ConfigurationTransactionStatus::kTooLarge,
             "oversized transaction was accepted");
+    require(transaction.begin(
+                13, ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION,
+                ADAPTER_CONFIGURATION_LEGACY_ENCODED_SIZE, 0) ==
+                ConfigurationTransactionStatus::kUnsupportedSchema &&
+                transaction.begin(
+                    14, ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION,
+                    ADAPTER_CONFIGURATION_V2_ENCODED_SIZE, 0) ==
+                    ConfigurationTransactionStatus::kUnsupportedSchema,
+            "legacy host writes could silently erase stored approvals");
+    payload[3] = ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY + 1;
+    require(transaction.begin(
+                15, ADAPTER_CONFIGURATION_SCHEMA_VERSION, sizeof(payload),
+                configuration_crc32(payload, sizeof(payload))) ==
+                ConfigurationTransactionStatus::kReceiving &&
+                transaction.append(15, 0, payload, sizeof(payload)) ==
+                    ConfigurationTransactionStatus::kReceiving &&
+                transaction.finish(15) ==
+                    ConfigurationTransactionStatus::kMalformed,
+            "valid CRC allowed a malformed approval list to reach storage");
 }
 
 }  // namespace
 
 int main() {
     test_schema_encoding();
+    test_native_switch_approval_identity_and_canonical_encoding();
+    test_native_switch_approval_rejects_invalid_records();
+    test_legacy_migration_power_loss();
     test_two_copy_recovery();
     test_interrupted_write_retains_previous_generation();
     test_transaction_validation();

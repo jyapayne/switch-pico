@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import struct
 import zlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -45,7 +46,11 @@ class FakeDevice:
         self.configuration = struct.pack(
             "<HB5x", 60, config_manager.REQUESTED_MODE_AUTO
         )
+        self.configuration_schema = 2
         self.configuration_generation = 3
+        self.native_rumble_diagnostics = b"".join(
+            struct.pack("<4B19I", slot, 0, 0, 0, *([0] * 19)) for slot in range(4)
+        )
         self.active_mode = config_manager.ACTIVE_MODE_SWITCH_PROBE
         self.capabilities = (
             config_manager.CAPABILITY_INPUT
@@ -306,11 +311,17 @@ class FakeDevice:
                     request,
                     struct.pack("<7I4B", 6, 1200, 120, 5000, 8, 2, 10, 2, 2, 1, 1),
                 )
+            if request == config_manager.OP_NATIVE_SWITCH_RUMBLE:
+                return make_response(
+                    request,
+                    self.native_rumble_diagnostics,
+                    schema=config_manager.NATIVE_SWITCH_RUMBLE_SCHEMA_VERSION,
+                )
             if request == config_manager.OP_CONFIGURATION_READ:
                 return make_response(
                     request,
                     self.configuration,
-                    schema=config_manager.CONFIGURATION_SCHEMA_VERSION,
+                    schema=self.configuration_schema,
                     generation=self.configuration_generation,
                 )
             if request == config_manager.OP_TRANSACTION_STATUS:
@@ -327,13 +338,10 @@ class FakeDevice:
                             else config_manager.STATUS_OK
                         )
                         if self.transaction_status == config_manager.STATUS_OK:
-                            pairing_window = struct.unpack_from(
-                                "<H", self.configuration
-                            )[0]
-                            self.configuration = struct.pack(
-                                "<HB5x",
-                                pairing_window,
-                                self.pending_requested_mode,
+                            self.configuration = (
+                                self.configuration[:2]
+                                + bytes((self.pending_requested_mode,))
+                                + self.configuration[3:]
                             )
                             self.configuration_generation += 1
                         self.pending_requested_mode = None
@@ -419,7 +427,7 @@ class FakeDevice:
         if request == config_manager.OP_CONFIGURATION_BEGIN:
             (
                 self.transaction_id,
-                _schema,
+                self.configuration_schema,
                 self.transaction_expected_size,
                 self.transaction_expected_crc,
             ) = struct.unpack("<IHHI", payload)
@@ -446,6 +454,8 @@ class FakeDevice:
             self.configuration = struct.pack(
                 "<HB5x", 60, config_manager.REQUESTED_MODE_AUTO
             )
+            if self.configuration_schema == config_manager.CONFIGURATION_SCHEMA_VERSION:
+                self.configuration += bytes(config_manager.CONFIGURATION_SIZE - 8)
             self.configuration_generation += 1
             self.transaction_payload = bytearray(self.configuration)
             self.transaction_expected_size = len(self.configuration)
@@ -685,6 +695,284 @@ def test_response_validation() -> None:
             config_manager.parse_response(response, config_manager.OP_INFO)
 
 
+def native_rumble_identity(
+    address: bytes = bytes.fromhex("102030405060"), product_id: int = 0x2009
+) -> config_manager.ControllerIdentity:
+    return config_manager.ControllerIdentity(
+        True, config_manager.TRANSPORT_CLASSIC, 0, address, 0x057E, product_id
+    )
+
+
+def native_rumble_configuration(
+    identities: tuple[config_manager.ControllerIdentity, ...] = (),
+) -> bytes:
+    return (
+        struct.pack("<HBB4x", 90, config_manager.REQUESTED_MODE_XINPUT, len(identities))
+        + b"".join(identity.to_bytes() for identity in identities)
+        + bytes((16 - len(identities)) * 14)
+    )
+
+
+@pytest.mark.parametrize(
+    ("schema", "payload", "mode"),
+    (
+        (1, struct.pack("<H2x", 75), config_manager.REQUESTED_MODE_AUTO),
+        (2, struct.pack("<HB5x", 75, 3), config_manager.REQUESTED_MODE_DINPUT),
+    ),
+)
+def test_legacy_configuration_has_no_native_rumble_approval(
+    schema: int, payload: bytes, mode: int
+) -> None:
+    device = FakeDevice()
+    device.configuration_schema = schema
+    device.configuration = payload
+    configuration = config_manager.read_configuration(device)
+    assert configuration.pairing_window_seconds == 75
+    assert configuration.requested_mode == mode
+    assert configuration.native_switch_controllers == ()
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.set_native_switch_rumble_approval(
+            device, native_rumble_identity(), True, 1.0
+        )
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.write_configuration(
+            device,
+            replace(
+                configuration, native_switch_controllers=(native_rumble_identity(),)
+            ),
+            1.0,
+        )
+    assert not device.out_requests
+
+
+def test_native_rumble_configuration_canonical_wire_round_trip() -> None:
+    device = FakeDevice()
+    identities = tuple(
+        native_rumble_identity(
+            bytes((index, 2, 3, 4, 5, 6)), (0x2009, 0x2006, 0x2007)[index % 3]
+        )
+        for index in range(16)
+    )
+    config_manager.write_configuration(
+        device,
+        config_manager.AdapterConfiguration(
+            90, 0, 0, config_manager.REQUESTED_MODE_XINPUT, tuple(reversed(identities))
+        ),
+        1.0,
+    )
+    assert device.configuration_schema == 3
+    assert device.configuration == native_rumble_configuration(identities)
+    stored = config_manager.read_configuration(device)
+    assert stored.native_switch_controllers == identities
+    assert stored.crc == zlib.crc32(device.configuration) & 0xFFFFFFFF
+    assert stored.pairing_window_seconds == 90
+    assert stored.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+
+
+@pytest.mark.parametrize(
+    ("offset", "value"),
+    (
+        (3, 17),  # Capacity overflow.
+        (4, 1),  # Header reserved byte.
+        (8, 0),  # Unstable non-global identity.
+        (9, config_manager.TRANSPORT_BLE),
+        (11, 1),  # Identity reserved byte.
+        (18, 0),  # Different vendor.
+        (20, 0),  # Unqualified product.
+        (22, 1),  # Unused identity slot.
+    ),
+)
+def test_native_rumble_configuration_rejects_malformed_approvals(
+    offset: int, value: int
+) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 3
+    payload = bytearray(native_rumble_configuration((native_rumble_identity(),)))
+    payload[offset] = value
+    device.configuration = bytes(payload)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_configuration(device)
+
+
+@pytest.mark.parametrize("malformation", ("duplicate", "unsorted", "global", "short"))
+def test_native_rumble_configuration_rejects_invalid_lists(malformation: str) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 3
+    first = native_rumble_identity()
+    second = native_rumble_identity(bytes.fromhex("A1A2A3A4A5A6"))
+    identities = {
+        "duplicate": (first, first),
+        "unsorted": (second, first),
+        "global": (config_manager.ControllerIdentity.global_fallback(),),
+        "short": (first,),
+    }[malformation]
+    device.configuration = native_rumble_configuration(identities)
+    if malformation == "short":
+        device.configuration = device.configuration[:-1]
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_configuration(device)
+
+
+@pytest.mark.parametrize(
+    "malformation", ("duplicate", "overflow", "global", "ble", "vendor", "product")
+)
+def test_native_rumble_write_rejects_invalid_approvals_before_transaction(
+    malformation: str,
+) -> None:
+    device = FakeDevice()
+    identity = native_rumble_identity()
+    identities = {
+        "duplicate": (identity, identity),
+        "overflow": tuple(
+            native_rumble_identity(bytes((index, 2, 3, 4, 5, 6))) for index in range(17)
+        ),
+        "global": (config_manager.ControllerIdentity.global_fallback(),),
+        "ble": (replace(identity, transport=config_manager.TRANSPORT_BLE),),
+        "vendor": (replace(identity, vendor_id=0x045E),),
+        "product": (replace(identity, product_id=0x2019),),
+    }[malformation]
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.write_configuration(
+            device,
+            config_manager.AdapterConfiguration(
+                90, 0, 0, native_switch_controllers=identities
+            ),
+            1.0,
+        )
+    assert not device.out_requests
+
+
+def test_native_rumble_cli_approval_is_physical_and_preserves_other_settings(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 3
+    device.configuration = native_rumble_configuration()
+    first = native_rumble_identity()
+    second = native_rumble_identity(bytes.fromhex("A1A2A3A4A5A6"))
+    for identity in (first, second):
+        device.profile_identities.append(identity)
+        device.active_profiles[identity.to_bytes()] = 3
+    previous_profiles = dict(device.profiles)
+    previous_active = dict(device.active_profiles)
+    previous_pairings = list(device.records)
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
+
+    assert config_manager.main(["config", "native-rumble", "list"]) == 0
+    assert first.address_text in capsys.readouterr().out
+    assert config_manager.read_configuration(device).native_switch_controllers == ()
+    assert (
+        config_manager.main(["config", "native-rumble", "approve", "--identity", "2"])
+        == 2
+    )
+    assert not device.out_requests
+    capsys.readouterr()
+    assert (
+        config_manager.main(
+            ["config", "native-rumble", "approve", "--identity", "2", "--yes"]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    approved = config_manager.read_configuration(device)
+    assert approved.native_switch_controllers == (first,)
+    assert approved.pairing_window_seconds == 90
+    assert approved.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+    assert device.profiles == previous_profiles
+    assert device.active_profiles == previous_active
+    assert device.records == previous_pairings
+    assert config_manager.main(["config", "native-rumble", "list"]) == 0
+    output = capsys.readouterr().out
+    assert f"Approved identity 2: {first.address_text}" in output
+    assert f"Approved identity 3: {second.address_text}" not in output
+    assert (
+        config_manager.main(["config", "set", "--pairing-window-seconds", "120"]) == 0
+    )
+    preserved = config_manager.read_configuration(device)
+    assert preserved.pairing_window_seconds == 120
+    assert preserved.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+    assert preserved.native_switch_controllers == (first,)
+    config_manager.set_mode(device, config_manager.REQUESTED_MODE_DINPUT, 1.0)
+    preserved = config_manager.read_configuration(device)
+    assert preserved.requested_mode == config_manager.REQUESTED_MODE_DINPUT
+    assert preserved.native_switch_controllers == (first,)
+    assert (
+        config_manager.main(["config", "native-rumble", "revoke", "--identity", "2"])
+        == 0
+    )
+    revoked = config_manager.read_configuration(device)
+    assert revoked.native_switch_controllers == ()
+    assert revoked.requested_mode == config_manager.REQUESTED_MODE_DINPUT
+    assert revoked.pairing_window_seconds == 120
+
+
+@pytest.mark.parametrize("identity_index", ("0", "1", "99"))
+def test_native_rumble_cli_rejects_unqualified_or_missing_identity(
+    monkeypatch: pytest.MonkeyPatch, identity_index: str
+) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 3
+    device.configuration = native_rumble_configuration()
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
+    assert (
+        config_manager.main(
+            [
+                "config",
+                "native-rumble",
+                "approve",
+                "--identity",
+                identity_index,
+                "--yes",
+            ]
+        )
+        == 1
+    )
+    assert not device.out_requests
+
+
+def test_native_rumble_cli_can_revoke_forgotten_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    first = native_rumble_identity()
+    second = native_rumble_identity(bytes.fromhex("A1A2A3A4A5A6"))
+    device.configuration_schema = 3
+    device.configuration = native_rumble_configuration((first, second))
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
+    assert (
+        config_manager.main(["config", "native-rumble", "revoke", "--approval", "2"])
+        == 1
+    )
+    assert not device.out_requests
+    assert (
+        config_manager.main(["config", "native-rumble", "revoke", "--approval", "0"])
+        == 0
+    )
+    assert config_manager.read_configuration(device).native_switch_controllers == (
+        second,
+    )
+    assert config_manager.OP_PROFILE_LIST not in device.requests
+
+
+@pytest.mark.parametrize(("offset", "value"), ((0, 1), (4, 32)))
+def test_native_rumble_diagnostics_rejects_malformed_rows(
+    offset: int, value: int
+) -> None:
+    device = FakeDevice()
+    payload = bytearray(device.native_rumble_diagnostics)
+    payload[offset] = value
+    device.native_rumble_diagnostics = bytes(payload)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_native_switch_rumble(device)
+
+
+def test_native_rumble_diagnostics_rejects_truncated_snapshot() -> None:
+    device = FakeDevice()
+    device.native_rumble_diagnostics = device.native_rumble_diagnostics[:-1]
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_native_switch_rumble(device)
+
+
 def test_configuration_transaction_and_reset() -> None:
     device = FakeDevice()
     before = config_manager.read_configuration(device)
@@ -704,14 +992,12 @@ def test_configuration_transaction_and_reset() -> None:
     stored = config_manager.read_configuration(device)
     assert stored.pairing_window_seconds == 90
     assert stored.requested_mode == config_manager.REQUESTED_MODE_XINPUT
-    assert device.configuration == struct.pack(
-        "<HB5x", 90, config_manager.REQUESTED_MODE_XINPUT
-    )
     reset = config_manager.reset_configuration(device, 1.0)
     assert reset.stored_generation == 5
     reset_configuration = config_manager.read_configuration(device)
     assert reset_configuration.pairing_window_seconds == 60
     assert reset_configuration.requested_mode == config_manager.REQUESTED_MODE_AUTO
+    assert reset_configuration.native_switch_controllers == ()
 
 
 def test_configuration_transaction_ids_stay_in_host_range(

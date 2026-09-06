@@ -703,7 +703,7 @@ Set B delivery evidence:
   firmware-timestamped input, explicit start/stop/run identity and visible
   capacity/time/disconnect termination. It does not write profiles until Save.
 
-### Native Switch-family HD rumble — Planned
+### Native Switch-family HD rumble — Implemented, qualification incomplete
 
 Standalone agent handoff: [SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md).
 It includes implementation locations, acceptance checks and current mixed-controller timing caveats.
@@ -711,22 +711,25 @@ It includes implementation locations, acceptance checks and current mixed-contro
 Goal: preserve Nintendo's left/right, low/high-band commands on controllers
 that can execute them natively. This is a separate output backend from the
 DualSense PCM synthesizer, not a promise that every controller in “Switch
-mode” supports the same rumble protocol. No Switch-family native forwarding
-implementation is included in the current DualSense work.
+mode” supports the same rumble protocol. Native output is now implemented
+behind persisted per-physical-controller approval; hardware qualification is
+tracked separately from the software regression results.
 
 Current constraints:
 
-- `ControllerRumbleOutput.hd` retains decoded substeps but not the original
-  eight wire bytes. Unity-gain forwarding therefore needs an explicit raw
-  representation alongside the decoded, profile-scaled timeline.
+- `ControllerRumbleOutput` retains original bytes with explicit validity and
+  unmodified provenance beside its decoded/scaled timeline. Unity forwarding
+  additionally requires agreement with the encoder's physical-state model.
 - The patched Bluepad32 Switch parser enables vibration with subcommand
   `0x48`, then implements conventional magnitudes through fixed frequencies
   and a 40 ms refresh. Preserve that hardware-tested third-party fallback.
-- `send_subcmd()` currently has a process-global four-bit packet counter;
-  native ownership needs a counter per physical controller shared by every
-  `0x01`/`0x10` sender. Player-LED requests currently construct zeroed rumble
-  fields, so they must participate in rumble arbitration rather than silently
-  overwrite the current command.
+- The parser now shares a per-device four-bit counter and last-successful
+  rumble payload across `0x01`/`0x10` senders. Queued LED reports refresh that
+  payload at actual submission. Native ownership cancels compatibility timers.
+- `switch_native_output.cpp` owns bounded generation-tagged queues, L2CAP
+  permission-driven delivery, expiry, feedback/resume and held-state coalescing.
+- Adapter configuration schema 3 persists up to 16 explicit physical approvals.
+  Existing profile schema 6/catalog 2, bonds and wake identity are unchanged.
 - Joy-Cons are currently separate, horizontally mapped controllers in
   Bluepad32. A paired two-Joy-Con logical controller is not implemented.
 

@@ -1,0 +1,27 @@
+#pragma once
+
+#include <stdint.h>
+
+struct uni_hid_device_s;
+using uni_hid_device_t = uni_hid_device_s;
+using uni_play_dual_rumble_t = void (*)(uni_hid_device_t*, uint16_t, uint16_t,
+                                       uint8_t, uint8_t);
+
+struct uni_report_parser_t {
+    uni_play_dual_rumble_t play_dual_rumble = nullptr;
+};
+
+// Only the parser boundary is faked. Native sends either enter the byte sink
+// synchronously or fail without retaining a packet; no hidden transmit queue.
+struct uni_hid_device_s {
+    uni_report_parser_t report_parser{};
+    struct { uint16_t interrupt_cid = 0; } conn;
+    bool connected = true;
+    bool info_ready = true;
+    bool acquire_allowed = true;
+    bool native_owned = false;
+    uint8_t controller_type = 3;
+    unsigned acquisitions = 0;
+    unsigned releases = 0;
+};
+

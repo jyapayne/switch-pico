@@ -101,18 +101,27 @@ ConfigurationStorageIo pico_configuration_storage_io() {
 
 namespace {
 
-void seed_legacy_configuration() {
+void seed_legacy_configuration(bool v2) {
     ConfigurationStorage seed;
-    const uint8_t legacy[] = {90, 0, 0, 0};
+    const uint8_t legacy[] = {
+        90, 0, static_cast<uint8_t>(v2 ? AdapterRequestedMode::kXInput
+                                     : AdapterRequestedMode::kAuto),
+        0, 0, 0, 0, 0,
+    };
     require(seed.initialize(fake_io()), "legacy seed storage init failed");
-    require(seed.commit(ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION,
-                        legacy, sizeof(legacy)) ==
+    require(seed.commit(
+                v2 ? ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION
+                   : ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION,
+                legacy, v2 ? ADAPTER_CONFIGURATION_V2_ENCODED_SIZE
+                           : ADAPTER_CONFIGURATION_LEGACY_ENCODED_SIZE) ==
                 ConfigurationStorageResult::kOk,
             "legacy seed commit failed");
 }
 
-void test_service_lifecycle_and_mutations() {
-    seed_legacy_configuration();
+void test_service_lifecycle_and_mutations(bool v2) {
+    seed_legacy_configuration(v2);
+    const AdapterRequestedMode original_mode =
+        v2 ? AdapterRequestedMode::kXInput : AdapterRequestedMode::kAuto;
     const int programs_after_seed = g_flash.program_count;
     const int erases_after_seed = g_flash.erase_count;
 
@@ -123,9 +132,9 @@ void test_service_lifecycle_and_mutations() {
     configuration_service_snapshot(&snapshot);
     require(snapshot.state == ConfigurationServiceState::kReady &&
                 snapshot.configuration.pairing_window_seconds == 90 &&
-                snapshot.configuration.requested_mode ==
-                    AdapterRequestedMode::kAuto,
-            "Core 0 did not decode and publish the v1 configuration");
+                snapshot.configuration.requested_mode == original_mode &&
+                snapshot.configuration.native_switch_controller_count == 0,
+            "Core 0 did not preserve legacy settings without approval");
     require(g_flash.program_count == programs_after_seed &&
                 g_flash.erase_count == erases_after_seed,
             "pre-USB initialization wrote flash");
@@ -145,16 +154,16 @@ void test_service_lifecycle_and_mutations() {
     require(configuration_service_set_mode(
                 2, AdapterRequestedMode::kSwitch, implemented) ==
                 ConfigurationTransactionStatus::kBusy,
-            "host mutation displaced the pending v1 migration");
+            "host mutation displaced the pending legacy migration");
 
     configuration_service_task_on_storage_core(0);
     configuration_service_snapshot(&snapshot);
     require(snapshot.state == ConfigurationServiceState::kReady &&
-                snapshot.configuration.requested_mode ==
-                    AdapterRequestedMode::kAuto &&
+                snapshot.configuration.requested_mode == original_mode &&
+                snapshot.configuration.native_switch_controller_count == 0 &&
                 snapshot.transaction.status ==
                     ConfigurationTransactionStatus::kIdle,
-            "v1 migration changed configuration or host transaction state");
+            "legacy migration changed configuration or host transaction state");
 
     ConfigurationStorage after_migration;
     require(after_migration.initialize(fake_io()) &&
@@ -163,15 +172,16 @@ void test_service_lifecycle_and_mutations() {
                     ADAPTER_CONFIGURATION_SCHEMA_VERSION &&
                 after_migration.snapshot().payload_size ==
                     ADAPTER_CONFIGURATION_ENCODED_SIZE,
-            "power cycle did not observe the migrated v2 record");
+            "power cycle did not observe the migrated v3 record");
     AdapterConfiguration migrated{};
     require(adapter_configuration_decode(
                 after_migration.snapshot().schema_version,
                 after_migration.snapshot().payload,
                 after_migration.snapshot().payload_size, &migrated) &&
                 migrated.pairing_window_seconds == 90 &&
-                migrated.requested_mode == AdapterRequestedMode::kAuto,
-            "migrated v2 bytes did not preserve v1 configuration");
+                migrated.requested_mode == original_mode &&
+                migrated.native_switch_controller_count == 0,
+            "migrated v3 bytes did not preserve legacy configuration");
 
     require(configuration_service_set_mode(
                 10, AdapterRequestedMode::kSwitch, implemented) ==
@@ -391,7 +401,7 @@ void test_service_lifecycle_and_mutations() {
                 snapshot.transaction.status ==
                     ConfigurationTransactionStatus::kCommitted &&
                 snapshot.reset_generation == reset_generation_before + 1,
-            "configuration reset did not durably restore v2 defaults");
+            "configuration reset did not durably restore v3 defaults");
 
     constexpr uint32_t kCapturedHostMode = 50;
     require(configuration_service_set_mode(
@@ -508,13 +518,178 @@ void test_abandoned_host_receive_does_not_block_recovery() {
             "recovery Auto did not become latest reboot authority");
 }
 
+void queue_configuration(uint32_t transaction_id,
+                         const AdapterConfiguration& configuration) {
+    uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+    require(adapter_configuration_encode(configuration, payload, sizeof(payload)),
+            "service approval fixture did not encode");
+    require(configuration_service_begin(
+                transaction_id, ADAPTER_CONFIGURATION_SCHEMA_VERSION,
+                sizeof(payload), configuration_crc32(payload, sizeof(payload))) ==
+                ConfigurationTransactionStatus::kReceiving &&
+                configuration_service_append(transaction_id, 0, payload,
+                                             sizeof(payload)) ==
+                    ConfigurationTransactionStatus::kReceiving &&
+                configuration_service_commit(transaction_id) ==
+                    ConfigurationTransactionStatus::kPending,
+            "approval configuration did not reach pending commit");
+}
+
+void test_native_switch_approval_preservation_and_revocation() {
+    ControllerIdentity pro{};
+    pro.stable = true;
+    pro.transport = ControllerTransport::kClassic;
+    pro.address[0] = 0x02;
+    pro.address[5] = 1;
+    pro.vendor_id = 0x057e;
+    pro.product_id = 0x2009;
+    ControllerIdentity left = pro;
+    left.address[5] = 2;
+    left.product_id = 0x2006;
+    AdapterConfiguration configuration{};
+    configuration.pairing_window_seconds = 90;
+    configuration.native_switch_controller_count = 2;
+    configuration.native_switch_controllers[0] = pro;
+    configuration.native_switch_controllers[1] = left;
+    uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+    ConfigurationStorage seed;
+    require(adapter_configuration_encode(configuration, payload, sizeof(payload)) &&
+                seed.initialize(fake_io()) &&
+                seed.commit(ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
+                            sizeof(payload)) == ConfigurationStorageResult::kOk,
+            "approved controller configuration did not persist");
+    configuration_service_prepare();
+    configuration_service_initialize_pre_usb();
+    ConfigurationServiceSnapshot snapshot{};
+    configuration_service_snapshot(&snapshot);
+    require(adapter_configuration_native_switch_approved(
+                snapshot.configuration, pro) &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, left),
+            "pre-USB snapshot did not expose persisted approvals");
+    configuration_service_initialize_on_storage_core();
+
+    const AdapterModeAvailability implemented{true, true, true, true};
+    require(configuration_service_set_mode(
+                1, AdapterRequestedMode::kSwitch, implemented) ==
+                ConfigurationTransactionStatus::kPending,
+            "approved configuration blocked host mode selection");
+    configuration_service_task_on_storage_core(0);
+    configuration_service_snapshot(&snapshot);
+    require(snapshot.configuration.requested_mode == AdapterRequestedMode::kSwitch &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, pro) &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, left),
+            "host mode selection erased approval");
+    require(configuration_service_set_mode_internal(
+                0x80000002u, AdapterRequestedMode::kXInput, implemented) ==
+                ConfigurationTransactionStatus::kPending,
+            "approved configuration blocked internal mode selection");
+    configuration_service_task_on_storage_core(1000);
+    configuration_service_snapshot(&snapshot);
+    require(snapshot.configuration.requested_mode == AdapterRequestedMode::kXInput &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, pro) &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, left),
+            "internal mode selection erased approval");
+
+    configuration = snapshot.configuration;
+    configuration.pairing_window_seconds = 120;
+    queue_configuration(3, configuration);
+    configuration_service_task_on_storage_core(2000);
+    configuration_service_snapshot(&snapshot);
+    require(snapshot.configuration.pairing_window_seconds == 120 &&
+                snapshot.configuration.requested_mode == AdapterRequestedMode::kXInput &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, pro) &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, left),
+            "pairing-window update erased approvals or requested mode");
+    const uint32_t approved_generation = snapshot.generation;
+    const uint32_t approved_crc = snapshot.payload_crc;
+
+    configuration = snapshot.configuration;
+    configuration.native_switch_controller_count = 1;
+    configuration.native_switch_controllers[0] = left;
+    queue_configuration(4, configuration);
+    configuration_service_snapshot(&snapshot);
+    require(adapter_configuration_native_switch_approved(
+                snapshot.configuration, pro),
+            "approval was revoked before durable commit");
+    g_flash.fail_program = true;
+    configuration_service_task_on_storage_core(3000);
+    g_flash.fail_program = false;
+    configuration_service_snapshot(&snapshot);
+    require(snapshot.transaction.status ==
+                ConfigurationTransactionStatus::kStorageError &&
+                snapshot.generation == approved_generation &&
+                snapshot.payload_crc == approved_crc &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, pro),
+            "failed revocation changed the published durable configuration");
+    ConfigurationStorage after_failure;
+    AdapterConfiguration recovered{};
+    require(after_failure.initialize(fake_io()) &&
+                adapter_configuration_decode(
+                    after_failure.snapshot().schema_version,
+                    after_failure.snapshot().payload,
+                    after_failure.snapshot().payload_size, &recovered) &&
+                adapter_configuration_native_switch_approved(recovered, pro) &&
+                adapter_configuration_native_switch_approved(recovered, left),
+            "interrupted revocation destroyed persisted approvals");
+
+    queue_configuration(5, configuration);
+    configuration_service_task_on_storage_core(3000);
+    configuration_service_snapshot(&snapshot);
+    require(snapshot.transaction.status ==
+                ConfigurationTransactionStatus::kCommitted &&
+                snapshot.configuration.pairing_window_seconds == 120 &&
+                snapshot.configuration.requested_mode == AdapterRequestedMode::kXInput &&
+                !adapter_configuration_native_switch_approved(
+                    snapshot.configuration, pro) &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, left),
+            "successful revocation did not preserve other approval and settings");
+    ConfigurationStorage after_revocation;
+    require(after_revocation.initialize(fake_io()) &&
+                adapter_configuration_decode(
+                    after_revocation.snapshot().schema_version,
+                    after_revocation.snapshot().payload,
+                    after_revocation.snapshot().payload_size, &recovered) &&
+                !adapter_configuration_native_switch_approved(recovered, pro) &&
+                adapter_configuration_native_switch_approved(recovered, left),
+            "controller-specific revocation did not survive power cycle");
+
+    require(configuration_service_reset(6) ==
+                ConfigurationTransactionStatus::kPending,
+            "approved configuration reset was not queued");
+    configuration_service_snapshot(&snapshot);
+    require(adapter_configuration_native_switch_approved(
+                snapshot.configuration, left),
+            "reset erased approval before commit");
+    configuration_service_task_on_storage_core(4000);
+    configuration_service_snapshot(&snapshot);
+    require(snapshot.transaction.status == ConfigurationTransactionStatus::kCommitted &&
+                !adapter_configuration_native_switch_approved(
+                    snapshot.configuration, left),
+            "configuration reset did not revoke persisted approval");
+}
+
 }  // namespace
 
-int main(int argc, char**) {
-    if (argc > 1) {
-        test_abandoned_host_receive_does_not_block_recovery();
+int main(int argc, char** argv) {
+    if (argc < 2 || strcmp(argv[1], "lifecycle") == 0) {
+        test_service_lifecycle_and_mutations(false);
+    } else if (strcmp(argv[1], "v2-migration") == 0) {
+        test_service_lifecycle_and_mutations(true);
+    } else if (strcmp(argv[1], "native-approvals") == 0) {
+        test_native_switch_approval_preservation_and_revocation();
     } else {
-        test_service_lifecycle_and_mutations();
+        require(strcmp(argv[1], "abandoned-receive") == 0,
+                "unknown service test scenario");
+        test_abandoned_host_receive_does_not_block_recovery();
     }
     return 0;
 }

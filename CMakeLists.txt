@@ -246,6 +246,8 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${SWITCH_PICO_SOURCE_DIR}/configuration/configuration_transaction.cpp
             ${SWITCH_PICO_SOURCE_DIR}/core/controller_identity.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/bluepad32_input_backend.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/input/switch_native_output.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_native_haptics.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/controller_macro_capture.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/switch2_wake.cpp
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/bootsel_pairing_button.cpp
@@ -276,6 +278,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     # explicitly reschedules remaining input so timers run between packets.
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_BLUEPAD32=1
+            SWITCH_PICO_NATIVE_SWITCH_RUMBLE=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
             SWITCH_PICO_USB_OUTPUT_MODES=1
             PICO_FLASH_ASSUME_CORE1_SAFE=0

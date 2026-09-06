@@ -29,6 +29,11 @@ struct ControllerRumbleOutput {
     // Switch packets carry ordered per-side substeps in addition to the
     // compatibility magnitudes consumed by existing non-native backends.
     SwitchHapticsFrame hd{};
+    // Only the Switch decoder grants provenance. Scaling retains the source
+    // bytes for diagnostics but revokes unmodified unless both gains are unity.
+    uint8_t raw[8]{};
+    bool raw_valid = false;
+    bool raw_unmodified = false;
 };
 typedef void (*ControllerRumbleCallback)(
     uint8_t instance, const ControllerRumbleOutput& rumble);
@@ -47,6 +52,7 @@ public:
     ControllerRumbleOutput decode(const uint8_t payload[8]);
 
 private:
+    friend class SwitchNativeHapticsEncoder;
     struct ActuatorState {
         uint8_t high_amplitude;
         uint8_t low_amplitude;

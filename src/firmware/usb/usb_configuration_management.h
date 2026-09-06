@@ -36,6 +36,9 @@ constexpr size_t kHapticsTransportProbePayloadSize = 176;
 constexpr uint16_t kMacroCaptureSchemaVersion = 1;
 constexpr size_t kMacroCaptureHeaderSize = 32;
 constexpr size_t kMacroCaptureEventSize = 20;
+constexpr uint16_t kNativeSwitchRumbleSchemaVersion = 2;
+constexpr size_t kNativeSwitchRumbleRowSize = 80;
+constexpr size_t kNativeSwitchRumblePayloadSize = 4 * kNativeSwitchRumbleRowSize;
 constexpr size_t kMaximumResponseSize =
     kResponseHeaderSize + kProfileListPayloadSize;
 constexpr size_t kMaximumChunkSize =
@@ -74,6 +77,7 @@ enum class Operation : uint8_t {
     kHapticsExperiment = 0x40,
     kHapticsTransportProbe = 0x41,
     kMacroCapture = 0x42,
+    kNativeSwitchRumble = 0x43,
 };
 
 enum class Status : uint8_t {

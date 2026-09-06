@@ -81,8 +81,7 @@ inline bool parse_rumble_report(const uint8_t *data, uint32_t size,
         data[1] != 0x08) {
         return false;
     }
-    output->low_frequency_magnitude = data[3];
-    output->high_frequency_magnitude = data[4];
+    *output = ControllerRumbleOutput{data[3], data[4]};
     return true;
 }
 

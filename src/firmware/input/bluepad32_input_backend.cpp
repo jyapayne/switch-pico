@@ -1,6 +1,9 @@
 #include "input/bluepad32_input_backend.h"
 #include "input/controller_hotkey_config.h"
 #include "input/switch2_wake.h"
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+#include "input/switch_native_output.h"
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 #include "input/haptics_experiment.h"
 #endif
@@ -104,7 +107,7 @@ struct RumbleEnvelope {
     uint32_t connection_generation;
     ControllerRumbleOutput rumble;
     uint16_t duration_ms;
-#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
     uint64_t received_us = 0;
 #endif
 };
@@ -1268,10 +1271,38 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
     configuration_service_task_on_storage_core(now_ms);
     profile_service_task_on_storage_core(now_ms);
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+    ConfigurationServiceSnapshot configuration{};
+    configuration_service_snapshot(&configuration);
+    if (configuration.state == ConfigurationServiceState::kReady) {
+        uint8_t previously_owned = 0;
+        for (uint8_t i = 0; i < kSlotCount; ++i)
+            if (switch_native_output_owns(g_slots[i].device)) previously_owned |= 1u << i;
+        switch_native_output_configure(configuration.configuration, configuration.generation);
+        for (uint8_t i = 0; i < kSlotCount; ++i) {
+            if ((previously_owned & (1u << i)) || !switch_native_output_owns(g_slots[i].device))
+                continue;
+            RumbleEnvelope retained{};
+            critical_section_enter_blocking(&g_state_lock);
+            const BackendSlot& current = g_slots[i];
+            retained = current.pending_rumble;
+            const bool valid = current.active && retained.slot == i &&
+                retained.connection_generation == current.connection_generation &&
+                retained.duration_ms == host_rumble_duration_ms();
+            critical_section_exit(&g_state_lock);
+            if (valid) switch_native_output_submit(i, retained.connection_generation,
+                retained.received_us, retained.rumble,
+                retained.duration_ms == kXInputHostRumbleDurationMs);
+        }
+    }
+#endif
 }
 
 void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
                      uint8_t weak, uint8_t strong) {
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+    if (switch_native_output_feedback(device, strong, weak, duration_ms)) return;
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     if (haptics_experiment_feedback(device, strong, weak, duration_ms)) {
         return;
@@ -1505,6 +1536,10 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             }
         }
         critical_section_exit(&g_state_lock);
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+        if (host_dispatch && switch_native_output_owns(device))
+            host_dispatch = false;  // The timestamped native queue already owns this command.
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
         if (host_dispatch && haptics_experiment_gameplay_owns(device)) {
             // Switch commands have already entered the timestamped timeline.
@@ -1651,6 +1686,9 @@ void platform_on_device_connected(uni_hid_device_t* device) {
 }
 
 void platform_on_device_disconnected(uni_hid_device_t* device) {
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+    switch_native_output_detach(device);
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     haptics_experiment_detach(device);
 #endif
@@ -1722,6 +1760,10 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         return UNI_ERROR_NO_SLOTS;
     }
     if (became_active) {
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+        switch_native_output_attach(static_cast<uint8_t>(slot_index),
+                                    lighting_generation, device, connection_identity);
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
         haptics_experiment_attach(
             static_cast<uint8_t>(slot_index), lighting_generation, device);
@@ -1842,10 +1884,19 @@ uni_platform* get_platform() {
 
 }  // namespace
 
-#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
 extern "C" bool uni_platform_on_l2cap_can_send_now(
         uni_hid_device_t* device, uint16_t cid) {
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+    // Nintendo shares this event with queued LED/subcommand output. Let the
+    // normal queue run too; its parser refreshes payload/counter at submission.
+    if (switch_native_output_on_can_send_now(device, cid)) return false;
+#endif
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     return haptics_experiment_on_can_send_now(device, cid);
+#else
+    return false;
+#endif
 }
 #endif
 
@@ -1908,6 +1959,9 @@ void bluepad32_input_backend_init() {
     critical_section_init(&g_state_lock);
     configuration_service_prepare();
     profile_service_prepare();
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+    switch_native_output_prepare();
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     haptics_experiment_prepare();
 #endif
@@ -2163,7 +2217,7 @@ void bluepad32_input_backend_queue_rumble(
         return;
     }
 
-#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
     const uint64_t received_us = time_us_64();
     uint32_t native_generation = 0;
     bool native_candidate = false;
@@ -2172,14 +2226,14 @@ void bluepad32_input_backend_queue_rumble(
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device != nullptr) {
-#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
         native_generation = slot.connection_generation;
         native_candidate = true;
 #endif
         const RumbleEnvelope envelope{
             slot_index, slot.connection_generation, rumble,
             duration_ms
-#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
             , received_us
 #endif
         };
@@ -2196,6 +2250,11 @@ void bluepad32_input_backend_queue_rumble(
         }
     }
     critical_section_exit(&g_state_lock);
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+    if (native_candidate)
+        switch_native_output_submit(slot_index, native_generation, received_us, rumble,
+                                    duration_ms == kXInputHostRumbleDurationMs);
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     if (native_candidate) {
         if (duration_ms == kXInputHostRumbleDurationMs) {

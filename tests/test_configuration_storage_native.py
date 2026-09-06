@@ -19,9 +19,28 @@ def test_configuration_storage_native(tmp_path: Path) -> None:
             "-pedantic",
             f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "configuration_storage_test.cpp"),
-            str(root / "src" / "firmware" / "configuration" / "adapter_configuration.cpp"),
-            str(root / "src" / "firmware" / "configuration" / "configuration_storage.cpp"),
-            str(root / "src" / "firmware" / "configuration" / "configuration_transaction.cpp"),
+            str(
+                root
+                / "src"
+                / "firmware"
+                / "configuration"
+                / "adapter_configuration.cpp"
+            ),
+            str(root / "src" / "firmware" / "core" / "controller_identity.cpp"),
+            str(
+                root
+                / "src"
+                / "firmware"
+                / "configuration"
+                / "configuration_storage.cpp"
+            ),
+            str(
+                root
+                / "src"
+                / "firmware"
+                / "configuration"
+                / "configuration_transaction.cpp"
+            ),
             "-o",
             str(executable),
         ],

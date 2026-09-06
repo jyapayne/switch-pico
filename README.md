@@ -325,13 +325,52 @@ Motion-producing Bluepad32 parsers normalize to 1024 units per degree/second and
 
 Commands remain bound to a USB slot and Bluetooth connection generation. Compatibility output uses a latest-value mailbox; native output keeps a bounded timestamped command history instead of collapsing substeps.
 
-The standard AIO and XInput builds now use **300 MHz at 1.3 V**, packet-level CYW43 reads, bounded HCI credit returns, and native DualSense haptics by default. The first eligible DualSense/DualSense Edge that becomes ready can occupy the one native stream, in any slot; later controllers do not steal it. Other rumble-capable controllers retain their tested parser-specific output. To change the selected native controller manually, stop the current run and use `haptics-experiment gameplay --slot N` (API slots are zero-based).
+The standard AIO and XInput builds use **300 MHz at 1.3 V**, packet-level CYW43 reads, bounded HCI credit returns, and native DualSense haptics by default. The first eligible DualSense/DualSense Edge that becomes ready can occupy the one native PCM stream, in any slot; later controllers do not steal it. Nintendo native output is a separate, explicit per-controller opt-in described below. Unapproved and unsupported controllers retain their existing parser-specific output. To change the selected DualSense manually, stop the current run and use `haptics-experiment gameplay --slot N` (API slots are zero-based).
 
 In Switch mode, that stream preserves decoded left/right, low/high-band HD commands. In XInput mode, strong/low magnitude drives the left 160 Hz carrier and weak/high drives the right 320 Hz carrier; these commands stay active until changed or stopped. XInput does not supply Nintendo frequency/substep detail. USB reset, unmount, and suspend stop held host rumble. Auto-mode XInput additionally reboots to Switch probe after unmount, by the existing one-attachment policy; manual XInput is exempt.
 
 Standard native gameplay uses **64 stereo frames at 3 kHz** per Bluetooth report (46.875 reports/s), with 21.333 ms causal lookback. The 32-frame mode passed single-controller tests but skipped audio slots under mixed Pro/DualSense load, so it is an explicit experiment: `SWITCH_PICO_HD_PACKET_FRAMES=32` requires the optimized transport and at least 300 MHz. It uses 93.75 reports/s and 10.667 ms lookback but is not the mixed-controller default. Native streaming continues silence while idle; no physical actuator-onset bound is claimed. See [HAPTICS_EXPERIMENT.md](HAPTICS_EXPERIMENT.md).
 
 400 MHz is an explicit experiment: use `SWITCH_PICO_SYS_CLOCK_MHZ=400` and `SWITCH_PICO_OVERCLOCK_MV=1400`. This board did not boot at 400 MHz/1.3 V; 1.4 V booted and passed a short run but did not outperform 300 MHz in the comparison. USB stays at 48 MHz and flash/radio bus dividers remain bounded. UART builds are unchanged; a stock-clock AIO build is an explicit recovery/compatibility option, not the normal default.
+
+### Native Nintendo rumble — opt-in, qualification in progress
+
+The AIO backend can send Nintendo report `0x10` directly to an explicitly
+approved original Pro Controller or standalone Joy-Con. Approval is keyed to
+the physical Bluetooth identity and applies across all eight profiles; matching
+a Nintendo name or VID/PID does **not** enable it automatically.
+
+```sh
+uv run switch-pico-config profiles list
+uv run switch-pico-config config native-rumble approve --identity N --yes
+uv run switch-pico-config config native-rumble status --json
+uv run switch-pico-config config native-rumble revoke --identity N
+```
+
+Use the physical controller's row from `profiles list`, not the global fallback.
+`config native-rumble list` also supplies approval indices; `revoke --approval N`
+can remove an approval after its profile-catalog entry has been forgotten.
+Approvals persist in adapter configuration schema 3 (232 bytes). Schema 1/2
+migration preserves existing settings and starts with no approvals; profile
+schema 6 and the profile catalog are unchanged.
+
+The native encoder preserves safe unity bytes when synchronized, otherwise
+encodes independent actuator/band/substep state with documented quantization.
+It has no DualSense PCM lookback or response curve. Native output shares a
+per-device counter and effective rumble state with LED subcommands. Identical
+held states are coalesced without changing the 50 ms Switch watchdog; active
+states refresh at 40 ms. XInput uses held low/left-160-Hz and high/right-320-Hz
+effects until explicitly stopped. Standalone Joy-Cons downmix each band by
+dominant amplitude, choosing left on ties; logical Joy-Con pairing is not added.
+
+**Qualification is incomplete.** A genuine Pro-only controlled run delivered
+all 1,025 commands without new loss or congestion. Earlier mixed Pro/DualSense
+runs exposed substantial shared-radio pressure; the latest held-state
+coalescing optimization still needs that hardware rerun. Joy-Con hardware,
+four-controller operation, captured game effects, and physical actuator timing
+are not qualified by the native regression suite. See
+[SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md) for the exact
+implementation, quantization policy, evidence and remaining checks.
 
 ### Hardware validation
 
@@ -363,7 +402,7 @@ Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry 
 
 ## Limitations
 - No NFC/amiibo/IR support.
-- Rumble is controller-specific: UART uses SDL3 haptics; AIO uses the selected DualSense native PCM backend or the controller's existing Bluepad32 rumble implementation. Native Switch-family forwarding remains planned.
+- Rumble is controller-specific: UART uses SDL3 haptics; AIO uses the selected DualSense PCM stream, explicitly approved Nintendo native output, or the controller's existing Bluepad32 implementation. Native Nintendo hardware qualification remains incomplete; do not assume universal Switch-mode compatibility.
 - The UART firmware requires a host computer running the bridge. The Pico 2 W AIO firmware does not; it hosts controllers over Bluetooth, not USB.
 - In XInput output mode, Home/System is carried in the raw XUSB Guide bit `0x0400`, and Capture is carried in the de-facto Share/reserved bit `0x0800` used by modern open XUSB stacks. The standard Microsoft XInput headers define neither Guide nor Share for `XINPUT_GAMEPAD.wButtons`, so `XInputGetState` does not expose either button portably. Guide may be reserved or intercepted by the OS, while Share/Capture support depends on the installed driver or consumers such as GameInput and Steam; qualify the intended controller, driver, and application on real Windows hardware.
 
@@ -728,15 +767,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 746,568 bytes | 4 MiB |
+| Executable flash image | 777,656 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 130,784 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 139,344 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,029,192 bytes of flash,
-leaving 3,165,112 bytes. Allocated SRAM sections leave 401,696 bytes of link-time
+The executable plus persistent reservations consume 1,060,280 bytes of flash,
+leaving 3,134,024 bytes. Allocated SRAM sections leave 393,136 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.

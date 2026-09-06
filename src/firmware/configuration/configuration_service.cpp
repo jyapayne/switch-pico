@@ -68,7 +68,7 @@ bool decode_storage_configuration(
         return false;
     }
     *migration_needed =
-        stored.schema_version == ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION;
+        stored.schema_version != ADAPTER_CONFIGURATION_SCHEMA_VERSION;
     return true;
 }
 
@@ -196,7 +196,7 @@ void configuration_service_initialize_on_storage_core() {
     }
     g_storage_core_adopted = g_storage_initialized;
     if (g_storage_core_adopted && g_migration_needed) {
-        const AdapterConfiguration configuration = g_snapshot.configuration;
+        const AdapterConfiguration& configuration = g_snapshot.configuration;
         if (adapter_configuration_encode(configuration, g_migration_payload,
                                          sizeof(g_migration_payload))) {
             g_migration_pending = true;

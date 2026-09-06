@@ -6,6 +6,9 @@
 #include "adapter/adapter_reboot.h"
 #include "adapter/adapter_usb_mode.h"
 #include "input/haptics_experiment.h"
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+#include "input/switch_native_output.h"
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 #include "input/haptics_transport_probe.h"
 #endif
@@ -347,6 +350,44 @@ size_t encode_haptics_transport_probe(uint8_t* output, size_t output_size) {
         Operation::kHapticsTransportProbe, Status::kUnsupportedSchema, 0,
         kHapticsTransportProbeSchemaVersion, 0,
         nullptr, 0, output, output_size);
+#endif
+}
+
+size_t encode_native_switch_rumble(uint8_t* output, size_t output_size) {
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+    uint8_t payload[kNativeSwitchRumblePayloadSize]{};
+    for (uint8_t slot = 0; slot < 4; ++slot) {
+        SwitchNativeOutputDiagnostics snapshot{};
+        switch_native_output_snapshot(slot, &snapshot);
+        uint8_t* row = payload + slot * kNativeSwitchRumbleRowSize;
+        row[0] = slot;
+        row[1] = snapshot.type;
+        row[2] = snapshot.firmware_hi;
+        row[3] = snapshot.firmware_lo;
+        write_u32(row + 4, snapshot.flags);
+        write_u32(row + 8, snapshot.generation);
+        write_u32(row + 12, snapshot.received_commands);
+        write_u32(row + 16, snapshot.submitted_reports);
+        write_u32(row + 20, snapshot.dropped_commands);
+        write_u32(row + 24, snapshot.resynchronizations);
+        write_u32(row + 28, snapshot.raw_commands);
+        write_u32(row + 32, snapshot.quantized_commands);
+        write_u32(row + 36, snapshot.congested_attempts);
+        write_u32(row + 40, snapshot.completed_commands);
+        write_u32(row + 44, snapshot.p50_upper_us);
+        write_u32(row + 48, snapshot.p95_upper_us);
+        write_u32(row + 52, snapshot.p99_upper_us);
+        write_u32(row + 56, snapshot.max_latency_us);
+        write_u32(row + 60, snapshot.queue_depth);
+        memcpy(row + 64, snapshot.last_wire, 8);
+        write_u32(row + 72, snapshot.max_encode_us);
+        write_u32(row + 76, snapshot.coalesced_commands);
+    }
+    return encode_response(Operation::kNativeSwitchRumble, Status::kOk, 0,
+        kNativeSwitchRumbleSchemaVersion, 0, payload, sizeof(payload), output, output_size);
+#else
+    return encode_response(Operation::kNativeSwitchRumble, Status::kUnsupportedSchema, 0,
+        kNativeSwitchRumbleSchemaVersion, 0, nullptr, 0, output, output_size);
 #endif
 }
 
@@ -973,6 +1014,9 @@ bool usb_configuration_management_vendor_control(
         case Operation::kHapticsTransportProbe:
             response_size =
                 encode_haptics_transport_probe(response, sizeof(response));
+            break;
+        case Operation::kNativeSwitchRumble:
+            response_size = encode_native_switch_rumble(response, sizeof(response));
             break;
         case Operation::kMacroCapture:
             response_size = encode_macro_capture(response, sizeof(response));

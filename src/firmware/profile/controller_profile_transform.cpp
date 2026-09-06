@@ -424,6 +424,9 @@ uint8_t controller_profile_scale_rumble_magnitude(uint8_t magnitude,
 ControllerRumbleOutput controller_profile_scale_host_rumble(
     const ControllerRumbleOutput& input, const ControllerProfile& profile) {
     ControllerRumbleOutput output = input;
+    output.raw_unmodified = input.raw_unmodified &&
+                            profile.strong_rumble_scale == UINT8_MAX &&
+                            profile.weak_rumble_scale == UINT8_MAX;
     output.low_frequency_magnitude = controller_profile_scale_rumble_magnitude(
         input.low_frequency_magnitude, profile.strong_rumble_scale);
     output.high_frequency_magnitude = controller_profile_scale_rumble_magnitude(

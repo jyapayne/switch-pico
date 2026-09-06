@@ -1,6 +1,6 @@
 # Switch-family native HD-rumble implementation handoff
 
-Status: **planned, not implemented**. This document is self-contained for another coding agent. The shorter project-roadmap version is in `ADAPTER_PARITY_PLAN.md` under “Native Switch-family HD rumble — Planned”.
+Status: **implemented; hardware qualification incomplete**. This handoff now records the implementation and remaining acceptance work. The roadmap entry is in `ADAPTER_PARITY_PLAN.md` under “Native Switch-family HD rumble — Implemented, qualification incomplete”.
 
 ## Goal
 
@@ -14,34 +14,118 @@ Start with a genuine original Switch Pro Controller, then original standalone Jo
 - `44a474e`: roadmap plan for native Switch-family HD rumble.
 - `3c2d9fa`: Set B profiles, catalog migration, recording, optimized transport and native DualSense/XInput work.
 - Other transport qualification/artifact work may still be in progress. Coordinate with the active agent before editing shared files; do not reset, stash, or overwrite its changes. Re-read current code rather than relying on line numbers here.
-- Standard AIO/XInput builds now use 300 MHz/1.3 V and the optimized CYW43 transport. The first eligible DualSense may own one native PCM stream, regardless of slot. Other models retain their controller-specific rumble path.
+- Standard AIO/XInput builds use 300 MHz/1.3 V and optimized CYW43 transport. DualSense retains its separate 64-frame PCM stream. Nintendo native output requires explicit approval of the stable physical Bluetooth identity; unapproved devices keep compatibility output.
 - Profiles are schema 6 / 384 bytes; catalog 2 keeps a 512-byte record stride and two 128 KiB arenas. Preserve migration, identity keys, names, active indices and atomic publication.
+- Adapter configuration is now schema 3 / 232 bytes: up to 16 physical Nintendo approvals, independent of profiles. Old schemas 1/2 migrate with no approvals and preserve their existing settings. No controller is approved merely by its name, VID/PID or parser.
 - Preserve Bluetooth bonds, calibration, the UART wire protocol and the private `src/firmware/platform/pico/switch2_wake_config.h`. Do not expose that file's contents or change the configured wake identity.
 
 ### Important timing qualification caveat
 
 Do not generalize single-controller DualSense results to mixed-controller loads. A 32-frame/93.75-packet-per-second run passed roughly 65 seconds with one controller, but a later Switch Pro + DualSense test with continuous USB motion reads recorded **80 skipped audio slots over 16.6 seconds**, despite receiving all 2,050 USB commands with no command drops or send failures. Maximum permission wait was 17,180 us and the eight outgoing ACL credits were observed exhausted. The standard native cadence is consequently **64 frames / 46.875 packets per second** at the same 300 MHz/1.3 V, with 32 frames an explicit experiment. Preserve the current cadence choice and coordinate before changing it as part of this Nintendo backend task.
 
-The Nintendo path should not need PCM packets at all. Its small native commands have a different bandwidth budget, which still needs real multi-controller measurement.
+Nintendo uses no PCM stream. Its small commands still contend for radio scheduling and HCI credits; payload byte rate alone did not predict the measured mixed-controller limit.
+
+## Implemented behavior and current evidence
+
+- `input/switch_native_output.*` owns four bounded, generation-tagged queues.
+  USB publication uses an IRQ-safe BTstack wake rather than taking the radio
+  async-context lock. Encoding waits for L2CAP can-send permission. A prepared
+  schedule that becomes obsolete is discarded and resynchronized, not replayed.
+- `usb/switch/switch_native_haptics.*` preserves independent sides/bands and all
+  representable 1/2/3-substep forms. Safe synchronized unity can retain raw bytes.
+  Profile changes revoke unmodified provenance. XInput parsing clears reused
+  HD/raw state rather than accidentally inheriting Nintendo data.
+- Safe amplitude codes stop at 100 (decoder LUT index 228 / Q15 17867).
+  Q15 is not a wire amplitude. Frequencies clamp to indices 1..127. Exact
+  one-packet forms are preferred, then bounded two-packet prefixes/baselines.
+  Unrepresentable scaled sequences retain their time slots and choose legal
+  commands minimizing `abs(Q15 error) + 128 * abs(frequency-index error)`,
+  with lower-command ties and exact silence. This is documented quantization,
+  **not** a promise of lossless or perceptually equivalent arbitrary scaling.
+- Mono selects the dominant contribution per band before rounding, with left
+  ties. Unequal side counts use the larger count and hold the shorter side's
+  final sample; that temporal quantization is reported. No Joy-Con pairing.
+- Parser counters and effective rumble are per physical device. Queued
+  subcommands refresh rumble and LED state at actual submission. Native
+  ownership cancels duration/delayed/refresh compatibility timers; detach
+  retires state without writing to a dead connection.
+- Local feedback overrides output without freezing the host timeline.
+  Switch commands expire after 50 ms. Unchanged held states coalesce while
+  extending that watchdog; active states retain a 40 ms refresh. XInput holds
+  use left-low 160 Hz / right-high 320 Hz until explicit stop.
+- Read-only management operation `0x43`, diagnostic schema 2, returns four
+  80-byte rows. It separates received, HCI-completed, coalesced and dropped
+  commands. Latency percentiles are 250-us histogram upper bounds for actual
+  submissions; coalesced holds are excluded. No physical-onset claim.
+
+Opt-in commands:
+
+```sh
+uv run switch-pico-config profiles list
+uv run switch-pico-config config native-rumble approve --identity N --yes
+uv run switch-pico-config config native-rumble status --json
+uv run switch-pico-config config native-rumble revoke --identity N
+```
+
+`--identity N` uses the physical row from `profiles list`. The separate
+`native-rumble list` command lists persisted approval indices; revocation by
+`--approval N` works even after a controller leaves the profile catalog.
+
+### Qualification checkpoint
+
+- **Software:** 260 repository tests pass, including independent absolute
+  packet vectors, scaled/relative codec cases, actual patched parser/queue
+  tests, and 17 owner lifecycle/credit/coalescing scenarios. All five final
+  firmware variants build; AIO, feasibility and UART artifacts are refreshed.
+- **Persistent data:** all 24 profiles, active indices, aliases and names
+  matched the pre-migration hardware checkpoint. Configuration migrated
+  generation 9 → 10; explicit approval of the attached Pro produced 11.
+  Profile schema/catalog, bonds and wake identity were not changed.
+- **Pro-only radio:** genuine Pro reply firmware bytes `03 48`; a controlled
+  pre-coalescing 125-Hz run completed all **1,025 commands**, with **1,025
+  submitted reports**, **zero new drops**, and **zero congestion attempts**.
+- **Mixed radio before coalescing:** can-send-driven Pro isolation with
+  DualSense connected completed 195 of 513 commands and dropped 318; the
+  idle DualSense PCM stream skipped 30 slots. Stopping its PCM stream but
+  keeping its input connection completed 276/513 and dropped 237. These
+  failures must not be relabeled as successful fidelity qualification.
+- **Next hardware check:** the held-state-coalescing build is flashed and
+  the Pro approval persists. The Pro did not reconnect after that flash;
+  press its normal Home button, leaving DualSense off initially. Repeat
+  actuator/band isolation and confirm physical vibration, then rerun with
+  DualSense input/PCM and distinguish repeated holds from every-command
+  state changes. Reconnect, approval revocation/resume, LEDs, scaling and
+  stateful XInput still need integrated hardware checks.
+- **Unavailable evidence:** no real-console USB/BT rumble capture corpus,
+  original Joy-Con L/R qualification, four-controller hardware result or
+  instrumented actuator onset has been obtained. Do not infer these from
+  synthetic vectors or HCI acceptance.
+
+Linux's current Nintendo driver also documents disconnect risk from excessive
+output traffic and uses input-report-aware throttling. This is corroborating
+timing evidence, not code incorporated into this project:
+https://github.com/torvalds/linux/blob/master/drivers/hid/hid-nintendo.c
 
 ## Read these code paths first
 
 | Area | Files / symbols | Relevant facts |
 |---|---|---|
-| Switch host decoder | `src/firmware/usb/switch/switch_haptics.h/.cpp`, `SwitchHapticsDecoder`, `ControllerRumbleOutput`, `SwitchHapticsFrame` | Two sides, each with up to three decoded low/high frequency/amplitude substeps. Original eight wire bytes are not retained in the output envelope. |
+| Switch host decoder | `src/firmware/usb/switch/switch_haptics.h/.cpp`, `SwitchHapticsDecoder`, `ControllerRumbleOutput`, `SwitchHapticsFrame` | Two sides with up to three substeps; original eight bytes now have explicit validity/unmodified provenance. |
 | Intensity scaling | `src/firmware/profile/controller_profile_transform.cpp`, `controller_profile_scale_host_rumble` | Strong scales low band and weak scales high band on both sides. Q15 amplitudes are decoder-normalized values, not raw Nintendo amplitude codes. |
 | Routing and lifetime | `src/firmware/input/bluepad32_input_backend.cpp` | Generation-tagged slots, compatibility mailbox, native submission, local/profile feedback, controller ready/disconnect events. Preserve slot isolation. |
+| Native Nintendo owner/encoder | `src/firmware/input/switch_native_output.*`, `src/firmware/usb/switch/switch_native_haptics.*` | Per-physical opt-in, bounded queues, can-send-driven serialization, safe encoding and coalescing. |
 | Existing Nintendo output | `patches/bluepad32-sdl3-imu.patch`; generated `build-aio/_deps/bluepad32-src/src/components/bluepad32/parser/uni_hid_parser_switch.c` | Modify the patch/build-local copy, not the upstream checkout or arbitrary SDK files. |
 | Parser functions | `send_subcmd`, `switch_encode_rumble`, `switch_send_dual_rumble_now`, `switch_stop_rumble_now`, `set_led`, `fsm_enable_rumble` | Existing conventional path enables vibration with 0x48, uses fixed frequencies and a 40 ms refresh. |
 | Transport | `src/firmware/input/haptics_transport_probe.*`, `src/firmware/platform/pico/cyw43_packet_transport.c`, `patches/btstack-credit-batch.patch` | Bounded receive fairness, packet-level reads, real per-handle credit accounting. Do not remove incoming flow control or invent extra controller credits. |
 | Prior evidence | `HAPTICS_EXPERIMENT.md` | Distinguishes measured submission timing from physical actuator onset and preserves the accepted controlled-effect reference. |
 
-### Existing parser issues the new owner must resolve
+### Parser ownership decisions
 
-1. `send_subcmd()` uses a process-global four-bit packet counter. Move sequence state to each physical parser/device instance and share it across that device's rumble and subcommand reports.
-2. Player-LED requests are built with zeroed rumble fields. All applicable subcommands must carry the current effective rumble state while native rumble is active.
-3. The parser has duration, delayed-start and refresh timers. A second independent native writer cannot safely coexist with those timers or their stale callbacks.
-4. `switch_encode_rumble()` currently takes one amplitude for both bands of an actuator. It is not a complete encoder for independent low/high amplitudes or all compressed multi-substep forms.
+1. Sequence state is per physical parser instance, shared by rumble/subcommands.
+2. Applicable subcommands carry the exact last-successful rumble bytes at send.
+3. Ownership transitions cancel compatibility timers and retire queued rumble.
+4. `switch_encode_rumble()` remains the conventional fixed-frequency fallback;
+   independent native bands and compressed substeps use the new C++ encoder.
 5. Bluepad32 explicitly treats Joy-Cons as separate, horizontally mapped controllers. There is no existing two-Joy-Con logical pair to route stereo output into.
 
 ## Model policy

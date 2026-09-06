@@ -4,11 +4,19 @@
 #include <stdint.h>
 
 #include "adapter/adapter_usb_mode.h"
+#include "core/controller_identity.h"
 
 constexpr uint16_t ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION = 1;
-constexpr uint16_t ADAPTER_CONFIGURATION_SCHEMA_VERSION = 2;
+constexpr uint16_t ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION = 2;
+constexpr uint16_t ADAPTER_CONFIGURATION_SCHEMA_VERSION = 3;
 constexpr size_t ADAPTER_CONFIGURATION_LEGACY_ENCODED_SIZE = 4;
-constexpr size_t ADAPTER_CONFIGURATION_ENCODED_SIZE = 8;
+constexpr size_t ADAPTER_CONFIGURATION_V2_ENCODED_SIZE = 8;
+constexpr size_t ADAPTER_CONFIGURATION_HEADER_SIZE = 8;
+constexpr size_t ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY = 16;
+constexpr size_t ADAPTER_CONFIGURATION_ENCODED_SIZE =
+    ADAPTER_CONFIGURATION_HEADER_SIZE +
+    ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY *
+        CONTROLLER_IDENTITY_ENCODED_SIZE;
 constexpr uint16_t ADAPTER_PAIRING_WINDOW_SECONDS_MIN = 10;
 constexpr uint16_t ADAPTER_PAIRING_WINDOW_SECONDS_MAX = 300;
 constexpr uint16_t ADAPTER_PAIRING_WINDOW_SECONDS_DEFAULT = 60;
@@ -17,6 +25,9 @@ struct AdapterConfiguration {
     uint16_t pairing_window_seconds =
         ADAPTER_PAIRING_WINDOW_SECONDS_DEFAULT;
     AdapterRequestedMode requested_mode = AdapterRequestedMode::kAuto;
+    uint8_t native_switch_controller_count = 0;
+    ControllerIdentity native_switch_controllers[
+        ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY]{};
 };
 
 struct AdapterModeAvailability {
@@ -27,6 +38,9 @@ struct AdapterModeAvailability {
 };
 
 AdapterConfiguration adapter_configuration_default();
+bool adapter_configuration_native_switch_approved(
+    const AdapterConfiguration& configuration,
+    const ControllerIdentity& identity);
 bool adapter_requested_mode_valid(AdapterRequestedMode requested_mode);
 bool adapter_requested_mode_available(
     AdapterRequestedMode requested_mode,

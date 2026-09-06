@@ -1,4 +1,5 @@
 #include "configuration/adapter_configuration.h"
+#include <string.h>
 
 namespace {
 
@@ -7,10 +8,37 @@ bool pairing_window_valid(uint16_t pairing_window_seconds) {
            pairing_window_seconds <= ADAPTER_PAIRING_WINDOW_SECONDS_MAX;
 }
 
+bool native_switch_identity_eligible(const ControllerIdentity& identity) {
+    return identity.stable &&
+           identity.transport == ControllerTransport::kClassic &&
+           identity.vendor_id == 0x057e &&
+           (identity.product_id == 0x2009 ||
+            identity.product_id == 0x2006 ||
+            identity.product_id == 0x2007);
+}
+
 }  // namespace
 
 AdapterConfiguration adapter_configuration_default() {
     return {};
+}
+
+bool adapter_configuration_native_switch_approved(
+    const AdapterConfiguration& configuration,
+    const ControllerIdentity& identity) {
+    if (!native_switch_identity_eligible(identity) ||
+        configuration.native_switch_controller_count >
+            ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY) {
+        return false;
+    }
+    for (size_t index = 0;
+         index < configuration.native_switch_controller_count; ++index) {
+        if (controller_identity_equal(
+                identity, configuration.native_switch_controllers[index])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool adapter_requested_mode_valid(AdapterRequestedMode requested_mode) {
@@ -48,19 +76,47 @@ bool adapter_configuration_encode(const AdapterConfiguration& configuration,
     if (output == nullptr ||
         output_size != ADAPTER_CONFIGURATION_ENCODED_SIZE ||
         !pairing_window_valid(configuration.pairing_window_seconds) ||
-        !adapter_requested_mode_valid(configuration.requested_mode)) {
+        !adapter_requested_mode_valid(configuration.requested_mode) ||
+        configuration.native_switch_controller_count >
+            ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY) {
         return false;
     }
 
+    memset(output, 0, output_size);
     output[0] = static_cast<uint8_t>(configuration.pairing_window_seconds);
     output[1] =
         static_cast<uint8_t>(configuration.pairing_window_seconds >> 8);
     output[2] = static_cast<uint8_t>(configuration.requested_mode);
-    output[3] = 0;
-    output[4] = 0;
-    output[5] = 0;
-    output[6] = 0;
-    output[7] = 0;
+    output[3] = configuration.native_switch_controller_count;
+    for (size_t index = 0;
+         index < configuration.native_switch_controller_count; ++index) {
+        const ControllerIdentity& identity =
+            configuration.native_switch_controllers[index];
+        uint8_t encoded[CONTROLLER_IDENTITY_ENCODED_SIZE];
+        if (!native_switch_identity_eligible(identity) ||
+            !controller_identity_encode(identity, encoded, sizeof(encoded))) {
+            return false;
+        }
+
+        // Sort wire records in place so list order cannot change the CRC.
+        size_t position = index;
+        while (position > 0) {
+            uint8_t* previous = output + ADAPTER_CONFIGURATION_HEADER_SIZE +
+                                (position - 1) * sizeof(encoded);
+            const int comparison = memcmp(encoded, previous, sizeof(encoded));
+            if (comparison == 0) {
+                return false;
+            }
+            if (comparison > 0) {
+                break;
+            }
+            memcpy(previous + sizeof(encoded), previous, sizeof(encoded));
+            --position;
+        }
+        memcpy(output + ADAPTER_CONFIGURATION_HEADER_SIZE +
+                   position * sizeof(encoded),
+               encoded, sizeof(encoded));
+    }
     return true;
 }
 
@@ -79,16 +135,49 @@ bool adapter_configuration_decode(uint16_t schema_version,
             return false;
         }
         decoded.requested_mode = AdapterRequestedMode::kAuto;
-    } else if (schema_version == ADAPTER_CONFIGURATION_SCHEMA_VERSION) {
-        if (payload_size != ADAPTER_CONFIGURATION_ENCODED_SIZE ||
-            payload[3] != 0 || payload[4] != 0 || payload[5] != 0 ||
-            payload[6] != 0 || payload[7] != 0) {
+    } else if (schema_version == ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION ||
+               schema_version == ADAPTER_CONFIGURATION_SCHEMA_VERSION) {
+        const bool current =
+            schema_version == ADAPTER_CONFIGURATION_SCHEMA_VERSION;
+        const size_t expected_size =
+            current ? ADAPTER_CONFIGURATION_ENCODED_SIZE
+                    : ADAPTER_CONFIGURATION_V2_ENCODED_SIZE;
+        if (payload_size != expected_size || payload[4] != 0 ||
+            payload[5] != 0 || payload[6] != 0 || payload[7] != 0 ||
+            (!current && payload[3] != 0) ||
+            payload[3] >
+                ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY) {
             return false;
         }
         decoded.requested_mode =
             static_cast<AdapterRequestedMode>(payload[2]);
         if (!adapter_requested_mode_valid(decoded.requested_mode)) {
             return false;
+        }
+        if (current) {
+            decoded.native_switch_controller_count = payload[3];
+            size_t offset = ADAPTER_CONFIGURATION_HEADER_SIZE;
+            for (size_t index = 0;
+                 index < decoded.native_switch_controller_count; ++index) {
+                ControllerIdentity& identity =
+                    decoded.native_switch_controllers[index];
+                if (!controller_identity_decode(
+                        payload + offset, CONTROLLER_IDENTITY_ENCODED_SIZE,
+                        &identity) ||
+                    !native_switch_identity_eligible(identity) ||
+                    (index > 0 &&
+                     memcmp(payload + offset - CONTROLLER_IDENTITY_ENCODED_SIZE,
+                            payload + offset,
+                            CONTROLLER_IDENTITY_ENCODED_SIZE) >= 0)) {
+                    return false;
+                }
+                offset += CONTROLLER_IDENTITY_ENCODED_SIZE;
+            }
+            for (; offset < payload_size; ++offset) {
+                if (payload[offset] != 0) {
+                    return false;
+                }
+            }
         }
     } else {
         return false;

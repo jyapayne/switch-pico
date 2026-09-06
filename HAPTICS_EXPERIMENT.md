@@ -28,7 +28,7 @@ Sources:
 ## Implementation contract
 
 1. AIO/XInput defaults enable `SWITCH_PICO_HAPTICS_EXPERIMENT`, `SWITCH_PICO_HD_RUMBLE`, packet-level CYW43 reads and bounded HCI credit batching at 300 MHz/1.3 V. UART is unchanged. Preserve wake identity, pairing storage and USB modes. Incoming flow control and FIFO capacities remain unchanged; the controller's advertised outgoing capacity is eight ACL packets on this hardware.
-2. One selected Sony DualSense/DualSense Edge, Bluetooth Classic, sufficient negotiated MTU. Auto-arm chooses the first eligible ready controller, not necessarily slot 0, and later controllers do not steal an active stream. The fixture requires explicit start. Idle native output remains silent; other models and unselected slots use their controller-specific compatibility paths.
+2. One selected Sony DualSense/DualSense Edge, Bluetooth Classic, sufficient negotiated MTU. Auto-arm chooses the first eligible ready controller, not necessarily slot 0, and later controllers do not steal an active stream. The fixture requires explicit start. Idle native output remains silent. Other devices use compatibility output unless explicitly approved for the separate Nintendo-native backend described in `SWITCH_FAMILY_HD_RUMBLE_PLAN.md`.
 3. Report 0x32 plus A2 remains a 143-byte L2CAP SDU. The first report selects native mode with sized state block 0x90/63 and one silent 0x92/64 haptic block. Subsequent reports use compact controls `{0x91,3,0x62,16,counter}`. Standard gameplay and the fixture carry two blocks (64 stereo frames, descriptor 0xd2). Explicit `SWITCH_PICO_HD_PACKET_FRAMES=32` carries one 64-byte block (descriptor 0x92) for single-controller qualification only. The counter advances by the number of blocks. Padding and Bluetooth CRC remain deterministic. No speaker, microphone, USB audio endpoint, Opus or resampler.
 4. At 3 kHz, 32/64 stereo frames require 93.75/46.875 reports/s. Absolute rational deadlines preserve fractional time and skip obsolete packets after stalls rather than burst-replaying them. Timer wakeups account for SDK +1 tick. Can-send permission and audio deadlines remain separate; flags are armed before requests and synchronous callbacks cannot recursively generate a stream.
 5. The deterministic fixture remains a finite 288-report / 6.144-second sequence: 48 priming intervals, four cycles of left 100 Hz / silence / right 200 Hz / silence (12 reports = 256 ms per phase), then 48 trailing-silence reports. Its peak remains 32/127. Gameplay is continuous, has no one-second priming pattern, and uses timestamped Switch commands instead. Stop restores compatibility output; disconnect cancels without stale-pointer use.
@@ -311,3 +311,12 @@ audio report gap was 26,655 us.
 The 32-frame path remains an explicit single-controller experiment and is
 covered by the same native protocol/lifecycle tests; it is not advertised as
 sustainable for mixed/four-controller operation.
+
+The later Nintendo-native implementation adds output traffic that was absent
+from this cadence comparison. Its Pro-only controlled run delivered all 1,025
+commands at 125 Hz, but early mixed Pro/DualSense runs exposed shared-radio
+congestion. Nintendo can-send-driven delivery and held-state coalescing are
+separate from the unchanged DualSense 64-frame policy. Consult
+[SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md) for measured
+results and outstanding qualification; do not treat the DualSense-only output
+benchmark above as proof that simultaneous native streams are lossless.

@@ -244,11 +244,20 @@ void test_input_report_mapping() {
 void test_rumble_report() {
     const uint8_t packet[8] = {0x00, 0x08, 0x00, 0xa5, 0x5a, 0x00, 0x00, 0x00};
     ControllerRumbleOutput output{};
+    output.raw_valid = true;
+    output.raw_unmodified = true;
+    output.raw[0] = 0x80;
+    output.hd.actuators[0].sample_count = 1;
+    output.hd.actuators[0].samples[0].low_amplitude_q15 = 1000;
     expect(XInput::parse_rumble_report(packet, sizeof(packet), &output),
            "valid rumble report rejected");
     expect(output.low_frequency_magnitude == 0xa5 &&
                output.high_frequency_magnitude == 0x5a,
            "rumble magnitudes mapped incorrectly");
+    expect(!output.raw_valid && !output.raw_unmodified &&
+               output.hd.actuators[0].sample_count == 0 &&
+               output.hd.actuators[1].sample_count == 0,
+           "XInput inherited Nintendo commands from reused output storage");
     expect(!XInput::parse_rumble_report(packet, 4, &output),
            "truncated rumble report accepted");
     uint8_t wrong_type[8]{};

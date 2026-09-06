@@ -20,17 +20,45 @@ def test_configuration_service_native(tmp_path: Path) -> None:
             f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
             f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "configuration_service_test.cpp"),
-            str(root / "src" / "firmware" / "configuration" / "adapter_configuration.cpp"),
-            str(root / "src" / "firmware" / "configuration" / "configuration_service.cpp"),
-            str(root / "src" / "firmware" / "configuration" / "configuration_storage.cpp"),
-            str(root / "src" / "firmware" / "configuration" / "configuration_transaction.cpp"),
+            str(
+                root
+                / "src"
+                / "firmware"
+                / "configuration"
+                / "adapter_configuration.cpp"
+            ),
+            str(root / "src" / "firmware" / "core" / "controller_identity.cpp"),
+            str(
+                root
+                / "src"
+                / "firmware"
+                / "configuration"
+                / "configuration_service.cpp"
+            ),
+            str(
+                root
+                / "src"
+                / "firmware"
+                / "configuration"
+                / "configuration_storage.cpp"
+            ),
+            str(
+                root
+                / "src"
+                / "firmware"
+                / "configuration"
+                / "configuration_transaction.cpp"
+            ),
             "-o",
             str(executable),
         ],
         check=True,
         cwd=root,
     )
-    subprocess.run([str(executable)], check=True, cwd=root)
-    subprocess.run(
-        [str(executable), "abandoned-receive"], check=True, cwd=root
-    )
+    for scenario in (
+        "lifecycle",
+        "v2-migration",
+        "native-approvals",
+        "abandoned-receive",
+    ):
+        subprocess.run([str(executable), scenario], check=True, cwd=root)

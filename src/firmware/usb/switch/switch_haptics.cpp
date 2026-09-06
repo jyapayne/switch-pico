@@ -1,57 +1,11 @@
 #include "usb/switch/switch_haptics.h"
 #include "usb/switch/switch_haptics_amplitudes.h"
+#include "usb/switch/switch_haptics_commands.h"
 #include <cstring>
 
 namespace {
 
-enum class CommandAction : uint8_t {
-    Ignore,
-    Default,
-    Substitute,
-    Sum,
-};
-
-struct HapticCommand {
-    CommandAction amplitude_action;
-    CommandAction frequency_action;
-    int16_t amplitude_offset;
-    int16_t frequency_offset;
-};
-
-constexpr HapticCommand kCommands[32] = {
-    {CommandAction::Default, CommandAction::Default, 0, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 0, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 240, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 224, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 208, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 192, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 176, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 160, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 144, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 128, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 112, 0},
-    {CommandAction::Substitute, CommandAction::Ignore, 96, 0},
-    {CommandAction::Ignore, CommandAction::Substitute, 0, 5},
-    {CommandAction::Ignore, CommandAction::Substitute, 0, 5},
-    {CommandAction::Ignore, CommandAction::Substitute, 0, 0},
-    {CommandAction::Ignore, CommandAction::Substitute, 0, 7},
-    {CommandAction::Ignore, CommandAction::Substitute, 0, 7},
-    {CommandAction::Sum, CommandAction::Sum, 4, 1},
-    {CommandAction::Sum, CommandAction::Ignore, 4, 0},
-    {CommandAction::Sum, CommandAction::Sum, 4, -1},
-    {CommandAction::Sum, CommandAction::Sum, 1, 1},
-    {CommandAction::Sum, CommandAction::Ignore, 1, 0},
-    {CommandAction::Sum, CommandAction::Sum, 1, -1},
-    {CommandAction::Ignore, CommandAction::Sum, 0, 1},
-    {CommandAction::Ignore, CommandAction::Ignore, 0, 0},
-    {CommandAction::Ignore, CommandAction::Sum, 0, -1},
-    {CommandAction::Sum, CommandAction::Sum, -1, 1},
-    {CommandAction::Sum, CommandAction::Ignore, -1, 0},
-    {CommandAction::Sum, CommandAction::Sum, -1, -1},
-    {CommandAction::Sum, CommandAction::Sum, -4, 1},
-    {CommandAction::Sum, CommandAction::Ignore, -4, 0},
-    {CommandAction::Sum, CommandAction::Sum, -4, -1},
-};
+using namespace SwitchHapticsCommands;
 
 constexpr uint32_t kNeutralWord = 0x40400100u;
 constexpr uint8_t kDefaultFrequency = 64;
@@ -64,41 +18,6 @@ constexpr uint8_t extract(uint32_t word) {
     return static_cast<uint8_t>((word >> Shift) & Mask);
 }
 
-uint8_t apply_command(CommandAction action, int16_t offset, uint8_t current,
-                      uint8_t default_value, uint8_t maximum) {
-    switch (action) {
-    case CommandAction::Ignore:
-        return current;
-    case CommandAction::Default:
-        return default_value;
-    case CommandAction::Substitute:
-        return static_cast<uint8_t>(offset);
-    case CommandAction::Sum: {
-        int result = static_cast<int>(current) + static_cast<int>(offset);
-        if (result < 0) {
-            result = 0;
-        } else if (result > maximum) {
-            result = maximum;
-        }
-        return static_cast<uint8_t>(result);
-    }
-}
-    return default_value;
-}
-
-uint8_t host_amplitude_to_lut_index(uint8_t host_index) {
-    const unsigned index = host_index & 0x7fu;
-    if (index == 0) {
-        return 0;
-    }
-    if (index < 16) {
-        return static_cast<uint8_t>(7u + 8u * index);
-    }
-    if (index < 32) {
-        return static_cast<uint8_t>(97u + 2u * index);
-    }
-    return static_cast<uint8_t>(128u + index);
-}
 
 uint32_t load_little_endian_word(const uint8_t* bytes) {
     return static_cast<uint32_t>(bytes[0]) |
@@ -308,6 +227,9 @@ ControllerRumbleOutput SwitchHapticsDecoder::decode(const uint8_t payload[8]) {
             actuators_[0], load_little_endian_word(payload), output.hd.actuators[0]);
         peaks[1] = decode_actuator(
             actuators_[1], load_little_endian_word(payload + 4), output.hd.actuators[1]);
+        std::memcpy(output.raw, payload, sizeof(output.raw));
+        output.raw_valid = true;
+        output.raw_unmodified = true;
     }
 
     const uint8_t low_peak = peaks[0].low > peaks[1].low ? peaks[0].low : peaks[1].low;

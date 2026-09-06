@@ -13,7 +13,7 @@ import sys
 import time
 import zlib
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -67,6 +67,15 @@ OP_PROFILE_IDENTIFY = 0x3C
 OP_HAPTICS_EXPERIMENT = 0x40
 OP_HAPTICS_TRANSPORT_PROBE = 0x41
 OP_MACRO_CAPTURE = 0x42
+OP_NATIVE_SWITCH_RUMBLE = 0x43
+NATIVE_SWITCH_RUMBLE_SCHEMA_VERSION = 2
+NATIVE_SWITCH_RUMBLE_ROW_SIZE = 80
+NATIVE_SWITCH_RUMBLE_SLOT_COUNT = 4
+NATIVE_SWITCH_RUMBLE_LATENCY_NOTE = (
+    "Latency percentiles are host-receipt-to-HCI-submission histogram upper "
+    "bounds in 250 us buckets (tail uses observed maximum), not physical latency. "
+    "Coalesced held-state commands require no new packet and are excluded."
+)
 MACRO_CAPTURE_SCHEMA_VERSION = 1
 MACRO_CAPTURE_STATES = (
     "idle",
@@ -90,8 +99,14 @@ STATUS_NAMES = {
     8: "storage failure",
 }
 
-CONFIGURATION_SCHEMA_VERSION = 2
-CONFIGURATION_SIZE = 8
+CONFIGURATION_SCHEMA_VERSION = 3
+CONFIGURATION_SIZE = 232
+NATIVE_SWITCH_CONTROLLER_CAPACITY = 16
+NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE = (
+    "Native rumble requires a genuine qualified Nintendo Switch Pro Controller "
+    "or Joy-Con. Approval applies to this physical controller across all profiles; "
+    "matching VID/PID is not automatic proof of clone support."
+)
 PAIRING_WINDOW_SECONDS_MIN = 10
 PAIRING_WINDOW_SECONDS_MAX = 300
 REQUESTED_MODE_AUTO = 0
@@ -357,6 +372,46 @@ class RuntimeDiagnostics:
 
 
 @dataclass(frozen=True)
+class NativeSwitchRumbleSlot:
+    slot: int
+    parser_type: int
+    firmware_high: int
+    firmware_low: int
+    flags: int
+    generation: int
+    received_commands: int
+    submitted_reports: int
+    dropped_commands: int
+    resynchronizations: int
+    raw_commands: int
+    quantized_commands: int
+    congested_attempts: int
+    completed_commands: int
+    p50_upper_us: int
+    p95_upper_us: int
+    p99_upper_us: int
+    max_latency_us: int
+    queue_depth: int
+    last_wire_low_u32: int
+    last_wire_high_u32: int
+    max_encode_us: int
+    coalesced_commands: int
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "connected": bool(self.flags & 1),
+            "approved": bool(self.flags & 2),
+            "active": bool(self.flags & 4),
+            "mono": bool(self.flags & 8),
+            "feedback": bool(self.flags & 16),
+            "last_wire_hex": struct.pack(
+                "<II", self.last_wire_low_u32, self.last_wire_high_u32
+            ).hex(),
+        }
+
+
+@dataclass(frozen=True)
 class HapticsExperimentDiagnostics:
     run_id: int
     connection_generation: int
@@ -529,6 +584,8 @@ class AdapterConfiguration:
     generation: int
     crc: int
     requested_mode: int = REQUESTED_MODE_AUTO
+    native_switch_controllers: tuple[ControllerIdentity, ...] = ()
+    schema_version: int = CONFIGURATION_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -2581,6 +2638,77 @@ def read_runtime_diagnostics(device: UsbDevice) -> RuntimeDiagnostics:
     )
 
 
+def parse_native_switch_rumble(
+    envelope: Envelope,
+) -> tuple[NativeSwitchRumbleSlot, ...]:
+    _raise_status(envelope)
+    if (
+        envelope.schema_version != NATIVE_SWITCH_RUMBLE_SCHEMA_VERSION
+        or len(envelope.payload)
+        != NATIVE_SWITCH_RUMBLE_ROW_SIZE * NATIVE_SWITCH_RUMBLE_SLOT_COUNT
+    ):
+        raise ConfigManagerError("unsupported native Nintendo rumble diagnostics")
+    slots = []
+    for slot in range(NATIVE_SWITCH_RUMBLE_SLOT_COUNT):
+        values = struct.unpack_from(
+            "<4B19I", envelope.payload, slot * NATIVE_SWITCH_RUMBLE_ROW_SIZE
+        )
+        if values[0] != slot or values[4] & ~0x1F:
+            raise ConfigManagerError("invalid native Nintendo rumble diagnostic row")
+        slots.append(NativeSwitchRumbleSlot(*values))
+    return tuple(slots)
+
+
+def read_native_switch_rumble(device: UsbDevice) -> tuple[NativeSwitchRumbleSlot, ...]:
+    return parse_native_switch_rumble(_control_in(device, OP_NATIVE_SWITCH_RUMBLE))
+
+
+def _print_native_switch_rumble_status(
+    slots: tuple[NativeSwitchRumbleSlot, ...], *, json_output: bool
+) -> None:
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "schema_version": NATIVE_SWITCH_RUMBLE_SCHEMA_VERSION,
+                    "latency_note": NATIVE_SWITCH_RUMBLE_LATENCY_NOTE,
+                    "slots": [slot.to_json_object() for slot in slots],
+                }
+            )
+        )
+        return
+    print(NATIVE_SWITCH_RUMBLE_LATENCY_NOTE)
+    for slot in slots:
+        values = slot.to_json_object()
+        print(
+            f"Slot {slot.slot}: parser type {slot.parser_type}, firmware bytes "
+            f"{slot.firmware_high:02x}:{slot.firmware_low:02x}, generation {slot.generation}"
+        )
+        print(
+            "  "
+            + " ".join(
+                f"{name}={str(values[name]).lower()}"
+                for name in ("connected", "approved", "active", "mono", "feedback")
+            )
+        )
+        print(
+            f"  Commands: received={slot.received_commands} completed={slot.completed_commands} "
+            f"raw={slot.raw_commands} quantized={slot.quantized_commands} "
+            f"dropped={slot.dropped_commands} coalesced={slot.coalesced_commands}"
+        )
+        print(
+            f"  Reports: submitted={slot.submitted_reports} "
+            f"congested={slot.congested_attempts} resynchronizations={slot.resynchronizations} "
+            f"queue_depth={slot.queue_depth}"
+        )
+        print(
+            f"  Latency upper bounds (us): p50={slot.p50_upper_us} "
+            f"p95={slot.p95_upper_us} p99={slot.p99_upper_us}; "
+            f"max={slot.max_latency_us}; max_encode={slot.max_encode_us}"
+        )
+        print(f"  Last wire bytes: {values['last_wire_hex']}")
+
+
 def parse_haptics_experiment(envelope: Envelope) -> HapticsExperimentDiagnostics:
     _raise_status(envelope)
     if envelope.schema_version != HAPTICS_EXPERIMENT_SCHEMA_VERSION:
@@ -2986,17 +3114,67 @@ def _run_haptics_experiment_command(
         time.sleep(min(0.1, remaining))
 
 
+def _canonical_native_switch_controllers(
+    identities: tuple[ControllerIdentity, ...],
+) -> tuple[ControllerIdentity, ...]:
+    if (
+        type(identities) is not tuple
+        or len(identities) > NATIVE_SWITCH_CONTROLLER_CAPACITY
+    ):
+        raise ConfigManagerError("invalid native rumble approval list")
+    for identity in identities:
+        if (
+            not isinstance(identity, ControllerIdentity)
+            or not identity.stable
+            or identity.transport != TRANSPORT_CLASSIC
+            or identity.vendor_id != 0x057E
+            or identity.product_id not in (0x2009, 0x2006, 0x2007)
+        ):
+            raise ConfigManagerError(
+                "native rumble approval requires a stable Classic Nintendo "
+                "Pro Controller or Joy-Con identity"
+            )
+    if len(set(identities)) != len(identities):
+        raise ConfigManagerError("duplicate native rumble approval")
+    return tuple(sorted(identities, key=ControllerIdentity.to_bytes))
+
+
 def read_configuration(device: UsbDevice) -> AdapterConfiguration:
     envelope = _control_in(device, OP_CONFIGURATION_READ)
     _raise_status(envelope)
-    if (
-        envelope.schema_version != CONFIGURATION_SCHEMA_VERSION
-        or len(envelope.payload) != CONFIGURATION_SIZE
-        or envelope.payload[3:] != bytes(5)
-    ):
+    payload = envelope.payload
+    identities: tuple[ControllerIdentity, ...] = ()
+    if envelope.schema_version == 1:
+        if len(payload) != 4 or payload[2:] != bytes(2):
+            raise ConfigManagerError("unsupported configuration object")
+        requested_mode = REQUESTED_MODE_AUTO
+    elif envelope.schema_version == 2:
+        if len(payload) != 8 or payload[3:] != bytes(5):
+            raise ConfigManagerError("unsupported configuration object")
+        requested_mode = payload[2]
+    elif envelope.schema_version == CONFIGURATION_SCHEMA_VERSION:
+        if len(payload) != CONFIGURATION_SIZE:
+            raise ConfigManagerError("unsupported configuration object")
+        count = payload[3]
+        end = 8 + count * CONTROLLER_IDENTITY_SIZE
+        if (
+            count > NATIVE_SWITCH_CONTROLLER_CAPACITY
+            or payload[4:8] != bytes(4)
+            or payload[end:] != bytes(CONFIGURATION_SIZE - end)
+        ):
+            raise ConfigManagerError("invalid native rumble approval encoding")
+        identities = tuple(
+            ControllerIdentity.from_bytes(
+                payload[offset : offset + CONTROLLER_IDENTITY_SIZE]
+            )
+            for offset in range(8, end, CONTROLLER_IDENTITY_SIZE)
+        )
+        if identities != _canonical_native_switch_controllers(identities):
+            raise ConfigManagerError("noncanonical native rumble approval order")
+        requested_mode = payload[2]
+    else:
         raise ConfigManagerError("unsupported configuration object")
-    pairing_window_seconds = struct.unpack_from("<H", envelope.payload)[0]
-    requested_mode = envelope.payload[2]
+    pairing_window_seconds = struct.unpack_from("<H", payload)[0]
     if not (
         PAIRING_WINDOW_SECONDS_MIN
         <= pairing_window_seconds
@@ -3010,6 +3188,8 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
         generation=envelope.generation,
         crc=envelope.payload_crc,
         requested_mode=requested_mode,
+        native_switch_controllers=identities,
+        schema_version=envelope.schema_version,
     )
 
 
@@ -3049,11 +3229,42 @@ def write_configuration(
         configuration.requested_mode
     ) is not int or not 0 <= configuration.requested_mode < len(REQUESTED_MODE_NAMES):
         raise ConfigManagerError("invalid requested USB mode")
-    payload = struct.pack(
-        "<HB5x",
-        configuration.pairing_window_seconds,
-        configuration.requested_mode,
+    identities = _canonical_native_switch_controllers(
+        configuration.native_switch_controllers
     )
+    if configuration.schema_version == CONFIGURATION_SCHEMA_VERSION:
+        payload = (
+            struct.pack(
+                "<HBB4x",
+                configuration.pairing_window_seconds,
+                configuration.requested_mode,
+                len(identities),
+            )
+            + b"".join(identity.to_bytes() for identity in identities)
+            + bytes(
+                (NATIVE_SWITCH_CONTROLLER_CAPACITY - len(identities))
+                * CONTROLLER_IDENTITY_SIZE
+            )
+        )
+    elif configuration.schema_version in (1, 2):
+        if identities:
+            raise ConfigManagerError(
+                "native rumble approval requires schema 3 firmware"
+            )
+        if configuration.schema_version == 1:
+            if configuration.requested_mode != REQUESTED_MODE_AUTO:
+                raise ConfigManagerError(
+                    "schema 1 does not support a requested USB mode"
+                )
+            payload = struct.pack("<H2x", configuration.pairing_window_seconds)
+        else:
+            payload = struct.pack(
+                "<HB5x",
+                configuration.pairing_window_seconds,
+                configuration.requested_mode,
+            )
+    else:
+        raise ConfigManagerError("unsupported configuration schema")
     transaction_id = _host_transaction_id()
     _control_out(
         device,
@@ -3061,7 +3272,7 @@ def write_configuration(
         struct.pack(
             "<IHHI",
             transaction_id,
-            CONFIGURATION_SCHEMA_VERSION,
+            configuration.schema_version,
             len(payload),
             _crc32(payload),
         ),
@@ -3075,6 +3286,28 @@ def write_configuration(
         )
     _control_out(device, OP_CONFIGURATION_COMMIT, struct.pack("<I", transaction_id))
     return _wait_for_transaction(device, transaction_id, timeout)
+
+
+def set_native_switch_rumble_approval(
+    device: UsbDevice,
+    identity: ControllerIdentity,
+    approved: bool,
+    timeout: float,
+) -> TransactionStatus:
+    """Persist explicit physical-controller approval without changing its profiles."""
+    _require_bool(approved, "native rumble approval")
+    _canonical_native_switch_controllers((identity,))
+    before = read_configuration(device)
+    if before.schema_version != CONFIGURATION_SCHEMA_VERSION:
+        raise ConfigManagerError("native rumble approval requires schema 3 firmware")
+    identities = tuple(
+        item for item in before.native_switch_controllers if item != identity
+    )
+    if approved:
+        identities += (identity,)
+    return write_configuration(
+        device, replace(before, native_switch_controllers=identities), timeout
+    )
 
 
 def reset_configuration(device: UsbDevice, timeout: float) -> TransactionStatus:
@@ -3971,6 +4204,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     config_reset = config_commands.add_parser("reset", help="restore defaults")
     config_reset.add_argument("--yes", action="store_true")
+    native_rumble = config_commands.add_parser(
+        "native-rumble",
+        help="manage physical-controller native Nintendo rumble approvals",
+        description=NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE,
+    )
+    native_commands = native_rumble.add_subparsers(
+        dest="native_rumble_command", required=True
+    )
+    native_commands.add_parser("list", help="list stored identities and approvals")
+    native_status = native_commands.add_parser(
+        "status", help="show per-slot native Nintendo rumble qualification counters"
+    )
+    native_status.add_argument(
+        "--json", action="store_true", help="emit JSON diagnostics"
+    )
+    for action in ("approve", "revoke"):
+        native_action = native_commands.add_parser(
+            action,
+            help=f"{action} native rumble for one stored physical controller",
+            description=NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE,
+        )
+        native_selector = native_action.add_mutually_exclusive_group(required=True)
+        native_selector.add_argument(
+            "--identity",
+            type=_identity_index,
+            metavar="N",
+            help="physical identity index from profiles list or native-rumble list",
+        )
+        if action == "revoke":
+            native_selector.add_argument(
+                "--approval",
+                type=_identity_index,
+                metavar="N",
+                help="approval index from native-rumble list, including forgotten identities",
+            )
+        if action == "approve":
+            native_action.add_argument(
+                "--yes",
+                action="store_true",
+                help="confirm this is a genuine qualified Pro Controller or Joy-Con",
+            )
 
     profiles = commands.add_parser(
         "profiles",
@@ -4054,6 +4328,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "profiles" and args.profile_command == "reset" and not args.yes:
         print("error: profiles reset requires --yes", file=sys.stderr)
         return 2
+    if (
+        args.command == "config"
+        and args.config_command == "native-rumble"
+        and args.native_rumble_command == "approve"
+        and not args.yes
+    ):
+        print(
+            "error: native-rumble approve requires --yes. "
+            + NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE,
+            file=sys.stderr,
+        )
+        return 2
 
     imported_profile: ControllerProfile | None = None
     try:
@@ -4120,16 +4406,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 print(f"generation={configuration.generation}")
                 print(f"crc={configuration.crc:08x}")
+                for identity in configuration.native_switch_controllers:
+                    print(
+                        f"native_switch_controller={identity.address_text} "
+                        f"VID:PID {identity.vendor_id:04X}:{identity.product_id:04X}"
+                    )
             elif args.config_command == "set":
                 before = read_configuration(device)
                 status = write_configuration(
                     device,
-                    AdapterConfiguration(
-                        pairing_window_seconds=args.pairing_window_seconds,
-                        generation=before.generation,
-                        crc=before.crc,
-                        requested_mode=before.requested_mode,
-                    ),
+                    replace(before, pairing_window_seconds=args.pairing_window_seconds),
                     args.timeout,
                 )
                 print(
@@ -4137,6 +4423,62 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{status.stored_generation} "
                     f"(CRC {status.stored_crc:08x})."
                 )
+            elif args.config_command == "native-rumble":
+                approval_index = getattr(args, "approval", None)
+                entries = (
+                    list_profiles(device)
+                    if args.native_rumble_command != "status" and approval_index is None
+                    else ()
+                )
+                if args.native_rumble_command == "status":
+                    _print_native_switch_rumble_status(
+                        read_native_switch_rumble(device), json_output=args.json
+                    )
+                elif args.native_rumble_command == "list":
+                    configuration = read_configuration(device)
+                    print(NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE)
+                    if configuration.schema_version != CONFIGURATION_SCHEMA_VERSION:
+                        print("Native rumble approval requires schema 3 firmware.")
+                    _print_profiles(entries)
+                    for index, entry in enumerate(entries):
+                        if entry.identity in configuration.native_switch_controllers:
+                            print(
+                                f"Approved identity {index}: {entry.identity.address_text}"
+                            )
+                    for index, identity in enumerate(
+                        configuration.native_switch_controllers
+                    ):
+                        print(
+                            f"Approval {index}: {identity.address_text} "
+                            f"VID:PID {identity.vendor_id:04X}:{identity.product_id:04X} "
+                            f"(revoke with --approval {index})"
+                        )
+                    if not configuration.native_switch_controllers:
+                        print("No native rumble approvals.")
+                else:
+                    if approval_index is None:
+                        identity = _resolve_profile_identity(entries, args.identity)
+                    else:
+                        configuration = read_configuration(device)
+                        if approval_index >= len(
+                            configuration.native_switch_controllers
+                        ):
+                            raise ConfigManagerError(
+                                "approval index is out of range; use native-rumble list"
+                            )
+                        identity = configuration.native_switch_controllers[
+                            approval_index
+                        ]
+                    approved = args.native_rumble_command == "approve"
+                    status = set_native_switch_rumble_approval(
+                        device, identity, approved, args.timeout
+                    )
+                    print(NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE)
+                    print(
+                        f"{'Approved' if approved else 'Revoked'} native rumble for "
+                        f"controller {identity.address_text} at "
+                        f"generation {status.stored_generation}."
+                    )
             else:
                 status = reset_configuration(device, args.timeout)
                 print(f"Reset configuration at generation {status.stored_generation}.")
