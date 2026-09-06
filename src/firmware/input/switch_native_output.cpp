@@ -1,4 +1,5 @@
 #include "input/switch_native_output.h"
+#include "input/native_output_scheduler.h"
 #include "usb/switch/switch_native_haptics.h"
 #include "usb/switch/switch_haptics_amplitudes.h"
 
@@ -31,6 +32,7 @@ struct SharedSlot {
     uint32_t generation = 0;
     bool accepting = false;
     bool stop_pending = false;
+    bool host_active = false;
     bool lost = false;
     uint8_t head = 0, count = 0;
     Command queue[kCapacity]{};
@@ -40,10 +42,13 @@ struct SharedSlot {
 struct OutputSlot {
     uni_hid_device_t* device = nullptr;
     ControllerIdentity identity{};
+    uint32_t generation = 0;
     bool approved = false, active = false, mono = false;
     bool neutral_needed = false, dirty = false, host_valid = false;
     bool feedback_active = false, pending_host = false, pending_trimmed = false;
-    bool permission_requested = false, permission_granted = false;
+    bool permission_requested = false, processing = false, urgent_stop = false;
+    bool requested_urgent_stop = false;
+    uint64_t deadline_us = 0, requested_deadline_us = 0;
     uint64_t feedback_until_us = 0, last_send_us = 0, retry_us = 0;
     uint64_t pending_since_us = 0;
     uint64_t pending_valid_until_us = UINT64_MAX;
@@ -66,6 +71,8 @@ btstack_data_source_t g_data_source{};
 btstack_timer_source_t g_timer{};
 
 void poll();
+void process_slot(uint8_t slot);
+bool granted(uni_hid_device_t* device, uint16_t cid, uint32_t generation);
 void increment(uint32_t& value, uint32_t amount = 1) {
     value = amount > UINT32_MAX - value ? UINT32_MAX : value + amount;
 }
@@ -141,6 +148,23 @@ void ensure_runloop() {
     btstack_run_loop_set_timer_handler(&g_timer, timer);
     g_runloop_ready = true;
 }
+uint64_t periodic_deadline(const OutputSlot& output) {
+    uint64_t deadline = UINT64_MAX;
+    if (output.host_valid || output.feedback_active)
+        deadline = output.last_send_us + kRefreshUs;
+    if (output.feedback_active && output.feedback_until_us < deadline)
+        deadline = output.feedback_until_us;
+    if (!output.feedback_active && output.host_valid && !output.host.stateful &&
+        output.host.received_us + kHostExpiryUs < deadline)
+        deadline = output.host.received_us + kHostExpiryUs;
+    return deadline;
+}
+bool ready(const OutputSlot& output, uint64_t now) {
+    return output.active && now >= output.retry_us &&
+        (output.neutral_needed || output.dirty || output.packets.count ||
+         ((output.feedback_active || output.host_valid) &&
+          now >= output.last_send_us + kRefreshUs));
+}
 void schedule() {
     if (g_timer_armed) {
         btstack_run_loop_remove_timer(&g_timer);
@@ -150,6 +174,8 @@ void schedule() {
     const uint64_t now = time_us_64();
     for (const auto& output : g_outputs) {
         if (!output.active) continue;
+        native_output_scheduler_reserve(output.device, output.generation,
+                                        periodic_deadline(output));
         if ((output.neutral_needed || output.dirty || output.packets.count) &&
             !output.permission_requested && output.retry_us < due) due = output.retry_us;
         if (output.feedback_active && output.feedback_until_us < due)
@@ -157,7 +183,8 @@ void schedule() {
         if (output.host_valid && !output.host.stateful &&
             output.host.received_us + kHostExpiryUs < due)
             due = output.host.received_us + kHostExpiryUs;
-        if ((output.feedback_active || output.host_valid) &&
+        if (!output.neutral_needed && !output.dirty && !output.packets.count &&
+            (output.feedback_active || output.host_valid) &&
             output.last_send_us + kRefreshUs < due)
             due = output.last_send_us + kRefreshUs;
     }
@@ -170,28 +197,36 @@ void schedule() {
 }
 bool permission(uint8_t slot) {
     OutputSlot& output = g_outputs[slot];
-    if (output.permission_granted) return true;
-    if (!output.permission_requested) {
+    if (native_output_scheduler_granted(output.device)) return true;
+    if (!output.permission_requested ||
+        output.requested_deadline_us != output.deadline_us ||
+        output.requested_urgent_stop != output.urgent_stop) {
+        const bool waiting = output.permission_requested;
         output.permission_requested = true;  // Callback may be synchronous.
-        if (l2cap_request_can_send_now_event(output.device->conn.interrupt_cid) != 0) {
+        output.requested_deadline_us = output.deadline_us;
+        output.requested_urgent_stop = output.urgent_stop;
+        if (native_output_scheduler_request(output.device, output.generation,
+                output.deadline_us, output.urgent_stop, granted) != 0) {
             output.permission_requested = false;
             output.retry_us = time_us_64() + 1000;
         }
-        if (!output.permission_granted) {
+        if (!waiting && !native_output_scheduler_granted(output.device)) {
             critical_section_enter_blocking(&g_lock);
             increment(g_shared[slot].diagnostics.congested_attempts);
             critical_section_exit(&g_lock);
         }
     }
-    return output.permission_granted;
+    return native_output_scheduler_granted(output.device);
 }
 
 bool send(uint8_t slot, const uint8_t* bytes) {
     OutputSlot& output = g_outputs[slot];
     if (!permission(slot)) return false;
-    output.permission_granted = false;
-    const bool sent = uni_hid_parser_switch_native_send(output.device, bytes);
+    auto* const device = output.device;
+    const uint32_t generation = output.generation;
+    const bool sent = uni_hid_parser_switch_native_send(device, bytes);
     const uint64_t now = time_us_64();
+    if (output.device != device || output.generation != generation) return false;
     critical_section_enter_blocking(&g_lock);
     auto& diagnostics = g_shared[slot].diagnostics;
     if (sent) {
@@ -245,6 +280,10 @@ ControllerRumbleOutput current_host(const Command& command, uint64_t now,
     return result;
 }
 void restore_compatibility(OutputSlot& output, uint64_t now) {
+    if (native_output_scheduler_granted(output.device))
+        native_output_scheduler_complete(output.device, output.generation);
+    native_output_scheduler_cancel(output.device);
+    output.permission_requested = false;
     uni_hid_parser_switch_native_release(output.device);
     output.active = false;
     if (output.device->report_parser.play_dual_rumble == nullptr) return;
@@ -264,7 +303,7 @@ void restore_compatibility(OutputSlot& output, uint64_t now) {
     output.feedback_active = false;
     output.dirty = false;
 }
-void process_slot(uint8_t slot) {
+void process_slot_step(uint8_t slot) {
     OutputSlot& output = g_outputs[slot];
     if (!output.active) return;
     const uint64_t now = time_us_64();
@@ -285,6 +324,7 @@ void process_slot(uint8_t slot) {
         shared.count = shared.head = 0;
     }
     critical_section_exit(&g_lock);
+    if (stop && output.host_valid && !output.feedback_active) output.urgent_stop = true;
     if (have_new && !loss && !output.feedback_active) {
         const bool pending_hold = output.pending_host &&
             same_hold(output.host, newest, false);
@@ -316,6 +356,8 @@ void process_slot(uint8_t slot) {
             if (loss || stop || output.packets.count) reset_pending(output);
             output.pending_host = true;
             output.pending_since_us = newest.first_received_us;
+            if (output.approved)
+                output.deadline_us = newest.first_received_us + kCommandWindowUs;
             output.dirty = true;
         }
         output.host = newest;
@@ -329,12 +371,16 @@ void process_slot(uint8_t slot) {
         if (!output.feedback_active) {
             reset_pending(output);
             output.dirty = true;
+            output.deadline_us = output.host.received_us + kHostExpiryUs;
+            output.urgent_stop = true;
         }
     }
     if (output.feedback_active && now >= output.feedback_until_us) {
         output.feedback_active = false;
         reset_pending(output);
         output.dirty = true;
+        output.deadline_us = output.feedback_until_us;
+        output.urgent_stop = !output.host_valid && !silent(output.feedback);
     }
     if (output.packets.count && now >= output.pending_valid_until_us) {
         const bool host_command = output.pending_host;
@@ -347,6 +393,7 @@ void process_slot(uint8_t slot) {
         if (!send(slot, kNeutral)) return;
         output.encoder.reset();
         output.neutral_needed = false;
+        output.urgent_stop = false;
         critical_section_enter_blocking(&g_lock);
         increment(g_shared[slot].diagnostics.resynchronizations);
         critical_section_exit(&g_lock);
@@ -356,6 +403,8 @@ void process_slot(uint8_t slot) {
             publish_flags(slot);
             return;
         }
+        // A baseline consumes its own grant, even when a codec packet follows.
+        if (output.approved) return;
     }
     if (!output.approved) {
         restore_compatibility(output, now);
@@ -371,6 +420,7 @@ void process_slot(uint8_t slot) {
         ((output.host_valid || output.feedback_active) && now >= output.last_send_us + kRefreshUs))) {
         // Request actual credit availability before mutating the encoder model.
         // Timer polling misses short free-buffer windows behind HCI credit writes.
+        if (!output.dirty) output.deadline_us = output.last_send_us + kRefreshUs;
         if (!permission(slot)) return;
         ControllerRumbleOutput effective{};
         output.pending_trimmed = false;
@@ -400,14 +450,51 @@ void process_slot(uint8_t slot) {
         output.packet_index = 0;
         output.dirty = false;
     }
-    // Bounded legal schedule: at most baseline + one compressed command, never
-    // drain an obsolete command backlog into the controller.
-    for (uint8_t i = 0; i < 2 && output.packet_index < output.packets.count; ++i) {
+    // One legal wire packet per grant. The wrapper releases and reacquires
+    // through the shared arbiter before submitting a prepared tail.
+    if (output.packet_index < output.packets.count) {
         if (!send(slot, output.packets.bytes[output.packet_index])) return;
         ++output.packet_index;
     }
     if (output.packets.count && output.packet_index == output.packets.count) finish_command(slot);
     publish_flags(slot);
+}
+void process_slot(uint8_t slot) {
+    OutputSlot& output = g_outputs[slot];
+    if (output.processing) return;
+    output.processing = true;
+    auto* const device = output.device;
+    const uint32_t generation = output.generation;
+    // A neutral barrier plus the codec's two-packet schedule is the maximum
+    // immediate work. Each attempt releases its token before another request.
+    for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+        process_slot_step(slot);
+        if (output.device != device || output.generation != generation) return;
+        const bool had_grant = native_output_scheduler_granted(output.device);
+        if (had_grant) native_output_scheduler_complete(device, generation);
+        if (!had_grant || !ready(output, time_us_64())) break;
+    }
+    output.processing = false;
+}
+bool granted(uni_hid_device_t* device, uint16_t cid, uint32_t generation) {
+    if (!g_prepared || device == nullptr) return false;
+    for (uint8_t slot = 0; slot < kSlots; ++slot) {
+        auto& output = g_outputs[slot];
+        if (output.device != device || output.generation != generation || !output.active ||
+            device->conn.interrupt_cid != cid || !output.permission_requested ||
+            !native_output_scheduler_granted(device)) continue;
+        output.permission_requested = false;
+        output.retry_us = 0;
+        // Synchronous delivery resumes the caller's permission() immediately.
+        // A different slot can run here even while the outer poll is active.
+        if (!output.processing) {
+            process_slot(slot);
+            schedule();
+        }
+        return false;  // Nintendo's generic LED FIFO must still see the event.
+    }
+    native_output_scheduler_complete(device, generation);  // Retired/no-send callback.
+    return false;
 }
 void poll() {
     if (g_polling) return;
@@ -445,8 +532,11 @@ void switch_native_output_attach(uint8_t slot, uint32_t generation,
           (type == 2 && identity.product_id == 0x2007))) return;
     ensure_runloop();
     OutputSlot& output = g_outputs[slot];
+    if (output.device) native_output_scheduler_cancel(output.device);
     output = {};
     output.device = device;
+    output.generation = generation;
+    output.deadline_us = time_us_64() + kCommandWindowUs;
     output.identity = identity;
     output.mono = type != 3;
     critical_section_enter_blocking(&g_lock);
@@ -472,11 +562,13 @@ void switch_native_output_detach(uni_hid_device_t* device) {
     for (uint8_t i = 0; i < kSlots; ++i) {
         if (g_outputs[i].device != device) continue;
         // Parser teardown owns timer retirement; never transmit on a dead CID.
+        native_output_scheduler_cancel(device);
         g_outputs[i] = {};
         critical_section_enter_blocking(&g_lock);
         g_shared[i].accepting = false;
         g_shared[i].count = g_shared[i].head = 0;
         g_shared[i].stop_pending = g_shared[i].lost = false;
+        g_shared[i].host_active = false;
         g_shared[i].diagnostics.flags = 0;
         critical_section_exit(&g_lock);
     }
@@ -494,11 +586,17 @@ void switch_native_output_configure(const AdapterConfiguration& configuration,
         const bool approved = adapter_configuration_native_switch_approved(configuration, output.identity);
         if (approved == output.approved) continue;
         output.approved = approved;
+        native_output_scheduler_cancel(output.device);
+        output.permission_requested = false;
+        output.deadline_us = time_us_64() + kCommandWindowUs;
+        output.urgent_stop = !approved && output.active;
         if (approved && !output.active && uni_hid_parser_switch_native_acquire(output.device)) {
             output.active = true;
             reset_pending(output);
         } else if (!approved && output.active) {
             reset_pending(output);
+            output.deadline_us = time_us_64();
+            output.urgent_stop = true;
         }
         publish_flags(i);
     }
@@ -529,7 +627,9 @@ bool switch_native_output_submit(uint8_t slot, uint32_t generation,
             shared.queue[(shared.head + shared.count) % kCapacity] = update;
             ++shared.count;
         }
-        shared.stop_pending = shared.stop_pending || silent(rumble);
+        const bool active = !silent(rumble);
+        shared.stop_pending = shared.stop_pending || (shared.host_active && !active);
+        shared.host_active = active;
         increment(shared.diagnostics.received_commands);
     }
     critical_section_exit(&g_lock);
@@ -540,19 +640,6 @@ bool switch_native_output_submit(uint8_t slot, uint32_t generation,
         btstack_run_loop_poll_data_sources_from_irq();
     }
     return accepted;
-}
-bool switch_native_output_on_can_send_now(uni_hid_device_t* device, uint16_t cid) {
-    if (!g_prepared || device == nullptr) return false;
-    for (auto& output : g_outputs) {
-        if (output.device != device || !output.active ||
-            device->conn.interrupt_cid != cid || !output.permission_requested) continue;
-        output.permission_requested = false;
-        output.permission_granted = true;
-        output.retry_us = 0;
-        poll();
-        return true;
-    }
-    return false;
 }
 
 bool switch_native_output_owns(const uni_hid_device_t* device) {
@@ -566,11 +653,18 @@ bool switch_native_output_feedback(uni_hid_device_t* device, uint8_t low,
     if (!g_prepared || device == nullptr) return false;
     for (auto& output : g_outputs) {
         if (output.device != device || !output.active) continue;
+        const uint64_t now = time_us_64();
+        const bool stopped = output.feedback_active && !silent(output.feedback) &&
+            (duration_ms == 0 || (low == 0 && high == 0));
         output.feedback = magnitudes(low, high);
-        output.feedback_until_us = time_us_64() + uint64_t{duration_ms} * 1000;
+        output.feedback_until_us = now + uint64_t{duration_ms} * 1000;
         output.feedback_active = duration_ms != 0;
         reset_pending(output);
         output.dirty = true;
+        output.deadline_us = now + kCommandWindowUs;
+        if (duration_ms && output.feedback_until_us < output.deadline_us)
+            output.deadline_us = output.feedback_until_us;
+        output.urgent_stop = stopped;
         poll();
         return true;
     }

@@ -728,6 +728,9 @@ Current constraints:
   payload at actual submission. Native ownership cancels compatibility timers.
 - `switch_native_output.cpp` owns bounded generation-tagged queues, L2CAP
   permission-driven delivery, expiry, feedback/resume and held-state coalescing.
+- `native_output_scheduler.cpp` arbitrates both native writers with urgent-stop
+  precedence, earliest deadlines, rotating ties, periodic credit reservations,
+  and generation-bound grant completion. Radio power policy is unchanged.
 - Adapter configuration schema 3 persists up to 16 explicit physical approvals.
   Existing profile schema 6/catalog 2, bonds and wake identity are unchanged.
 - Joy-Cons are currently separate, horizontally mapped controllers in

@@ -49,6 +49,13 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                         / "src"
                         / "firmware"
                         / "input"
+                        / "native_output_scheduler.cpp"
+                    ),
+                    str(
+                        root
+                        / "src"
+                        / "firmware"
+                        / "input"
                         / "switch_hd_rumble_synth.cpp"
                     ),
                     str(

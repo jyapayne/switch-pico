@@ -499,11 +499,12 @@ int btstack_run_loop_remove_timer(btstack_timer_source_t* timer) {
 
 uint64_t time_us_64() { return uint64_t{now_ms} * 1000; }
 uint16_t l2cap_get_remote_mtu_for_local_cid(uint16_t) { return 143; }
+bool l2cap_can_send_packet_now(uint16_t) { return true; }
+int hci_number_free_acl_slots_for_handle(uint16_t) { return 8; }
 uint8_t l2cap_request_can_send_now_event(uint16_t cid) {
     for (const auto& slot : g_slots) {
         if (slot.device != nullptr && slot.device->conn.interrupt_cid == cid) {
-            require(haptics_experiment_on_can_send_now(slot.device, cid),
-                    "native send permission was not consumed");
+            (void)uni_platform_on_l2cap_can_send_now(slot.device, cid);
             return ERROR_CODE_SUCCESS;
         }
     }

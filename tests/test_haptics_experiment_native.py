@@ -41,6 +41,7 @@ def test_haptics_experiment_native(
             f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "haptics_experiment_test.cpp"),
             str(root / "src" / "firmware" / "input" / "haptics_experiment.cpp"),
+            str(root / "src" / "firmware" / "input" / "native_output_scheduler.cpp"),
             str(root / "src" / "firmware" / "input" / "switch_hd_rumble_synth.cpp"),
             str(root / "src" / "firmware" / "usb" / "switch" / "switch_haptics.cpp"),
             "-o",

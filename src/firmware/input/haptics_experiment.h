@@ -67,5 +67,5 @@ bool haptics_experiment_owns(const uni_hid_device_t* device);
 bool haptics_experiment_gameplay_owns(const uni_hid_device_t* device);
 bool haptics_experiment_feedback(uni_hid_device_t* device,
                                  uint8_t low, uint8_t high, uint16_t duration_ms);
-bool haptics_experiment_on_can_send_now(uni_hid_device_t* device,
-                                       uint16_t cid);
+// Preserve fixture/drain exclusivity on unsolicited or control-CID events.
+bool haptics_experiment_blocks_generic(const uni_hid_device_t* device);

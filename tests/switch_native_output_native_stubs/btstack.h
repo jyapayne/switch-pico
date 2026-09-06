@@ -28,4 +28,6 @@ void btstack_run_loop_set_timer_handler(btstack_timer_source_t* timer,
 void btstack_run_loop_set_timer(btstack_timer_source_t* timer, uint32_t timeout_ms);
 void btstack_run_loop_add_timer(btstack_timer_source_t* timer);
 bool btstack_run_loop_remove_timer(btstack_timer_source_t* timer);
+bool l2cap_can_send_packet_now(uint16_t cid);
+int hci_number_free_acl_slots_for_handle(uint16_t handle);
 uint8_t l2cap_request_can_send_now_event(uint16_t cid);

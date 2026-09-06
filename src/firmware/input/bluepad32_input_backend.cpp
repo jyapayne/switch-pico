@@ -7,6 +7,9 @@
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 #include "input/haptics_experiment.h"
 #endif
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
+#include "input/native_output_scheduler.h"
+#endif
 #include "configuration/configuration_service.h"
 #include "profile/profile_service.h"
 #include <limits.h>
@@ -1887,16 +1890,12 @@ uni_platform* get_platform() {
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
 extern "C" bool uni_platform_on_l2cap_can_send_now(
         uni_hid_device_t* device, uint16_t cid) {
-#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
-    // Nintendo shares this event with queued LED/subcommand output. Let the
-    // normal queue run too; its parser refreshes payload/counter at submission.
-    if (switch_native_output_on_can_send_now(device, cid)) return false;
-#endif
+    bool block_generic = false;
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-    return haptics_experiment_on_can_send_now(device, cid);
-#else
-    return false;
+    block_generic = haptics_experiment_blocks_generic(device);
 #endif
+    const bool consumed = native_output_scheduler_on_can_send_now(device, cid);
+    return consumed || block_generic;
 }
 #endif
 
@@ -1959,6 +1958,9 @@ void bluepad32_input_backend_init() {
     critical_section_init(&g_state_lock);
     configuration_service_prepare();
     profile_service_prepare();
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
+    native_output_scheduler_prepare();
+#endif
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
     switch_native_output_prepare();
 #endif

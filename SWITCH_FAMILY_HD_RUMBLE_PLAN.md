@@ -143,18 +143,20 @@ prove nonzero-effect fidelity. Exit-sniff requests alone failed to keep the
 Pro active; that unproven automatic-wake code has been removed. The no-sniff
 policy is an experimental per-link setting, not a qualified production default.
 
-The current diagnostic build supports **same-boot** receive bounds 1/2/4 and
-incoming-credit thresholds 2/3, retaining the existing credit timer and three
-advertised receive buffers. Runtime controls were exercised and returned to
-baseline receive bound 1 / credit threshold 2; the radio workload matrix is
-awaiting normal Home/PS reconnects after flashing. Native approval remains on.
+The diagnostic builds supported same-boot receive bounds 1/2/4 and incoming
+credit thresholds 2/3 while retaining the existing credit timer and three
+advertised receive buffers. These experiments did not establish a lossless
+mixed high-rate configuration.
 
 Temporary `build-aio/link_probe.cpp`, `link_probe_config.h`,
-`link_probe_credit.patch`, and `SWITCH_PICO_LINK_PROBE` CMake/management hooks
-are **uncommitted experiment code**, not packaged release firmware.
-Operation `0x44`, diagnostic schema 2, returns 468 bytes containing link
-snapshots, selected HCI command/mode events, disconnect reasons, and control
-completion state. OUT payload `<HH>` supports:
+`link_probe_credit.patch`, and `SWITCH_PICO_LINK_PROBE` hooks were removed
+when packaging the deadline-aware scheduler. Production settings remain one
+received packet per service turn, two-credit batching, normal link policy,
+and 300 MHz/1.3 V. Native approvals remain enabled.
+
+For historical reproduction, diagnostic operation `0x44` (schema 2, 468-byte
+payload) captured link snapshots, selected HCI events, disconnect reasons and
+control completion state. Its OUT payload `<HH>` supported:
 
 - connected Pro handle + policy 1 (role-switch only), 5 (normal role-switch
   plus sniff), or `0xffff` (readback);
@@ -194,8 +196,57 @@ DualSense stream was in can-send timeout. Original interval 24 / policy 5
 were restored and the connected DualSense native stream was re-armed.
 Do not promote interval-only tuning from command acceptance.
 
-Keep approvals/bonds/profiles unchanged. Remove diagnostic hooks and restore
-or qualify settings before publishing another production build.
+Further interval/window tests with attempt 1 / timeout 0 also failed:
+7.5 ms completed 464 of 1,025 Pro commands, dropped 560 and skipped 76
+DualSense audio slots; 5 ms completed 162 of 513 Pro commands, dropped 350
+and skipped 52 slots. Each coalesced one command. Original timing was restored.
+
+A host-side outstanding-packet quota protected DualSense only by sacrificing
+Pro delivery. At quotas 8/4/2/1, Pro completed 224/184/97/50 of 513 commands,
+with 22/8/0/0 DualSense skips. A repeated quota-2 trial completed 95 commands
+with zero DualSense skips; the repeated quota-8 baseline completed 207 with
+27 skips. Quotas were restored and that experimental gate was removed.
+
+### Shared deadline-aware scheduler implementation
+
+The user selected a deadline-aware host scheduler rather than making an
+unqualified power-policy change permanent. `input/native_output_scheduler.*`
+now coordinates Nintendo and DualSense native senders:
+
+- Fixed four-client table, no payload/PCM FIFO or heap allocation.
+- Urgent real stop transitions first; earliest pending deadlines next;
+  rotating equal-deadline ties; bounded waves of synchronous grants.
+- The last free controller ACL credit is held for an earlier announced
+  periodic deadline. This is host admission, not reserved on-air time.
+- Future-reservation changes do not dispatch synchronously. A regression
+  reproduced the former rollover race: announcing the next PCM interval
+  dispatched later Pro work before the already-due PCM request was registered.
+- Every send/abort releases one grant, identified by connection generation.
+  A stale completion cannot release a replacement connection's grant.
+- Generic LED FIFO handoffs preserve fixture/drain ownership, without
+  retaining a notification that prevents the next PCM request.
+- Both writers retain their original packet formats, gains, command lifetimes
+  and generation/expiry rules. No Bluetooth power-policy commands are added.
+
+Software verification: 261 repository tests pass, including 11 dedicated
+arbiter scenarios and both native sender lifecycle suites. All five firmware
+variants build. High-rate radio qualification remains a separate failure:
+the corrected scheduler candidate completed 342/1,025 Pro commands, coalesced
+one, dropped 682, and skipped 48 DualSense audio slots under a zero-amplitude
+changing-command workload. Both connections stayed stable. A mixed held-effect
+run completed 33 state changes, coalesced 992 holds and dropped none out of
+1,025 Pro commands, with 197 reports including refreshes; DualSense accepted
+all host commands and skipped one audio slot. These are measured limits, not
+a claim that host arbitration solves the remaining mixed-transport limit.
+
+Final packaged-build check: all 24 profiles, active indices, aliases and names
+were preserved; adapter configuration remained generation 13 with Pro native
+approval enabled. A 16.6-second mixed held-effect run received 2,049 commands
+per controller, with zero Pro drops, 1,984 coalesced holds, stable connections,
+and one DualSense audio-slot skip. The user accepted this result as sufficient
+for the current setup. No further power-policy tuning was applied, and no
+lossless high-rate, Joy-Con, four-controller or captured-game qualification is
+implied by that acceptance.
 
 Linux's current Nintendo driver also documents disconnect risk from excessive
 output traffic and uses input-report-aware throttling. This is corroborating

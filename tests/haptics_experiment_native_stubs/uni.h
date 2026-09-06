@@ -44,4 +44,5 @@ struct uni_hid_device_s {
     btstack_timer_source_t parser_timer;
     bool notification_pending = false;
     bool credit = true;
+    uint16_t native_ready_cid = 0;
 };

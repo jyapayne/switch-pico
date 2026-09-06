@@ -247,6 +247,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${SWITCH_PICO_SOURCE_DIR}/core/controller_identity.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/bluepad32_input_backend.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/switch_native_output.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/input/native_output_scheduler.cpp
             ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_native_haptics.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/controller_macro_capture.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/switch2_wake.cpp

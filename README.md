@@ -363,13 +363,23 @@ states refresh at 40 ms. XInput uses held low/left-160-Hz and high/right-320-Hz
 effects until explicitly stopped. Standalone Joy-Cons downmix each band by
 dominant amplitude, choosing left on ties; logical Joy-Con pairing is not added.
 
+Nintendo and DualSense native sends share a fixed-capacity **deadline-aware
+host scheduler**. Real stop transitions take priority, pending packets use
+earliest-deadline order with rotating ties, and earlier periodic deadlines
+protect the last available controller ACL credit. Grants and releases are
+connection-generation-bound; LED handoffs and reconnects do not retain stale
+permissions. This schedules HCI submission, not the radio's on-air slots.
+The standard firmware does **not** disable Bluetooth sniff/power-saving mode.
+
 **Qualification is incomplete.** The optimized Pro-only build passed 1,025
 distinct commands at 125 Hz with no loss or congestion. Separate held-state
 testing coalesced 505 of 513 commands into eight state changes plus refreshes,
 also without loss; the user confirmed both actuators, both bands and clean
-stops. Mixed held-effect traffic also passed at approximately 125 Hz per
-controller. Continuously changing both streams at that rate still loses Pro
-commands and DualSense audio slots; transport experiments remain unqualified.
+stops. On the final deadline-scheduler build, a 16.6-second mixed held-effect
+test received 2,049 commands per controller with no Pro command drops and one
+DualSense audio-slot skip. This result was accepted for the current setup.
+Continuously changing both streams at 125 Hz still loses Pro commands and
+DualSense audio slots; lossless high-rate transport is not claimed.
 Joy-Con hardware, four-controller operation, captured game effects and physical
 actuator timing are not qualified by the native regression suite. See
 [SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md) for the exact
@@ -770,15 +780,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 777,656 bytes | 4 MiB |
+| Executable flash image | 786,864 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 139,344 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 139,616 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,060,280 bytes of flash,
-leaving 3,134,024 bytes. Allocated SRAM sections leave 393,136 bytes of link-time
+The executable plus persistent reservations consume 1,069,488 bytes of flash,
+leaving 3,124,816 bytes. Allocated SRAM sections leave 392,864 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.

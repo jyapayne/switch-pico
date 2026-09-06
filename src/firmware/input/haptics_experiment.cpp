@@ -1,5 +1,6 @@
 #include "input/haptics_experiment.h"
 #include "input/haptics_transport_probe.h"
+#include "input/native_output_scheduler.h"
 #include "input/switch_hd_rumble_synth.h"
 
 #include <btstack.h>
@@ -122,9 +123,10 @@ static const int8_t HAPTICS_DATA kSine[30] = {
 
 void cadence_timer(btstack_timer_source_t*);
 void lifecycle_timer(btstack_timer_source_t*);
-void request_send();
+void request_send(bool promote = false);
 void restore_compatibility(HapticsExperimentState state);
 void start_stream();
+bool on_output_grant(uni_hid_device_t* device, uint16_t cid, uint32_t generation);
 
 bool gameplay() {
     return g_diagnostics.mode == 1;
@@ -256,8 +258,24 @@ void schedule_lifecycle(uint64_t deadline_us) {
     schedule_timer(&g_lifecycle_timer, &g_lifecycle_armed, deadline_us);
 }
 
+void schedule_packet() {
+    const uint64_t due_us = packet_due(g_next_packet);
+    native_output_scheduler_reserve(g_connection.device,
+                                     g_connection.generation, due_us);
+    schedule_timer(&g_cadence_timer, &g_cadence_armed, due_us);
+}
+
+void reserve_after_packet() {
+    const uint64_t due_us =
+        g_phase == Phase::kPattern && (gameplay() || g_next_packet + 1 < kPackets)
+            ? packet_due(g_next_packet + 1) : UINT64_MAX;
+    native_output_scheduler_reserve(g_connection.device,
+                                     g_connection.generation, due_us);
+}
+
 void finish(HapticsExperimentState state, uint8_t error) {
     haptics_transport_probe_end();
+    native_output_scheduler_cancel(g_connection.device);
     cancel_timer(&g_cadence_timer, &g_cadence_armed);
     cancel_timer(&g_lifecycle_timer, &g_lifecycle_armed);
     g_send_requested = false;
@@ -283,8 +301,8 @@ void timeout_drain() {
     }
     ++g_diagnostics.send_failures;
     g_diagnostics.last_error = kTimeout;
-    // The outstanding BTstack notification cannot be canceled. Stop accepting
-    // it as PCM permission; the normal FIFO may use it for compatibility output.
+    // Cancel native admission; an outstanding stack notification may still
+    // arrive later and belongs to the ordinary compatibility FIFO.
     g_send_requested = false;
     restore_compatibility(HapticsExperimentState::kError);
 }
@@ -299,8 +317,10 @@ void begin_drain(HapticsExperimentState state, uint64_t deadline_us) {
     schedule_lifecycle(deadline_us);
     if (time_us_64() >= deadline_us) {
         timeout_drain();
-    } else if (!g_send_requested) {
-        request_send();
+    } else {
+        // Promote a pending tone in place: its eventual grant must send the
+        // urgent stop, without requesting a second stack notification.
+        request_send(true);
     }
 }
 
@@ -322,6 +342,7 @@ void restore_compatibility(HapticsExperimentState state) {
     g_accept_host = false;
     critical_section_exit(&g_lock);
     cancel_timer(&g_cadence_timer, &g_cadence_armed);
+    native_output_scheduler_cancel(g_connection.device);
     g_send_requested = false;
     g_phase = Phase::kRestore;
     g_finish_state = g_diagnostics.send_failures != 0
@@ -343,20 +364,45 @@ void restore_compatibility(HapticsExperimentState state) {
     publish();
 }
 
-void request_send() {
-    if (g_send_requested || g_request_in_progress ||
+void request_send(bool promote) {
+    if ((g_send_requested && !promote) || g_request_in_progress ||
         (g_phase != Phase::kPattern && g_phase != Phase::kDrain)) {
         return;
     }
-    g_request_us = time_us_64();
+    const uint64_t now_us = time_us_64();
+    const bool stopping = g_phase == Phase::kDrain;
+    if (!stopping) {
+        if (now_us >= g_end_us) {
+            end_pattern();
+            return;
+        }
+        if (now_us < packet_due(g_next_packet)) {
+            schedule_packet();
+            return;
+        }
+        const uint32_t current = static_cast<uint32_t>(
+            ((now_us - g_start_us) * kPacketDenominator) / packet_numerator_us());
+        g_diagnostics.skipped_packets += current - g_next_packet;
+        g_next_packet = current;
+        reserve_after_packet();
+    }
+    if (!g_send_requested) {
+        g_request_us = now_us;
+    }
     g_send_requested = true;
     g_request_in_progress = true;
     ++g_diagnostics.can_send_requests;
     if (gameplay() && g_phase == Phase::kPattern) {
         schedule_lifecycle(g_request_us + kDrainTimeoutUs);
     }
-    const uint8_t status =
-        l2cap_request_can_send_now_event(g_connection.cid);
+    const uint8_t status = native_output_scheduler_request(
+        g_connection.device, g_connection.generation,
+        stopping ? now_us : packet_due(g_next_packet), stopping, on_output_grant);
+    if (stopping && g_send_requested) {
+        // Clear cadence only after promotion: reserve() can pump a pending
+        // request synchronously, so the urgent bit must already be installed.
+        reserve_after_packet();
+    }
     g_request_in_progress = false;
     if (status == ERROR_CODE_SUCCESS && !g_send_requested) {
         // The synchronous callback already published its result and armed the
@@ -380,8 +426,7 @@ void request_send() {
                 g_diagnostics.skipped_packets += current + 1 - g_next_packet;
                 g_next_packet = current + 1;
                 if (gameplay() || g_next_packet < kPackets) {
-                    schedule_timer(&g_cadence_timer, &g_cadence_armed,
-                                   packet_due(g_next_packet));
+                    schedule_packet();
                 }
             }
         } else if (g_phase == Phase::kDrain) {
@@ -505,8 +550,7 @@ void cadence_timer(btstack_timer_source_t*) {
         if (now_us >= g_end_us) {
             end_pattern();
         } else if (now_us < packet_due(g_next_packet)) {
-            schedule_timer(&g_cadence_timer, &g_cadence_armed,
-                           packet_due(g_next_packet));
+            schedule_packet();
         } else {
             request_send();
         }
@@ -753,6 +797,7 @@ void haptics_experiment_detach(uni_hid_device_t* device) {
     if (device == nullptr) {
         return;
     }
+    native_output_scheduler_cancel(device);
     if (g_phase != Phase::kIdle && g_connection.device == device) {
         // Do not dereference the device or send restoration on a dead link.
         finish(HapticsExperimentState::kDisconnected, kConnection);
@@ -824,11 +869,24 @@ bool haptics_experiment_feedback(uni_hid_device_t* device,
     return true;
 }
 
+bool haptics_experiment_blocks_generic(const uni_hid_device_t* device) {
+    return haptics_experiment_owns(device) &&
+           (g_phase == Phase::kDrain ||
+            (g_phase == Phase::kPattern && !gameplay()));
+}
 
-bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
-                                                    uint16_t cid) {
-    if (device != g_connection.device || !connection_current() ||
+namespace {
+
+bool HAPTICS_HOT(on_output_grant)(uni_hid_device_t* device, uint16_t cid, uint32_t generation) {
+    if (!native_output_scheduler_granted(device)) {
+        return haptics_experiment_blocks_generic(device);
+    }
+    if (g_in_callback) {
+        return true;
+    }
+    if (device != g_connection.device || generation != g_connection.generation || !connection_current() ||
         (g_phase != Phase::kPattern && g_phase != Phase::kDrain)) {
+        native_output_scheduler_complete(device, generation);
         return false;
     }
     if (gameplay() && g_phase == Phase::kPattern && !g_in_callback &&
@@ -840,12 +898,13 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
             g_send_requested = false;
             schedule_timer(&g_cadence_timer, &g_cadence_armed, time_us_64() + 1000);
         }
+        native_output_scheduler_complete(device, generation);
         return false;
     }
-    // The generic FIFO is device-wide, not CID-specific. Consume control-CID
-    // and unsolicited events too, without treating them as PCM permission.
-    if (cid != g_connection.cid || !g_send_requested || g_in_callback) {
-        return true;
+    // Only the scheduler's current interrupt-CID grant is PCM permission.
+    if (cid != g_connection.cid || !g_send_requested) {
+        native_output_scheduler_complete(device, generation);
+        return haptics_experiment_blocks_generic(device);
     }
     g_send_requested = false;
     g_in_callback = true;
@@ -864,15 +923,16 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
         schedule_lifecycle(g_end_us + kDrainTimeoutUs);
     }
     if (g_phase == Phase::kDrain && now_us >= g_lifecycle_due_us) {
+        native_output_scheduler_complete(device, generation);
         timeout_drain();
         g_in_callback = false;
         return true;
     }
     if (g_phase == Phase::kPattern && now_us < packet_due(g_next_packet)) {
         // Notifications are not reservations of credit for a future deadline.
-        schedule_timer(&g_cadence_timer, &g_cadence_armed,
-                       packet_due(g_next_packet));
+        schedule_packet();
         g_in_callback = false;
+        native_output_scheduler_complete(device, generation);
         publish();
         return true;
     }
@@ -885,6 +945,7 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
         g_next_packet = current;
         due_us = packet_due(current);
     }
+    reserve_after_packet();
     uint8_t report[kReportBytes];
     const uint64_t generate_start_us = time_us_64();
     const bool tone = generate_packet(report, g_next_packet, stopping);
@@ -897,17 +958,27 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
     if (!stopping && submit_us >= packet_due(g_next_packet + 1)) {
         // A flash/interrupt stall can occur during synthesis as well as before
         // CAN_SEND_NOW. Never submit a now-obsolete tone after its phase ended.
-        ++g_diagnostics.skipped_packets;
-        ++g_next_packet;
+        uint32_t next = static_cast<uint32_t>(
+            ((submit_us - g_start_us) * kPacketDenominator) /
+            packet_numerator_us()) + 1;
+        if (!gameplay() && next > kPackets) {
+            next = kPackets;
+        }
+        g_diagnostics.skipped_packets += next - g_next_packet;
+        g_next_packet = next;
         if (gameplay() || g_next_packet < kPackets) {
-            schedule_timer(&g_cadence_timer, &g_cadence_armed,
-                           packet_due(g_next_packet));
+            schedule_packet();
+        } else {
+            native_output_scheduler_reserve(device, g_connection.generation,
+                                             UINT64_MAX);
         }
         g_in_callback = false;
+        native_output_scheduler_complete(device, generation);
         publish();
         return true;
     }
     if (stopping && submit_us >= g_lifecycle_due_us) {
+        native_output_scheduler_complete(device, generation);
         timeout_drain();
         g_in_callback = false;
         return true;
@@ -915,6 +986,7 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
     const uint64_t send_started_us = time_us_64();
     const uint8_t status = l2cap_send(cid, report, sizeof(report));
     const uint64_t send_returned_us = time_us_64();
+    native_output_scheduler_complete(device, generation);
     haptics_transport_probe_send(
         static_cast<uint32_t>(send_returned_us - send_started_us),
         static_cast<uint32_t>(send_returned_us),
@@ -952,8 +1024,7 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
     } else {
         ++g_next_packet;
         if (gameplay() || g_next_packet < kPackets) {
-            schedule_timer(&g_cadence_timer, &g_cadence_armed,
-                           packet_due(g_next_packet));
+            schedule_packet();
         }
         if (gameplay()) {
             schedule_lifecycle(packet_due(g_next_packet) + kDrainTimeoutUs);
@@ -963,3 +1034,5 @@ bool HAPTICS_HOT(haptics_experiment_on_can_send_now)(uni_hid_device_t* device,
     publish();
     return true;
 }
+
+}  // namespace

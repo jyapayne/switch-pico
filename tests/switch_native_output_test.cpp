@@ -1,4 +1,5 @@
 #include "input/switch_native_output.h"
+#include "input/native_output_scheduler.h"
 
 #include <btstack.h>
 #include <parser/uni_hid_parser_switch.h>
@@ -72,7 +73,8 @@ void run_until(uint64_t target_us) {
         if (writable && !credit_event_only && !permission_requests.empty()) {
             const auto cid = permission_requests.front();
             permission_requests.pop_front();
-            switch_native_output_on_can_send_now(radio_devices[cid], cid);
+            require(!native_output_scheduler_on_can_send_now(radio_devices[cid], cid),
+                    "Nintendo arbitration swallowed the generic LED FIFO event");
             continue;
         }
         if (poll_requested) {
@@ -86,6 +88,9 @@ void run_until(uint64_t target_us) {
             }
             continue;
         }
+        for (const auto& entry : radio_devices)
+            require(!native_output_scheduler_granted(entry.second),
+                    "native owner held a grant across an event-loop wait");
         const auto next = std::min_element(timers.begin(), timers.end(),
             [](const auto* a, const auto* b) { return a->due_us < b->due_us; });
         if (next == timers.end() || (*next)->due_us > target_us) {
@@ -106,7 +111,7 @@ void advance_ms(uint32_t milliseconds) { run_until(now_us + uint64_t{millisecond
 
 void conventional(uni_hid_device_t* device, uint16_t delay_ms,
                   uint16_t duration_ms, uint8_t weak, uint8_t strong) {
-    require(device->connected && !device->native_owned,
+    require(device->conn.connected && !device->native_owned,
             "compatibility output ran before native ownership was released");
     compatibility.push_back({device, delay_ms, duration_ms, weak, strong, wire.size(), now_us});
 }
@@ -311,7 +316,7 @@ void test_generation() {
     submit({255, 0}, true);
     flush();
     submit(three_steps());
-    old.connected = false;
+    old.conn.connected = false;
     const size_t old_count = frame_count(old);
     switch_native_output_detach(&old);
     switch_native_output_attach(0, kGeneration + 1, &replacement, identity());
@@ -544,7 +549,8 @@ void test_credit_driven_delivery() {
     const auto cid = permission_requests.front();
     permission_requests.pop_front();
     in_credit_event = true;
-    require(switch_native_output_on_can_send_now(&target, cid), "credit event was ignored");
+    require(!native_output_scheduler_on_can_send_now(&target, cid),
+            "Nintendo arbitration swallowed the generic LED FIFO event");
     in_credit_event = false;
     expect_bytes(last_frame(target), kSeed, "credit window did not submit current native state");
 }
@@ -595,6 +601,61 @@ void test_pending_hold_preserves_initial_latency() {
             diagnostics().max_latency_us == last_frame(target).submitted_us - first,
             "coalescing hid the initial wait or counted redundant commands as loss");
 }
+void test_stop_priority(bool stopping) {
+    auto quiet = device();
+    auto periodic = device();
+    switch_native_output_configure(persisted({identity(), identity(2)}), 1);
+    switch_native_output_attach(0, kGeneration, &quiet, identity());
+    switch_native_output_attach(1, 21, &periodic, identity(2));
+    if (stopping) {
+        submit({255, 0}, true);
+        flush();
+    }
+    writable = false;
+    submit({0, 255}, true, 1, 21);
+    flush();
+    advance_ms(1);
+    submit({}, true);  // A true stop only when the first controller was active.
+    flush();
+    const size_t before = wire.size();
+    writable = true;
+    advance_ms(1);
+    require(wire.size() >= before + 2,
+            "one controller's grant prevented the other pending output");
+    require(wire[before].device == (stopping ? &quiet : &periodic),
+            stopping ? "real stop failed to preempt an older vibration deadline"
+                     : "already-silent host report hijacked urgent stop priority");
+    if (stopping) require(is_neutral(wire[before]), "urgent stop was not physical neutral");
+    expect_state(periodic, {}, {64, 64, 0, 17867});
+    require(!native_output_scheduler_granted(&quiet) &&
+                !native_output_scheduler_granted(&periodic),
+            "completed synchronous callbacks leaked a scheduler grant");
+}
+
+void test_reused_device_pending_credit() {
+    auto target = device();
+    attach_approved(target);
+    writable = false;
+    submit({255, 0}, true);
+    flush();
+    const uint16_t old_cid = target.conn.interrupt_cid;
+    switch_native_output_detach(&target);
+    target.native_owned = false;  // Parser teardown, before its object is reused.
+    switch_native_output_attach(0, kGeneration + 1, &target, identity());
+    require(target.conn.interrupt_cid == old_cid, "fixture did not reuse the physical CID");
+    const size_t before = wire.size();
+    writable = true;
+    advance_ms(1);
+    require(wire.size() == before + 1 && is_neutral(wire.back()),
+            "stale credit replayed output across a reused device generation");
+    submit({0, 255}, true, 0, kGeneration + 1);
+    flush();
+    expect_state(target, {}, {64, 64, 0, 17867});
+    require(diagnostics().completed_commands == 1 &&
+                !native_output_scheduler_granted(&target),
+            "reconnect lost its new command or retained a stale grant");
+}
+
 
 }  // namespace
 
@@ -637,9 +698,16 @@ bool btstack_run_loop_remove_timer(btstack_timer_source_t* timer) {
     return true;
 }
 
+bool l2cap_can_send_packet_now(uint16_t) {
+    return writable && (!credit_event_only || in_credit_event);
+}
+int hci_number_free_acl_slots_for_handle(uint16_t) {
+    return writable ? 8 : 0;
+}
+
 uint8_t l2cap_request_can_send_now_event(uint16_t cid) {
     if (writable && !credit_event_only)
-        switch_native_output_on_can_send_now(radio_devices[cid], cid);
+        native_output_scheduler_on_can_send_now(radio_devices[cid], cid);
     else if (std::find(permission_requests.begin(), permission_requests.end(), cid) ==
              permission_requests.end())
         permission_requests.push_back(cid);
@@ -650,6 +718,7 @@ bool uni_hid_parser_switch_native_info(uni_hid_device_t* target, uint8_t* type,
                                        uint8_t* firmware_hi, uint8_t* firmware_lo) {
     if (!target || !target->info_ready) return false;
     if (!target->conn.interrupt_cid) target->conn.interrupt_cid = next_cid++;
+    target->conn.handle = target->conn.interrupt_cid;
     radio_devices[target->conn.interrupt_cid] = target;
     if (type) *type = target->controller_type;
     if (firmware_hi) *firmware_hi = 5;
@@ -657,15 +726,17 @@ bool uni_hid_parser_switch_native_info(uni_hid_device_t* target, uint8_t* type,
     return true;
 }
 bool uni_hid_parser_switch_native_acquire(uni_hid_device_t* target) {
-    if (!target->connected || !target->info_ready || !target->acquire_allowed) return false;
+    if (!target->conn.connected || !target->info_ready || !target->acquire_allowed) return false;
     require(!target->native_owned, "parser acquired twice without release");
     target->native_owned = true;
     ++target->acquisitions;
     return true;
 }
 bool uni_hid_parser_switch_native_send(uni_hid_device_t* target, const uint8_t rumble[8]) {
-    require(target && target->connected && target->native_owned,
+    require(target && target->conn.connected && target->native_owned,
             "native send reached disconnected or unowned parser");
+    require(native_output_scheduler_granted(target),
+            "native parser send bypassed the shared scheduler grant");
     require(!credit_event_only || in_credit_event,
             "native sender polled outside the notified credit window");
     bool accepted = writable;
@@ -680,7 +751,7 @@ bool uni_hid_parser_switch_native_send(uni_hid_device_t* target, const uint8_t r
     return true;
 }
 void uni_hid_parser_switch_native_release(uni_hid_device_t* target) {
-    require(target && target->connected && target->native_owned,
+    require(target && target->conn.connected && target->native_owned,
             "parser released while disconnected or already unowned");
     target->native_owned = false;
     ++target->releases;
@@ -689,6 +760,7 @@ void uni_hid_parser_switch_native_release(uni_hid_device_t* target) {
 int main(int argc, char** argv) {
     require(argc == 2, "one regression scenario is required");
     scenario = argv[1];
+    native_output_scheduler_prepare();
     switch_native_output_prepare();
     if (std::strcmp(scenario, "approval") == 0) test_approval();
     else if (std::strcmp(scenario, "model-gate") == 0) test_model_gate();
@@ -707,6 +779,9 @@ int main(int argc, char** argv) {
     else if (std::strcmp(scenario, "credit-driven") == 0) test_credit_driven_delivery();
     else if (std::strcmp(scenario, "held-state") == 0) test_held_state_coalescing();
     else if (std::strcmp(scenario, "pending-hold") == 0) test_pending_hold_preserves_initial_latency();
+    else if (std::strcmp(scenario, "silent-priority") == 0) test_stop_priority(false);
+    else if (std::strcmp(scenario, "stop-priority") == 0) test_stop_priority(true);
+    else if (std::strcmp(scenario, "reused-credit") == 0) test_reused_device_pending_credit();
     else require(false, "unknown regression scenario");
     return 0;
 }

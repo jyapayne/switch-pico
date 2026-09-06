@@ -1,5 +1,6 @@
 #include "input/haptics_experiment.h"
 #include "input/haptics_transport_probe.h"
+#include "input/native_output_scheduler.h"
 #include "usb/switch/switch_haptics.h"
 
 #include <algorithm>
@@ -40,7 +41,6 @@ std::vector<Pcm> pcm;
 std::vector<Generic> generic_sent;
 std::vector<Generic> generic_queue;
 Delivery delivery = Delivery::kImmediate;
-uni_hid_device_t* permission = nullptr;
 unsigned request_depth = 0;
 unsigned max_request_depth = 0;
 unsigned request_calls = 0;
@@ -51,6 +51,7 @@ unsigned fail_sends = 0;
 uint32_t send_cost_us = 0;
 uint32_t request_cost_us = 0;
 bool reenter_send = false;
+bool detach_during_send = false;
 
 void no_lock() {
     assert(native_haptics_lock_depth == 0);
@@ -132,9 +133,11 @@ bool dispatch(uni_hid_device_t* device, uint16_t cid) {
     no_lock();
     if (cid == device->conn.interrupt_cid) {
         device->notification_pending = false;
+        device->native_ready_cid = cid;
     }
-    permission = device->credit ? device : nullptr;
-    const bool consumed = haptics_experiment_on_can_send_now(device, cid);
+    const bool exclusive = haptics_experiment_blocks_generic(device);
+    const bool consumed =
+        native_output_scheduler_on_can_send_now(device, cid) || exclusive;
     if (!consumed && device->credit) {
         const auto it = std::find_if(generic_queue.begin(), generic_queue.end(),
                                      [device](const Generic& report) {
@@ -146,9 +149,9 @@ bool dispatch(uni_hid_device_t* device, uint16_t cid) {
             generic_sent.push_back(report);
             generic_queue.erase(it);
             --device->outgoing_buffer.queued;
+            device->native_ready_cid = 0;
         }
     }
-    permission = nullptr;
     return consumed;
 }
 
@@ -181,17 +184,18 @@ void reset(uint64_t at_us = 10000123) {
         haptics_experiment_poll();
     }
     timers.clear();
+    native_output_scheduler_prepare();
     devices = {};
     pcm.clear();
     generic_sent.clear();
     generic_queue.clear();
     now_us = at_us;
     delivery = Delivery::kImmediate;
-    permission = nullptr;
     request_depth = max_request_depth = request_calls = send_calls = timer_calls = 0;
     fail_requests = fail_sends = 0;
     send_cost_us = request_cost_us = 0;
     reenter_send = false;
+    detach_during_send = false;
     for (unsigned slot = 0; slot < devices.size(); ++slot) {
         auto& device = devices[slot];
         device.vendor_id = 0x054c;
@@ -597,6 +601,48 @@ void timing_cost_reentrancy_and_wrap() {
     assert(wrapped.elapsed_us >= 6147000 && wrapped.elapsed_us < 6148000);
     assert(wrapped.max_send_gap_us <= 22000 && wrapped.sent_packets == 288);
 }
+void synchronous_teardown_releases_admission() {
+    reset();
+    detach_during_send = true;
+    assert(haptics_experiment_request(2, 0));
+    haptics_experiment_poll();
+    assert(snapshot().state == HapticsExperimentState::kDisconnected);
+    assert(!haptics_experiment_owns(&devices[0]));
+    assert(!native_output_scheduler_granted(&devices[0]) && timers.empty());
+    const size_t sent = pcm.size();
+    run_until(now_us + 100000);
+    assert(pcm.size() == sent);
+
+    detach_during_send = false;
+    haptics_experiment_attach(0, 101, &devices[0]);
+    assert(haptics_experiment_request(2, 0));
+    haptics_experiment_poll();
+    run_until(now_us + 50000);
+    assert(snapshot().state == HapticsExperimentState::kRunning);
+    assert(snapshot().connection_generation == 101);
+    assert(snapshot().sent_packets >= 3);
+}
+
+
+void gameplay_led_yield_releases_admission() {
+    reset();
+    assert(haptics_experiment_request(2, 0));
+    haptics_experiment_poll();
+    const uint64_t started = snapshot().start_us;
+    delivery = Delivery::kDeferred;
+    run_until(due(started, 1, snapshot().packet_frames) + 1000);
+    assert(devices[0].notification_pending);
+    devices[0].credit = false;
+    emit_generic(&devices[0], GenericKind::kLed);
+    devices[0].credit = true;
+    assert(!dispatch(&devices[0], devices[0].conn.interrupt_cid));
+    assert(pcm.size() == 1 && generic_queue.empty());
+    assert(generic_sent.size() == 1 && generic_sent[0].kind == GenericKind::kLed);
+    delivery = Delivery::kImmediate;
+    run_until(now_us + 2000);
+    assert(snapshot().state == HapticsExperimentState::kRunning);
+    assert(pcm.size() == 2);
+}
 
 void gameplay_timeline_and_lifecycle() {
     reset();
@@ -830,6 +876,17 @@ uint16_t l2cap_get_remote_mtu_for_local_cid(uint16_t cid) {
     return device_for_cid(cid)->remote_mtu;
 }
 
+bool l2cap_can_send_packet_now(uint16_t cid) {
+    no_lock();
+    const auto* device = device_for_cid(cid);
+    return device->credit && device->native_ready_cid == cid;
+}
+
+int hci_number_free_acl_slots_for_handle(uint16_t handle) {
+    no_lock();
+    return handle < devices.size() && devices[handle].credit ? 4 : 0;
+}
+
 uint8_t uni_circular_buffer_is_empty(const uni_circular_buffer_t* buffer) {
     return buffer->queued == 0;
 }
@@ -857,13 +914,15 @@ uint8_t l2cap_request_can_send_now_event(uint16_t cid) {
 uint8_t l2cap_send(uint16_t cid, const uint8_t* data, uint16_t size) {
     no_lock();
     auto* device = device_for_cid(cid);
-    assert(permission == device && device->credit);
+    assert(device->native_ready_cid == cid && device->credit);
+    assert(native_output_scheduler_granted(device));
+    device->native_ready_cid = 0;
     assert(size == 143);
     ++send_calls;
     const uint64_t submitted_us = now_us;
     now_us += send_cost_us;
     if (reenter_send) {
-        assert(haptics_experiment_on_can_send_now(device, cid));
+        assert(native_output_scheduler_on_can_send_now(device, cid));
         const auto concurrent_snapshot = snapshot();
         assert(concurrent_snapshot.state == HapticsExperimentState::kPending ||
                concurrent_snapshot.state == HapticsExperimentState::kRunning);
@@ -875,12 +934,16 @@ uint8_t l2cap_send(uint16_t cid, const uint8_t* data, uint16_t size) {
     Pcm packet{submitted_us, cid, {}};
     std::copy(data, data + size, packet.bytes.begin());
     pcm.push_back(packet);
+    if (detach_during_send) {
+        haptics_experiment_detach(device);
+    }
     return ERROR_CODE_SUCCESS;
 }
 
 int main(int argc, char** argv) {
     assert(argc == 2);
     haptics_experiment_prepare();
+    native_output_scheduler_prepare();
     assert(snapshot().state == HapticsExperimentState::kIdle);
     nominal_run(argv[1]);
     stalled_deadlines();
@@ -890,6 +953,8 @@ int main(int argc, char** argv) {
     reconnect_and_pending_generation();
     support_and_transport_errors();
     timing_cost_reentrancy_and_wrap();
+    synchronous_teardown_releases_admission();
+    gameplay_led_yield_releases_admission();
     gameplay_timeline_and_lifecycle();
     gameplay_queued_start_and_command_overflow();
     stateful_rumble_prepare_feedback_and_zero();

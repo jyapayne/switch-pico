@@ -47,7 +47,6 @@ bool switch_native_output_submit(uint8_t slot, uint32_t generation,
                                  const ControllerRumbleOutput& rumble,
                                  bool stateful);
 bool switch_native_output_owns(const uni_hid_device_s* device);
-bool switch_native_output_on_can_send_now(uni_hid_device_s* device, uint16_t cid);
 bool switch_native_output_feedback(uni_hid_device_s* device, uint8_t low,
                                    uint8_t high, uint16_t duration_ms);
 void switch_native_output_snapshot(uint8_t slot,

@@ -23,6 +23,7 @@ def test_switch_native_output_native(tmp_path: Path) -> None:
             f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
             f"-I{firmware}",
             str(firmware / "input" / "switch_native_output.cpp"),
+            str(firmware / "input" / "native_output_scheduler.cpp"),
             str(firmware / "usb" / "switch" / "switch_native_haptics.cpp"),
             str(firmware / "usb" / "switch" / "switch_haptics.cpp"),
             str(firmware / "configuration" / "adapter_configuration.cpp"),
@@ -54,5 +55,8 @@ def test_switch_native_output_native(tmp_path: Path) -> None:
         "credit-driven",
         "held-state",
         "pending-hold",
+        "silent-priority",
+        "stop-priority",
+        "reused-credit",
     ):
         subprocess.run([str(executable), scenario], check=True, cwd=root)
