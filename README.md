@@ -317,13 +317,17 @@ When a controller becomes ready, RGB-capable devices such as DualSense and DualS
 | PS Move ZCM1/ZCM2 | Buttons/trigger | Yes | Yes, after calibration |
 | Wii Remote | Mode-dependent | Yes | Accelerometer |
 | 8BitDo in Switch-compatible Bluetooth mode | Yes | Model-dependent | Yes when the mode exposes IMU |
-| Xbox Bluetooth controller | Yes | Yes | No hardware IMU |
+| Xbox Bluetooth controller | Yes | Grip + impulse-trigger motors (Microsoft Xbox parser) | No hardware IMU |
 
 Motion-producing Bluepad32 parsers normalize to 1024 units per degree/second and 8192 units per g in SDL-oriented axes before conversion to Nintendo samples. PS Move motion remains neutral until all model-specific calibration blocks have been received and validated; buttons and rumble remain available while calibration is pending or unavailable. The latest normalized sample is duplicated across the report's three nominal 5 ms slots and remains pending until a regular `0x30` USB report successfully consumes it.
 
 ### Rumble per controller
 
 Commands remain bound to a USB slot and Bluetooth connection generation. Compatibility output uses a latest-value mailbox; native output keeps a bounded timestamped command history instead of collapsing substeps.
+
+Microsoft controllers (`045E`) using Bluepad32's Xbox parser now add **impulse-trigger rumble** while retaining the existing strong/weak grip output. Switch high-band amplitude drives the corresponding left/right trigger, taking the peak across each command's substeps and capping the added output at half scale. Conventional/XInput high-frequency magnitude drives both triggers at half strength. Profile rumble scaling applies before this mapping; local confirmation/identify pulses remain grip-only. All four motors share the existing duration/stop handling. This is amplitude-only translation, not HD/PCM playback or adaptive-trigger resistance; the compatibility mailbox and transport cadence are unchanged.
+
+The connected Classic Xbox (`045E:02E0`) was exercised with 307 USB reports: two rounds of left high-band, right high-band, and both, with intervening stops. It remained connected, and configuration generation 13 / CRC `3af5ee18` was preserved. Firmware counters confirmed host rumble dispatch; the user tested the effect and accepted it as good. The 261-test suite passed, including Xbox side isolation, amplified trigger-only output, conventional mapping, stop, and disconnect coverage.
 
 The standard AIO and XInput builds use **300 MHz at 1.3 V**, packet-level CYW43 reads, bounded HCI credit returns, and native DualSense haptics by default. The first eligible DualSense/DualSense Edge that becomes ready can occupy the one native PCM stream, in any slot; later controllers do not steal it. Nintendo native output is a separate, explicit per-controller opt-in described below. Unapproved and unsupported controllers retain their existing parser-specific output. To change the selected DualSense manually, stop the current run and use `haptics-experiment gameplay --slot N` (API slots are zero-based).
 
@@ -780,15 +784,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 786,864 bytes | 4 MiB |
+| Executable flash image | 787,824 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
 | Allocated/reserved SRAM, including heap and stacks | 139,616 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,069,488 bytes of flash,
-leaving 3,124,816 bytes. Allocated SRAM sections leave 392,864 bytes of link-time
+The executable plus persistent reservations consume 1,070,448 bytes of flash,
+leaving 3,123,856 bytes. Allocated SRAM sections leave 392,864 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.

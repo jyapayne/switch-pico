@@ -64,6 +64,9 @@ void require_clear_completion_pending();
 void require_clear_snapshot_published();
 void request_repeated_clear_during_disconnect();
 gap_connection_type_t gap_connection_types[256]{};
+uint8_t xbox_left_trigger = 0;
+uint8_t xbox_right_trigger = 0;
+unsigned xbox_quad_calls = 0;
 
 struct CoreStopped {};
 
@@ -125,6 +128,21 @@ void register_lookup_device(uni_hid_device_t* candidate) {
 }
 
 }  // namespace
+
+void xboxone_play_quad_rumble(uni_hid_device_t* device, uint16_t delay,
+                              uint16_t duration, uint8_t left, uint8_t right,
+                              uint8_t weak, uint8_t strong) {
+    ++xbox_quad_calls;
+    xbox_left_trigger = left;
+    xbox_right_trigger = right;
+    play_rumble(device, delay, duration, weak, strong);
+}
+
+void uni_hid_parser_xboxone_play_dual_rumble(
+    uni_hid_device_t* device, uint16_t delay, uint16_t duration,
+    uint8_t weak, uint8_t strong) {
+    xboxone_play_quad_rumble(device, delay, duration, 0, 0, weak, strong);
+}
 
 
 bool uni_hid_device_is_gamepad(const uni_hid_device_t* device) {
@@ -2288,6 +2306,74 @@ void test_host_rumble_mode_duration() {
 #endif
 }
 
+void test_xbox_trigger_rumble() {
+    start_pairing_backend();
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
+    test_adapter_mode = AdapterUsbMode::kSwitchProbe;
+#endif
+    auto controller = device(0, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    controller.vendor_id = 0x045e;
+    controller.product_id = 0x02e0;
+    controller.report_parser.play_dual_rumble =
+        uni_hid_parser_xboxone_play_dual_rumble;
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+            "Xbox did not become ready");
+    ControllerRumbleOutput hd{80, 100};
+    hd.hd.actuators[0].sample_count = 3;
+    hd.hd.actuators[1].sample_count = 1;
+    hd.hd.actuators[0].samples[1].high_amplitude_q15 = 16384;
+    bluepad32_input_backend_queue_rumble(0, hd);
+    process_rumble_timer(&g_rumble_timer);
+    require(xbox_left_trigger == 63 && xbox_right_trigger == 0 &&
+                controller.last_low == 80 && controller.last_high == 100 &&
+                controller.last_rumble_duration_ms == 50,
+            "left high-band substep must drive only left trigger, preserving grips");
+
+    hd = {};
+    hd.hd.actuators[0].sample_count = 1;
+    hd.hd.actuators[1].sample_count = 1;
+    hd.hd.actuators[0].samples[0].low_amplitude_q15 = 32767;
+    hd.hd.actuators[1].samples[0].high_amplitude_q15 = 65535;
+    bluepad32_input_backend_queue_rumble(0, hd);
+    process_rumble_timer(&g_rumble_timer);
+    require(xbox_left_trigger == 0 && xbox_right_trigger == 127 &&
+                controller.last_rumble_duration_ms == 50,
+            "right trigger-only effect must not stop or overflow after amplification");
+
+    dispatch_rumble(&controller, 75, 100, 100);
+    require(xbox_left_trigger == 0 && xbox_right_trigger == 0,
+            "local feedback must clear trigger vibration");
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
+    test_adapter_mode = AdapterUsbMode::kXInput;
+#endif
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{200, 180});
+    process_rumble_timer(&g_rumble_timer);
+    require(xbox_left_trigger == 90 && xbox_right_trigger == 90 &&
+                controller.last_rumble_duration_ms == host_rumble_duration_ms(),
+            "conventional high-frequency rumble must feed both triggers");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{});
+    process_rumble_timer(&g_rumble_timer);
+    require(xbox_left_trigger == 0 && xbox_right_trigger == 0 &&
+                controller.last_high == 0 && controller.last_low == 0 &&
+                controller.last_rumble_duration_ms == 0,
+            "explicit stop must stop all four motors");
+
+    const unsigned calls = xbox_quad_calls;
+    controller.report_parser.play_dual_rumble = play_rumble;
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{45, 67});
+    process_rumble_timer(&g_rumble_timer);
+    require(xbox_quad_calls == calls && controller.last_low == 45 &&
+                controller.last_high == 67,
+            "Microsoft VID alone must not route an unrelated parser to Xbox output");
+    controller.report_parser.play_dual_rumble =
+        uni_hid_parser_xboxone_play_dual_rumble;
+    bluepad32_input_backend_queue_rumble(0, hd);
+    platform_on_device_disconnected(&controller);
+    process_rumble_timer(&g_rumble_timer);
+    require(xbox_quad_calls == calls,
+            "pending Xbox output must not reach a disconnected controller");
+}
+
 void test_clear_pairings() {
     classic_bond_count = 1;
     classic_bonds[0][0] = 0x10;
@@ -2775,6 +2861,8 @@ int main(int argc, char** argv) {
         test_protocol_neutral_analog_state();
     } else if (scenario == "rumble-mode") {
         test_host_rumble_mode_duration();
+    } else if (scenario == "xbox-rumble") {
+        test_xbox_trigger_rumble();
     } else if (scenario == "clear-pairings") {
         test_clear_pairings();
     } else if (scenario == "configuration-timer") {

@@ -165,6 +165,11 @@ struct uni_hid_device_s {
     uni_circular_buffer_t outgoing_buffer;
 };
 
+void uni_hid_parser_xboxone_play_dual_rumble(
+    uni_hid_device_t*, uint16_t, uint16_t, uint8_t, uint8_t);
+void xboxone_play_quad_rumble(
+    uni_hid_device_t*, uint16_t, uint16_t, uint8_t, uint8_t, uint8_t, uint8_t);
+
 struct uni_platform {
     const char* name;
     void (*init)(int, const char**);

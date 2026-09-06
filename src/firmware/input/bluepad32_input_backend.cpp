@@ -1314,6 +1314,39 @@ void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
     device->report_parser.play_dual_rumble(device, 0, duration_ms, weak, strong);
 }
 
+uint8_t xbox_trigger_magnitude(const SwitchHapticsActuatorFrame& frame) {
+    uint16_t peak = 0;
+    for (uint8_t i = 0; i < frame.sample_count && i < 3; ++i) {
+        if (frame.samples[i].high_amplitude_q15 > peak)
+            peak = frame.samples[i].high_amplitude_q15;
+    }
+    // Impulse triggers are amplitude-only ERMs, not HD actuators. Keep their
+    // extra response at half scale, including after profile amplification.
+    if (peak > 32767) peak = 32767;
+    return static_cast<uint8_t>((static_cast<uint32_t>(peak) * 127u) / 32767u);
+}
+
+void dispatch_host_rumble(uni_hid_device_t* device, uint16_t duration_ms,
+                          const ControllerRumbleOutput& rumble) {
+    const uint8_t weak = rumble.high_frequency_magnitude;
+    const uint8_t strong = rumble.low_frequency_magnitude;
+    if (device->vendor_id == 0x045e &&
+        device->report_parser.play_dual_rumble ==
+            uni_hid_parser_xboxone_play_dual_rumble) {
+        const bool hd = rumble.hd.actuators[0].sample_count != 0 ||
+                        rumble.hd.actuators[1].sample_count != 0;
+        const uint8_t left = hd ? xbox_trigger_magnitude(rumble.hd.actuators[0])
+                                : weak / 2u;
+        const uint8_t right = hd ? xbox_trigger_magnitude(rumble.hd.actuators[1])
+                                 : weak / 2u;
+        const bool stop = (weak | strong | left | right) == 0;
+        xboxone_play_quad_rumble(device, 0, stop ? 0 : duration_ms,
+                                 left, right, weak, strong);
+        return;
+    }
+    dispatch_rumble(device, (weak | strong) == 0 ? 0 : duration_ms, weak, strong);
+}
+
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 void seed_native_host_rumble() {
     HapticsExperimentDiagnostics native;
@@ -1584,13 +1617,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
                    device->report_parser.play_dual_rumble != nullptr) {
             __atomic_add_fetch(
                 &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
-            const bool stop =
-                envelope.rumble.low_frequency_magnitude == 0 &&
-                envelope.rumble.high_frequency_magnitude == 0;
-            dispatch_rumble(
-                device, stop ? 0 : envelope.duration_ms,
-                envelope.rumble.high_frequency_magnitude,
-                envelope.rumble.low_frequency_magnitude);
+            dispatch_host_rumble(device, envelope.duration_ms, envelope.rumble);
         }
     }
 

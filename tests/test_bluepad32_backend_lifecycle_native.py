@@ -90,6 +90,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             ]
         )
         subprocess.run(command, check=True, cwd=root)
+        subprocess.run([str(executable), "xbox-rumble"], check=True, cwd=root)
         if native:
             subprocess.run([str(executable), "native-stateful"], check=True, cwd=root)
             subprocess.run(
