@@ -685,6 +685,106 @@ Research basis:
 - Xbox Elite Shift: modifier-driven alternate mappings —
   https://support.xbox.com/en-US/help/hardware-network/controller/shift-elite-series-2
 
+### Native Switch-family HD rumble — Planned
+
+Goal: preserve Nintendo's left/right, low/high-band commands on controllers
+that can execute them natively. This is a separate output backend from the
+DualSense PCM synthesizer, not a promise that every controller in “Switch
+mode” supports the same rumble protocol. No Switch-family native forwarding
+implementation is included in the current DualSense work.
+
+Current constraints:
+
+- `ControllerRumbleOutput.hd` retains decoded substeps but not the original
+  eight wire bytes. Unity-gain forwarding therefore needs an explicit raw
+  representation alongside the decoded, profile-scaled timeline.
+- The patched Bluepad32 Switch parser enables vibration with subcommand
+  `0x48`, then implements conventional magnitudes through fixed frequencies
+  and a 40 ms refresh. Preserve that hardware-tested third-party fallback.
+- `send_subcmd()` currently has a process-global four-bit packet counter;
+  native ownership needs a counter per physical controller shared by every
+  `0x01`/`0x10` sender. Player-LED requests currently construct zeroed rumble
+  fields, so they must participate in rumble arbitration rather than silently
+  overwrite the current command.
+- Joy-Cons are currently separate, horizontally mapped controllers in
+  Bluepad32. A paired two-Joy-Con logical controller is not implemented.
+
+Delivery order:
+
+1. **Qualify protocol and models.** Start with an original genuine Switch Pro
+   Controller (`057E:2009`), then original Joy-Con L/R (`057E:2006/2007`).
+   Capture console USB commands and actual Bluetooth output for neutral,
+   repeated, relative and multi-substep words. Verify the accepted formats,
+   amplitude normalization and repeated-word semantics against real hardware;
+   the older public four-byte tables alone do not establish every compressed
+   command's behavior. Do not infer native support from a Pro-like parser
+   type, name or VID/PID alone: ambiguous clones stay on compatibility output
+   until their model is qualified. Switch 2 controllers and NSO retro models
+   require separate capability/protocol qualification.
+2. **Add a generation-tagged native command path.** Extend the existing rumble
+   envelope with original bytes and an explicit validity/unmodified flag;
+   retain the decoded timeline for scaling, recovery and fallback. Add a
+   fixed-capacity Core-0-to-Core-1 command queue and one output owner per
+   physical Switch device. Use native Bluetooth report `0x10`, not PCM.
+   The existing format is 11 bytes including the Bluetooth HID transaction
+   byte: about 1,375 payload bytes/s at 125 reports/s, before L2CAP/HCI/radio
+   overhead. Direct forwarding need not inherit the DualSense 10.667 ms PCM
+   lookback, but its actual latency must be measured.
+3. **Implement fidelity, scaling and resynchronization together.** Raw
+   forwarding is a fast path only when profile gain is unity and physical
+   controller state is synchronized. Other gains require a bounded encoder
+   from the scaled per-band timeline, preserving all representable substeps.
+   Validate the inverse amplitude mapping against independent golden data;
+   decoder-normalized Q15 values are not raw wire amplitude codes. Preserve
+   silence and Nintendo's safe amplitude bounds. Do not apply the DualSense
+   2x/0.8-power response curve to Nintendo actuators. If a scaled multi-step
+   command cannot be represented in one word, qualify a bounded legal packet
+   schedule/quantization policy explicitly; do not quietly collapse it to a
+   peak or latest magnitude. After queue loss, feedback or reconnect, send a
+   valid absolute current-state/neutral resynchronization before dependent
+   relative commands; never replay an obsolete vibration backlog.
+4. **Unify LEDs, feedback and lifetime handling.** Keep the current effective
+   rumble bytes in all applicable subcommand reports. Local confirmation
+   temporarily overrides host output while host state continues advancing,
+   then resumes the current state, not the old effect. Preserve the existing
+   50 ms Switch-command expiry policy and prioritize explicit stop. Cancel
+   duration, delayed-start and refresh timers when ownership changes or a
+   device disconnects; old-generation callbacks must never touch a replacement.
+   XInput input to this backend remains a two-magnitude, stateful effect with
+   fixed carriers, not invented Nintendo frequency detail.
+5. **Add single-actuator and third-party policies.** A standalone Joy-Con
+   needs an explicit mono downmix so effects addressed to either host side
+   are not simply lost. Preserve each band's dominant contribution with
+   deterministic frequency/tie handling and safe amplitude limits; document
+   the unavoidable spatial loss. Stereo routing to a Joy-Con pair belongs
+   with a separate logical-pairing feature. Keep the current 8BitDo Ultimate
+   enable/fixed-frequency/refresh behavior unless that exact model passes
+   native qualification; never replace it with a blanket Switch-family rule.
+6. **Qualify and promote per model.** Add independent codec/golden-packet
+   regressions, scale-zero/unity/intermediate checks, channel separation,
+   packet-counter wrap, backpressure/resync, LED/feedback coexistence,
+   timeout/stop and disconnect/reuse cases. Run safe physical frequency and
+   amplitude sweeps and captured game effects; then measure one and four
+   controllers, mixed DualSense/Switch output, simultaneous input/motion and
+   persistent-profile writes. Report p50/p95/p99/worst host-receipt-to-HCI
+   submission, skipped/resynchronized commands and physical actuator onset
+   where instrumentation is available. Enable the path only for qualified
+   models; keep the UART protocol, bonds, calibration and wake configuration
+   unchanged.
+
+Implementation locations: `usb/switch/switch_haptics.*` and the profile
+rumble transform for representation/scaling; `input/bluepad32_input_backend.*`
+for routing/lifetimes; a bounded Switch output scheduler under `input/`;
+and `patches/bluepad32-sdl3-imu.patch` for parser integration. Patch the
+build-local Bluepad32 copy, not the upstream checkout.
+
+Protocol references:
+
+- Bluetooth reports, neutral values and actuator safety:
+  https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/blob/master/bluetooth_hid_notes.md
+- Frequency/amplitude encoding tables:
+  https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/blob/master/rumble_data_table.md
+
 ### Phase 8 — Performance and release qualification
 
 Measure:
