@@ -2,6 +2,28 @@
 
 const PROFILE_OWNER_STORAGE_KEY = "switch-pico.profile-owner";
 
+const MACRO_STEP_LIMIT = 8;
+const MACRO_SHARED_STEP_LIMIT = 16;
+const MACRO_BYTE_LIMIT = 136;
+const DEFAULT_MACRO_STEP_BYTES = 5;
+
+// Visual-only state never enters the persisted profile or USB output.
+const macroPreview = {
+  frame: 0,
+  running: false,
+  startedAt: 0,
+  steps: [],
+  duration: 0,
+  index: -1,
+  cycles: 1,
+  cycle: -1,
+};
+let draggedMacroStep = null;
+const macroCapture = {
+  session: null,
+  requestActive: false,
+  timer: 0,
+};
 const state = {
   schema: null,
   identities: [],
@@ -18,7 +40,9 @@ const state = {
   busy: false,
   identifyAvailable: false,
   adapterConnected: false,
+  previewInputConnected: false,
   playtestRequestActive: false,
+  liveSample: null,
   playtestTimer: 0,
   libraryRequestActive: false,
   libraryTimer: 0,
@@ -54,9 +78,44 @@ const elements = {
   rumble: document.querySelector("#rumbleFields"),
   builtinActions: document.querySelector("#builtinActions"),
   turbo: document.querySelector("#turboFields"),
+  turboDefaults: document.querySelector("#turboDefaultFields"),
+  turboTimingNotice: document.querySelector("#turboTimingNotice"),
+  shortcutModifier: document.querySelector("#shortcutModifierFields"),
+  shortcuts: document.querySelector("#shortcutFields"),
+  shift: document.querySelector("#shiftFields"),
+  shiftMap: document.querySelector("#shiftMapFields"),
   macroControls: document.querySelector("#macroControls"),
   macroSteps: document.querySelector("#macroSteps"),
   macroStepsTitle: document.querySelector("#macroStepsTitle"),
+  macroDuration: document.querySelector("#macroDuration"),
+  macroNotice: document.querySelector("#macroNotice"),
+  macroPreview: document.querySelector("#macroPreview"),
+  macroPreviewTitle: document.querySelector("#macroPreviewTitle"),
+  macroPreviewModeHelp: document.querySelector("#macroPreviewModeHelp"),
+  macroPreviewPlay: document.querySelector("#macroPreviewPlay"),
+  macroPreviewStop: document.querySelector("#macroPreviewStop"),
+  macroPreviewRestart: document.querySelector("#macroPreviewRestart"),
+  macroPreviewStatus: document.querySelector("#macroPreviewStatus"),
+  macroPreviewTime: document.querySelector("#macroPreviewTime"),
+  macroPreviewProgress: document.querySelector("#macroPreviewProgress"),
+  macroPreviewButtons: document.querySelector("#macroPreviewButtons"),
+  macroCapture: document.querySelector("#macroCapture"),
+  captureTitle: document.querySelector("#macroCaptureTitle"),
+  captureRecord: document.querySelector("#macroCaptureRecord"),
+  captureStop: document.querySelector("#macroCaptureStop"),
+  captureOptions: document.querySelector("#macroCaptureOptions"),
+  captureAxis: document.querySelector("#macroCaptureAxis"),
+  captureTrigger: document.querySelector("#macroCaptureTrigger"),
+  captureDuration: document.querySelector("#macroCaptureDuration"),
+  captureBudget: document.querySelector("#macroCaptureBudget"),
+  captureState: document.querySelector("#macroCaptureState"),
+  captureElapsed: document.querySelector("#macroCaptureElapsed"),
+  captureProgress: document.querySelector("#macroCaptureProgress"),
+  captureNotice: document.querySelector("#macroCaptureNotice"),
+  captureEvents: document.querySelector("#macroCaptureEvents"),
+  captureUse: document.querySelector("#macroCaptureUse"),
+  captureDiscard: document.querySelector("#macroCaptureDiscard"),
+  captureRecover: document.querySelector("#macroCaptureRecover"),
   playtestPanel: document.querySelector("#playtestPanel"),
   playtestTitle: document.querySelector("#playtestTitle"),
   playtestStatus: document.querySelector("#playtestStatus"),
@@ -185,6 +244,9 @@ function updateCurveMarker(group, side, input) {
 }
 
 function clearPlaytest(message, stateName = "waiting") {
+  state.liveSample = null;
+  if (state.previewInputConnected) stopMacroPreview("Preview stopped: controller disconnected.");
+  state.previewInputConnected = false;
   state.identifyAvailable = false;
   elements.identify.disabled = true;
   elements.playtestPanel.dataset.state = stateName;
@@ -197,15 +259,18 @@ function clearPlaytest(message, stateName = "waiting") {
     .forEach((button) => button.classList.remove("pressed"));
   document.querySelectorAll(".curve-marker.visible")
     .forEach((marker) => marker.classList.remove("visible"));
+  renderCapture();
 }
 
 function renderPlaytest(sample) {
+  state.liveSample = sample;
   if (!sample.connected) {
     clearPlaytest(
       "Connect or move a controller to compare its raw input with this draft."
     );
     return;
   }
+  state.previewInputConnected = true;
   const rawLeft = sample.left_stick;
   const rawRight = sample.right_stick;
   const outputLeft = transformStick(rawLeft, state.profile.sticks.left);
@@ -257,11 +322,8 @@ function renderPlaytest(sample) {
   elements.playtestPanel.dataset.state = "live";
   elements.playtestStatus.textContent = "Live";
   const owner = currentOwner();
-  const sourceAddress = sample.identity?.address
-    ?.replaceAll(":", "").toLowerCase();
   state.identifyAvailable = Boolean(
-    owner && owner.index !== 0 && sourceAddress &&
-    owner.key.includes(sourceAddress) &&
+    owner && owner.index !== 0 && sample.identity_key === owner.key &&
     sample.capabilities?.some((capability) =>
       ["rumble", "lightbar", "player_leds"].includes(capability)
     )
@@ -277,13 +339,14 @@ function renderPlaytest(sample) {
   elements.controllerDetails.textContent = details.join(" · ");
   elements.playtestHelp.textContent =
     "Yellow is raw input; blue is the output produced by this unsaved draft.";
+  renderCapture();
 }
 
 async function pollPlaytest() {
   window.clearTimeout(state.playtestTimer);
   if (
-    document.hidden || state.playtestRequestActive ||
-    !state.schema || !state.profile
+    document.hidden || state.busy || state.playtestRequestActive ||
+    captureBlocking() || macroCapture.requestActive || !state.schema || !state.profile
   ) {
     state.playtestTimer = window.setTimeout(pollPlaytest, 250);
     return;
@@ -296,7 +359,7 @@ async function pollPlaytest() {
       `/api/profiles/${identityIndex}/${profileIndex + 1}/playtest`
     );
     if (
-      identityIndex === state.identityIndex &&
+      !captureBlocking() && identityIndex === state.identityIndex &&
       profileIndex === state.profileIndex
     ) {
       renderPlaytest(sample);
@@ -313,6 +376,7 @@ async function pollPlaytest() {
     }
   } finally {
     state.playtestRequestActive = false;
+    renderCapture();
     state.playtestTimer = window.setTimeout(pollPlaytest, 75);
   }
 }
@@ -323,15 +387,22 @@ function isDirty() {
 }
 
 function setConnection(mode, text) {
+  const wasConnected = state.adapterConnected;
   state.adapterConnected = mode === "ready";
+  if (wasConnected && !state.adapterConnected) stopMacroPreview("Preview stopped: adapter disconnected.");
+  if (wasConnected && !state.adapterConnected && captureBlocking()) {
+    stopCapture("Adapter disconnected; retaining the last received recording.");
+  }
   elements.connection.dataset.state = mode;
   elements.connectionText.textContent = text;
+  elements.copyProfile.disabled = state.busy || !state.adapterConnected;
   if (state.profile) {
     elements.save.disabled =
       !state.adapterConnected || state.busy || !isDirty();
     elements.activate.disabled =
       !state.adapterConnected || state.busy || state.active;
   }
+  renderCapture();
 }
 
 let toastTimer = 0;
@@ -363,6 +434,7 @@ async function api(path, options = {}) {
 
 function setBusy(busy) {
   state.busy = busy;
+  busy ||= captureBlocking();
   elements.save.disabled =
     busy || !state.adapterConnected || !isDirty();
   elements.activate.disabled =
@@ -380,31 +452,18 @@ function setBusy(busy) {
   elements.copyProfile.disabled = busy || !state.adapterConnected;
   elements.importProfile.disabled = busy;
   elements.exportProfile.disabled = busy;
-  if (state.schema && state.profile) {
-    const macro = state.profile.macros[state.selectedMacro];
-    const totalSteps = state.profile.macros.reduce(
-      (sum, item) => sum + item.steps.length, 0
-    );
-    const totalBytes = state.profile.macros.reduce(
-      (sum, item) => sum + item.steps.reduce(
-        (stepSum, step) => stepSum + macroStepWireSize(step), 0
-      ), 0
-    );
-    elements.addMacroStep.disabled = (
-      busy || macro.steps.length >= 8 || totalSteps >= 16 ||
-      totalBytes + 3 > 136
-    );
-  }
+  if (state.schema && state.profile) updateMacroBudgets();
   document.querySelectorAll(".profile-button").forEach((button) => {
     button.disabled = busy;
   });
+  renderCapture();
 }
 
 function updateDirtyState() {
   const dirty = isDirty();
   elements.dirtyBadge.hidden = !dirty;
   elements.save.disabled =
-    !state.adapterConnected || state.busy || !dirty;
+    !state.adapterConnected || state.busy || captureBlocking() || !dirty;
 }
 
 function confirmDiscard() {
@@ -446,6 +505,9 @@ function syncLibraryMetadata(identities, restoreStoredOwner = false) {
   const preferredKey = (
     restoreStoredOwner ? storedOwnerKey() : oldOwner?.key
   ) || storedOwnerKey();
+  if (oldOwner && state.profile && !identities.some((entry) => entry.key === oldOwner.key)) {
+    throw new Error("The selected profile owner is unavailable. Your draft is retained; reconnect the owner or export it before choosing another.");
+  }
   state.identities = identities;
   const nextOwner = (
     identities.find((entry) => entry.key === preferredKey) ||
@@ -479,7 +541,7 @@ function syncLibraryMetadata(identities, restoreStoredOwner = false) {
 async function pollLibraryMetadata() {
   window.clearTimeout(state.libraryTimer);
   if (
-    document.hidden || state.busy ||
+    document.hidden || state.busy || captureBlocking() || macroCapture.requestActive ||
     state.libraryRequestActive || !state.schema
   ) {
     state.libraryTimer =
@@ -495,6 +557,7 @@ async function pollLibraryMetadata() {
     setConnection("error", "Adapter disconnected");
   } finally {
     state.libraryRequestActive = false;
+    renderCapture();
     state.libraryTimer =
       window.setTimeout(pollLibraryMetadata, 750);
   }
@@ -524,7 +587,7 @@ function renderProfileList() {
   elements.profileList.querySelectorAll(".profile-button").forEach((button) => {
     button.addEventListener("click", async () => {
       const next = Number(button.dataset.profileIndex);
-      if (next === state.profileIndex || !confirmDiscard()) return;
+      if (captureBlocking() || next === state.profileIndex || !confirmDiscard()) return;
       state.profileIndex = next;
       await loadProfile();
     });
@@ -543,6 +606,66 @@ function buttonOptions(
   return none + choices.map((button) => (
     `<option value="${button}"${selected === button ? " selected" : ""}>${escapeHtml(controlLabel(button, style))}</option>`
   )).join("");
+}
+
+function modeOptions(modes, selected) {
+  return modes.map((mode) =>
+    `<option value="${mode}"${mode === selected ? " selected" : ""}>${label(mode)}</option>`
+  ).join("");
+}
+
+function modifierOptions(selected, excluded = []) {
+  const available = currentOwner()?.modifier_controls || state.schema.buttons;
+  return `<option value=""${selected === null ? " selected" : ""}>None</option>` +
+    state.schema.controls.map((control) =>
+      `<option value="${control}"${selected === control ? " selected" : ""}${available.includes(control) && !excluded.includes(control) ? "" : " disabled"}>${escapeHtml(controlLabel(control))}${available.includes(control) ? "" : " (unavailable)"}</option>`
+    ).join("");
+}
+
+function renderShortcuts() {
+  const shortcuts = state.profile.shortcuts;
+  elements.shortcutModifier.innerHTML = `
+    <div class="control-card">
+      <label for="shortcut-modifier">Shortcut modifier</label>
+      <select class="select" id="shortcut-modifier" data-kind="shortcut-modifier" aria-describedby="shortcut-modifier-help">${modifierOptions(shortcuts.modifier, shortcuts.profiles)}</select>
+      <p class="field-help" id="shortcut-modifier-help">None clears every shortcut. Analog trigger modifiers require a known Xbox or PlayStation owner; unsupported choices remain unavailable.</p>
+    </div>`;
+  elements.shortcuts.innerHTML = shortcuts.profiles.map((selector, index) => `
+    <div class="control-card">
+      <label for="shortcut-${index}">Profile ${index + 1}${state.profileNames[index] ? ` · ${escapeHtml(state.profileNames[index])}` : ""}</label>
+      <select class="select" id="shortcut-${index}" data-kind="shortcut-selector" data-index="${index}"${shortcuts.modifier === null ? " disabled" : ""}>
+        <option value=""${selector === null ? " selected" : ""}>None</option>
+        ${state.schema.shortcut_selectors.map((button) =>
+          `<option value="${button}"${selector === button ? " selected" : ""}${button === shortcuts.modifier || shortcuts.profiles.some((item, other) => other !== index && item === button) ? " disabled" : ""}>${escapeHtml(controlLabel(button))}</option>`
+        ).join("")}
+      </select>
+    </div>`).join("");
+}
+
+function renderShift() {
+  const shift = state.profile.shift;
+  elements.shift.innerHTML = `
+    <div class="control-card">
+      <label for="shift-mode">Shift mode</label>
+      <select class="select" id="shift-mode" data-kind="shift-mode">${modeOptions(state.schema.shift_modes, shift.mode)}</select>
+    </div>
+    <div class="control-card">
+      <label for="shift-modifier">Shift modifier</label>
+      <select class="select" id="shift-modifier" data-kind="shift-modifier"${shift.mode === "off" ? " disabled" : ""} aria-describedby="shift-modifier-help">${modifierOptions(shift.modifier)}</select>
+      <p class="field-help" id="shift-modifier-help">Hold uses the alternate map while pressed. Toggle switches layers on each fresh press and resets when the profile or mode changes. Analog modifiers follow the same availability as shortcuts.</p>
+    </div>`;
+  elements.shiftMap.innerHTML = state.schema.buttons.map((button) => `
+    <div class="control-card">
+      <label for="shift-map-${button}">${escapeHtml(controlLabel(button))} → alternate output</label>
+      <select class="select" id="shift-map-${button}" data-kind="shift-map" data-name="${button}"${shift.mode === "off" || shift.modifier === null ? " disabled" : ""}>${buttonOptions(shift.button_map[button], true, state.schema.buttons)}</select>
+    </div>`).join("");
+  updateShiftValidity();
+}
+
+function updateShiftValidity() {
+  const modifier = elements.shift.querySelector("#shift-modifier");
+  modifier.setCustomValidity(state.profile.shift.mode !== "off" && state.profile.shift.modifier === null
+    ? "Choose a modifier for Hold or Toggle, or turn Shift off." : "");
 }
 
 const controllerArtwork = {
@@ -659,6 +782,7 @@ function renderButtonMap() {
     hotspot.setAttribute("aria-label", hotspot.title);
     hotspot.onclick = () => {
       state.selectedButton = button;
+      stopMacroPreview("Preview stopped: control selection changed.");
       renderButtonMap();
     };
   });
@@ -787,21 +911,69 @@ function renderFeedback() {
     </div>`;
 }
 
+function turboSettingFields(settings, button = null, disabled = false) {
+  const titles = { rate_hz: "Rate (Hz)", duty_percent: "Duty (%)", burst_count: "Burst pulses" };
+  return Object.entries(state.schema.turbo_settings_bounds).map(([field, bounds]) => {
+    const id = `turbo-setting-${button || "defaults"}-${field}`;
+    const inactive = disabled || (button !== null && field === "burst_count" && state.profile.turbo[button] !== "burst");
+    return `<div class="number-field">
+      <label for="${id}">${titles[field]} · ${bounds.min}–${bounds.max}</label>
+      <input class="number-input" id="${id}" type="number" required min="${bounds.min}" max="${bounds.max}" step="1" value="${settings[field]}" data-kind="turbo-setting" data-name="${button || ""}" data-field="${field}"${inactive ? " disabled" : ""}>
+    </div>`;
+  }).join("");
+}
+
 function renderTurbo() {
-  elements.turbo.innerHTML = state.schema.buttons.map((button) => `
-    <div class="control-card">
-      <label for="turbo-${button}">${controlLabel(button)}</label>
+  const settings = state.profile.turbo_settings;
+  elements.turboDefaults.innerHTML = `
+    <div class="subpanel-heading"><h4>Shared defaults</h4><span>Settings apply to physical buttons, before either button map.</span></div>
+    <div class="turbo-setting-grid">${turboSettingFields(settings.defaults)}</div>
+    <p class="field-help">Duty is the ON portion of each cycle. Burst count applies only to Burst mode. Enable a per-button override to replace all three defaults for that button.</p>`;
+  elements.turbo.innerHTML = state.schema.buttons.map((button) => {
+    const override = settings.overrides[button];
+    const off = state.profile.turbo[button] === "off";
+    return `<div class="control-card turbo-card" data-turbo-button="${button}">
+      <label for="turbo-${button}">${escapeHtml(controlLabel(button))} · physical source</label>
       <select class="select" id="turbo-${button}" data-kind="turbo" data-name="${button}">
-        ${state.schema.turbo_modes.map((mode) => `<option value="${mode}"${state.profile.turbo[button] === mode ? " selected" : ""}>${label(mode)}</option>`).join("")}
+        ${modeOptions(state.schema.turbo_modes, state.profile.turbo[button])}
       </select>
-    </div>`).join("");
+      <label class="checkbox-pill turbo-override">
+        <input type="checkbox" data-kind="turbo-override" data-name="${button}"${override ? " checked" : ""}${off ? " disabled" : ""}>
+        <span>Override shared settings for ${escapeHtml(controlLabel(button))}</span>
+      </label>
+      <div class="turbo-setting-grid">${turboSettingFields(override || settings.defaults, button, off || !override)}</div>
+      <p class="field-help" data-turbo-timing></p>
+    </div>`;
+  }).join("");
+  updateTurboTiming();
+}
+
+function updateTurboTiming() {
+  const narrow = [];
+  elements.turbo.querySelectorAll("[data-turbo-button]").forEach((card) => {
+    const button = card.dataset.turboButton;
+    const mode = state.profile.turbo[button];
+    const settings = state.profile.turbo_settings.overrides[button] || state.profile.turbo_settings.defaults;
+    const on = 1000 * settings.duty_percent / (100 * settings.rate_hz);
+    const off = 1000 / settings.rate_hz - on;
+    const tooNarrow = mode !== "off" && Math.min(on, off) < 15;
+    card.classList.toggle("narrow-pulse", tooNarrow);
+    card.querySelector("[data-turbo-timing]").textContent =
+      `${on.toFixed(2)} ms ON / ${off.toFixed(2)} ms OFF${mode === "off" ? " · inactive" : ""}`;
+    if (tooNarrow) narrow.push(controlLabel(button));
+  });
+  elements.turboTimingNotice.classList.toggle("warning", narrow.length > 0);
+  elements.turboTimingNotice.textContent = narrow.length
+    ? `Narrow phases: ${narrow.join(", ")}. The adapter does not report live USB cadence. Switch normally sends at 15 ms with an 8 ms endpoint interval; these shorter ON/OFF windows may be missed or quantized. Other USB modes differ. Your values are unchanged.`
+    : "USB timing: live cadence is not reported. Switch normally sends at 15 ms with an 8 ms endpoint interval; other USB modes differ. Phases shorter than a report interval may be missed or quantized.";
 }
 
 function macroNumber(index, field, value, min, max, title, disabled = false) {
+  const id = `macro-step-${index}-${field.replace(".", "-")}`;
   return `
     <div class="number-field">
-      <label>${title}</label>
-      <input class="number-input" type="number" required min="${min}" max="${max}" step="1" value="${value}" data-kind="macro-number" data-index="${index}" data-field="${field}"${disabled ? " disabled" : ""}>
+      <label for="${id}">${title}</label>
+      <input id="${id}" class="number-input" type="number" required min="${min}" max="${max}" step="1" value="${value}" data-kind="macro-number" data-index="${index}" data-field="${field}"${disabled ? " disabled" : ""}>
     </div>`;
 }
 
@@ -844,20 +1016,611 @@ function macroStepWireSize(step) {
     (overrides.has("right_trigger") ? 2 : 0);
 }
 
+function defaultMacroStep() {
+  return {
+    type: "state",
+    overrides: ["buttons"],
+    duration_ms: 100,
+    output_buttons: [],
+    left_stick: { x: 0, y: 0 },
+    right_stick: { x: 0, y: 0 },
+    triggers: { left: 0, right: 0 },
+  };
+}
+
+function macroBudget(macros = state.profile.macros) {
+  return macros.reduce((total, macro) => {
+    total.steps += macro.steps.length;
+    for (const step of macro.steps) {
+      total.bytes += macroStepWireSize(step);
+      total.duration += step.duration_ms;
+    }
+    return total;
+  }, { steps: 0, bytes: 0, duration: 0 });
+}
+
+function macroBudgetError(macros) {
+  if (!Array.isArray(macros) || macros.length !== 4) return "A profile must contain four independent macros.";
+  if (macros.some((macro) => !Array.isArray(macro.steps))) return "Every macro must contain a step list.";
+  if (macros.some((macro) => macro.steps.length > MACRO_STEP_LIMIT)) {
+    return "Each macro can contain at most 8 steps.";
+  }
+  for (const macro of macros) {
+    for (const step of macro.steps) {
+      if (step.type !== "state" || !Number.isInteger(step.duration_ms) ||
+          step.duration_ms < 0 || step.duration_ms > 10000) {
+        return "State steps require a whole-number duration from 0 to 10000 ms.";
+      }
+    }
+    if (!state.schema.macro_playback_modes.includes(macro.playback) ||
+        !Number.isInteger(macro.repeat_count) ||
+        macro.repeat_count < state.schema.macro_repeat_bounds.min ||
+        macro.repeat_count > state.schema.macro_repeat_bounds.max) {
+      return "Choose a valid playback mode and whole-number repeat count within the displayed limits.";
+    }
+    if (macro.trigger.length && macro.playback !== "once" && macro.steps.length &&
+        macro.steps.every((step) => step.duration_ms === 0)) {
+      return "A looping macro must have a nonzero cycle duration.";
+    }
+  }
+  const budget = macroBudget(macros);
+  if (budget.steps > MACRO_SHARED_STEP_LIMIT) return "The four macros share a limit of 16 steps.";
+  if (budget.bytes > MACRO_BYTE_LIMIT) return "The four macros share a limit of 136 sparse bytes.";
+  return "";
+}
+
+function captureBlocking() {
+  const session = macroCapture.session;
+  return Boolean(session && (!session.terminal || session.applying));
+}
+
+function captureOriginMatches(session) {
+  return session.profile === state.profile &&
+    session.ownerKey === currentOwner()?.key &&
+    session.profileIndex === state.profileIndex &&
+    session.macroIndex === state.selectedMacro;
+}
+
+function captureOptions() {
+  const channels = Array.from(
+    elements.captureOptions.querySelectorAll("[data-capture-channel]:checked")
+  ).reduce((mask, input) => mask | Number(input.dataset.captureChannel), 0);
+  const stepBytes = 3 + [2, 4, 4, 2, 2].reduce(
+    (sum, size, index) => sum + (channels & (1 << index) ? size : 0), 0
+  );
+  const otherBudget = state.profile ? macroBudget(
+    state.profile.macros.filter((_, index) => index !== state.selectedMacro)
+  ) : { steps: 0, bytes: 0 };
+  return {
+    channels,
+    axis_quantum: Number(elements.captureAxis.value),
+    trigger_quantum: Number(elements.captureTrigger.value),
+    max_duration_ms: Number(elements.captureDuration.value),
+    max_events: Math.max(0, Math.min(
+      MACRO_STEP_LIMIT, MACRO_SHARED_STEP_LIMIT - otherBudget.steps,
+      Math.floor((MACRO_BYTE_LIMIT - otherBudget.bytes) / stepBytes)
+    )),
+    stepBytes,
+    otherBudget,
+  };
+}
+
+function renderCapture() {
+  const session = macroCapture.session;
+  const page = session?.page;
+  const options = session?.options || captureOptions();
+  const locked = captureBlocking();
+  const pending = macroCapture.requestActive;
+  const live = state.liveSample;
+  const owner = currentOwner();
+  const sourceReady = live?.connected && live.owner_key === owner?.key &&
+    (owner?.index === 0 || live.identity_key === owner?.key);
+  const invalid = elements.captureOptions.querySelector("input:invalid");
+  elements.captureTitle.textContent = session
+    ? `${session.ownerLabel} · profile ${session.profileIndex + 1} · macro ${session.macroIndex + 1}`
+    : `Record into macro ${state.selectedMacro + 1}`;
+  elements.captureOptions.disabled = Boolean(session) || state.busy;
+  elements.captureRecord.disabled = Boolean(session) || state.busy ||
+    !state.adapterConnected || !sourceReady || document.hidden ||
+    state.playtestRequestActive || state.libraryRequestActive ||
+    !options.channels || !options.max_events || Boolean(invalid);
+  elements.captureStop.disabled = !session || session.terminal ||
+    pending || !session.runId;
+  elements.captureUse.disabled = !session?.terminal || pending || state.busy ||
+    !page?.steps?.length || session.used || !captureOriginMatches(session);
+  elements.captureDiscard.disabled = !session || pending || state.busy;
+  elements.captureRecover.hidden = !session?.error;
+  elements.captureRecover.disabled = pending || state.busy;
+  const status = session?.error ? "error" : page?.state_name || (session ? "starting" : "idle");
+  elements.macroCapture.dataset.state = status;
+  elements.captureState.textContent = session?.applying ? "Validating recorded steps" : {
+    idle: "Ready", starting: "Starting recording", recording: "Recording raw input",
+    stopped: "Stopped", full: "Full · recording stopped",
+    timed_out: "Time limit reached", disconnected: "Controller disconnected",
+    error: "Recording needs attention",
+  }[status] || status;
+  elements.captureElapsed.textContent =
+    `${Math.round((page?.elapsed_us || 0) / 1000)} / ${options.max_duration_ms} ms`;
+  const count = page?.total_events || 0;
+  elements.captureProgress.max = Math.max(1, options.max_events);
+  elements.captureProgress.value = count;
+  elements.captureBudget.textContent =
+    `${count}/${options.max_events} recorded states · ${count * options.stepBytes}/${options.max_events * options.stepBytes} reserved sparse bytes · ` +
+    `other macros: ${options.otherBudget.steps}/16 shared steps, ${options.otherBudget.bytes}/136 bytes. ` +
+    "Initial input counts as a state; held states split at 10 seconds. Capture stops before exceeding capacity.";
+  const terminalNotice = {
+    stopped: "Recording retained. Review it, then Use or Discard.",
+    full: "The recording filled its requested state/byte capacity and stopped. This is a bounded partial sequence, not a complete longer performance.",
+    timed_out: "The configured time limit ended this recording. Review the retained sequence before using it.",
+    disconnected: "The controller disconnected. Partial recorded input is retained; reconnecting will not resume this run.",
+  }[page?.state_name];
+  const originWarning = session && !captureOriginMatches(session)
+    ? "This capture belongs to another draft or macro. Use is disabled; it cannot overwrite this selection."
+    : "";
+  elements.captureNotice.textContent = [
+    session?.error, terminalNotice, page?.conversion_error,
+    session?.message, originWarning,
+    session?.used ? "Recorded steps are now in the unsaved draft. Review the visual preview below; Save remains a separate action." : "",
+    !session && !sourceReady ? "Connect the selected controller and wait for its live input before recording." : "",
+    !session && !options.channels ? "Select at least one channel." : "",
+    !session && !options.max_events ? "Other macros leave no room for a recorded state. Free shared steps or bytes first." : "",
+  ].filter(Boolean).join(" ");
+  // Each response contains the complete firmware prefix (at most eight states),
+  // not samples taken by this poll. Terminal pages are collected by the host.
+  const events = page?.events || [];
+  elements.captureEvents.innerHTML = events.map((event, index) => {
+    const values = [];
+    if (options.channels & 1) {
+      const buttons = state.schema.buttons.filter((_, bit) => event.buttons & (1 << bit));
+      values.push(`Buttons: ${buttons.map((button) => controlLabel(button)).join(" + ") || "released"}`);
+    }
+    if (options.channels & 2) values.push(`Left stick: ${event.left_x}, ${event.left_y}`);
+    if (options.channels & 4) values.push(`Right stick: ${event.right_x}, ${event.right_y}`);
+    if (options.channels & 8) values.push(`Left trigger: ${event.left_trigger}`);
+    if (options.channels & 16) values.push(`Right trigger: ${event.right_trigger}`);
+    const duration = page.steps?.[index]?.duration_ms;
+    return `<li><strong>${Math.round(event.at_us / 1000)} ms${duration === undefined ? "" : ` · hold ${duration} ms`}</strong> · ${escapeHtml(values.join(" · "))}</li>`;
+  }).join("");
+  elements.form.querySelectorAll(":scope > .panel:not(#macro), #macro > :not(#macroCapture)")
+    .forEach((node) => { node.inert = locked; });
+  if (locked) {
+    [
+      elements.identity, elements.refresh, elements.resetDraft, elements.save,
+      elements.activate, elements.identify, elements.saveAlias,
+      elements.controllerAlias, elements.profileName, elements.saveProfileName,
+      elements.copyProfile, elements.importProfile, elements.exportProfile,
+      ...elements.profileList.querySelectorAll("button"),
+    ].forEach((control) => { control.disabled = true; });
+  }
+}
+
+function capturePath(session, action) {
+  return `/api/profiles/${session.identityIndex}/${session.profileIndex + 1}/capture/${action}`;
+}
+
+function captureQuery(session) {
+  return `?owner_key=${encodeURIComponent(session.ownerKey)}&connection_generation=${session.generation}&capture_id=${encodeURIComponent(session.captureId)}`;
+}
+
+function acceptCapturePage(session, page) {
+  if (macroCapture.session !== session) return;
+  if (
+    page.owner_key !== session.ownerKey ||
+    page.capture_id !== session.captureId ||
+    page.profile_number !== session.profileIndex + 1 ||
+    page.macro_index !== session.macroIndex ||
+    page.connection_generation !== session.generation ||
+    page.slot !== session.slot || (session.runId && page.run_id !== session.runId)
+  ) throw new Error("Stale recording response refused. The draft and retained input are unchanged.");
+  session.runId = page.run_id;
+  session.page = page;
+  session.error = "";
+  session.terminal = !["idle", "recording"].includes(page.state_name);
+}
+
+function finishCaptureRequest(session) {
+  macroCapture.requestActive = false;
+  setBusy(state.busy);
+  if (macroCapture.session !== session) return;
+  if (session.terminal) {
+    state.playtestTimer = window.setTimeout(pollPlaytest, 75);
+    state.libraryTimer = window.setTimeout(pollLibraryMetadata, 750);
+  }
+  if (!session.terminal && session.stopRequested && !session.stopAttempted) {
+    stopCapture(session.message);
+  } else if (!session.terminal && !session.error && !document.hidden) {
+    macroCapture.timer = window.setTimeout(refreshCapture, 75);
+  }
+}
+
+async function beginCapture() {
+  if (elements.captureRecord.disabled || state.busy || macroCapture.session ||
+      state.playtestRequestActive || state.libraryRequestActive) return;
+  if (!elements.form.reportValidity() || !macroInputsValid(true)) return;
+  const options = captureOptions();
+  if (!options.channels || !options.max_events) return;
+  const owner = currentOwner();
+  const sample = state.liveSample;
+  const session = {
+    captureId: crypto.randomUUID(),
+    profile: state.profile, ownerKey: owner.key, ownerLabel: owner.label,
+    identityIndex: state.identityIndex, profileIndex: state.profileIndex,
+    macroIndex: state.selectedMacro, slot: sample.slot,
+    generation: sample.connection_generation, options, runId: null,
+    page: null, terminal: false, error: "", message: "", used: false,
+    stopRequested: false, stopAttempted: false, applying: false,
+  };
+  macroCapture.session = session;
+  macroCapture.requestActive = true;
+  window.clearTimeout(state.playtestTimer);
+  window.clearTimeout(state.libraryTimer);
+  stopMacroPreview("Preview stopped: recording live input.");
+  setBusy(state.busy);
+  try {
+    const page = await api(capturePath(session, "start"), {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        owner_key: session.ownerKey, capture_id: session.captureId, slot: session.slot,
+        connection_generation: session.generation, macro_index: session.macroIndex,
+        profile: state.profile, channels: options.channels,
+        max_events: options.max_events, axis_quantum: options.axis_quantum,
+        trigger_quantum: options.trigger_quantum, max_duration_ms: options.max_duration_ms,
+      }),
+    });
+    acceptCapturePage(session, page);
+  } catch (error) {
+    session.error = `${error.message} Draft unchanged. Read retained recording to recover an acknowledged start whose response was lost, or Discard.`;
+  } finally {
+    finishCaptureRequest(session);
+  }
+}
+
+async function refreshCapture() {
+  window.clearTimeout(macroCapture.timer);
+  const session = macroCapture.session;
+  if (!session || macroCapture.requestActive || session.terminal) return;
+  macroCapture.requestActive = true;
+  renderCapture();
+  try {
+    const page = await api(
+      capturePath(session, session.runId || "current") + captureQuery(session),
+      { keepalive: true }
+    );
+    acceptCapturePage(session, page);
+    if (document.hidden) session.stopRequested = true;
+  } catch (error) {
+    session.error = `${error.message} The last received input and draft are retained. The firmware time/event limits still apply.`;
+    session.stopRequested = true;
+  } finally {
+    finishCaptureRequest(session);
+  }
+}
+
+async function stopCapture(message = "") {
+  window.clearTimeout(macroCapture.timer);
+  const session = macroCapture.session;
+  if (!session || session.terminal) return;
+  session.stopRequested = true;
+  if (message) session.message = message;
+  if (macroCapture.requestActive) return;
+  session.stopAttempted = true;
+  if (!session.runId) {
+    session.error ||= "Start has not been acknowledged. Read retained recording to recover its run before stopping.";
+    renderCapture();
+    return;
+  }
+  macroCapture.requestActive = true;
+  renderCapture();
+  try {
+    const page = await api(capturePath(session, "stop"), {
+      method: "POST", keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        run_id: session.runId, owner_key: session.ownerKey, capture_id: session.captureId,
+        connection_generation: session.generation,
+      }),
+    });
+    acceptCapturePage(session, page);
+  } catch (error) {
+    session.error = `${error.message} Stop was not acknowledged. Last received input and draft are retained; the bounded firmware run cannot resume automatically.`;
+  } finally {
+    finishCaptureRequest(session);
+  }
+}
+
+async function useCapture() {
+  const session = macroCapture.session;
+  if (!session?.terminal || macroCapture.requestActive || !captureOriginMatches(session)) return;
+  if (!session.page?.steps?.length || !elements.form.reportValidity()) return;
+  const candidate = clone(state.profile);
+  candidate.macros[session.macroIndex].steps = clone(session.page.steps);
+  const error = macroBudgetError(candidate.macros);
+  if (error) {
+    session.message = `${error} Draft unchanged; recording retained.`;
+    renderCapture();
+    return;
+  }
+  session.applying = true;
+  macroCapture.requestActive = true;
+  setBusy(state.busy);
+  try {
+    const validated = await api("/api/profiles/validate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(candidate),
+    });
+    if (!captureOriginMatches(session) || macroCapture.session !== session) {
+      throw new Error("Capture destination changed; refusing to overwrite another draft");
+    }
+    const steps = validated.profile.macros[session.macroIndex].steps;
+    const macros = state.profile.macros.map((macro, index) =>
+      index === session.macroIndex ? { ...macro, steps } : macro
+    );
+    const budgetError = macroBudgetError(macros);
+    if (budgetError) throw new Error(budgetError);
+    stopMacroPreview("Ready to preview recorded steps.");
+    state.profile.macros[session.macroIndex].steps = clone(steps);
+    session.used = true;
+    session.message = "";
+    renderMacro();
+    updateDirtyState();
+  } catch (error) {
+    session.message = `${error.message} Draft unchanged; recording retained.`;
+  } finally {
+    session.applying = false;
+    finishCaptureRequest(session);
+  }
+}
+
+async function discardCapture() {
+  const session = macroCapture.session;
+  if (!session || macroCapture.requestActive) return;
+  if (!session.terminal) {
+    await stopCapture("Recording stopped before discard.");
+    if (!session.terminal && !window.confirm(
+      "The recorder could not acknowledge Stop. Discard the visible capture anyway? The firmware still stops at its event/time limit. Your draft will not change."
+    )) return;
+  }
+  window.clearTimeout(macroCapture.timer);
+  macroCapture.session = null;
+  setBusy(state.busy);
+  pollPlaytest();
+  pollLibraryMetadata();
+}
+
+function canAddMacroStep(bytes, budget) {
+  return state.profile.macros[state.selectedMacro].steps.length < MACRO_STEP_LIMIT &&
+    budget.steps < MACRO_SHARED_STEP_LIMIT && budget.bytes + bytes <= MACRO_BYTE_LIMIT;
+}
+
+function macroNotice(message, error = false) {
+  elements.macroNotice.textContent = message;
+  elements.macroNotice.classList.toggle("error", error);
+}
+
+function updateMacroBudgets() {
+  const macro = state.profile.macros[state.selectedMacro];
+  const budget = macroBudget();
+  elements.macroControls.querySelector("[data-budget-steps]")?.replaceChildren(
+    `${budget.steps}/${MACRO_SHARED_STEP_LIMIT} shared steps`
+  );
+  elements.macroControls.querySelector("[data-budget-bytes]")?.replaceChildren(
+    `${budget.bytes}/${MACRO_BYTE_LIMIT} sparse bytes`
+  );
+  const progress = elements.macroControls.querySelector("[data-budget-progress]");
+  if (progress) progress.value = budget.bytes;
+  elements.macroControls.querySelectorAll("[data-macro-index]").forEach((button) => {
+    const item = state.profile.macros[Number(button.dataset.macroIndex)];
+    const duration = item.steps.reduce((sum, step) => sum + step.duration_ms, 0);
+    button.querySelector("small").textContent = `${item.steps.length}/8 steps · ${duration} ms`;
+  });
+  const duration = macro.steps.reduce((sum, step) => sum + step.duration_ms, 0);
+  const bytes = macro.steps.reduce((sum, step) => sum + macroStepWireSize(step), 0);
+  elements.macroDuration.textContent =
+    `${macro.steps.length}/8 steps · ${bytes} bytes · ${duration} ms total · ${budget.duration} ms across all macros`;
+  elements.addMacroStep.disabled = state.busy || !canAddMacroStep(DEFAULT_MACRO_STEP_BYTES, budget);
+  elements.addMacroStep.title = "Add a 100 ms button step (5 sparse bytes)";
+  let startsAt = 0;
+  elements.macroSteps.querySelectorAll("[data-step-index]").forEach((card) => {
+    const index = Number(card.dataset.stepIndex);
+    const step = macro.steps[index];
+    card.querySelector(".step-number").textContent =
+      `Step ${index + 1} · ${macroStepWireSize(step)} bytes`;
+    card.querySelector(".step-timing").textContent =
+      `${startsAt}–${startsAt + step.duration_ms} ms`;
+    startsAt += step.duration_ms;
+    card.querySelectorAll("[data-step-action]").forEach((button) => {
+      const action = button.dataset.stepAction;
+      button.disabled = state.busy ||
+        (action === "up" && index === 0) ||
+        (action === "down" && index === macro.steps.length - 1) ||
+        (action === "insert" && !canAddMacroStep(DEFAULT_MACRO_STEP_BYTES, budget)) ||
+        (action === "duplicate" && !canAddMacroStep(macroStepWireSize(step), budget));
+    });
+  });
+  if (!macroPreview.running) {
+    const total = duration * (macro.playback === "repeat" ? macro.repeat_count : 1);
+    elements.macroPreviewTime.textContent = `0 / ${total} ms${["while_held", "toggle"].includes(macro.playback) ? " per cycle" : ""}`;
+    elements.macroPreviewProgress.max = Math.max(1, total);
+    elements.macroPreviewProgress.value = 0;
+  }
+  updateMacroPreviewControls();
+  renderCapture();
+}
+
+function macroInputsValid(report = false) {
+  const invalid = elements.macroSteps.querySelector("input:invalid") ||
+    elements.macroControls.querySelector("input:invalid");
+  if (report && invalid) invalid.reportValidity();
+  return !invalid;
+}
+
+function updateMacroPlayback() {
+  const macro = state.profile.macros[state.selectedMacro];
+  const count = elements.macroControls.querySelector("#macro-repeat-count");
+  if (count) count.disabled = macro.playback !== "repeat";
+  elements.macroPreviewModeHelp.textContent = {
+    once: "Once: the preview stops at the end of one sequence.",
+    repeat: `Repeat: the preview stops after ${macro.repeat_count} complete cycles.`,
+    while_held: "While held: hardware repeats while the entire trigger chord is held. This visual preview repeats until you choose Stop; it does not monitor or inject trigger input.",
+    toggle: "Toggle: hardware starts and stops on fresh trigger presses. This visual preview repeats until you choose Stop; it never sends USB input.",
+  }[macro.playback];
+}
+
+// Clone before changing anything: rejected additions and override expansions
+// leave all four drafts, including nested output values, untouched.
+function mutateMacroSteps(change, focusIndex, focusSelector = "[data-step-handle]") {
+  if (state.busy || captureBlocking() || !macroInputsValid(true)) return false;
+  stopMacroPreview("Preview stopped: draft edited.");
+  const macro = state.profile.macros[state.selectedMacro];
+  const steps = clone(macro.steps);
+  change(steps);
+  const macros = state.profile.macros.map((item, index) =>
+    index === state.selectedMacro ? { ...item, steps } : item
+  );
+  const error = macroBudgetError(macros);
+  if (error) {
+    macroNotice(`${error} Draft unchanged.`, true);
+    return false;
+  }
+  macro.steps = steps;
+  renderMacroSteps();
+  updateMacroBudgets();
+  updateDirtyState();
+  const index = Math.min(focusIndex, steps.length - 1);
+  const focus = elements.macroSteps.querySelector(`[data-step-index="${index}"] ${focusSelector}`);
+  (focus || elements.addMacroStep).focus();
+  return true;
+}
+
+function updateMacroPreviewControls() {
+  const macro = state.profile?.macros[state.selectedMacro];
+  const zeroLoop = macro && macro.playback !== "once" &&
+    macro.steps.every((step) => step.duration_ms === 0);
+  const unavailable = !macro?.steps.length || zeroLoop ||
+    state.busy || captureBlocking() || document.hidden || !macroInputsValid();
+  elements.macroPreviewPlay.disabled = unavailable || macroPreview.running;
+  elements.macroPreviewRestart.disabled = unavailable;
+  elements.macroPreviewStop.disabled = !macroPreview.running;
+}
+
+function showMacroPreviewStep(step) {
+  const overrides = new Set(step?.overrides || []);
+  elements.macroPreview.querySelectorAll("[data-preview-field]").forEach((card) => {
+    const field = card.dataset.previewField;
+    const overridden = overrides.has(field);
+    card.dataset.mode = overridden ? "override" : "passthrough";
+    card.querySelector("[data-preview-mode]").textContent = overridden ? "Overridden" : "Passthrough";
+    if (field.endsWith("_stick")) {
+      const position = stickCoordinates(overridden ? step[field] : { x: 0, y: 0 });
+      const scope = card.querySelector(".stick-scope");
+      scope.style.setProperty("--output-x", `${position.left}%`);
+      scope.style.setProperty("--output-y", `${position.top}%`);
+      card.querySelector("output").textContent = overridden
+        ? `${step[field].x}, ${step[field].y}` : "Controller input";
+    } else if (field.endsWith("_trigger")) {
+      const value = overridden ? step.triggers[field === "left_trigger" ? "left" : "right"] : 0;
+      const progress = card.querySelector("progress");
+      progress.value = value;
+      progress.setAttribute("aria-valuetext", overridden ? String(value) : "Passthrough: controller input");
+      card.querySelector("output").textContent = overridden ? String(value) : "Controller input";
+    }
+  });
+  elements.macroPreviewButtons.querySelectorAll("[data-preview-button]").forEach((button) => {
+    const overridden = overrides.has("buttons");
+    const pressed = overridden && step.output_buttons.includes(button.dataset.previewButton);
+    button.classList.toggle("pressed", pressed);
+    button.querySelector("small").textContent = overridden ? (pressed ? "Pressed" : "Released") : "Passthrough";
+  });
+}
+
+function stopMacroPreview(message = "Ready", reset = false) {
+  if (!macroPreview.running && !reset) return;
+  window.cancelAnimationFrame(macroPreview.frame);
+  macroPreview.frame = 0;
+  macroPreview.running = false;
+  macroPreview.steps = [];
+  macroPreview.index = -1;
+  macroPreview.cycle = -1;
+  elements.macroPreview.dataset.state = "stopped";
+  elements.macroPreviewStatus.textContent = message;
+  elements.macroSteps.querySelectorAll(".preview-active")
+    .forEach((card) => card.classList.remove("preview-active"));
+  showMacroPreviewStep(null);
+  updateMacroPreviewControls();
+}
+
+function tickMacroPreview(now) {
+  if (!macroPreview.running) return;
+  const elapsed = Math.max(0, now - macroPreview.startedAt);
+  const total = macroPreview.duration * macroPreview.cycles;
+  const finite = macroPreview.cycles !== Infinity;
+  if (macroPreview.duration === 0 || (finite && elapsed >= total)) {
+    elements.macroPreviewTime.textContent = `${total} / ${total} ms`;
+    elements.macroPreviewProgress.value = total;
+    stopMacroPreview("Preview complete. All fields return to passthrough.");
+    return;
+  }
+  const cycle = Math.floor(elapsed / macroPreview.duration);
+  const phase = elapsed % macroPreview.duration;
+  let endsAt = 0;
+  let index = 0;
+  // Skip elapsed cycles arithmetically; inspect at most eight states per frame.
+  for (; index < macroPreview.steps.length; index += 1) {
+    endsAt += macroPreview.steps[index].duration_ms;
+    if (phase < endsAt) break;
+  }
+  elements.macroPreviewTime.textContent = finite
+    ? `${Math.floor(elapsed)} / ${total} ms`
+    : `${Math.floor(phase)} / ${macroPreview.duration} ms · cycle ${cycle + 1}`;
+  elements.macroPreviewProgress.value = finite ? elapsed : phase;
+  if (index !== macroPreview.index || cycle !== macroPreview.cycle) {
+    macroPreview.index = index;
+    macroPreview.cycle = cycle;
+    elements.macroPreviewStatus.textContent =
+      `Cycle ${cycle + 1}${finite ? ` of ${macroPreview.cycles}` : " · Stop to end"} · step ${index + 1} of ${macroPreview.steps.length}`;
+    showMacroPreviewStep(macroPreview.steps[index]);
+    elements.macroSteps.querySelectorAll("[data-step-index]").forEach((card) => {
+      card.classList.toggle("preview-active", Number(card.dataset.stepIndex) === index);
+    });
+  }
+  macroPreview.frame = window.requestAnimationFrame(tickMacroPreview);
+}
+
+function playMacroPreview() {
+  if (state.busy || document.hidden || !state.profile || !macroInputsValid(true)) return;
+  const macro = state.profile.macros[state.selectedMacro];
+  const steps = macro.steps;
+  if (!steps.length) return;
+  const duration = steps.reduce((sum, step) => sum + step.duration_ms, 0);
+  if (macro.playback !== "once" && duration === 0) {
+    macroNotice("A looping preview requires a nonzero cycle duration.", true);
+    return;
+  }
+  stopMacroPreview("Ready", true);
+  macroPreview.steps = clone(steps);
+  macroPreview.duration = duration;
+  macroPreview.cycles = macro.playback === "once" ? 1 :
+    macro.playback === "repeat" ? macro.repeat_count : Infinity;
+  macroPreview.startedAt = performance.now();
+  macroPreview.running = true;
+  elements.macroPreview.dataset.state = "playing";
+  elements.macroPreviewProgress.max = Math.max(1, macroPreview.duration *
+    (macroPreview.cycles === Infinity ? 1 : macroPreview.cycles));
+  updateMacroPreviewControls();
+  tickMacroPreview(macroPreview.startedAt);
+}
+
 function renderMacro() {
+  stopMacroPreview("Ready", true);
+  draggedMacroStep = null;
+  macroNotice("");
   const controllerStyle =
     state.identities[state.identityIndex]?.controller?.style || "generic";
   elements.builtinActions.dataset.controllerStyle = controllerStyle;
   elements.macroControls.dataset.controllerStyle = controllerStyle;
   const macro = state.profile.macros[state.selectedMacro];
-  const totalSteps = state.profile.macros.reduce(
-    (sum, item) => sum + item.steps.length, 0
-  );
-  const totalBytes = state.profile.macros.reduce(
-    (sum, item) => sum + item.steps.reduce(
-      (stepSum, step) => stepSum + macroStepWireSize(step), 0
-    ), 0
-  );
+  const budget = macroBudget();
   elements.builtinActions.innerHTML = [
     actionChordCard(
       "profile_switch",
@@ -876,16 +1639,16 @@ function renderMacro() {
   ].join("");
   elements.macroControls.innerHTML = `
     <div class="macro-picker">
-      <div class="macro-tabs">
+      <div class="macro-tabs" role="group" aria-label="Choose a macro draft">
         ${state.profile.macros.map((item, index) => `
-          <button type="button" class="macro-tab${index === state.selectedMacro ? " selected" : ""}" data-macro-index="${index}">
+          <button type="button" class="macro-tab${index === state.selectedMacro ? " selected" : ""}" data-macro-index="${index}" aria-pressed="${index === state.selectedMacro}">
             Macro ${index + 1}<small>${item.steps.length} step${item.steps.length === 1 ? "" : "s"}</small>
           </button>`).join("")}
       </div>
       <div class="macro-budget">
-        <strong>${totalSteps}/16 steps</strong>
-        <span>${totalBytes}/136 sparse bytes</span>
-        <progress max="136" value="${totalBytes}"></progress>
+        <strong data-budget-steps>${budget.steps}/16 shared steps</strong>
+        <span data-budget-bytes>${budget.bytes}/136 sparse bytes</span>
+        <progress data-budget-progress max="136" value="${budget.bytes}" aria-label="Shared macro sparse byte budget"></progress>
       </div>
     </div>
     ${actionChordCard(
@@ -900,14 +1663,41 @@ function renderMacro() {
       <select class="select" id="macro-cancel" data-kind="macro-selector" data-field="cancel">
         ${buttonOptions(macro.cancel, true, state.schema.controls, controllerStyle)}
       </select>
+      <div class="macro-playback-fields">
+        <div class="number-field">
+          <label for="macro-playback">Playback mode</label>
+          <select class="select" id="macro-playback" data-kind="macro-playback">${modeOptions(state.schema.macro_playback_modes, macro.playback)}</select>
+        </div>
+        <div class="number-field">
+          <label for="macro-repeat-count">Repeat cycles · ${state.schema.macro_repeat_bounds.min}–${state.schema.macro_repeat_bounds.max}</label>
+          <input class="number-input" id="macro-repeat-count" type="number" required min="${state.schema.macro_repeat_bounds.min}" max="${state.schema.macro_repeat_bounds.max}" step="1" value="${macro.repeat_count}" data-kind="macro-repeat"${macro.playback === "repeat" ? "" : " disabled"}>
+        </div>
+      </div>
+      <p class="field-help">Once plays one cycle. While held repeats while the entire trigger is held. Toggle repeats until pressed again. Repeat plays the selected cycle count. Cancel ends any active mode.</p>
     </div>`;
 
   elements.macroControls.querySelectorAll("[data-macro-index]").forEach((button) => {
     button.onclick = () => {
+      if (state.busy || captureBlocking() || !macroInputsValid(true)) return;
       state.selectedMacro = Number(button.dataset.macroIndex);
+      renderCapture();
       renderMacro();
+      elements.macroControls.querySelector(`[data-macro-index="${state.selectedMacro}"]`).focus();
     };
   });
+  elements.macroPreviewTitle.textContent = `Macro ${state.selectedMacro + 1} draft preview`;
+  elements.macroPreviewButtons.innerHTML = state.schema.buttons.map((button) => `
+    <span class="preview-button" data-preview-button="${button}">
+      <b>${escapeHtml(controlLabel(button, controllerStyle))}</b><small>Passthrough</small>
+    </span>`).join("");
+  renderMacroSteps();
+  updateMacroPlayback();
+  updateMacroBudgets();
+}
+
+function renderMacroSteps() {
+  const macro = state.profile.macros[state.selectedMacro];
+  const controllerStyle = currentControllerStyle();
 
   elements.macroSteps.innerHTML = macro.steps.length === 0
     ? '<div class="macro-step end"><p class="field-help">No steps yet. Add a state step to build this macro.</p></div>'
@@ -915,10 +1705,20 @@ function renderMacro() {
       const overrides = new Set(step.overrides);
       const outputButtons = new Set(step.output_buttons);
       return `
-        <div class="macro-step">
+        <div class="macro-step" data-step-index="${index}" role="listitem" aria-label="Step ${index + 1}">
           <div class="step-header">
-            <span class="step-number">Macro ${state.selectedMacro + 1} · step ${index + 1} · ${macroStepWireSize(step)} bytes</span>
-            <button class="remove-step" type="button" data-remove-step="${index}">Remove</button>
+            <div class="step-identity">
+              <button class="step-tool step-handle" type="button" draggable="true" data-step-handle="${index}" aria-label="Reorder step ${index + 1}" aria-describedby="macroReorderHelp" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown">Drag</button>
+              <span class="step-number">Step ${index + 1} · ${macroStepWireSize(step)} bytes</span>
+              <span class="step-timing"></span>
+            </div>
+            <div class="step-tools" role="group" aria-label="Step ${index + 1} actions">
+              <button class="step-tool" type="button" data-step-action="up" aria-label="Move step ${index + 1} up">Move up</button>
+              <button class="step-tool" type="button" data-step-action="down" aria-label="Move step ${index + 1} down">Move down</button>
+              <button class="step-tool" type="button" data-step-action="insert" aria-label="Insert a new step before step ${index + 1}">Insert before</button>
+              <button class="step-tool" type="button" data-step-action="duplicate" aria-label="Duplicate step ${index + 1}">Duplicate</button>
+              <button class="remove-step" type="button" data-step-action="remove" aria-label="Remove step ${index + 1}">Remove</button>
+            </div>
           </div>
           <div class="step-grid">
             ${macroNumber(index, "duration_ms", step.duration_ms, 0, 10000, "Duration (ms)")}
@@ -953,10 +1753,6 @@ function renderMacro() {
     }).join("");
   elements.macroStepsTitle.textContent = `Macro ${state.selectedMacro + 1} steps`;
   elements.addMacroStep.textContent = `Add step to macro ${state.selectedMacro + 1}`;
-  elements.addMacroStep.disabled = (
-    state.busy || macro.steps.length >= 8 || totalSteps >= 16 ||
-    totalBytes + 3 > 136
-  );
 }
 
 function renderEditor() {
@@ -979,6 +1775,8 @@ function renderEditor() {
   renderIdentities();
   renderProfileList();
   renderButtonMap();
+  renderShortcuts();
+  renderShift();
   renderAnalog();
   renderFeedback();
   renderTurbo();
@@ -989,6 +1787,8 @@ function renderEditor() {
 }
 
 async function loadProfile() {
+  if (captureBlocking()) return;
+  stopMacroPreview("Preview stopped: profile selection changed.");
   clearPlaytest("Loading the selected controller profile.");
   setBusy(true);
   elements.form.hidden = true;
@@ -1016,12 +1816,17 @@ async function loadProfile() {
   }
 }
 
-async function loadLibrary() {
+async function loadLibrary(preserveDraft = false) {
   setBusy(true);
   try {
     const payload = await api("/api/profiles");
-    syncLibraryMetadata(payload.identities, true);
-    await loadProfile();
+    syncLibraryMetadata(payload.identities, !preserveDraft);
+    if (!preserveDraft || !state.profile) {
+      await loadProfile();
+    } else {
+      setConnection("ready", "Adapter connected");
+      toast("Library refreshed. Your unsaved draft is unchanged.");
+    }
   } catch (error) {
     setConnection("error", "Adapter unavailable");
     elements.loading.querySelector("p").textContent = error.message;
@@ -1041,7 +1846,14 @@ function updateNestedStep(step, path, value) {
 function handleFormChange(event) {
   const target = event.target;
   const kind = target.dataset.kind;
-  if (!kind || !state.profile) return;
+  if (!kind || !state.profile || captureBlocking()) return;
+  stopMacroPreview("Preview stopped: draft edited.");
+  if (event.type === "change" && kind.startsWith("macro-") && kind !== "macro-selector") return;
+  if (target.disabled) return;
+  if (["turbo-setting", "macro-repeat"].includes(kind) && !target.validity.valid) {
+    updateMacroPreviewControls();
+    return;
+  }
   if (kind === "analog-number") {
     state.profile[target.dataset.group][target.dataset.side][target.dataset.field] = Number(target.value);
   } else if (kind === "analog-bool") {
@@ -1082,11 +1894,56 @@ function handleFormChange(event) {
     const selected = new Set(current);
     target.checked ? selected.add(target.dataset.name) : selected.delete(target.dataset.name);
     owner[field] = state.schema.controls.filter((name) => selected.has(name));
+  } else if (kind === "shortcut-modifier") {
+    state.profile.shortcuts.modifier = target.value || null;
+    if (!target.value) state.profile.shortcuts.profiles.fill(null);
+    renderShortcuts();
+    elements.shortcutModifier.querySelector("select").focus();
+  } else if (kind === "shortcut-selector") {
+    state.profile.shortcuts.profiles[Number(target.dataset.index)] = target.value || null;
+    renderShortcuts();
+    elements.shortcuts.querySelector(`#shortcut-${target.dataset.index}`).focus();
+  } else if (kind === "shift-mode" || kind === "shift-modifier") {
+    state.profile.shift[kind === "shift-mode" ? "mode" : "modifier"] = target.value || null;
+    renderShift();
+    elements.shift.querySelector(`#${kind}`).focus();
+  } else if (kind === "shift-map") {
+    state.profile.shift.button_map[target.dataset.name] = target.value || null;
   } else if (kind === "turbo") {
     state.profile.turbo[target.dataset.name] = target.value;
+    renderTurbo();
+    elements.turbo.querySelector(`#turbo-${target.dataset.name}`).focus();
+  } else if (kind === "turbo-override") {
+    const overrides = state.profile.turbo_settings.overrides;
+    if (target.checked) {
+      overrides[target.dataset.name] = clone(state.profile.turbo_settings.defaults);
+    } else {
+      delete overrides[target.dataset.name];
+    }
+    renderTurbo();
+    elements.turbo.querySelector(`[data-kind="turbo-override"][data-name="${target.dataset.name}"]`).focus();
+  } else if (kind === "turbo-setting") {
+    const settings = state.profile.turbo_settings;
+    const config = target.dataset.name ? settings.overrides[target.dataset.name] : settings.defaults;
+    config[target.dataset.field] = Number(target.value);
+    if (!target.dataset.name) {
+      elements.turbo.querySelectorAll(`[data-kind="turbo-setting"][data-field="${target.dataset.field}"]`).forEach((input) => {
+        if (!settings.overrides[input.dataset.name]) input.value = target.value;
+      });
+    }
+    updateTurboTiming();
   } else if (kind === "macro-selector") {
     state.profile.macros[state.selectedMacro][target.dataset.field] = target.value || null;
+  } else if (kind === "macro-playback" || kind === "macro-repeat") {
+    state.profile.macros[state.selectedMacro][kind === "macro-playback" ? "playback" : "repeat_count"] =
+      kind === "macro-playback" ? target.value : Number(target.value);
+    updateMacroPlayback();
   } else if (kind === "macro-number") {
+    if (!target.validity.valid) {
+      macroNotice("Enter a whole number within the displayed limits. The last valid draft value is retained.", true);
+      updateMacroPreviewControls();
+      return;
+    }
     updateNestedStep(state.profile.macros[state.selectedMacro].steps[Number(target.dataset.index)], target.dataset.field, Number(target.value));
   } else if (kind === "macro-output") {
     const step = state.profile.macros[state.selectedMacro].steps[Number(target.dataset.index)];
@@ -1094,7 +1951,9 @@ function handleFormChange(event) {
     target.checked ? selected.add(target.dataset.name) : selected.delete(target.dataset.name);
     step.output_buttons = state.schema.buttons.filter((name) => selected.has(name));
   } else if (kind === "macro-override") {
-    const step = state.profile.macros[state.selectedMacro].steps[Number(target.dataset.index)];
+    const index = Number(target.dataset.index);
+    const macro = state.profile.macros[state.selectedMacro];
+    const step = clone(macro.steps[index]);
     const selected = new Set(step.overrides);
     target.checked ? selected.add(target.dataset.name) : selected.delete(target.dataset.name);
     step.overrides = state.schema.macro_overrides.filter((name) => selected.has(name));
@@ -1105,7 +1964,36 @@ function handleFormChange(event) {
       if (target.dataset.name === "left_trigger") step.triggers.left = 0;
       if (target.dataset.name === "right_trigger") step.triggers.right = 0;
     }
-    renderMacro();
+    const macros = state.profile.macros.map((item, macroIndex) =>
+      macroIndex === state.selectedMacro
+        ? { ...item, steps: item.steps.map((itemStep, stepIndex) => stepIndex === index ? step : itemStep) }
+        : item
+    );
+    const error = macroBudgetError(macros);
+    if (error) {
+      target.checked = macro.steps[index].overrides.includes(target.dataset.name);
+      macroNotice(`${error} Draft unchanged.`, true);
+      return;
+    }
+    macro.steps[index] = step;
+    const card = target.closest("[data-step-index]");
+    card.querySelectorAll("[data-kind='macro-number']").forEach((input) => {
+      const [group, side] = input.dataset.field.split(".");
+      if (!side) return;
+      const override = group === "triggers" ? `${side}_trigger` : group;
+      if (override !== target.dataset.name) return;
+      input.disabled = !selected.has(override);
+      input.value = step[group][side];
+    });
+    card.querySelectorAll("[data-kind='macro-output']").forEach((input) => {
+      if (target.dataset.name !== "buttons") return;
+      input.disabled = !selected.has("buttons");
+      input.checked = step.output_buttons.includes(input.dataset.name);
+    });
+  }
+  if (kind.startsWith("macro-")) {
+    macroNotice("");
+    updateMacroBudgets();
   }
   updateDirtyState();
 }
@@ -1113,6 +2001,7 @@ function handleFormChange(event) {
 elements.analog.addEventListener("click", (event) => {
   const button = event.target.closest("[data-copy-analog]");
   if (!button) return;
+  stopMacroPreview("Preview stopped: draft edited.");
   const group = button.dataset.copyAnalog;
   const source = button.dataset.sourceSide;
   const destination = source === "left" ? "right" : "left";
@@ -1127,7 +2016,7 @@ elements.form.addEventListener("change", handleFormChange);
 
 elements.identity.addEventListener("change", async () => {
   const previous = state.identityIndex;
-  if (!confirmDiscard()) {
+  if (captureBlocking() || !confirmDiscard()) {
     elements.identity.value = String(previous);
     return;
   }
@@ -1140,7 +2029,7 @@ elements.identity.addEventListener("change", async () => {
 });
 
 elements.refresh.addEventListener("click", async () => {
-  if (confirmDiscard()) await loadLibrary();
+  await loadLibrary(true);
 });
 
 elements.resetDraft.addEventListener("click", () => {
@@ -1151,35 +2040,129 @@ elements.resetDraft.addEventListener("click", () => {
 });
 
 elements.addMacroStep.addEventListener("click", () => {
-  const steps = state.profile.macros[state.selectedMacro].steps;
-  const totalSteps = state.profile.macros.reduce(
-    (sum, macro) => sum + macro.steps.length, 0
-  );
-  const totalBytes = state.profile.macros.reduce(
-    (sum, macro) => sum + macro.steps.reduce(
-      (stepSum, step) => stepSum + macroStepWireSize(step), 0
-    ), 0
-  );
-  if (steps.length >= 8 || totalSteps >= 16 || totalBytes + 3 > 136) return;
-  steps.push({
-    type: "state",
-    overrides: ["buttons"],
-    duration_ms: 100,
-    output_buttons: [],
-    left_stick: { x: 0, y: 0 },
-    right_stick: { x: 0, y: 0 },
-    triggers: { left: 0, right: 0 },
-  });
-  renderMacro();
-  updateDirtyState();
+  const index = state.profile.macros[state.selectedMacro].steps.length;
+  if (mutateMacroSteps((steps) => steps.push(defaultMacroStep()), index)) {
+    macroNotice(`Added step ${index + 1}.`);
+  }
 });
 
+function moveMacroStep(from, to, focusSelector = "[data-step-handle]") {
+  const count = state.profile.macros[state.selectedMacro].steps.length;
+  if (from === to || from < 0 || to < 0 || from >= count || to >= count) return;
+  if (mutateMacroSteps((steps) => {
+    const [step] = steps.splice(from, 1);
+    steps.splice(to, 0, step);
+  }, to, focusSelector)) {
+    macroNotice(`Moved step ${from + 1} to position ${to + 1}.`);
+  }
+}
+
 elements.macroSteps.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-remove-step]");
-  if (!button) return;
-  state.profile.macros[state.selectedMacro].steps.splice(Number(button.dataset.removeStep), 1);
-  renderMacro();
-  updateDirtyState();
+  const button = event.target.closest("[data-step-action]");
+  if (!button || button.disabled) return;
+  const index = Number(button.closest("[data-step-index]").dataset.stepIndex);
+  const action = button.dataset.stepAction;
+  if (action === "up" || action === "down") {
+    moveMacroStep(index, index + (action === "up" ? -1 : 1));
+    return;
+  }
+  const focusIndex = action === "duplicate" ? index + 1 : index;
+  if (mutateMacroSteps((steps) => {
+    if (action === "insert") steps.splice(index, 0, defaultMacroStep());
+    else if (action === "duplicate") steps.splice(index + 1, 0, clone(steps[index]));
+    else if (action === "remove") steps.splice(index, 1);
+  }, focusIndex)) {
+    macroNotice(action === "remove" ? `Removed step ${index + 1}.` :
+      action === "insert" ? `Inserted step ${index + 1}.` : `Duplicated step ${index + 1} into position ${index + 2}.`);
+  }
+});
+
+elements.macroSteps.addEventListener("keydown", (event) => {
+  const handle = event.target.closest("[data-step-handle]");
+  if (!handle || !event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+  event.preventDefault();
+  const index = Number(handle.dataset.stepHandle);
+  moveMacroStep(index, index + (event.key === "ArrowUp" ? -1 : 1));
+});
+
+function clearMacroDrag() {
+  draggedMacroStep = null;
+  elements.macroSteps.querySelectorAll(".dragging, .drop-before, .drop-after").forEach((card) => {
+    card.classList.remove("dragging", "drop-before", "drop-after");
+  });
+}
+
+elements.macroSteps.addEventListener("dragstart", (event) => {
+  const handle = event.target.closest("[data-step-handle]");
+  if (!handle || state.busy || !macroInputsValid(true)) {
+    event.preventDefault();
+    return;
+  }
+  stopMacroPreview("Preview stopped: reordering steps.");
+  draggedMacroStep = Number(handle.dataset.stepHandle);
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", String(draggedMacroStep));
+  handle.closest("[data-step-index]").classList.add("dragging");
+});
+
+elements.macroSteps.addEventListener("dragover", (event) => {
+  const card = event.target.closest("[data-step-index]");
+  if (draggedMacroStep === null || !card) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  elements.macroSteps.querySelectorAll(".drop-before, .drop-after")
+    .forEach((item) => item.classList.remove("drop-before", "drop-after"));
+  const bounds = card.getBoundingClientRect();
+  card.classList.add(event.clientY < bounds.top + bounds.height / 2 ? "drop-before" : "drop-after");
+});
+
+elements.macroSteps.addEventListener("drop", (event) => {
+  const card = event.target.closest("[data-step-index]");
+  if (draggedMacroStep === null || !card) return;
+  event.preventDefault();
+  const from = draggedMacroStep;
+  const bounds = card.getBoundingClientRect();
+  const gap = Number(card.dataset.stepIndex) + (event.clientY >= bounds.top + bounds.height / 2 ? 1 : 0);
+  clearMacroDrag();
+  moveMacroStep(from, gap > from ? gap - 1 : gap);
+});
+
+elements.macroSteps.addEventListener("dragend", clearMacroDrag);
+elements.macroPreviewPlay.addEventListener("click", playMacroPreview);
+elements.macroPreviewRestart.addEventListener("click", playMacroPreview);
+elements.macroPreviewStop.addEventListener("click", () => stopMacroPreview("Preview stopped."));
+elements.captureRecord.addEventListener("click", beginCapture);
+elements.captureStop.addEventListener("click", () => stopCapture());
+elements.captureUse.addEventListener("click", useCapture);
+elements.captureDiscard.addEventListener("click", discardCapture);
+elements.captureRecover.addEventListener("click", () => {
+  const session = macroCapture.session;
+  if (!session || macroCapture.requestActive) return;
+  session.stopRequested = true;
+  session.stopAttempted = false;
+  refreshCapture();
+});
+elements.captureOptions.addEventListener("input", renderCapture);
+elements.captureOptions.addEventListener("change", renderCapture);
+window.addEventListener("pagehide", () => stopCapture("Recording stopped because you left the editor."));
+window.addEventListener("hashchange", () => stopCapture("Recording stopped because you navigated to another section."));
+document.querySelector("#macroCaptureSettings").addEventListener("submit", (event) => {
+  event.preventDefault();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopMacroPreview("Preview stopped: tab hidden.");
+    clearMacroDrag();
+    stopCapture("Recording stopped because the tab was hidden.");
+  }
+  updateMacroPreviewControls();
+  renderCapture();
+});
+elements.form.addEventListener("input", () => {
+  stopMacroPreview("Preview stopped: draft edited.");
+});
+elements.form.addEventListener("change", () => {
+  stopMacroPreview("Preview stopped: draft edited.");
 });
 
 elements.saveProfileName.addEventListener("click", async () => {
@@ -1196,7 +2179,9 @@ elements.saveProfileName.addEventListener("click", async () => {
     );
     state.profileNames[state.profileIndex] = value;
     state.pendingName = false;
-    renderEditor();
+    elements.profileTitle.textContent = value || `Profile ${state.profileIndex + 1}`;
+    renderProfileList();
+    updateDirtyState();
     toast(`Profile name saved · generation ${result.stored_generation}`);
   } catch (error) {
     toast(error.message, true);
@@ -1242,14 +2227,14 @@ elements.identify.addEventListener("click", async () => {
 });
 
 elements.exportProfile.addEventListener("click", () => {
-  const name = state.profileNames[state.profileIndex] ||
-    `profile-${state.profileIndex + 1}`;
+  const name = state.profileNames[state.profileIndex] || "";
+  const filename = name || `profile-${state.profileIndex + 1}`;
   const blob = new Blob([
     JSON.stringify({ name, profile: state.profile }, null, 2),
   ], { type: "application/json" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `${name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.json`;
+  link.download = `${filename.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.json`;
   link.click();
   URL.revokeObjectURL(link.href);
 });
@@ -1261,6 +2246,7 @@ elements.importProfile.addEventListener("click", () => {
 elements.importProfileFile.addEventListener("change", async () => {
   const [file] = elements.importProfileFile.files;
   if (!file) return;
+  setBusy(true);
   try {
     const imported = JSON.parse(await file.text());
     if (
@@ -1269,7 +2255,12 @@ elements.importProfileFile.addEventListener("change", async () => {
     ) {
       throw new Error("Profile name exceeds 31 UTF-8 bytes");
     }
-    state.profile = clone(imported.profile || imported);
+    const result = await api("/api/profiles/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(imported.profile || imported),
+    });
+    state.profile = result.profile;
     if (typeof imported.name === "string") {
       state.profileNames[state.profileIndex] = imported.name;
       state.pendingName = true;
@@ -1280,10 +2271,12 @@ elements.importProfileFile.addEventListener("change", async () => {
     toast(`Import failed: ${error.message}`, true);
   } finally {
     elements.importProfileFile.value = "";
+    setBusy(false);
   }
 });
 
 elements.copyProfile.addEventListener("click", () => {
+  if (!elements.form.reportValidity()) return;
   elements.copyIdentity.innerHTML = state.identities.map((identity) => (
     `<option value="${identity.index}">${escapeHtml(identity.label)}</option>`
   )).join("");
@@ -1300,6 +2293,7 @@ elements.copyProfile.addEventListener("click", () => {
 
 elements.confirmCopy.addEventListener("click", async (event) => {
   event.preventDefault();
+  if (!elements.form.reportValidity()) return;
   setBusy(true);
   try {
     const result = await api(
@@ -1310,6 +2304,8 @@ elements.confirmCopy.addEventListener("click", async (event) => {
         body: JSON.stringify({
           identity_index: Number(elements.copyIdentity.value),
           profile_number: Number(elements.copySlot.value),
+          profile: state.profile,
+          name: state.profileNames[state.profileIndex],
         }),
       }
     );
@@ -1346,6 +2342,9 @@ document.querySelectorAll("[data-reset-section]").forEach((button) => {
       state.profile.rumble = clone(defaults.rumble);
     } else if (section === "turbo") {
       state.profile.turbo = clone(defaults.turbo);
+      state.profile.turbo_settings = clone(defaults.turbo_settings);
+    } else if (section === "shortcuts" || section === "shift") {
+      state.profile[section] = clone(defaults[section]);
     } else if (section === "macro") {
       state.profile.switching_chord = clone(defaults.switching_chord);
       state.profile.motion_toggle_chord = clone(defaults.motion_toggle_chord);
@@ -1358,6 +2357,12 @@ document.querySelectorAll("[data-reset-section]").forEach((button) => {
 
 elements.save.addEventListener("click", async () => {
   if (!elements.form.reportValidity()) return;
+  const error = macroBudgetError(state.profile.macros);
+  if (error) {
+    macroNotice(error, true);
+    toast(error, true);
+    return;
+  }
   setBusy(true);
   try {
     const result = await api(`/api/profiles/${state.identityIndex}/${state.profileIndex + 1}`, {
@@ -1408,7 +2413,9 @@ elements.activate.addEventListener("click", async () => {
 });
 
 window.addEventListener("beforeunload", (event) => {
-  if (!isDirty()) return;
+  stopMacroPreview("Preview stopped: leaving the editor.");
+  stopCapture("Recording stopped because you left the editor.");
+  if (!isDirty() && !macroCapture.session) return;
   event.preventDefault();
   event.returnValue = "";
 });

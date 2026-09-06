@@ -50,10 +50,10 @@ struct ControllerProfileRuntimeLocalConfirmation {
 // Reset all four fixed slot caches to the default profile.
 void controller_profile_runtime_reset();
 
-// Refresh a slot when its identity, connection generation, or database
-// generation changes; identity-only promotion preserves a held switching
-// transaction. Consume pre-hotkey switching chords while transforming the
-// backend-suppressed state through the shared synthetic pipeline. Inactive
+// Refresh slot-local profile and synthetic state on identity or generation
+// changes while preserving a latched hotkey target across profile refreshes.
+// Arbitrate pre-hotkey shortcuts, cycle and motion before Shift and synthetic
+// input. The caller removes the reserved output-mode chord first. Inactive
 // snapshots return neutral output and invalidate the slot.
 ControllerProfileTransformResult controller_profile_runtime_transform(
     uint8_t slot, const Bluepad32SlotSnapshot& snapshot, uint32_t now_ms,

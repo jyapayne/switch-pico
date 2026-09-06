@@ -18,6 +18,8 @@ constexpr uint32_t PROFILE_STORAGE_NO_RECORD = UINT32_MAX;
 constexpr uint8_t PROFILE_STORAGE_METADATA_MAX_BYTES = 31;
 constexpr size_t PROFILE_STORAGE_METADATA_PAYLOAD_SIZE =
     PROFILE_STORAGE_METADATA_MAX_BYTES + 1;
+constexpr size_t PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE =
+    CONTROLLER_PROFILE_COUNT * PROFILE_STORAGE_METADATA_PAYLOAD_SIZE;
 constexpr size_t PROFILE_STORAGE_MAX_LIVE_RECORDS =
     (CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1) *
     (CONTROLLER_PROFILE_COUNT + 3);
@@ -27,6 +29,9 @@ constexpr size_t PROFILE_STORAGE_RECORD_CAPACITY =
 static_assert(PROFILE_STORAGE_MAX_LIVE_RECORDS <=
               PROFILE_STORAGE_RECORD_CAPACITY,
               "all live profile records must fit during compaction");
+static_assert(PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE == 256);
+static_assert(PROFILE_STORAGE_RECORD_CAPACITY == 248);
+static_assert(PROFILE_STORAGE_MAX_LIVE_RECORDS == 187);
 
 // Layout of the retired v1/v2 whole-database store. The indexed catalog reads
 // this region once during migration; new firmware never writes it.
@@ -127,10 +132,13 @@ private:
     kProfileNames = 6,
   };
 
-  bool scan_arena(uint8_t arena, uint32_t *epoch, uint32_t *generation,
-                  uint32_t *payload_crc, size_t *next_offset,
-                  ProfileStorageIdentityIndex *index,
-                  uint8_t *identity_count) const;
+  ProfileStorageResult scan_arena(
+      uint8_t arena, uint16_t *version, uint32_t *epoch,
+      uint32_t *generation, uint32_t *payload_crc, size_t *next_offset,
+      ProfileStorageIdentityIndex *index, uint8_t *identity_count) const;
+  bool validate_record(const uint8_t *record, uint16_t version) const;
+  bool read_record_payload(uint32_t record, RecordType type, uint8_t *output,
+                           size_t capacity, size_t *size = nullptr) const;
   bool read_profile_record(uint32_t record, ControllerProfile *output) const;
   bool read_metadata_record(uint32_t record, char *output,
                             size_t output_size) const;
@@ -139,7 +147,8 @@ private:
                               uint8_t profile_index, const uint8_t *payload,
                               size_t payload_size);
   ProfileStorageResult compact();
-  bool migrate_legacy();
+  ProfileStorageResult migrate_legacy();
+  bool publish_arena(uint8_t arena, uint32_t epoch, size_t records_end) const;
   bool publish_empty_arena(uint8_t arena, uint32_t epoch);
   bool write_record(uint8_t arena, size_t offset, RecordType type,
                     const ControllerIdentity &identity, uint8_t profile_index,
@@ -156,6 +165,7 @@ private:
       index_[CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1]{};
   uint8_t identity_count_ = 0;
   uint32_t epoch_ = 0;
+  uint16_t catalog_version_ = 0;
   size_t next_offset_ = PROFILE_STORAGE_RECORDS_OFFSET;
   bool initialized_ = false;
 };

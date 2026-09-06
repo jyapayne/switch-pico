@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import switch_pico_bridge.config_manager as config_manager
+from switch_pico_bridge import config_manager
 
 
 def make_response(
@@ -19,18 +19,21 @@ def make_response(
     schema: int = 0,
     generation: int = 0,
 ) -> bytes:
-    return struct.pack(
-        "<4sBBBBHHII",
-        b"SPMG",
-        config_manager.PROTOCOL_VERSION,
-        operation,
-        status,
-        flags,
-        len(payload),
-        schema,
-        generation,
-        zlib.crc32(payload) & 0xFFFFFFFF,
-    ) + payload
+    return (
+        struct.pack(
+            "<4sBBBBHHII",
+            b"SPMG",
+            config_manager.PROTOCOL_VERSION,
+            operation,
+            status,
+            flags,
+            len(payload),
+            schema,
+            generation,
+            zlib.crc32(payload) & 0xFFFFFFFF,
+        )
+        + payload
+    )
 
 
 class FakeDevice:
@@ -159,7 +162,9 @@ class FakeDevice:
             payload.extend(identity_bytes)
             payload.extend((self.active_profiles[identity_bytes], 0, len(alias)))
             payload.extend(alias)
-            payload.extend(bytes(config_manager.PROFILE_METADATA_MAX_BYTES - len(alias)))
+            payload.extend(
+                bytes(config_manager.PROFILE_METADATA_MAX_BYTES - len(alias))
+            )
         return bytes(payload)
 
     def _profile_metadata_payload(self) -> bytes:
@@ -176,7 +181,9 @@ class FakeDevice:
             encoded = value.encode("utf-8")
             payload.extend((len(encoded),))
             payload.extend(encoded)
-            payload.extend(bytes(config_manager.PROFILE_METADATA_MAX_BYTES - len(encoded)))
+            payload.extend(
+                bytes(config_manager.PROFILE_METADATA_MAX_BYTES - len(encoded))
+            )
         return bytes(payload)
 
     def _profile_transaction_payload(self) -> bytes:
@@ -205,13 +212,17 @@ class FakeDevice:
         flags = 0x03 if self.playtest_motion is not None else 0x01
         payload[0] = flags
         payload[1] = self.playtest_slot
-        struct.pack_into("<HII", payload, 2, self.playtest_button_mask,
-                         self.playtest_connection_generation,
-                         self.playtest_state_generation)
+        struct.pack_into(
+            "<HII",
+            payload,
+            2,
+            self.playtest_button_mask,
+            self.playtest_connection_generation,
+            self.playtest_state_generation,
+        )
         payload[12:26] = self.stable_identity.to_bytes()
         struct.pack_into(
-            "<hhhhHH", payload, 26, *self.playtest_sticks,
-            *self.playtest_triggers
+            "<hhhhHH", payload, 26, *self.playtest_sticks, *self.playtest_triggers
         )
         payload[38] = 1 if self.playtest_motion is not None else 0
         payload[39] = self.playtest_battery
@@ -293,8 +304,7 @@ class FakeDevice:
             if request == config_manager.OP_RUNTIME_DIAGNOSTICS:
                 return make_response(
                     request,
-                    struct.pack("<7I4B", 6, 1200, 120, 5000, 8, 2, 10,
-                                2, 2, 1, 1),
+                    struct.pack("<7I4B", 6, 1200, 120, 5000, 8, 2, 10, 2, 2, 1, 1),
                 )
             if request == config_manager.OP_CONFIGURATION_READ:
                 return make_response(
@@ -413,15 +423,11 @@ class FakeDevice:
                 self.transaction_expected_size,
                 self.transaction_expected_crc,
             ) = struct.unpack("<IHHI", payload)
-            assert 0 < self.transaction_id <= (
-                config_manager.HOST_TRANSACTION_ID_MASK
-            )
+            assert 0 < self.transaction_id <= (config_manager.HOST_TRANSACTION_ID_MASK)
             self.transaction_payload = bytearray()
             self.transaction_status = config_manager.STATUS_PENDING
         elif request == config_manager.OP_CONFIGURATION_CHUNK:
-            transaction_id, offset, chunk_size = struct.unpack_from(
-                "<IHH", payload
-            )
+            transaction_id, offset, chunk_size = struct.unpack_from("<IHH", payload)
             assert transaction_id == self.transaction_id
             assert offset == len(self.transaction_payload)
             self.transaction_payload.extend(payload[8 : 8 + chunk_size])
@@ -436,18 +442,14 @@ class FakeDevice:
             self.transaction_status = config_manager.STATUS_OK
         elif request == config_manager.OP_CONFIGURATION_RESET:
             self.transaction_id = struct.unpack("<I", payload)[0]
-            assert 0 < self.transaction_id <= (
-                config_manager.HOST_TRANSACTION_ID_MASK
-            )
+            assert 0 < self.transaction_id <= (config_manager.HOST_TRANSACTION_ID_MASK)
             self.configuration = struct.pack(
                 "<HB5x", 60, config_manager.REQUESTED_MODE_AUTO
             )
             self.configuration_generation += 1
             self.transaction_payload = bytearray(self.configuration)
             self.transaction_expected_size = len(self.configuration)
-            self.transaction_expected_crc = (
-                zlib.crc32(self.configuration) & 0xFFFFFFFF
-            )
+            self.transaction_expected_crc = zlib.crc32(self.configuration) & 0xFFFFFFFF
             self.transaction_status = config_manager.STATUS_OK
         elif request == config_manager.OP_MODE_SET:
             assert len(payload) == 5
@@ -497,17 +499,12 @@ class FakeDevice:
             ) = struct.unpack_from("<BBHHI", payload, 18)
             assert reserved == 0
             assert schema == config_manager.PROFILE_SCHEMA_VERSION
-            assert (
-                self.profile_transaction_expected_size
-                == config_manager.PROFILE_SIZE
-            )
+            assert self.profile_transaction_expected_size == config_manager.PROFILE_SIZE
             self.profile_transaction_payload = bytearray()
             self.profile_transaction_status = config_manager.STATUS_PENDING
             self.profile_chunk_sizes = []
         elif request == config_manager.OP_PROFILE_CHUNK:
-            transaction_id, offset, chunk_size = struct.unpack_from(
-                "<IHH", payload
-            )
+            transaction_id, offset, chunk_size = struct.unpack_from("<IHH", payload)
             assert transaction_id == self.profile_transaction_id
             assert offset == len(self.profile_transaction_payload)
             chunk = payload[8 : 8 + chunk_size]
@@ -515,10 +512,7 @@ class FakeDevice:
             self.profile_transaction_payload.extend(chunk)
             self.profile_chunk_sizes.append(chunk_size)
         elif request == config_manager.OP_PROFILE_COMMIT:
-            assert (
-                struct.unpack("<I", payload)[0]
-                == self.profile_transaction_id
-            )
+            assert struct.unpack("<I", payload)[0] == self.profile_transaction_id
             assert (
                 len(self.profile_transaction_payload)
                 == self.profile_transaction_expected_size
@@ -535,25 +529,16 @@ class FakeDevice:
                 self.profile_generation += 1
                 self.profile_transaction_status = config_manager.STATUS_OK
             else:
-                self.profile_transaction_status = (
-                    self.fail_profile_commit_status
-                )
+                self.profile_transaction_status = self.fail_profile_commit_status
         elif request == config_manager.OP_PROFILE_RESET:
             self._queue_profile_mutation(request, payload)
             assert (
-                self.profile_transaction_index
-                == config_manager.PROFILE_NONE_BUTTON
-                or 0
-                <= self.profile_transaction_index
-                < config_manager.PROFILE_CAPACITY
+                self.profile_transaction_index == config_manager.PROFILE_NONE_BUTTON
+                or 0 <= self.profile_transaction_index < config_manager.PROFILE_CAPACITY
             )
         elif request == config_manager.OP_PROFILE_ACTIVATE:
             self._queue_profile_mutation(request, payload)
-            assert (
-                0
-                <= self.profile_transaction_index
-                < config_manager.PROFILE_CAPACITY
-            )
+            assert 0 <= self.profile_transaction_index < config_manager.PROFILE_CAPACITY
         elif request == config_manager.OP_PROFILE_METADATA_SET:
             self.profile_transaction_id = struct.unpack_from("<I", payload)[0]
             identity = payload[4:18]
@@ -599,18 +584,20 @@ def custom_profile() -> config_manager.ControllerProfile:
             15,
             config_manager.PROFILE_NONE_BUTTON,
         ),
-        left_stick=config_manager.StickConfig(
-            -123, 456, 1000, 30000, 384, True, False
-        ),
-        right_stick=config_manager.StickConfig(
-            789, -321, 500, 31000, 192, False, True
-        ),
+        left_stick=config_manager.StickConfig(-123, 456, 1000, 30000, 384, True, False),
+        right_stick=config_manager.StickConfig(789, -321, 500, 31000, 192, False, True),
         left_trigger=config_manager.TriggerConfig(
-            100, 65000, 320, 32000,
+            100,
+            65000,
+            320,
+            32000,
             config_manager.LOGICAL_CONTROLS.index("right_trigger"),
         ),
         right_trigger=config_manager.TriggerConfig(
-            200, 64000, 224, 33000,
+            200,
+            64000,
+            224,
+            33000,
             config_manager.LOGICAL_BUTTONS.index("north"),
         ),
         weak_rumble_scale=77,
@@ -640,11 +627,7 @@ def custom_profile() -> config_manager.ControllerProfile:
             config_manager.ControllerMacro(
                 (1 << 1) | (1 << 2),
                 config_manager.PROFILE_NONE_BUTTON,
-                (
-                    config_manager.MacroStep(
-                        0, 1, 25, 1 << 3, 0, 0, 0, 0, 0, 0
-                    ),
-                ),
+                (config_manager.MacroStep(0, 1, 25, 1 << 3, 0, 0, 0, 0, 0, 0),),
             ),
             config_manager.ControllerMacro.empty(),
             config_manager.ControllerMacro.empty(),
@@ -652,15 +635,16 @@ def custom_profile() -> config_manager.ControllerProfile:
         turbo_modes=(0, 1, 2) + (0,) * 13,
     )
 
+
 def legacy_profile_wire(
     schema_version: int,
     macro_trigger: int = config_manager.PROFILE_NONE_BUTTON,
     macro_cancel: int = config_manager.PROFILE_NONE_BUTTON,
 ) -> bytearray:
     profile = config_manager.ControllerProfile.default()
-    payload = bytearray(config_manager.PROFILE_SIZE)
+    payload = bytearray(config_manager.PROFILE_LEGACY_SIZE)
     struct.pack_into(
-        "<HH", payload, 0, schema_version, config_manager.PROFILE_SIZE
+        "<HH", payload, 0, schema_version, config_manager.PROFILE_LEGACY_SIZE
     )
     payload[4:20] = bytes(range(len(config_manager.LOGICAL_BUTTONS)))
     payload[20:36] = profile.left_stick.to_bytes()
@@ -680,7 +664,6 @@ def legacy_profile_wire(
     for index in range(config_manager.PROFILE_LEGACY_MACRO_STEP_CAPACITY):
         payload[100 + index * config_manager.PROFILE_MACRO_STEP_SIZE] = 1
     return payload
-
 
 
 def test_response_validation() -> None:
@@ -728,10 +711,7 @@ def test_configuration_transaction_and_reset() -> None:
     assert reset.stored_generation == 5
     reset_configuration = config_manager.read_configuration(device)
     assert reset_configuration.pairing_window_seconds == 60
-    assert (
-        reset_configuration.requested_mode
-        == config_manager.REQUESTED_MODE_AUTO
-    )
+    assert reset_configuration.requested_mode == config_manager.REQUESTED_MODE_AUTO
 
 
 def test_configuration_transaction_ids_stay_in_host_range(
@@ -759,9 +739,7 @@ def test_configuration_transaction_ids_stay_in_host_range(
         1.0,
     )
     config_manager.reset_configuration(device, 1.0)
-    config_manager.set_mode(
-        device, config_manager.REQUESTED_MODE_SWITCH, 1.0
-    )
+    config_manager.set_mode(device, config_manager.REQUESTED_MODE_SWITCH, 1.0)
 
     transaction_ids = [
         struct.unpack_from("<I", payload)[0]
@@ -786,17 +764,11 @@ def test_mode_envelopes_and_host_side_validation(
 ) -> None:
     device = FakeDevice()
     monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(
-        config_manager.secrets, "randbits", lambda _bits: 0x12345678
-    )
+    monkeypatch.setattr(config_manager.secrets, "randbits", lambda _bits: 0x12345678)
 
-    status = config_manager.set_mode(
-        device, config_manager.REQUESTED_MODE_XINPUT, 1.0
-    )
+    status = config_manager.set_mode(device, config_manager.REQUESTED_MODE_XINPUT, 1.0)
 
-    mode_payload = struct.pack(
-        "<IB", 0x12345678, config_manager.REQUESTED_MODE_XINPUT
-    )
+    mode_payload = struct.pack("<IB", 0x12345678, config_manager.REQUESTED_MODE_XINPUT)
     operation, payload, encoded = device.out_requests[0]
     assert operation == config_manager.OP_MODE_SET
     assert payload == mode_payload
@@ -818,18 +790,14 @@ def test_mode_envelopes_and_host_side_validation(
     operation, payload, encoded = device.out_requests[-1]
     assert operation == config_manager.OP_BOOTSEL_REBOOT
     assert payload == b""
-    assert encoded == config_manager.encode_request(
-        config_manager.OP_BOOTSEL_REBOOT
-    )
+    assert encoded == config_manager.encode_request(config_manager.OP_BOOTSEL_REBOOT)
     assert device.bootsel_reboot_requested
 
     for transaction_id in (0, 0x80000000, True):
         with pytest.raises(config_manager.ConfigManagerError):
             config_manager.request_reboot(device, transaction_id)
     for mode in (0xFF, True):
-        with pytest.raises(
-            config_manager.ConfigManagerError, match="not available"
-        ):
+        with pytest.raises(config_manager.ConfigManagerError, match="not available"):
             config_manager.set_mode(device, mode, 1.0)
 
     for mode in (
@@ -858,9 +826,7 @@ def test_mode_set_propagates_busy_and_commit_errors_without_reboot(
     monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(config_manager.ConfigManagerError, match=message):
-        config_manager.configure_mode(
-            device, config_manager.REQUESTED_MODE_SWITCH, 1.0
-        )
+        config_manager.configure_mode(device, config_manager.REQUESTED_MODE_SWITCH, 1.0)
 
     assert config_manager.OP_REBOOT not in device.requests
 
@@ -881,9 +847,7 @@ def test_mode_transaction_must_correlate_before_reboot(
         config_manager.ConfigManagerError,
         match="different transaction",
     ):
-        config_manager.configure_mode(
-            device, config_manager.REQUESTED_MODE_SWITCH, 1.0
-        )
+        config_manager.configure_mode(device, config_manager.REQUESTED_MODE_SWITCH, 1.0)
 
     assert config_manager.OP_REBOOT not in device.requests
 
@@ -930,13 +894,10 @@ def test_mode_noop_accepts_only_mode_appropriate_active_state(
         device.capabilities = config_manager.CAPABILITY_INPUT
     elif active_mode == config_manager.ACTIVE_MODE_XINPUT:
         device.capabilities = (
-            config_manager.CAPABILITY_INPUT |
-            config_manager.CAPABILITY_RUMBLE
+            config_manager.CAPABILITY_INPUT | config_manager.CAPABILITY_RUMBLE
         )
 
-    same_device, changed = config_manager.configure_mode(
-        device, requested_mode, 1.0
-    )
+    same_device, changed = config_manager.configure_mode(device, requested_mode, 1.0)
 
     assert same_device is device
     assert not changed
@@ -994,8 +955,7 @@ def test_mode_change_waits_for_disappearance_and_reenumeration(
         reenumerated.capabilities = config_manager.CAPABILITY_INPUT
     elif active_mode == config_manager.ACTIVE_MODE_XINPUT:
         reenumerated.capabilities = (
-            config_manager.CAPABILITY_INPUT |
-            config_manager.CAPABILITY_RUMBLE
+            config_manager.CAPABILITY_INPUT | config_manager.CAPABILITY_RUMBLE
         )
     scans = iter(((previous,), (), (reenumerated,)))
     monkeypatch.setattr(
@@ -1005,9 +965,7 @@ def test_mode_change_waits_for_disappearance_and_reenumeration(
     )
     monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
 
-    result, changed = config_manager.configure_mode(
-        previous, requested_mode, 1.0
-    )
+    result, changed = config_manager.configure_mode(previous, requested_mode, 1.0)
 
     assert result is reenumerated
     assert changed
@@ -1135,28 +1093,20 @@ def test_mode_verifies_requested_and_active_state_after_reenumeration(
     monkeypatch.setattr(config_manager.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(config_manager.ConfigManagerError, match=message):
-        config_manager.configure_mode(
-            previous, requested_mode, 1.0
-        )
+        config_manager.configure_mode(previous, requested_mode, 1.0)
 
 
 def test_reenumeration_reports_missing_disappearance_and_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = FakeDevice()
-    monkeypatch.setattr(
-        config_manager, "_candidate_devices", lambda: (device,)
-    )
-    with pytest.raises(
-        config_manager.ConfigManagerError, match="did not disappear"
-    ):
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
+    with pytest.raises(config_manager.ConfigManagerError, match="did not disappear"):
         snapshot = config_manager._capture_reenumeration_snapshot(device)
         config_manager._wait_for_reenumeration(snapshot, 0)
 
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: ())
-    with pytest.raises(
-        config_manager.ConfigManagerError, match="did not re-enumerate"
-    ):
+    with pytest.raises(config_manager.ConfigManagerError, match="did not re-enumerate"):
         snapshot = config_manager._capture_reenumeration_snapshot(device)
         config_manager._wait_for_reenumeration(snapshot, 0)
 
@@ -1200,8 +1150,7 @@ def test_requested_and_active_mode_response_validation() -> None:
     ):
         config_manager.read_configuration(device)
     device.configuration = (
-        struct.pack("<HB5x", 60, config_manager.REQUESTED_MODE_AUTO)[:-1]
-        + b"\x01"
+        struct.pack("<HB5x", 60, config_manager.REQUESTED_MODE_AUTO)[:-1] + b"\x01"
     )
     with pytest.raises(
         config_manager.ConfigManagerError,
@@ -1220,9 +1169,7 @@ def test_requested_and_active_mode_response_validation() -> None:
     ):
         config_manager.read_info(device)
     device.capabilities = config_manager.CAPABILITY_RUMBLE
-    with pytest.raises(
-        config_manager.ConfigManagerError, match="omit required input"
-    ):
+    with pytest.raises(config_manager.ConfigManagerError, match="omit required input"):
         config_manager.read_info(device)
 
 
@@ -1236,13 +1183,10 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         0xABCD,
     )
     encoded_identity = identity.to_bytes()
-    assert encoded_identity == bytes.fromhex(
-        "01020300A1B2C3D4E5F63412CDAB"
-    )
+    assert encoded_identity == bytes.fromhex("01020300A1B2C3D4E5F63412CDAB")
     assert config_manager.ControllerIdentity.from_bytes(encoded_identity) == identity
-    assert (
-        config_manager.ControllerIdentity.global_fallback().to_bytes()
-        == bytes(config_manager.CONTROLLER_IDENTITY_SIZE)
+    assert config_manager.ControllerIdentity.global_fallback().to_bytes() == bytes(
+        config_manager.CONTROLLER_IDENTITY_SIZE
     )
     malformed_identity = bytearray(encoded_identity)
     malformed_identity[3] = 1
@@ -1271,11 +1215,10 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     )
     assert encoded[96:102] == bytes((1, 0, 0x47, 0, 1, 17))
     assert encoded[102:108] == bytes((6, 0, 0x7C, 17, 1, 5))
-    assert encoded[252:] == bytes(4)
+    assert encoded[252:256] == bytes(4)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
 
     serialized = profile.to_json()
-    assert serialized.startswith('{\n  "schema_version": 5,\n  "size": 256,')
     decoded = config_manager.ControllerProfile.from_json(serialized)
     assert decoded == profile
     assert decoded.to_json() == serialized
@@ -1302,9 +1245,7 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         256,
         config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD,
     )
-    migrated_default = config_manager.ControllerProfile.from_bytes(
-        legacy_default_wire
-    )
+    migrated_default = config_manager.ControllerProfile.from_bytes(legacy_default_wire)
     assert (
         migrated_default.left_trigger.digital_threshold
         == config_manager.PROFILE_DEFAULT_DIGITAL_THRESHOLD
@@ -1338,9 +1279,7 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         macro_trigger=0,
         macro_cancel=1,
     )
-    migrated_previous = config_manager.ControllerProfile.from_bytes(
-        previous_wire
-    )
+    migrated_previous = config_manager.ControllerProfile.from_bytes(previous_wire)
     assert migrated_previous.left_trigger.output == 16
     assert migrated_previous.right_trigger.output == 17
     assert migrated_previous.macros[0].trigger_mask == 1
@@ -1349,9 +1288,10 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     assert migrated_previous.to_bytes()[0] == config_manager.PROFILE_SCHEMA_VERSION
 
     legacy_json_object = default_profile.to_json_object()
-    legacy_json_object["schema_version"] = (
-        config_manager.PROFILE_LEGACY_SCHEMA_VERSION
-    )
+    legacy_json_object["schema_version"] = config_manager.PROFILE_LEGACY_SCHEMA_VERSION
+    legacy_json_object["size"] = config_manager.PROFILE_LEGACY_SIZE
+    for field in ("shortcuts", "shift", "turbo_settings"):
+        del legacy_json_object[field]
     del legacy_json_object["motion_toggle_chord"]
     del legacy_json_object["triggers"]["left"]["output"]
     del legacy_json_object["triggers"]["right"]["output"]
@@ -1383,6 +1323,149 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     assert migrated_json.motion_toggle_chord == 0
 
 
+def test_schema5_full_macro_stream_migrates_bytes_and_json(monkeypatch) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    obj["macros"][0]["trigger"] = ["south"]
+    obj["macros"][0]["steps"] = [
+        custom_profile().macros[0].steps[0].to_json_object()
+    ] * 8
+    expected = config_manager.ControllerProfile.from_json_object(obj)
+    legacy_wire = bytearray(expected.to_bytes()[:256])
+    struct.pack_into("<HH", legacy_wire, 0, 5, 256)
+    assert legacy_wire[254:256] == b"\x31\xd4"
+    migrated = config_manager.ControllerProfile.from_bytes(legacy_wire)
+    assert migrated == expected
+    assert migrated.to_bytes()[4:256] == legacy_wire[4:]
+    envelope = config_manager.parse_response(
+        make_response(config_manager.OP_PROFILE_READ, bytes(legacy_wire), schema=5),
+        config_manager.OP_PROFILE_READ,
+    )
+    monkeypatch.setattr(
+        config_manager, "_control_in", lambda device, operation: envelope
+    )
+    assert config_manager.read_selected_profile(FakeDevice()) == expected
+    envelope = config_manager.parse_response(
+        make_response(config_manager.OP_PROFILE_READ, bytes(legacy_wire), schema=6),
+        config_manager.OP_PROFILE_READ,
+    )
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_selected_profile(FakeDevice())
+
+    obj["schema_version"] = 5
+    obj["size"] = 256
+    for field in ("shortcuts", "shift", "turbo_settings"):
+        del obj[field]
+    for macro in obj["macros"]:
+        del macro["playback"]
+        del macro["repeat_count"]
+    assert config_manager.ControllerProfile.from_json_object(obj) == expected
+    struct.pack_into("<HH", legacy_wire, 0, 6, 384)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(legacy_wire)
+
+
+def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
+    obj = custom_profile().to_json_object()
+    obj["shortcuts"] = {
+        "modifier": "left_trigger",
+        "profiles": ["south", None, None, None, None, None, None, "dpad_right"],
+    }
+    obj["shift"]["mode"] = "toggle"
+    obj["shift"]["modifier"] = "right_trigger"
+    obj["shift"]["button_map"]["south"] = None
+    obj["turbo"]["dpad_right"] = "burst"
+    obj["turbo_settings"] = {
+        "defaults": {"rate_hz": 30, "duty_percent": 99, "burst_count": 255},
+        "overrides": {
+            "dpad_right": {"rate_hz": 23, "duty_percent": 37, "burst_count": 17},
+            "west": {"rate_hz": 1, "duty_percent": 1, "burst_count": 1},
+        },
+    }
+    for macro, playback in zip(
+        obj["macros"], ("repeat", "once", "while_held", "toggle")
+    ):
+        macro["playback"] = playback
+    obj["macros"][0]["repeat_count"] = 255
+    profile = config_manager.ControllerProfile.from_json_object(obj)
+    encoded = profile.to_bytes()
+    assert encoded[256:267] == bytes((16, 0, 255, 255, 255, 255, 255, 255, 15, 2, 17))
+    assert encoded[283:294] == bytes((30, 99, 255, 4, 128, 1, 1, 1, 23, 37, 17))
+    assert encoded[294:336] == bytes(42)
+    assert encoded[336:344] == bytes((3, 255, 0, 1, 1, 1, 2, 1))
+    assert encoded[344:] == bytes(40)
+    assert config_manager.ControllerProfile.from_bytes(encoded) == profile
+    assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("shortcuts", "modifier"), None),
+        (("shortcuts", "modifier"), "south"),
+        (("shortcuts", "profiles", 1), "south"),
+        (("shortcuts", "profiles", 0), "left_shoulder"),
+        (("shift", "modifier"), None),
+        (("shift", "button_map", "south"), "left_trigger"),
+        (("turbo_settings", "defaults", "rate_hz"), 0),
+        (("turbo_settings", "defaults", "rate_hz"), 31),
+        (("turbo_settings", "defaults", "duty_percent"), 0),
+        (("turbo_settings", "defaults", "duty_percent"), 100),
+        (("turbo_settings", "defaults", "burst_count"), 0),
+        (("turbo_settings", "defaults", "burst_count"), 256),
+        (("macros", 0, "repeat_count"), 0),
+        (("macros", 0, "repeat_count"), 256),
+        (("macros", 0, "playback"), "forever"),
+    ],
+)
+def test_set_b_rejects_invalid_json_settings(path: tuple, value: object) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    obj["shortcuts"]["modifier"] = "left_trigger"
+    obj["shortcuts"]["profiles"][0] = "south"
+    obj["shift"]["mode"] = "hold"
+    obj["shift"]["modifier"] = "right_trigger"
+    parent = obj
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+
+
+@pytest.mark.parametrize(
+    ("offset", "value"),
+    [
+        (288, 1),
+        (383, 1),
+        (265, 3),
+        (267, 16),
+        (283, 31),
+        (284, 100),
+        (285, 0),
+        (336, 4),
+        (337, 0),
+    ],
+)
+def test_set_b_rejects_corrupt_extension_bytes(offset: int, value: int) -> None:
+    payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    payload[offset] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+def test_looping_macro_requires_positive_total_duration() -> None:
+    obj = custom_profile().to_json_object()
+    obj["macros"][0]["steps"][0]["duration_ms"] = 0
+    once = config_manager.ControllerProfile.from_json_object(obj)
+    assert config_manager.ControllerProfile.from_bytes(once.to_bytes()) == once
+    for playback in ("while_held", "toggle", "repeat"):
+        obj["macros"][0]["playback"] = playback
+        with pytest.raises(config_manager.ConfigManagerError):
+            config_manager.ControllerProfile.from_json_object(obj)
+    obj["macros"][0]["trigger"] = []
+    disabled = config_manager.ControllerProfile.from_json_object(obj)
+    assert config_manager.ControllerProfile.from_bytes(disabled.to_bytes()) == disabled
+
+
 def test_sparse_macro_capacity_boundaries() -> None:
     full_step = custom_profile().macros[0].steps[0].to_json_object()
     button_step = custom_profile().macros[1].steps[0].to_json_object()
@@ -1391,11 +1474,14 @@ def test_sparse_macro_capacity_boundaries() -> None:
     exact["macros"][0]["trigger"] = ["south"]
     exact["macros"][0]["steps"] = [full_step] * 8
     exact_profile = config_manager.ControllerProfile.from_json_object(exact)
-    assert sum(
-        len(step.to_sparse_bytes())
-        for macro in exact_profile.macros
-        for step in macro.steps
-    ) == config_manager.PROFILE_MACRO_STREAM_SIZE
+    assert (
+        sum(
+            len(step.to_sparse_bytes())
+            for macro in exact_profile.macros
+            for step in macro.steps
+        )
+        == config_manager.PROFILE_MACRO_STREAM_SIZE
+    )
     assert (
         config_manager.ControllerProfile.from_bytes(exact_profile.to_bytes())
         == exact_profile
@@ -1405,9 +1491,7 @@ def test_sparse_macro_capacity_boundaries() -> None:
     for index, macro in enumerate(sixteen["macros"]):
         macro["trigger"] = [config_manager.LOGICAL_CONTROLS[index]]
         macro["steps"] = [button_step] * 4
-    sixteen_profile = config_manager.ControllerProfile.from_json_object(
-        sixteen
-    )
+    sixteen_profile = config_manager.ControllerProfile.from_json_object(sixteen)
     assert sum(len(macro.steps) for macro in sixteen_profile.macros) == 16
     assert len(sixteen_profile.to_bytes()) == config_manager.PROFILE_SIZE
 
@@ -1425,9 +1509,7 @@ def test_sparse_macro_capacity_boundaries() -> None:
 
 def test_trigger_threshold_uses_transformed_output_domain() -> None:
     for threshold in (0, 0xFFFF):
-        trigger = config_manager.TriggerConfig(
-            30000, 40000, 256, threshold, 16
-        )
+        trigger = config_manager.TriggerConfig(30000, 40000, 256, threshold, 16)
         assert (
             config_manager.TriggerConfig.from_bytes(
                 trigger.to_bytes(),
@@ -1446,15 +1528,9 @@ def test_trigger_threshold_uses_transformed_output_domain() -> None:
             == trigger
         )
 
-        current_wire = bytearray(
-            config_manager.ControllerProfile.default().to_bytes()
-        )
-        struct.pack_into(
-            "<HHHH", current_wire, 52, 30000, 40000, 256, threshold
-        )
-        current_profile = config_manager.ControllerProfile.from_bytes(
-            current_wire
-        )
+        current_wire = bytearray(config_manager.ControllerProfile.default().to_bytes())
+        struct.pack_into("<HHHH", current_wire, 52, 30000, 40000, 256, threshold)
+        current_profile = config_manager.ControllerProfile.from_bytes(current_wire)
         assert current_profile.left_trigger.digital_threshold == threshold
         assert current_profile.to_bytes() == current_wire
 
@@ -1473,18 +1549,12 @@ def test_trigger_threshold_uses_transformed_output_domain() -> None:
             config_manager.ConfigManagerError,
             match="lower_deadzone must be below upper_saturation",
         ):
-            config_manager.TriggerConfig(
-                lower_deadzone, upper_saturation, 256, 0, 16
-            )
+            config_manager.TriggerConfig(lower_deadzone, upper_saturation, 256, 0, 16)
 
 
 def test_default_timeout_covers_batched_profile_commit() -> None:
     args = config_manager.build_parser().parse_args(["profiles", "list"])
-    assert (
-        args.timeout
-        == config_manager.DEFAULT_OPERATION_TIMEOUT_SECONDS
-        == 15.0
-    )
+    assert args.timeout == config_manager.DEFAULT_OPERATION_TIMEOUT_SECONDS == 15.0
 
 
 def test_profile_list_select_read_and_chunked_commit() -> None:
@@ -1509,23 +1579,28 @@ def test_profile_list_select_read_and_chunked_commit() -> None:
     )
     assert status.status == config_manager.STATUS_OK
     assert status.stored_generation == 8
-    assert device.profile_chunk_sizes == [40, 40, 40, 40, 40, 40, 16]
+    assert max(device.profile_chunk_sizes) <= config_manager.MAXIMUM_CHUNK_SIZE
+    assert sum(device.profile_chunk_sizes) == config_manager.PROFILE_SIZE
     assert config_manager.OP_PROFILE_TRANSACTION_STATUS in device.requests
-    assert (
-        config_manager.read_profile(device, device.stable_identity, 2)
-        == profile
-    )
+    assert config_manager.read_profile(device, device.stable_identity, 2) == profile
 
 
 def test_profile_metadata_and_identify_round_trip() -> None:
     device = FakeDevice()
     identity = device.stable_identity
     alias_status = config_manager.set_profile_metadata(
-        device, identity, config_manager.PROFILE_NONE_BUTTON,
-        "Desk pad", 1.0,
+        device,
+        identity,
+        config_manager.PROFILE_NONE_BUTTON,
+        "Desk pad",
+        1.0,
     )
     name_status = config_manager.set_profile_metadata(
-        device, identity, 7, "Desktop", 1.0,
+        device,
+        identity,
+        7,
+        "Desktop",
+        1.0,
     )
     metadata = config_manager.read_profile_metadata(device, identity, 7)
     assert alias_status.status == config_manager.STATUS_OK
@@ -1616,7 +1691,6 @@ def test_profile_reset_and_activate_wait_for_correlated_transactions(
 
     reset = config_manager.reset_profile(device, identity, 2, 1.0)
 
-
     assert reset.transaction_id == device.profile_transaction_id == 1
     assert reset.status == config_manager.STATUS_OK
     assert reset.stored_generation == 8
@@ -1655,20 +1729,12 @@ def test_profile_cli_surfaces_late_storage_failure(
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     previous_active = device.active_profiles[device.stable_identity.to_bytes()]
 
-    assert (
-        config_manager.main(
-            ["profiles", "activate", "4", "--identity", "1"]
-        )
-        == 1
-    )
+    assert config_manager.main(["profiles", "activate", "4", "--identity", "1"]) == 1
 
     output = capsys.readouterr()
     assert output.out == ""
     assert "storage failure" in output.err
-    assert (
-        device.active_profiles[device.stable_identity.to_bytes()]
-        == previous_active
-    )
+    assert device.active_profiles[device.stable_identity.to_bytes()] == previous_active
     assert device.profile_status_responses == [
         (device.profile_transaction_id, config_manager.STATUS_PENDING),
         (device.profile_transaction_id, 8),
@@ -1721,6 +1787,7 @@ def test_profile_edit_cli_starts_local_web_editor(
             "open_browser": False,
         }
     ]
+
 
 def test_profile_cli_json_round_trip_activate_and_reset(
     monkeypatch: pytest.MonkeyPatch,
@@ -1780,22 +1847,12 @@ def test_profile_cli_json_round_trip_activate_and_reset(
     )
     _ = capsys.readouterr()
 
-    assert (
-        config_manager.main(
-            ["profiles", "activate", "8", "--identity", "1"]
-        )
-        == 0
-    )
+    assert config_manager.main(["profiles", "activate", "8", "--identity", "1"]) == 0
     assert device.active_profiles[device.stable_identity.to_bytes()] == 7
     _ = capsys.readouterr()
 
     before_reset_requests = len(device.requests)
-    assert (
-        config_manager.main(
-            ["profiles", "reset", "2", "--identity", "1"]
-        )
-        == 2
-    )
+    assert config_manager.main(["profiles", "reset", "2", "--identity", "1"]) == 2
     assert "requires --yes" in capsys.readouterr().err
     assert len(device.requests) == before_reset_requests
 
@@ -1839,9 +1896,7 @@ def test_malformed_profiles_are_rejected_before_usb(
 ) -> None:
     malformed_binary = bytearray(config_manager.ControllerProfile.default().to_bytes())
     malformed_binary[75] = 0xC0
-    with pytest.raises(
-        config_manager.ConfigManagerError, match="action flags"
-    ):
+    with pytest.raises(config_manager.ConfigManagerError, match="action flags"):
         config_manager.ControllerProfile.from_bytes(malformed_binary)
 
     profile_object = config_manager.ControllerProfile.default().to_json_object()
@@ -1873,9 +1928,7 @@ def test_malformed_profiles_are_rejected_before_usb(
 
     monkeypatch.setattr(config_manager, "_candidate_devices", candidates)
     for path in (missing_path, unknown_path, enum_path, range_path):
-        assert (
-            config_manager.main(["profiles", "import", "1", str(path)]) == 1
-        )
+        assert config_manager.main(["profiles", "import", "1", str(path)]) == 1
         assert "error:" in capsys.readouterr().err
     assert usb_lookups == 0
 
@@ -1904,9 +1957,7 @@ def test_profile_crc_status_failures_and_identity_bounds(
         )
 
     bounded_device = FakeDevice()
-    monkeypatch.setattr(
-        config_manager, "_candidate_devices", lambda: [bounded_device]
-    )
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [bounded_device])
     assert (
         config_manager.main(
             [
@@ -1970,16 +2021,9 @@ def test_config_cli_preserves_requested_mode(
         "<HB5x", 60, config_manager.REQUESTED_MODE_XINPUT
     )
     device.active_mode = config_manager.ACTIVE_MODE_XINPUT
-    monkeypatch.setattr(
-        config_manager, "_candidate_devices", lambda: (device,)
-    )
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
 
-    assert (
-        config_manager.main(
-            ["config", "set", "--pairing-window-seconds", "90"]
-        )
-        == 0
-    )
+    assert config_manager.main(["config", "set", "--pairing-window-seconds", "90"]) == 0
     assert struct.unpack("<HB5x", device.configuration) == (
         90,
         config_manager.REQUESTED_MODE_XINPUT,
@@ -1998,8 +2042,7 @@ def test_config_cli_preserves_requested_mode(
             "xinput",
             config_manager.REQUESTED_MODE_XINPUT,
             config_manager.ACTIVE_MODE_XINPUT,
-            config_manager.CAPABILITY_INPUT |
-            config_manager.CAPABILITY_RUMBLE,
+            config_manager.CAPABILITY_INPUT | config_manager.CAPABILITY_RUMBLE,
         ),
         (
             "dinput",
@@ -2026,14 +2069,10 @@ def test_mode_cli_changes_then_noops(
     previous = FakeDevice()
     reenumerated = FakeDevice()
     reenumerated.address = 8
-    reenumerated.configuration = struct.pack(
-        "<HB5x", 60, requested_mode
-    )
+    reenumerated.configuration = struct.pack("<HB5x", 60, requested_mode)
     reenumerated.active_mode = active_mode
     reenumerated.capabilities = capabilities
-    scans = iter(
-        ((previous,), (previous,), (), (reenumerated,))
-    )
+    scans = iter(((previous,), (previous,), (), (reenumerated,)))
     monkeypatch.setattr(
         config_manager,
         "_candidate_devices",
@@ -2045,9 +2084,7 @@ def test_mode_cli_changes_then_noops(
     assert capsys.readouterr().out == f"USB mode changed to {mode_name}.\n"
     assert previous.reboot_transaction_ids == [previous.transaction_id]
 
-    monkeypatch.setattr(
-        config_manager, "_candidate_devices", lambda: (reenumerated,)
-    )
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (reenumerated,))
     assert config_manager.main(["mode", mode_name]) == 0
     assert capsys.readouterr().out == f"USB mode is already {mode_name}.\n"
     assert reenumerated.out_requests == []
@@ -2058,9 +2095,7 @@ def test_bootsel_reboot_cli(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = FakeDevice()
-    monkeypatch.setattr(
-        config_manager, "_candidate_devices", lambda: (device,)
-    )
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
 
     assert config_manager.main(["reboot", "bootsel"]) == 0
     assert capsys.readouterr().out == "Rebooting into USB BOOTSEL mode.\n"
@@ -2106,9 +2141,7 @@ def test_find_requires_selector_for_multiple_picos(
     first = FakeDevice()
     second = FakeDevice()
     second.address = 8
-    monkeypatch.setattr(
-        config_manager, "_candidate_devices", lambda: [first, second]
-    )
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [first, second])
     with pytest.raises(
         config_manager.ConfigManagerError,
         match="multiple switch-pico devices",
@@ -2118,28 +2151,64 @@ def test_find_requires_selector_for_multiple_picos(
 
 
 def haptics_response(
-    state: int = 0, *, run_id: int = 0, slot: int = 0xFF,
-    last_error: int = 0, sent_packets: int = 0,
-    first_tone_due_us: int = 0, first_tone_sent_us: int = 0,
-    elapsed_us: int = 0, connection_generation: int = 9, mode: int = 0,
-    host_updates: int = 0, dropped_updates: int = 0,
+    state: int = 0,
+    *,
+    run_id: int = 0,
+    slot: int = 0xFF,
+    last_error: int = 0,
+    sent_packets: int = 0,
+    first_tone_due_us: int = 0,
+    first_tone_sent_us: int = 0,
+    elapsed_us: int = 0,
+    connection_generation: int = 9,
+    mode: int = 0,
+    host_updates: int = 0,
+    dropped_updates: int = 0,
+    packet_frames: int = 64,
+    last_packet_nonzero: bool = False,
 ) -> bytes:
     return make_response(
         config_manager.OP_HAPTICS_EXPERIMENT,
         struct.pack(
-            "<17I8B2I", run_id, connection_generation, 100, 105,
-            sent_packets, 2, 3, 109, 4,
-            123, 22000, 11001, 9876, first_tone_due_us, first_tone_sent_us,
-            0x76543210, elapsed_us, state, slot, last_error, 0, mode, 0, 0, 0,
-            host_updates, dropped_updates,
+            "<17I8B2I",
+            run_id,
+            connection_generation,
+            100,
+            105,
+            sent_packets,
+            2,
+            3,
+            109,
+            4,
+            123,
+            22000,
+            11001,
+            9876,
+            first_tone_due_us,
+            first_tone_sent_us,
+            0x76543210,
+            elapsed_us,
+            state,
+            slot,
+            last_error,
+            0,
+            mode,
+            packet_frames,
+            int(last_packet_nonzero),
+            0,
+            host_updates,
+            dropped_updates,
         ),
-        schema=3, generation=run_id,
+        schema=5,
+        generation=run_id,
     )
 
 
 class HapticsDevice(FakeDevice):
     def __init__(
-        self, responses: list[bytes | Exception], *,
+        self,
+        responses: list[bytes | Exception],
+        *,
         transport_response: bytes | Exception | None = None,
     ) -> None:
         super().__init__()
@@ -2147,8 +2216,13 @@ class HapticsDevice(FakeDevice):
         self.transport_response = transport_response
 
     def ctrl_transfer(
-        self, bm_request_type: int, request: int, value: int, index: int,
-        data_or_w_length: object, timeout: int,
+        self,
+        bm_request_type: int,
+        request: int,
+        value: int,
+        index: int,
+        data_or_w_length: object,
+        timeout: int,
     ) -> bytes | int:
         if request == config_manager.OP_HAPTICS_TRANSPORT_PROBE:
             assert bm_request_type == 0xC0
@@ -2180,7 +2254,13 @@ class HapticsDevice(FakeDevice):
         )
         payload = encoded[16:]
         assert (magic, version, operation, flags, reserved, size, schema) == (
-            b"SPMG", 1, 0x40, 0, 0, 2, 0,
+            b"SPMG",
+            1,
+            0x40,
+            0,
+            0,
+            2,
+            0,
         )
         assert crc == zlib.crc32(payload) & 0xFFFFFFFF
         self.out_requests.append((request, payload, encoded))
@@ -2200,14 +2280,22 @@ def haptics_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 def test_haptics_schema_timing_and_wraparound() -> None:
-    device = HapticsDevice([
-        haptics_response(
-            2, run_id=17, slot=2, sent_packets=101,
-            first_tone_due_us=0xFFFFFFF0, first_tone_sent_us=0x30,
-            elapsed_us=1100000, mode=1,
-            host_updates=0x89ABCDEF, dropped_updates=0x12345678,
-        ),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(
+                2,
+                run_id=17,
+                slot=2,
+                sent_packets=101,
+                first_tone_due_us=0xFFFFFFF0,
+                first_tone_sent_us=0x30,
+                elapsed_us=1100000,
+                mode=1,
+                host_updates=0x89ABCDEF,
+                dropped_updates=0x12345678,
+            ),
+        ]
+    )
     snapshot = config_manager.read_haptics_experiment(device)
     assert snapshot.state_name == "running"
     assert snapshot.run_id == 17 and snapshot.slot == 2
@@ -2241,15 +2329,15 @@ def test_haptics_schema_timing_and_wraparound() -> None:
         ("active_without_slot", "slot"),
         ("mode", "mode"),
         ("reserved71", "reserved"),
-        ("reserved73", "reserved"),
-        ("reserved74", "reserved"),
+        ("packet_size", "packet size"),
+        ("nonzero_flag", "nonzero flag"),
         ("reserved75", "reserved"),
         ("flags", "reserved"),
     ],
 )
 def test_haptics_rejects_malformed_diagnostics(mutation: str, message: str) -> None:
     payload = bytearray(haptics_response(2, slot=0)[20:])
-    schema, flags = 3, 0
+    schema, flags = 5, 0
     if mutation == "schema":
         schema = 2
         del payload[72:]
@@ -2269,19 +2357,27 @@ def test_haptics_rejects_malformed_diagnostics(mutation: str, message: str) -> N
         payload[69] = 0xFF
     elif mutation == "mode":
         payload[72] = 2
+    elif mutation == "packet_size":
+        payload[73] = 1
+    elif mutation == "nonzero_flag":
+        payload[74] = 2
     elif mutation.startswith("reserved"):
         payload[int(mutation.removeprefix("reserved"))] = 1
     else:
         flags = 1
     response = make_response(
-        0x40, bytes(payload), schema=schema, flags=flags,
+        0x40,
+        bytes(payload),
+        schema=schema,
+        flags=flags,
     )
     with pytest.raises(config_manager.ConfigManagerError, match=message):
         config_manager.read_haptics_experiment(HapticsDevice([response]))
 
 
 def test_haptics_disabled_firmware_is_readable_but_cannot_start(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = HapticsDevice([haptics_response(6)])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
@@ -2300,17 +2396,22 @@ def test_haptics_disabled_firmware_is_readable_but_cannot_start(
 
 
 def test_haptics_old_firmware_stall_is_actionable_without_hiding_disconnect(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    device = HapticsDevice([
-        config_manager.usb.core.USBError("Pipe error", error_code=-9, errno=32),
-    ])
+    device = HapticsDevice(
+        [
+            config_manager.usb.core.USBError("Pipe error", error_code=-9, errno=32),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "start"]) == 1
     assert "SWITCH_PICO_HAPTICS_EXPERIMENT=ON" in capsys.readouterr().err
     assert device.out_requests == []
     disconnected = config_manager.usb.core.USBError(
-        "No such device", error_code=-4, errno=19,
+        "No such device",
+        error_code=-4,
+        errno=19,
     )
     with pytest.raises(config_manager.usb.core.USBError) as raised:
         config_manager.read_haptics_experiment(HapticsDevice([disconnected]))
@@ -2319,14 +2420,19 @@ def test_haptics_old_firmware_stall_is_actionable_without_hiding_disconnect(
 
 @pytest.mark.parametrize(("action", "mode"), [("start", 0), ("gameplay", 1)])
 def test_haptics_arming_waits_for_firmware_not_usb_ack(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    haptics_clock: list[float], action: str, mode: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    haptics_clock: list[float],
+    action: str,
+    mode: int,
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(3, run_id=40, slot=0),
-        haptics_response(1, run_id=41, slot=0, mode=mode),
-        haptics_response(2, run_id=41, slot=0, sent_packets=1, mode=mode),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(3, run_id=40, slot=0),
+            haptics_response(1, run_id=41, slot=0, mode=mode),
+            haptics_response(2, run_id=41, slot=0, sent_packets=1, mode=mode),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", action, "--json"]) == 0
     captured = capsys.readouterr()
@@ -2341,8 +2447,10 @@ def test_haptics_arming_waits_for_firmware_not_usb_ack(
             "sample_rate_hz": 3000,
             "stereo_frames_per_packet": 64,
             "lookback_us": pytest.approx(21333.333333333),
-            "command_window_us": 8000,
-            "watchdog_us": 50000,
+            "switch_command_window_us": 8000,
+            "switch_watchdog_us": 50000,
+            "xinput_command_policy": "held_until_changed_or_stopped",
+            "xinput_carrier_hz": {"left_low": 160, "right_high": 320},
             "band_gains": {"low": 2.0, "high": 2.0},
             "response_exponent": 0.8,
         }
@@ -2353,27 +2461,46 @@ def test_haptics_arming_waits_for_firmware_not_usb_ack(
 
 
 def test_haptics_start_watch_captures_correlated_measurement_series(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     haptics_clock: list[float],
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(),
-        haptics_response(1, run_id=1, slot=3),
-        haptics_response(
-            2, run_id=1, slot=3, sent_packets=101,
-            first_tone_due_us=0xFFFFFFF0, first_tone_sent_us=0x30,
-            elapsed_us=1100000,
-        ),
-        haptics_response(3, run_id=1, slot=3, sent_packets=574, elapsed_us=6144000),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(),
+            haptics_response(1, run_id=1, slot=3),
+            haptics_response(
+                2,
+                run_id=1,
+                slot=3,
+                sent_packets=101,
+                first_tone_due_us=0xFFFFFFF0,
+                first_tone_sent_us=0x30,
+                elapsed_us=1100000,
+            ),
+            haptics_response(3, run_id=1, slot=3, sent_packets=574, elapsed_us=6144000),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main([
-        "haptics-experiment", "start", "--slot", "3", "--watch", "--json",
-    ]) == 0
+    assert (
+        config_manager.main(
+            [
+                "haptics-experiment",
+                "start",
+                "--slot",
+                "3",
+                "--watch",
+                "--json",
+            ]
+        )
+        == 0
+    )
     captured = capsys.readouterr()
     series = [json.loads(line) for line in captured.out.splitlines()]
     assert [row["state_name"] for row in series] == [
-        "pending", "running", "completed",
+        "pending",
+        "running",
+        "completed",
     ]
     assert [row["sent_packets"] for row in series] == [0, 101, 574]
     assert series[1]["first_tone_submission_delay_us"] == 64
@@ -2395,14 +2522,20 @@ def test_haptics_start_watch_captures_correlated_measurement_series(
     ],
 )
 def test_haptics_gameplay_reports_asynchronous_rejection(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    haptics_clock: list[float], state: int, error: int, description: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    haptics_clock: list[float],
+    state: int,
+    error: int,
+    description: str,
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(),
-        haptics_response(1, run_id=1, slot=0, mode=1),
-        haptics_response(state, run_id=1, slot=0, last_error=error, mode=1),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(),
+            haptics_response(1, run_id=1, slot=0, mode=1),
+            haptics_response(state, run_id=1, slot=0, last_error=error, mode=1),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "gameplay", "--json"]) == 1
     captured = capsys.readouterr()
@@ -2415,59 +2548,98 @@ def test_haptics_gameplay_reports_asynchronous_rejection(
 
 
 def test_haptics_status_watch_reports_connection_loss_after_running(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     haptics_clock: list[float],
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(2, run_id=7, slot=0, sent_packets=11),
-        haptics_response(5, run_id=7, slot=0, sent_packets=13, last_error=3),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(2, run_id=7, slot=0, sent_packets=11),
+            haptics_response(5, run_id=7, slot=0, sent_packets=13, last_error=3),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main([
-        "haptics-experiment", "status", "--watch", "--json",
-    ]) == 1
+    assert (
+        config_manager.main(
+            [
+                "haptics-experiment",
+                "status",
+                "--watch",
+                "--json",
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
     assert [json.loads(line)["state_name"] for line in captured.out.splitlines()] == [
-        "running", "disconnected",
+        "running",
+        "disconnected",
     ]
     assert "connection missing or lost" in captured.err
 
 
 def test_haptics_start_does_not_mistake_stale_completion_for_new_run(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     haptics_clock: list[float],
 ) -> None:
     device = HapticsDevice([haptics_response(3, run_id=8, slot=0)])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main([
-        "--timeout", "0.2", "haptics-experiment", "start",
-    ]) == 1
+    assert (
+        config_manager.main(
+            [
+                "--timeout",
+                "0.2",
+                "haptics-experiment",
+                "start",
+            ]
+        )
+        == 1
+    )
     assert "not confirmed before --timeout" in capsys.readouterr().err
     assert haptics_clock[0] == pytest.approx(0.2)
 
 
 def test_haptics_watch_is_bounded_and_rejects_run_replacement(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     haptics_clock: list[float],
 ) -> None:
     device = HapticsDevice([haptics_response(2, run_id=1, slot=0)])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main([
-        "--timeout", "0.2", "haptics-experiment", "status", "--watch",
-    ]) == 1
+    assert (
+        config_manager.main(
+            [
+                "--timeout",
+                "0.2",
+                "haptics-experiment",
+                "status",
+                "--watch",
+            ]
+        )
+        == 1
+    )
     assert "did not reach a terminal state" in capsys.readouterr().err
     device.haptics_responses = [
         haptics_response(2, run_id=1, slot=0),
         haptics_response(3, run_id=2, slot=0),
     ]
-    assert config_manager.main([
-        "haptics-experiment", "status", "--watch",
-    ]) == 1
+    assert (
+        config_manager.main(
+            [
+                "haptics-experiment",
+                "status",
+                "--watch",
+            ]
+        )
+        == 1
+    )
     assert "run changed" in capsys.readouterr().err
 
 
 def test_haptics_busy_start_and_wrong_slot_stop_do_not_mutate_active_run(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = HapticsDevice([haptics_response(2, run_id=1, slot=3, mode=1)])
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
@@ -2482,18 +2654,31 @@ def test_haptics_busy_start_and_wrong_slot_stop_do_not_mutate_active_run(
 
 @pytest.mark.parametrize("mode", [0, 1])
 def test_haptics_stop_waits_for_service_completion(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    haptics_clock: list[float], mode: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    haptics_clock: list[float],
+    mode: int,
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(2, run_id=1, slot=2, mode=mode),
-        haptics_response(2, run_id=1, slot=2, mode=mode),
-        haptics_response(4, run_id=1, slot=2, mode=mode),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(2, run_id=1, slot=2, mode=mode),
+            haptics_response(2, run_id=1, slot=2, mode=mode),
+            haptics_response(4, run_id=1, slot=2, mode=mode),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main([
-        "haptics-experiment", "stop", "--slot", "2", "--json",
-    ]) == 0
+    assert (
+        config_manager.main(
+            [
+                "haptics-experiment",
+                "stop",
+                "--slot",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
+    )
     captured = capsys.readouterr()
     row = json.loads(captured.out)
     assert row["state_name"] == "stopped"
@@ -2515,12 +2700,15 @@ def test_haptics_invalid_slot_is_rejected_before_discovery(
 
 
 def test_haptics_retry_after_unsupported_controller_is_not_disabled_firmware(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(6, run_id=7, slot=0, last_error=1),
-        haptics_response(2, run_id=8, slot=0),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(6, run_id=7, slot=0, last_error=1),
+            haptics_response(2, run_id=8, slot=0),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "start", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["run_id"] == 8
@@ -2528,12 +2716,15 @@ def test_haptics_retry_after_unsupported_controller_is_not_disabled_firmware(
 
 
 def test_haptics_start_correlates_rollover_and_rejects_superseded_run(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(3, run_id=0xFFFFFFFF, slot=0),
-        haptics_response(2, run_id=0, slot=0),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(3, run_id=0xFFFFFFFF, slot=0),
+            haptics_response(2, run_id=0, slot=0),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "start", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["run_id"] == 0
@@ -2547,42 +2738,101 @@ def test_haptics_start_correlates_rollover_and_rejects_superseded_run(
 
 @pytest.mark.parametrize("timeout", ["nan", "inf"])
 def test_haptics_timeout_must_be_bounded_before_discovery(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     timeout: str,
 ) -> None:
     def unexpected_discovery(*args: object) -> None:
         pytest.fail("unbounded timeout reached USB discovery")
 
     monkeypatch.setattr(config_manager, "find_pico", unexpected_discovery)
-    assert config_manager.main([
-        "--timeout", timeout, "haptics-experiment", "status", "--watch",
-    ]) == 2
+    assert (
+        config_manager.main(
+            [
+                "--timeout",
+                timeout,
+                "haptics-experiment",
+                "status",
+                "--watch",
+            ]
+        )
+        == 2
+    )
     assert "must be finite" in capsys.readouterr().err
 
 
 def transport_response(
-    *, run_id: int = 17, connection_generation: int = 9,
-    connection_handle: int = 0x1234, active: int = 0,
+    *,
+    run_id: int = 17,
+    connection_generation: int = 9,
+    connection_handle: int = 0x1234,
+    active: int = 0,
 ) -> bytes:
     return make_response(
         config_manager.OP_HAPTICS_TRANSPORT_PROBE,
         struct.pack(
-            "<32I", run_id, connection_generation, connection_handle,
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-            20, 21, 22, 23, 24, 0xFFFFFFF0, active, 27, 0xFFFFFFFF, 29, 30,
-            1021, 10,
+            "<38Ii5I",
+            run_id,
+            connection_generation,
+            connection_handle,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            0xFFFFFFF0,
+            active,
+            27,
+            0xFFFFFFFF,
+            29,
+            30,
+            1021,
+            10,
+            400000,
+            399998,
+            48000,
+            1300,
+            6,
+            1366,
+            -1250,
+            100,
+            20,
+            3,
+            0,
+            1,
         ),
-        schema=2, generation=run_id,
+        schema=3,
+        generation=run_id,
     )
 
 
 def test_haptics_profile_decodes_exact_wire_order_and_correlates_live_run(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(2, run_id=17, slot=0, sent_packets=10, mode=1),
-        haptics_response(2, run_id=17, slot=0, sent_packets=11, mode=1),
-    ], transport_response=transport_response(active=1))
+    device = HapticsDevice(
+        [
+            haptics_response(2, run_id=17, slot=0, sent_packets=10, mode=1),
+            haptics_response(2, run_id=17, slot=0, sent_packets=11, mode=1),
+        ],
+        transport_response=transport_response(active=1),
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "profile", "--json"]) == 0
     row = json.loads(capsys.readouterr().out)
@@ -2592,7 +2842,7 @@ def test_haptics_profile_decodes_exact_wire_order_and_correlates_live_run(
     transport = row["transport"]
     transport.pop("evidence_note")
     assert transport == {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": 17,
         "connection_generation": 9,
         "connection_handle": 0x1234,
@@ -2625,6 +2875,18 @@ def test_haptics_profile_decodes_exact_wire_order_and_correlates_live_run(
         "max_poll_gap_us": 30,
         "controller_acl_packet_bytes": 1021,
         "controller_acl_packet_count": 10,
+        "requested_sys_khz": 400000,
+        "measured_sys_khz": 399998,
+        "measured_usb_khz": 48000,
+        "core_voltage_mv": 1300,
+        "flash_clock_divider": 6,
+        "cyw43_pio_divider256": 1366,
+        "temperature_millicelsius": -1250,
+        "host_completed_writes": 100,
+        "acl_writes": 20,
+        "other_writes": 3,
+        "write_failures": 0,
+        "packet_read_optimized": 1,
     }
     assert transport["active"] is True
     assert device.out_requests == []
@@ -2645,10 +2907,11 @@ def test_haptics_profile_decodes_exact_wire_order_and_correlates_live_run(
     ],
 )
 def test_haptics_profile_rejects_malformed_transport(
-    mutation: str, message: str,
+    mutation: str,
+    message: str,
 ) -> None:
     payload = bytearray(transport_response()[20:])
-    schema, flags, generation, status = 2, 0, 17, config_manager.STATUS_OK
+    schema, flags, generation, status = 3, 0, 17, config_manager.STATUS_OK
     if mutation == "schema":
         schema = 1
     elif mutation == "short":
@@ -2666,20 +2929,26 @@ def test_haptics_profile_rejects_malformed_transport(
     elif mutation == "status":
         status = 7
     response = make_response(
-        0x41, bytes(payload), schema=schema, flags=flags,
-        generation=generation, status=status,
+        0x41,
+        bytes(payload),
+        schema=schema,
+        flags=flags,
+        generation=generation,
+        status=status,
     )
     if mutation == "crc":
         response = response[:-1] + bytes((response[-1] ^ 1,))
     device = HapticsDevice(
-        [haptics_response(3, run_id=17, slot=0)], transport_response=response,
+        [haptics_response(3, run_id=17, slot=0)],
+        transport_response=response,
     )
     with pytest.raises(config_manager.ConfigManagerError, match=message):
         config_manager.read_haptics_experiment_profile(device)
 
 
 def test_haptics_profile_accepts_retained_failed_run_with_invalid_handle(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = HapticsDevice(
         [haptics_response(5, run_id=17, slot=0, last_error=3, mode=1)],
@@ -2696,18 +2965,24 @@ def test_haptics_profile_accepts_retained_failed_run_with_invalid_handle(
 
 @pytest.mark.parametrize("unsupported", ["status", "stall"])
 def test_haptics_profile_unsupported_keeps_legacy_status_readable(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     unsupported: str,
 ) -> None:
     response: bytes | Exception = make_response(
-        0x41, status=config_manager.STATUS_UNSUPPORTED_SCHEMA, schema=1,
+        0x41,
+        status=config_manager.STATUS_UNSUPPORTED_SCHEMA,
+        schema=1,
     )
     if unsupported == "stall":
         response = config_manager.usb.core.USBError(
-            "Pipe error", error_code=-9, errno=32,
+            "Pipe error",
+            error_code=-9,
+            errno=32,
         )
     device = HapticsDevice(
-        [haptics_response(3, run_id=17, slot=0)], transport_response=response,
+        [haptics_response(3, run_id=17, slot=0)],
+        transport_response=response,
     )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "profile", "--json"]) == 1
@@ -2722,10 +2997,13 @@ def test_haptics_profile_unsupported_keeps_legacy_status_readable(
 
 def test_haptics_profile_does_not_hide_usb_disconnect_as_unsupported() -> None:
     disconnected = config_manager.usb.core.USBError(
-        "No such device", error_code=-4, errno=19,
+        "No such device",
+        error_code=-4,
+        errno=19,
     )
     device = HapticsDevice(
-        [haptics_response(3, run_id=17, slot=0)], transport_response=disconnected,
+        [haptics_response(3, run_id=17, slot=0)],
+        transport_response=disconnected,
     )
     with pytest.raises(config_manager.usb.core.USBError) as raised:
         config_manager.read_haptics_experiment_profile(device)
@@ -2733,33 +3011,51 @@ def test_haptics_profile_does_not_hide_usb_disconnect_as_unsupported() -> None:
 
 
 @pytest.mark.parametrize(
-    ("after_run", "after_generation", "probe_run", "probe_generation",
-     "after_slot", "after_mode"),
+    (
+        "after_run",
+        "after_generation",
+        "probe_run",
+        "probe_generation",
+        "after_slot",
+        "after_mode",
+    ),
     [
-        (17, 9, 16, 9, 0, 1),   # A stale probe cannot attach to the current run.
-        (18, 9, 17, 9, 0, 1),   # A new run starts after reading the probe.
-        (18, 9, 18, 9, 0, 1),   # A new run starts before reading the probe.
+        (17, 9, 16, 9, 0, 1),  # A stale probe cannot attach to the current run.
+        (18, 9, 17, 9, 0, 1),  # A new run starts after reading the probe.
+        (18, 9, 18, 9, 0, 1),  # A new run starts before reading the probe.
         (17, 10, 17, 9, 0, 1),  # A connection changes after reading the probe.
-        (17, 10, 17, 10, 0, 1), # A connection changes before reading the probe.
-        (17, 9, 17, 8, 0, 1),   # A matching run ID cannot mask stale connection data.
-        (17, 9, 17, 9, 1, 1),   # A different slot must not inherit the profile.
-        (17, 9, 17, 9, 0, 0),   # A fixture cannot impersonate gameplay.
+        (17, 10, 17, 10, 0, 1),  # A connection changes before reading the probe.
+        (17, 9, 17, 8, 0, 1),  # A matching run ID cannot mask stale connection data.
+        (17, 9, 17, 9, 1, 1),  # A different slot must not inherit the profile.
+        (17, 9, 17, 9, 0, 0),  # A fixture cannot impersonate gameplay.
     ],
 )
 def test_haptics_profile_never_publishes_cross_run_metrics(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    after_run: int, after_generation: int, probe_run: int, probe_generation: int,
-    after_slot: int, after_mode: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    after_run: int,
+    after_generation: int,
+    probe_run: int,
+    probe_generation: int,
+    after_slot: int,
+    after_mode: int,
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(2, run_id=17, slot=0, mode=1),
-        haptics_response(
-            2, run_id=after_run, slot=after_slot, connection_generation=after_generation,
-            mode=after_mode,
+    device = HapticsDevice(
+        [
+            haptics_response(2, run_id=17, slot=0, mode=1),
+            haptics_response(
+                2,
+                run_id=after_run,
+                slot=after_slot,
+                connection_generation=after_generation,
+                mode=after_mode,
+            ),
+        ],
+        transport_response=transport_response(
+            run_id=probe_run,
+            connection_generation=probe_generation,
         ),
-    ], transport_response=transport_response(
-        run_id=probe_run, connection_generation=probe_generation,
-    ))
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", "profile", "--json"]) == 1
     captured = capsys.readouterr()
@@ -2768,22 +3064,41 @@ def test_haptics_profile_never_publishes_cross_run_metrics(
 
 
 def test_haptics_gameplay_watch_timeout_leaves_stream_armed(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     haptics_clock: list[float],
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(3, run_id=8, slot=0),
-        haptics_response(1, run_id=9, slot=3, mode=1),
-        haptics_response(
-            2, run_id=9, slot=3, mode=1, sent_packets=2, host_updates=4,
-            dropped_updates=1,
-        ),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(3, run_id=8, slot=0),
+            haptics_response(1, run_id=9, slot=3, mode=1),
+            haptics_response(
+                2,
+                run_id=9,
+                slot=3,
+                mode=1,
+                sent_packets=2,
+                host_updates=4,
+                dropped_updates=1,
+            ),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main([
-        "--timeout", "0.2", "haptics-experiment", "gameplay", "--slot", "3",
-        "--watch", "--json",
-    ]) == 1
+    assert (
+        config_manager.main(
+            [
+                "--timeout",
+                "0.2",
+                "haptics-experiment",
+                "gameplay",
+                "--slot",
+                "3",
+                "--watch",
+                "--json",
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
     series = [json.loads(line) for line in captured.out.splitlines()]
     assert [row["state_name"] for row in series] == ["pending", "running", "running"]
@@ -2807,17 +3122,27 @@ def test_haptics_gameplay_watch_timeout_leaves_stream_armed(
     ],
 )
 def test_haptics_confirmation_never_attributes_another_run_slot_or_mode(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    action: str, response_run: int, response_slot: int, response_mode: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+    response_run: int,
+    response_slot: int,
+    response_mode: int,
 ) -> None:
     stopping = action == "stop"
-    device = HapticsDevice([
-        haptics_response(2 if stopping else 3, run_id=40, slot=0, mode=int(stopping)),
-        haptics_response(
-            4 if stopping else 2, run_id=response_run, slot=response_slot,
-            mode=response_mode,
-        ),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(
+                2 if stopping else 3, run_id=40, slot=0, mode=int(stopping)
+            ),
+            haptics_response(
+                4 if stopping else 2,
+                run_id=response_run,
+                slot=response_slot,
+                mode=response_mode,
+            ),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
     assert config_manager.main(["haptics-experiment", action, "--json"]) == 1
     captured = capsys.readouterr()
@@ -2826,18 +3151,110 @@ def test_haptics_confirmation_never_attributes_another_run_slot_or_mode(
 
 
 def test_haptics_gameplay_watch_rejects_fixture_with_same_run_and_slot(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     haptics_clock: list[float],
 ) -> None:
-    device = HapticsDevice([
-        haptics_response(2, run_id=7, slot=0, mode=1),
-        haptics_response(3, run_id=7, slot=0, mode=0),
-    ])
+    device = HapticsDevice(
+        [
+            haptics_response(2, run_id=7, slot=0, mode=1),
+            haptics_response(3, run_id=7, slot=0, mode=0),
+        ]
+    )
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [device])
-    assert config_manager.main([
-        "haptics-experiment", "status", "--watch", "--json",
-    ]) == 1
+    assert (
+        config_manager.main(
+            [
+                "haptics-experiment",
+                "status",
+                "--watch",
+                "--json",
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
     row = json.loads(captured.out)
     assert row["state_name"] == "running" and row["mode"] == 1
     assert "cannot attribute measurements" in captured.err
+
+
+def capture_envelope(
+    events: list[tuple[int, int]],
+    *,
+    first: int = 0,
+    total: int = 3,
+    generation: int = 9,
+    elapsed_us: int = 5000,
+) -> config_manager.Envelope:
+    payload = struct.pack(
+        "<IIIBBBBHHHHIB3x",
+        7,
+        generation,
+        elapsed_us,
+        0,
+        2,
+        1,
+        len(events),
+        total,
+        first,
+        512,
+        1024,
+        10000,
+        128,
+    ) + b"".join(
+        struct.pack("<IHhhhhHH2x", at_us, buttons, 0, 0, 0, 0, 0, 0)
+        for at_us, buttons in events
+    )
+    return config_manager.parse_response(
+        make_response(config_manager.OP_MACRO_CAPTURE, payload, schema=1, generation=7),
+        config_manager.OP_MACRO_CAPTURE,
+    )
+
+
+def test_capture_conversion_preserves_edges_without_rounding_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config_manager, "_control_out", lambda *args: None)
+    monkeypatch.setattr(
+        config_manager,
+        "_control_in",
+        lambda *args: capture_envelope([(0, 0), (1500, 1), (3500, 0)]),
+    )
+    page = config_manager.collect_macro_capture(FakeDevice(), 7)
+    steps = config_manager.capture_macro_steps(page)
+    assert [step.output_button_mask for step in steps] == [0, 1, 0]
+    assert [step.duration_ms for step in steps] == [2, 2, 1]
+
+
+def test_capture_collection_rejects_mixed_connection_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = iter(
+        [
+            capture_envelope(
+                [(index * 1000, 0) for index in range(32)], total=33, elapsed_us=40000
+            ),
+            capture_envelope(
+                [(32000, 1)], first=32, total=33, generation=10, elapsed_us=40000
+            ),
+        ]
+    )
+    monkeypatch.setattr(config_manager, "_control_out", lambda *args: None)
+    monkeypatch.setattr(config_manager, "_control_in", lambda *args: next(pages))
+    with pytest.raises(
+        config_manager.ConfigManagerError, match="changed while reading"
+    ):
+        config_manager.collect_macro_capture(FakeDevice(), 7)
+
+
+def test_haptics_reports_actual_short_packet_lookback() -> None:
+    envelope = config_manager.parse_response(
+        haptics_response(2, run_id=7, slot=0, mode=1, packet_frames=32),
+        config_manager.OP_HAPTICS_EXPERIMENT,
+    )
+    gameplay = config_manager.parse_haptics_experiment(envelope).to_json_object()[
+        "gameplay"
+    ]
+    assert gameplay["stereo_frames_per_packet"] == 32
+    assert gameplay["lookback_us"] == pytest.approx(10666.6666667)

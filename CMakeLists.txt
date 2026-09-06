@@ -26,12 +26,39 @@ endif()
 option(SWITCH_PICO_LOG "Enable UART debug logging" OFF)
 option(SWITCH_PICO_ADAPTER_FEASIBILITY
        "Build the automatic Switch/XInput feasibility prototype" OFF)
+if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
+    set(SWITCH_PICO_NATIVE_DEFAULT ON)
+    set(SWITCH_PICO_CLOCK_DEFAULT 300)
+else()
+    set(SWITCH_PICO_NATIVE_DEFAULT OFF)
+    set(SWITCH_PICO_CLOCK_DEFAULT 150)
+endif()
 option(SWITCH_PICO_HAPTICS_EXPERIMENT
-       "Enable the host-triggered DualSense PCM transport experiment" OFF)
+       "Enable native DualSense haptics and transport diagnostics" ${SWITCH_PICO_NATIVE_DEFAULT})
 option(SWITCH_PICO_HAPTICS_EXPERIMENT_RAM
-       "Execute the haptics experiment hot path from SRAM" ON)
+       "Execute the native haptics hot path from SRAM" ON)
 option(SWITCH_PICO_HD_RUMBLE
-       "Auto-arm native Switch HD rumble for a DualSense in slot zero" OFF)
+       "Auto-arm the first eligible DualSense native haptics stream" ${SWITCH_PICO_NATIVE_DEFAULT})
+set(SWITCH_PICO_SYS_CLOCK_MHZ "${SWITCH_PICO_CLOCK_DEFAULT}" CACHE STRING
+    "Pico 2 W CPU clock: 300 MHz default, 150 stock or 400 opt-in")
+set_property(CACHE SWITCH_PICO_SYS_CLOCK_MHZ PROPERTY STRINGS 150 300 400)
+if(NOT SWITCH_PICO_SYS_CLOCK_MHZ MATCHES "^(150|300|400)$")
+    message(FATAL_ERROR "SWITCH_PICO_SYS_CLOCK_MHZ must be 150, 300, or 400")
+endif()
+set(SWITCH_PICO_OVERCLOCK_MV "1300" CACHE STRING
+    "Experimental core voltage: 1300 mV, or explicit 1400 mV at 400 MHz")
+set_property(CACHE SWITCH_PICO_OVERCLOCK_MV PROPERTY STRINGS 1300 1400)
+if(NOT SWITCH_PICO_OVERCLOCK_MV MATCHES "^(1300|1400)$")
+    message(FATAL_ERROR "SWITCH_PICO_OVERCLOCK_MV must be 1300 or 1400")
+endif()
+if(SWITCH_PICO_OVERCLOCK_MV STREQUAL "1400"
+        AND NOT SWITCH_PICO_SYS_CLOCK_MHZ STREQUAL "400")
+    message(FATAL_ERROR "The 1400 mV experiment is restricted to 400 MHz")
+endif()
+option(SWITCH_PICO_CYW43_PACKET_READ
+       "Use packet-level CYW43 receive transactions" ${SWITCH_PICO_NATIVE_DEFAULT})
+option(SWITCH_PICO_HCI_CREDIT_BATCH
+       "Batch incoming HCI credit returns" ${SWITCH_PICO_NATIVE_DEFAULT})
 if(SWITCH_PICO_HD_RUMBLE)
     set(SWITCH_PICO_HAPTICS_EXPERIMENT ON)
 endif()
@@ -59,6 +86,29 @@ if(SWITCH_PICO_HAPTICS_EXPERIMENT
     message(FATAL_ERROR
             "SWITCH_PICO_HAPTICS_EXPERIMENT requires the BLUEPAD32 backend")
 endif()
+if(NOT SWITCH_PICO_SYS_CLOCK_MHZ STREQUAL "150"
+        AND NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
+    message(FATAL_ERROR "Experimental clocks require the Pico 2 W backend")
+endif()
+if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
+    # Boot stage 2 must see the divider too: establish safe flash timing
+    # before main raises clk_sys. Keep the CYW43 SPI bus at or below 37.5 MHz.
+    math(EXPR SWITCH_PICO_FLASH_CLKDIV "(${SWITCH_PICO_SYS_CLOCK_MHZ} + 74) / 75")
+    math(EXPR SWITCH_PICO_PIO_DIV256 "(${SWITCH_PICO_SYS_CLOCK_MHZ} * 256 + 74) / 75")
+    math(EXPR SWITCH_PICO_PIO_DIV_INT "${SWITCH_PICO_PIO_DIV256} / 256")
+    math(EXPR SWITCH_PICO_PIO_DIV_FRAC "${SWITCH_PICO_PIO_DIV256} % 256")
+    add_compile_definitions(
+        SWITCH_PICO_SYS_CLOCK_MHZ=${SWITCH_PICO_SYS_CLOCK_MHZ}
+        SWITCH_PICO_OVERCLOCK_MV=${SWITCH_PICO_OVERCLOCK_MV}
+        PICO_FLASH_SPI_CLKDIV=${SWITCH_PICO_FLASH_CLKDIV}
+        CYW43_PIO_CLOCK_DIV_INT=${SWITCH_PICO_PIO_DIV_INT}
+        CYW43_PIO_CLOCK_DIV_FRAC8=${SWITCH_PICO_PIO_DIV_FRAC})
+    if(NOT SWITCH_PICO_SYS_CLOCK_MHZ STREQUAL "150")
+        # RP2350 otherwise discards boot2 and uses the ROM's XIP setup,
+        # ignoring PICO_FLASH_SPI_CLKDIV despite reporting a boot2 name.
+        add_compile_definitions(PICO_EMBED_XIP_SETUP=1)
+    endif()
+endif()
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -67,6 +117,65 @@ project(switch-pico C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
+if(SWITCH_PICO_CYW43_PACKET_READ)
+    if(NOT SWITCH_PICO_HAPTICS_EXPERIMENT)
+        message(FATAL_ERROR "Packet-level CYW43 reads require the transport experiment")
+    endif()
+    find_package(Git REQUIRED)
+    set(CYW43_BUS_DIR ${PICO_SDK_PATH}/src/rp2_common/pico_cyw43_driver/cybt_shared_bus)
+    set(CYW43_LOCAL_DIR ${CMAKE_CURRENT_BINARY_DIR}/cyw43-packet-read)
+    set(CYW43_STATUS_PATCH ${CMAKE_CURRENT_LIST_DIR}/patches/cyw43-packet-read-status.patch)
+    file(MAKE_DIRECTORY ${CYW43_LOCAL_DIR})
+    configure_file(${CYW43_BUS_DIR}/cybt_shared_bus_driver.c
+                   ${CYW43_LOCAL_DIR}/cybt_shared_bus_driver.c COPYONLY)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CYW43_STATUS_PATCH})
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+                GIT_CEILING_DIRECTORIES=${CMAKE_CURRENT_BINARY_DIR}
+                ${GIT_EXECUTABLE} apply --no-index ${CYW43_STATUS_PATCH}
+        WORKING_DIRECTORY ${CYW43_LOCAL_DIR}
+        RESULT_VARIABLE CYW43_PATCH_RESULT ERROR_VARIABLE CYW43_PATCH_ERROR)
+    if(NOT CYW43_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Cannot prepare packet-read driver: ${CYW43_PATCH_ERROR}")
+    endif()
+    get_target_property(CYW43_BUS_SOURCES cybt_shared_bus INTERFACE_SOURCES)
+    list(FIND CYW43_BUS_SOURCES ${CYW43_BUS_DIR}/cybt_shared_bus_driver.c CYW43_DRIVER_INDEX)
+    if(CYW43_DRIVER_INDEX EQUAL -1)
+        message(FATAL_ERROR "SDK shared-bus source layout changed")
+    endif()
+    list(REMOVE_ITEM CYW43_BUS_SOURCES ${CYW43_BUS_DIR}/cybt_shared_bus_driver.c)
+    list(APPEND CYW43_BUS_SOURCES ${CYW43_LOCAL_DIR}/cybt_shared_bus_driver.c)
+    set_property(TARGET cybt_shared_bus PROPERTY INTERFACE_SOURCES ${CYW43_BUS_SOURCES})
+endif()
+if(SWITCH_PICO_HCI_CREDIT_BATCH)
+    if(NOT SWITCH_PICO_HAPTICS_EXPERIMENT)
+        message(FATAL_ERROR "HCI credit batching requires the transport experiment")
+    endif()
+    find_package(Git REQUIRED)
+    set(HCI_LOCAL_ROOT ${CMAKE_CURRENT_BINARY_DIR}/btstack-credit-batch)
+    set(HCI_LOCAL_SOURCE ${HCI_LOCAL_ROOT}/lib/btstack/src/hci.c)
+    set(HCI_BATCH_PATCH ${CMAKE_CURRENT_LIST_DIR}/patches/btstack-credit-batch.patch)
+    file(MAKE_DIRECTORY ${HCI_LOCAL_ROOT}/lib/btstack/src)
+    configure_file(${PICO_BTSTACK_PATH}/src/hci.c ${HCI_LOCAL_SOURCE} COPYONLY)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${HCI_BATCH_PATCH})
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+                GIT_CEILING_DIRECTORIES=${CMAKE_CURRENT_BINARY_DIR}
+                ${GIT_EXECUTABLE} apply --no-index ${HCI_BATCH_PATCH}
+        WORKING_DIRECTORY ${HCI_LOCAL_ROOT}
+        RESULT_VARIABLE HCI_PATCH_RESULT ERROR_VARIABLE HCI_PATCH_ERROR)
+    if(NOT HCI_PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Cannot prepare credit-batch HCI: ${HCI_PATCH_ERROR}")
+    endif()
+    get_target_property(HCI_SOURCES pico_btstack_base INTERFACE_SOURCES)
+    list(FIND HCI_SOURCES ${PICO_BTSTACK_PATH}/src/hci.c HCI_SOURCE_INDEX)
+    if(HCI_SOURCE_INDEX EQUAL -1)
+        message(FATAL_ERROR "SDK HCI source layout changed")
+    endif()
+    list(REMOVE_ITEM HCI_SOURCES ${PICO_BTSTACK_PATH}/src/hci.c)
+    list(APPEND HCI_SOURCES ${HCI_LOCAL_SOURCE})
+    set_property(TARGET pico_btstack_base PROPERTY INTERFACE_SOURCES ${HCI_SOURCES})
+endif()
 
 # Configure BLUEPAD32 input backend if selected
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
@@ -125,8 +234,10 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${SWITCH_PICO_SOURCE_DIR}/configuration/configuration_transaction.cpp
             ${SWITCH_PICO_SOURCE_DIR}/core/controller_identity.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/bluepad32_input_backend.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/input/controller_macro_capture.cpp
             ${SWITCH_PICO_SOURCE_DIR}/input/switch2_wake.cpp
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/bootsel_pairing_button.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/platform/pico/system_clock.cpp
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/pico_configuration_storage.cpp
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/pico_profile_storage.cpp
             ${SWITCH_PICO_SOURCE_DIR}/profile/controller_profile.cpp
@@ -156,9 +267,20 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             SWITCH_PICO_HID_INSTANCE_COUNT=4
             SWITCH_PICO_USB_OUTPUT_MODES=1
             PICO_FLASH_ASSUME_CORE1_SAFE=0
+            PICO_STACK_SIZE=4096
             PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT=$<IF:$<BOOL:${SWITCH_PICO_HAPTICS_EXPERIMENT}>,1,16>
             SWITCH2_WAKE_CONFIGURED=${SWITCH2_WAKE_CONFIGURED_VALUE}
     )
+    if(SWITCH_PICO_CYW43_PACKET_READ)
+        target_sources(switch-pico PRIVATE
+            ${SWITCH_PICO_SOURCE_DIR}/platform/pico/cyw43_packet_transport.c)
+        target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_CYW43_PACKET_READ=1)
+        target_link_options(switch-pico PRIVATE
+            "LINKER:--wrap=cyw43_btbus_read" "LINKER:--wrap=cyw43_btbus_init")
+    endif()
+    if(SWITCH_PICO_HCI_CREDIT_BATCH)
+        target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_HCI_CREDIT_BATCH=1)
+    endif()
     if(SWITCH_PICO_HAPTICS_EXPERIMENT)
         target_sources(switch-pico PRIVATE
                 ${SWITCH_PICO_SOURCE_DIR}/input/haptics_experiment.cpp
@@ -212,7 +334,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             pico_multicore
             pico_flash
     )
-    target_link_libraries(switch-pico hardware_watchdog)
+    target_link_libraries(switch-pico hardware_watchdog hardware_adc hardware_vreg hardware_powman)
 endif()
 
 if (SWITCH_PICO_LOG)

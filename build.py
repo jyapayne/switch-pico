@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build and flash the project with optional grip color overrides."""
+
 import argparse
 import os
 import random
@@ -22,18 +23,10 @@ FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico.elf"
 FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico.uf2"
 AIO_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-aio.elf"
 AIO_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-aio.uf2"
-FEASIBILITY_FIRMWARE_ELF_PATH = (
-    FIRMWARE_DIR / "switch-pico-adapter-feasibility.elf"
-)
-FEASIBILITY_FIRMWARE_UF2_PATH = (
-    FIRMWARE_DIR / "switch-pico-adapter-feasibility.uf2"
-)
-WAKE_CAPTURE_FIRMWARE_ELF_PATH = (
-    FIRMWARE_DIR / "switch-pico-wake-capture.elf"
-)
-WAKE_CAPTURE_FIRMWARE_UF2_PATH = (
-    FIRMWARE_DIR / "switch-pico-wake-capture.uf2"
-)
+FEASIBILITY_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-adapter-feasibility.elf"
+FEASIBILITY_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-adapter-feasibility.uf2"
+WAKE_CAPTURE_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-wake-capture.elf"
+WAKE_CAPTURE_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-wake-capture.uf2"
 
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
 UF2_PATH = Path(os.environ.get("UF2_PATH", BUILD_DIR / "switch-pico.uf2")).expanduser()
@@ -53,9 +46,7 @@ CMAKE_CACHE_PATHS = tuple(
         WAKE_CAPTURE_BUILD_DIR,
     )
 )
-TOOLCHAIN_COMPILER = (
-    "arm-none-eabi-gcc.exe" if os.name == "nt" else "arm-none-eabi-gcc"
-)
+TOOLCHAIN_COMPILER = "arm-none-eabi-gcc.exe" if os.name == "nt" else "arm-none-eabi-gcc"
 
 
 class BuildEnvironmentError(RuntimeError):
@@ -266,14 +257,13 @@ def configure_pico_environment(
         detected.append(("PICO_SDK_PATH", sdk_path, sdk_source))
     if explicit_toolchain is None and compiler_on_path is None:
         updates["PICO_TOOLCHAIN_PATH"] = str(toolchain_path)
-        detected.append(
-            ("PICO_TOOLCHAIN_PATH", toolchain_path, toolchain_source)
-        )
+        detected.append(("PICO_TOOLCHAIN_PATH", toolchain_path, toolchain_source))
 
     environ.update(updates)
     for variable, path, source in detected:
         print(f"Auto-detected {variable}={path} ({source})")
     return updates
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -313,13 +303,16 @@ def parse_args():
         parser.error("wake capture firmware does not use grip-color options")
     return args
 
+
 def random_hex_color():
     return "".join(f"{random.randrange(256):02X}" for _ in range(3))
+
 
 def validate_custom_color(value):
     if not re.fullmatch(r"[0-9A-Fa-f]{6}", value):
         raise ValueError("Color must be a 6-digit hex value like FF8800.")
     return value
+
 
 def update_grip_colors(rgb_hex):
     if not CONFIG_FILE.exists():
@@ -352,6 +345,7 @@ def update_grip_colors(rgb_hex):
         sys.stderr.write(f"Error writing {CONFIG_FILE}: {exc}\n")
         sys.exit(1)
 
+
 def run_cmd(command):
     try:
         subprocess.run(command, cwd=SCRIPT_DIR, check=True)
@@ -361,12 +355,15 @@ def run_cmd(command):
     except subprocess.CalledProcessError as exc:
         sys.exit(exc.returncode)
 
+
 def resolve_picotool():
     env_val = os.environ.get("PICOTOOL_PATH")
     if env_val:
         env_path = Path(env_val).expanduser()
         if not env_path.exists():
-            sys.stderr.write(f"Error: PICOTOOL_PATH set to {env_path}, but it does not exist.\n")
+            sys.stderr.write(
+                f"Error: PICOTOOL_PATH set to {env_path}, but it does not exist.\n"
+            )
             sys.exit(1)
         return env_path
 
@@ -374,8 +371,11 @@ def resolve_picotool():
     if found:
         return Path(found)
 
-    sys.stderr.write("Error: picotool not found. Put it on your PATH or set PICOTOOL_PATH.\n")
+    sys.stderr.write(
+        "Error: picotool not found. Put it on your PATH or set PICOTOOL_PATH.\n"
+    )
     sys.exit(1)
+
 
 def build(
     aio,
@@ -400,9 +400,19 @@ def build(
             "-DPICO_BOARD=pico",
             "-DSWITCH_PICO_INPUT_BACKEND=UART",
         ]
-    # Experimental images are built explicitly in their own CMake directory.
-    definitions.append("-DSWITCH_PICO_HAPTICS_EXPERIMENT=OFF")
-    definitions.append("-DSWITCH_PICO_HD_RUMBLE=OFF")
+    # AIO and XInput images use the qualified native transport by default.
+    # UART remains unchanged; explicit flags also prevent stale cache choices.
+    native = "ON" if aio or adapter_feasibility else "OFF"
+    definitions.extend(
+        [
+            f"-DSWITCH_PICO_HAPTICS_EXPERIMENT={native}",
+            f"-DSWITCH_PICO_HD_RUMBLE={native}",
+            f"-DSWITCH_PICO_SYS_CLOCK_MHZ={300 if native == 'ON' else 150}",
+            "-DSWITCH_PICO_OVERCLOCK_MV=1300",
+            f"-DSWITCH_PICO_CYW43_PACKET_READ={native}",
+            f"-DSWITCH_PICO_HCI_CREDIT_BATCH={native}",
+        ]
+    )
 
     run_cmd(
         [
@@ -416,12 +426,12 @@ def build(
     )
     run_cmd(["cmake", "--build", str(build_dir)])
 
-    missing_artifacts = [
-        path for path in (elf_path, uf2_path) if not path.is_file()
-    ]
+    missing_artifacts = [path for path in (elf_path, uf2_path) if not path.is_file()]
     if missing_artifacts:
         missing = ", ".join(str(path) for path in missing_artifacts)
-        sys.stderr.write(f"Error: Build did not produce required artifact(s): {missing}\n")
+        sys.stderr.write(
+            f"Error: Build did not produce required artifact(s): {missing}\n"
+        )
         sys.exit(1)
     FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(elf_path, firmware_elf_path)
@@ -447,14 +457,10 @@ def build_wake_capture():
         ]
     )
     run_cmd(["cmake", "--build", str(WAKE_CAPTURE_BUILD_DIR)])
-    missing_artifacts = [
-        path for path in (elf_path, uf2_path) if not path.is_file()
-    ]
+    missing_artifacts = [path for path in (elf_path, uf2_path) if not path.is_file()]
     if missing_artifacts:
         missing = ", ".join(str(path) for path in missing_artifacts)
-        sys.stderr.write(
-            f"Error: Wake capture build did not produce: {missing}\n"
-        )
+        sys.stderr.write(f"Error: Wake capture build did not produce: {missing}\n")
         sys.exit(1)
     FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(elf_path, WAKE_CAPTURE_FIRMWARE_ELF_PATH)
@@ -477,6 +483,7 @@ def flash(elf_path, allow_elf_override):
             sys.stderr.write(f"Error: Cannot find ELF at {elf_path}.\n")
         sys.exit(1)
     run_cmd([str(picotool), "load", str(elf_path), "-fx"])
+
 
 def main():
     args = parse_args()
@@ -537,6 +544,7 @@ def main():
         elf_path,
         allow_elf_override=not args.aio and not args.adapter_feasibility,
     )
+
 
 if __name__ == "__main__":
     main()

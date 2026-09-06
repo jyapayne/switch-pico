@@ -20,6 +20,7 @@ struct XInputContext {
     uint8_t endpoint_in = 0;
     uint8_t endpoint_out = 0;
     bool configured = false;
+    bool host_rumble_active = false;
 };
 
 XInputContext g_contexts[SWITCH_PICO_HID_INSTANCE_COUNT]{};
@@ -41,7 +42,18 @@ XInputContext *context_for_endpoint(uint8_t endpoint) {
     return nullptr;
 }
 
+void stop_context_rumble(XInputContext& context) {
+    if (!context.host_rumble_active) return;
+    context.host_rumble_active = false;
+    if (context.rumble_callback != nullptr) {
+        context.rumble_callback(static_cast<uint8_t>(&context - g_contexts),
+                                ControllerRumbleOutput{});
+    }
+}
+
 void reset_context(XInputContext &context) {
+    context.configured = false;
+    stop_context_rumble(context);
     const ControllerRumbleCallback callback = context.rumble_callback;
     context = {};
     context.rumble_callback = callback;
@@ -133,7 +145,7 @@ bool driver_control(uint8_t rhport, uint8_t stage,
 bool driver_transfer(uint8_t rhport, uint8_t endpoint, xfer_result_t result,
                      uint32_t transferred) {
     XInputContext *context = context_for_endpoint(endpoint);
-    if (context == nullptr || result != XFER_RESULT_SUCCESS) {
+    if (context == nullptr || !context->configured || result != XFER_RESULT_SUCCESS) {
         return false;
     }
     if (endpoint == context->endpoint_out) {
@@ -142,6 +154,8 @@ bool driver_transfer(uint8_t rhport, uint8_t endpoint, xfer_result_t result,
                                         &rumble) &&
             context->rumble_callback != nullptr) {
             const uint8_t instance = static_cast<uint8_t>(context - g_contexts);
+            context->host_rumble_active = rumble.low_frequency_magnitude != 0 ||
+                                           rumble.high_frequency_magnitude != 0;
             context->rumble_callback(instance, rumble);
         }
         memset(context->output_report, 0, sizeof(context->output_report));
@@ -203,6 +217,10 @@ bool xinput_task(uint8_t instance) {
 bool xinput_is_ready(uint8_t instance) {
     XInputContext *context = context_for(instance);
     return context != nullptr && context->configured && tud_ready();
+}
+
+void xinput_stop_rumble() {
+    for (XInputContext& context : g_contexts) stop_context_rumble(context);
 }
 
 usbd_class_driver_t const* xinput_class_driver() {

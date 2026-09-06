@@ -243,7 +243,7 @@ Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `
 The editor selects Switch Pro, DualSense, or Xbox artwork from the connected controller's USB VID/PID and places each remappable control directly over the matching physical button. Controller artwork is from [AL2009man/Gamepad-Asset-Pack](https://github.com/AL2009man/Gamepad-Asset-Pack) under its MIT license; the bundled license and source revision are recorded beside the assets.
 
 Profile names and controller aliases are stored as independently checksummed
-catalog metadata, so naming does not change the 256-byte profile format. The
+catalog metadata. Runtime profiles use schema 6 and 384-byte records; names remain separate. The
 editor can rename and copy profiles across controllers and slots, import or
 export JSON backups, and reset one section without discarding the rest of the
 draft. Its response-curve cards provide named presets, exact Q8.8 fine
@@ -259,9 +259,10 @@ rumble/light pulse only to the selected live controller.
 `diagnostics` reports Bluetooth initialization stage, real BTstack timer
 callbacks, controller report traffic, host/local rumble requests and
 dispatches, active/rumble-capable slot counts, and pending feedback. The AIO
-build bounds each CYW43 HCI drain to 16 packets so continuous multi-controller
-traffic returns to BTstack timers instead of starving rumble stop/refresh,
-configuration, pairing, and profile work.
+build services one CYW43 packet per poll and explicitly reschedules remaining
+input. Packet-level ring reads and bounded incoming-credit batching reduce
+bus work without disabling flow control. `haptics-experiment profile --json`
+adds transport timings, clock/voltage settings and packet-size diagnostics.
 
 ### Per-controller profiles
 
@@ -275,7 +276,14 @@ The profile editor lists **Cycle active profile**, **Toggle motion**, and **Run 
 - On connection and profile changes, RGB/player LEDs briefly show the active profile color/count, then return to the persistent USB slot color/player number.
 - Each controller identity and each of the four active USB slots remain isolated.
 
-Profile input processing is deterministic: physical buttons and analog triggers are mapped and tuned first, Turbo or Auto Burst gates configured buttons second, and active macro overrides apply last. Each profile has four independently triggered macros. A macro supports up to eight state steps, while all four share a fixed sixteen-step decoded pool and a 136-byte sparse wire stream. A wait-only step uses 3 bytes, a button-only step 5 bytes, and a full-precision all-field step 17 bytes; therefore the stream holds 16 typical button steps or exactly 8 all-field steps. Stick coordinates remain signed 16-bit values. Macro triggers can be multi-control chords, partial chords remain ordinary input, and each macro has its own cancel control.
+Profile hotkeys use physical controls, with trigger thresholds from the base profile. Reserved output-mode handling runs first, followed by direct profile shortcuts, profile cycling, and motion toggle. Shift consumes its modifier, macro bindings use unshifted controls, Turbo gates physical button sources, the selected button map and base analog transforms produce output, and explicit macro overrides apply last.
+
+- **Direct shortcuts:** assign one modifier and unique face/D-pad selectors to profiles 1–8. Chord controls are consumed; holding or changing a profile cannot retrigger the same press. Activation and feedback wait for the atomic commit. The existing one-second minimum commit interval still applies to rapid successive changes.
+- **Shift:** one alternate button-only map, enabled while held or toggled on a fresh modifier press. It does not layer analog tuning, Turbo settings, or macro definitions. Toggle state resets with connection, profile, mode, and configuration changes.
+- **Turbo/Burst:** shared settings with optional per-button overrides; 1–30 Hz, 1–99% duty, and 1–255 finite Burst pulses. Hold Turbo follows the button, Auto Burst toggles continuous repetition, and Burst runs its configured count after a press. Defaults remain 15 Hz/50%. Counts describe scheduled ON windows; narrow phases can be missed by host report sampling, so the editor warns instead of silently changing settings.
+- **Macros:** four independently triggered sequences, up to eight steps each, sharing sixteen decoded steps and a **136-byte sparse stream**. Wait/button/all-field steps cost 3/5/17 bytes. Playback supports Once, While held, Toggle, and bounded Repeat (1–255 cycles). Repeating zero-duration sequences are rejected; clock gaps skip elapsed cycles rather than replay a backlog.
+- **Authoring:** insert, duplicate, remove, drag-reorder, or move steps with keyboard controls. Duration and byte budgets update on every edit. The visual preview shows overridden versus passthrough fields and never injects controller output.
+- **Recording:** Record input captures timestamped firmware-side changes before profile mapping, not the editor's 75 ms snapshots. Choose channels and explicit analog quantization; the initial state consumes one entry and long holds split at ten seconds. The UI limits capture to the remaining 8/16/136 budget, visibly reports capacity/time/disconnect endings, and retains data for review. **Use recorded steps** changes only the unsaved macro; **Save to Pico** is still separate. Input-report and millisecond playback precision remain real limits.
 
 ### Per-controller motion toggle
 
@@ -315,7 +323,15 @@ Motion-producing Bluepad32 parsers normalize to 1024 units per degree/second and
 
 ### Rumble per controller
 
-Rumble effects are per-slot and independent. The Switch sends rumble commands to a specific USB interface, and the Pico routes each command to the Bluetooth controller in the matching slot. Each slot has a critical-section-protected latest-value mailbox tagged with its connection generation; a newer pending command replaces the older one, and disconnect invalidates commands from the prior controller.
+Commands remain bound to a USB slot and Bluetooth connection generation. Compatibility output uses a latest-value mailbox; native output keeps a bounded timestamped command history instead of collapsing substeps.
+
+The standard AIO and XInput builds now use **300 MHz at 1.3 V**, packet-level CYW43 reads, bounded HCI credit returns, and native DualSense haptics by default. The first eligible DualSense/DualSense Edge that becomes ready can occupy the one native stream, in any slot; later controllers do not steal it. Other rumble-capable controllers retain their tested parser-specific output. To change the selected native controller manually, stop the current run and use `haptics-experiment gameplay --slot N` (API slots are zero-based).
+
+In Switch mode, that stream preserves decoded left/right, low/high-band HD commands. In XInput mode, strong/low magnitude drives the left 160 Hz carrier and weak/high drives the right 320 Hz carrier; these commands stay active until changed or stopped. XInput does not supply Nintendo frequency/substep detail. USB reset, unmount, and suspend stop held host rumble. Auto-mode XInput additionally reboots to Switch probe after unmount, by the existing one-attachment policy; manual XInput is exempt.
+
+Qualified optimized gameplay uses **32 stereo frames at 3 kHz** per Bluetooth report (93.75 reports/s), with 10.667 ms causal lookback. Unoptimized builds and the deterministic fixture retain 64-frame packets. Native streaming continues silence while idle to avoid mode churn. This is not a measured physical actuator-onset bound; details and the accepted reference pattern are in [HAPTICS_EXPERIMENT.md](HAPTICS_EXPERIMENT.md).
+
+400 MHz is an explicit experiment: use `SWITCH_PICO_SYS_CLOCK_MHZ=400` and `SWITCH_PICO_OVERCLOCK_MV=1400`. This board did not boot at 400 MHz/1.3 V; 1.4 V booted and passed a short run but did not outperform 300 MHz in the comparison. USB stays at 48 MHz and flash/radio bus dividers remain bounded. UART builds are unchanged; a stock-clock AIO build is an explicit recovery/compatibility option, not the normal default.
 
 ### Hardware validation
 
@@ -347,7 +363,7 @@ Bluepad32 is Apache-2.0. BTstack use on Pico W/Pico 2 W is covered by Raspberry 
 
 ## Limitations
 - No NFC/amiibo/IR support.
-- Rumble is best-effort: the UART build depends on SDL3 haptics; the AIO build depends on the connected controller's Bluepad32 rumble implementation.
+- Rumble is controller-specific: UART uses SDL3 haptics; AIO uses the selected DualSense native PCM backend or the controller's existing Bluepad32 rumble implementation. Native Switch-family forwarding remains planned.
 - The UART firmware requires a host computer running the bridge. The Pico 2 W AIO firmware does not; it hosts controllers over Bluetooth, not USB.
 - In XInput output mode, Home/System is carried in the raw XUSB Guide bit `0x0400`, and Capture is carried in the de-facto Share/reserved bit `0x0800` used by modern open XUSB stacks. The standard Microsoft XInput headers define neither Guide nor Share for `XINPUT_GAMEPAD.wButtons`, so `XInputGetState` does not expose either button portably. Guide may be reserved or intercepted by the OS, while Share/Capture support depends on the installed driver or consumers such as GameInput and Steam; qualify the intended controller, driver, and application on real Windows hardware.
 
@@ -379,7 +395,7 @@ RUMBLE (force feedback)
 
 ### HD rumble translation
 
-Nintendo sends two stateful four-byte HD-rumble actuator words. Each word can carry full or relative high/low frequency and amplitude commands with up to three subsamples; amplitude uses a logarithmic curve. The Pico decodes both words once in `SwitchHapticsDecoder`, retains actuator state across packets, and reduces the result to conventional low/strong and high/weak motor magnitudes. SDL3 and Bluepad32 cannot reproduce the original linear-actuator frequencies or left/right spatial effects, but they receive the correct nonlinear band amplitudes.
+Nintendo sends two stateful four-byte HD-rumble actuator words with full/relative low/high-band commands and up to three substeps. `SwitchHapticsDecoder` retains this timeline as well as conventional strong/weak magnitudes. The selected DualSense's native PCM backend uses the timeline; ordinary controller-parser and UART/SDL paths use the magnitudes. Preserving frequency intent is not a claim of identical force response across actuators. Native forwarding for genuine Switch-family controllers is [planned separately](ADAPTER_PARITY_PLAN.md#native-switch-family-hd-rumble--planned), not enabled by the DualSense implementation.
 
 The UART return frame carries the decoded result rather than raw HD-rumble bytes:
 
@@ -712,33 +728,37 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 695,592 bytes | 4 MiB |
+| Executable flash image | 747,024 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Linked SRAM | 99,040 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 131,144 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 978,216 bytes (23.32%)
-of flash, leaving 3,216,088 bytes (3.07 MiB). Linked SRAM consumes 18.60%,
-leaving 433,440 bytes of link-time headroom.
+The executable plus persistent reservations consume 1,029,648 bytes of flash,
+leaving 3,164,656 bytes. Allocated SRAM sections leave 401,336 bytes of link-time
+headroom; this is not a runtime heap high-water measurement. Core 0 has a
+4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
+catalog migration/compaction rather than overflowing its 4 KiB scratch bank.
 
-Profiles use two 128 KiB append-only arenas. Each independently published
-record contains one identity/profile key, generation, schema, length, and CRC.
-The compact in-memory index is 1,556 bytes; only the fallback and active
-profile for each observed identity are decoded and published. Including the
-active cache, selected-profile buffer, transaction state, profile runtime
-contexts, and catalog index, the profile subsystem uses approximately 13 KiB
-of SRAM instead of retaining every profile in decoded form.
+Profiles use two 128 KiB append-only arenas and retain 248 physical record
+slots. Catalog 2 uses a 128-byte header plus a 384-byte profile in the same
+512-byte stride. The second page is programmed before the header-containing
+first page, and records are read back before publication. Profile names
+remain 256-byte metadata payloads and aliases remain 32 bytes. The compact
+index stores locations and generations; active/fallback profiles for observed
+identities and the selected profile are decoded, not the entire database.
 
 The catalog supports eight profiles for the global fallback and each of 16
 stable identities. Missing records resolve to defaults, so profiles 5–8 do
 not consume flash until changed. When an arena fills, the latest indexed
 records are compacted into its peer and the new superblock is published last.
-Interrupted or corrupt appends therefore leave the previous valid record
-available. On first boot after upgrading, the legacy four-profile banks are
-read from their old flash addresses and copied into the new catalog before
-the legacy region can be erased.
+Interrupted or corrupt appends leave the previous valid record available.
+Catalog 1 and retired four-profile banks migrate through the alternate arena;
+the old published data is retained until all copies and the new superblock
+verify. Schema 1–5 profiles retain their meaning when decoded as schema 6.
+Keep a profile export before downgrading: older firmware cannot read the new
+catalog/profile format.
 
 ## References
 - GP2040-CE (controller firmware ecosystem): https://github.com/OpenStickCommunity/GP2040-CE

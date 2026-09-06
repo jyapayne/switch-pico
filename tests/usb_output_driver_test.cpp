@@ -590,6 +590,13 @@ void test_xinput_boundary_dispatch() {
                        static_cast<uint8_t>(0x40 + instance),
                "XInput rumble crossed instance boundaries");
     }
+    driver->reset(0);
+    for (uint8_t instance = 0; instance < kInstanceCount; ++instance) {
+        expect(xinput_rumble_events[instance].count == 2 &&
+                   xinput_rumble_events[instance].output.low_frequency_magnitude == 0 &&
+                   xinput_rumble_events[instance].output.high_frequency_magnitude == 0,
+               "USB reset left the host's stateful rumble running");
+    }
 
     expect_usb_string(1, "Switch Pico",
                       "XInput manufacturer string changed");

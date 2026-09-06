@@ -12,5 +12,7 @@ void xinput_set_rumble_callback(uint8_t instance,
 void xinput_set_input(uint8_t instance, const ControllerState& state);
 bool xinput_task(uint8_t instance);
 bool xinput_is_ready(uint8_t instance);
+// Stop held host output on USB reset, unmount, or suspend.
+void xinput_stop_rumble();
 
 usbd_class_driver_t const* xinput_class_driver();

@@ -56,6 +56,7 @@ bool switch_selected() {
 
 void usb_output_driver_init(AdapterUsbMode mode) {
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
+    if (xinput_selected()) xinput_stop_rumble();
     g_mode = mode;
 #else
     (void)mode;
@@ -384,9 +385,19 @@ extern "C" void tud_mount_cb() {
 
 extern "C" void tud_umount_cb() {
     LOG_PRINTF("[USB] umount_cb\n");
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
+    if (xinput_selected()) xinput_stop_rumble();
+#endif
     if (switch_selected()) {
         switch_pro_unmount();
     }
+}
+
+extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
+    (void)remote_wakeup_en;
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
+    if (xinput_selected()) xinput_stop_rumble();
+#endif
 }
 
 extern "C" usbd_class_driver_t const* usbd_app_driver_get_cb(

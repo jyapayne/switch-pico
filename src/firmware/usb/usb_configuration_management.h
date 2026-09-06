@@ -29,10 +29,13 @@ constexpr size_t kProfileMetadataPayloadSize =
     (CONTROLLER_PROFILE_COUNT + 1) *
     (PROFILE_SERVICE_METADATA_MAX_BYTES + 1);
 constexpr uint16_t kProfileMetadataSchemaVersion = 1;
-constexpr uint16_t kHapticsExperimentSchemaVersion = 3;
+constexpr uint16_t kHapticsExperimentSchemaVersion = 5;
 constexpr size_t kHapticsExperimentPayloadSize = 84;
-constexpr uint16_t kHapticsTransportProbeSchemaVersion = 2;
-constexpr size_t kHapticsTransportProbePayloadSize = 128;
+constexpr uint16_t kHapticsTransportProbeSchemaVersion = 3;
+constexpr size_t kHapticsTransportProbePayloadSize = 176;
+constexpr uint16_t kMacroCaptureSchemaVersion = 1;
+constexpr size_t kMacroCaptureHeaderSize = 32;
+constexpr size_t kMacroCaptureEventSize = 20;
 constexpr size_t kMaximumResponseSize =
     kResponseHeaderSize + kProfileListPayloadSize;
 constexpr size_t kMaximumChunkSize =
@@ -70,6 +73,7 @@ enum class Operation : uint8_t {
     kProfileIdentify = 0x3c,
     kHapticsExperiment = 0x40,
     kHapticsTransportProbe = 0x41,
+    kMacroCapture = 0x42,
 };
 
 enum class Status : uint8_t {

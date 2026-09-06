@@ -6,6 +6,7 @@
 #include "core/controller_identity.h"
 #include "profile/controller_profile.h"
 #include "core/controller_state.h"
+#include "input/controller_macro_capture.h"
 #include "usb/switch/switch_haptics.h"
 
 constexpr uint8_t BLUEPAD32_INPUT_BACKEND_SLOT_COUNT = 4;
@@ -123,3 +124,25 @@ void bluepad32_input_backend_queue_profile_feedback(
     uint8_t slot, uint32_t connection_generation,
     uint8_t active_profile_number,
     ControllerProfileConfirmationPolicy policy);
+
+constexpr uint8_t BLUEPAD32_CAPTURE_PAGE_EVENTS = 32;
+struct Bluepad32CaptureSnapshot {
+    uint32_t run_id = 0;
+    uint32_t connection_generation = 0;
+    uint32_t elapsed_us = 0;
+    uint8_t slot = 0xff;
+    CaptureState state = CaptureState::kIdle;
+    CaptureOptions options{};
+    uint16_t total_events = 0;
+    uint16_t first_index = 0;
+    uint8_t event_count = 0;
+    CaptureEvent events[BLUEPAD32_CAPTURE_PAGE_EVENTS]{};
+};
+
+// Core 0 management operations; recording itself observes Core 1 input before
+// profile transforms. All recorder access uses the existing slot-state lock.
+bool bluepad32_input_backend_capture_start(
+    uint8_t slot, uint32_t connection_generation, const CaptureOptions& options);
+bool bluepad32_input_backend_capture_stop(uint32_t run_id);
+bool bluepad32_input_backend_capture_page(
+    uint32_t run_id, uint16_t first_index, Bluepad32CaptureSnapshot* output);

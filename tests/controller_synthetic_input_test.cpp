@@ -527,6 +527,217 @@ void test_four_contexts_are_isolated() {
             "cancelling one slot changed another slot's Auto Burst state");
 }
 
+void test_parameterized_turbo_and_finite_burst() {
+    ControllerProfile profile =
+        controller_profile_default(controller_identity_global(), 0);
+    profile.turbo_defaults = {10, 25, 3};
+    profile.turbo_modes[0] = ControllerProfileTurboMode::kBurst;
+    profile.turbo_modes[1] = ControllerProfileTurboMode::kTurbo;
+    profile.turbo_override_mask = 1u << 1;
+    profile.turbo_overrides[1] = {20, 80, 1};
+    profile.button_map[0] = 3;
+    profile.button_map[1] = 2;
+    ControllerSyntheticInputContext context{};
+    const ControllerState pressed = state_with_buttons(3);
+    auto output = controller_synthetic_input_apply(&context, pressed, profile, 0);
+    require(output.state.button_north && output.state.button_west,
+            "parameterized bindings did not start immediately");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 24);
+    require(output.state.button_north && output.state.button_west,
+            "duty window ended early");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 25);
+    require(!output.state.button_north && output.state.button_west,
+            "defaults or physical-source override selected the wrong duty");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 40);
+    require(!output.state.button_north && !output.state.button_west,
+            "override duty boundary remained ON");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 50);
+    require(!output.state.button_north && output.state.button_west,
+            "override period followed the default rate");
+    output = controller_synthetic_input_apply(
+        &context, controller_neutral_state(), profile, 100);
+    require(output.state.button_north && !output.state.button_west,
+            "finite Burst release cancelled its windows or hold Turbo latched");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 101);
+    require(output.state.button_north, "fresh Burst press did not restart");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 325);
+    require(output.state.button_north, "third Burst ON window ended early");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 326);
+    require(!output.state.button_north, "Burst did not stop at final ON end");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 401);
+    require(!output.state.button_north, "held completed Burst rearmed itself");
+
+    context = {};
+    profile.turbo_defaults.burst_count = 1;
+    constexpr uint32_t start = UINT32_MAX - 10u;
+    (void)controller_synthetic_input_apply(&context, pressed, profile, start);
+    output = controller_synthetic_input_apply(&context, pressed, profile, 13);
+    require(output.state.button_north, "one-window Burst ended early at wrap");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 14);
+    require(!output.state.button_north, "one-window Burst crossed its deadline");
+    context = {};
+    profile.turbo_defaults = {1, 99, 255};
+    (void)controller_synthetic_input_apply(&context, pressed, profile, 0);
+    output = controller_synthetic_input_apply(&context, pressed, profile, 254989);
+    require(output.state.button_north, "maximum Burst lost its final window");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 254990);
+    require(!output.state.button_north, "maximum Burst count overflowed");
+    context = {};
+    (void)controller_synthetic_input_apply(&context, pressed, profile, 0);
+    output = controller_synthetic_input_apply(
+        &context, pressed, profile, 4000000000u);
+    require(!output.state.button_north && output.state.button_west,
+            "long-gap catch-up replayed missed Burst pulses or overflowed Turbo");
+    context = {};
+    profile.turbo_modes[0] = ControllerProfileTurboMode::kTurbo;
+    profile.turbo_defaults = {30, 1, 1};
+    output = controller_synthetic_input_apply(&context, pressed, profile, 0);
+    require(output.state.button_north, "narrow Turbo duty did not start ON");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 1);
+    require(!output.state.button_north,
+            "narrow duty was silently clamped to the polling cadence");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 100);
+    require(output.state.button_north, "narrow duty lost its absolute cycle phase");
+    context = {};
+    profile.turbo_defaults = {30, 99, 1};
+    (void)controller_synthetic_input_apply(&context, pressed, profile, 0);
+    output = controller_synthetic_input_apply(&context, pressed, profile, 33);
+    require(!output.state.button_north, "99-percent duty included its OFF boundary");
+    output = controller_synthetic_input_apply(&context, pressed, profile, 34);
+    require(output.state.button_north, "fractional period accumulated polling drift");
+}
+
+void test_shift_maps_consumption_and_physical_bindings() {
+    ControllerProfile profile =
+        profile_with_macro(ControllerProfileLogicalButton::kSelect);
+    profile.shift.mode = ControllerProfileShiftMode::kHold;
+    profile.shift.modifier = CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    profile.shift.button_map[0] = 3;
+    profile.button_map[0] = CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL;
+    profile.sticks[0].invert_x = true;
+    profile.triggers[1].lower_deadzone = 1000;
+    profile.turbo_modes[0] = ControllerProfileTurboMode::kTurbo;
+    profile.turbo_defaults = {10, 20, 3};
+    ControllerState input = state_with_buttons(1);
+    input.left_trigger = UINT16_MAX;
+    input.right_trigger = 32768;
+    input.left_stick_x = 12345;
+    const auto base = controller_profile_transform(input, profile);
+    ControllerSyntheticInputContext context{};
+    auto output = controller_synthetic_input_apply(&context, input, profile, 0);
+    require(output.state.button_north && !output.state.button_south &&
+                output.state.left_trigger == 0 &&
+                output.state.right_trigger < UINT16_MAX &&
+                output.state.left_stick_x == base.state.left_stick_x,
+            "Shift did not consume analog modifier or replaced base analog tuning");
+    const uint16_t tuned_trigger = output.state.right_trigger;
+    output = controller_synthetic_input_apply(&context, input, profile, 20);
+    require(!output.state.button_north &&
+                output.state.right_trigger == tuned_trigger,
+            "Shift moved Turbo settings to the mapped output");
+    input.left_trigger = 0;
+    output = controller_synthetic_input_apply(&context, input, profile, 100);
+    require(!output.state.button_north &&
+                output.state.right_trigger == UINT16_MAX,
+            "releasing hold Shift did not restore base button-to-trigger mapping");
+
+    context = {};
+    profile.shift.mode = ControllerProfileShiftMode::kToggle;
+    profile.shift.modifier = button_index(ControllerProfileLogicalButton::kSelect);
+    profile.turbo_modes[0] = ControllerProfileTurboMode::kOff;
+    profile.macros[0].step_count = profile.macro_step_count = 1;
+    profile.macro_steps[0] = {kControllerProfileOverrideButtons, 100, 2};
+    input = state_with_buttons(1u | (1u << profile.shift.modifier));
+    output = controller_synthetic_input_apply(&context, input, profile, 0);
+    require(output.state.button_north && !output.state.button_select &&
+                !output.state.button_east,
+            "Shift modifier leaked into mapping or its competing macro");
+    output = controller_synthetic_input_apply(&context, input, profile, 1);
+    require(output.state.button_north, "held toggle Shift retriggered");
+    output = controller_synthetic_input_apply(
+        &context, state_with_buttons(1), profile, 2);
+    require(output.state.button_north, "toggle Shift did not latch after release");
+    output = controller_synthetic_input_apply(&context, input, profile, 3);
+    require(!output.state.button_north && output.state.right_trigger == UINT16_MAX,
+            "second Shift rising edge did not restore base mapping");
+    controller_synthetic_input_cancel(
+        &context, controller_profile_extract_control_mask(input, profile));
+    output = controller_synthetic_input_apply(&context, input, profile, 4);
+    require(!output.state.button_north, "cancel phantom-toggled a held modifier");
+    (void)controller_synthetic_input_apply(
+        &context, controller_neutral_state(), profile, 5);
+    output = controller_synthetic_input_apply(&context, input, profile, 6, 0, true);
+    require(!output.state.button_north, "winning hotkey did not suppress Shift");
+    output = controller_synthetic_input_apply(&context, input, profile, 7);
+    require(!output.state.button_north, "suppression release phantom-toggled Shift");
+}
+
+void test_macro_playback_modes_and_bounded_cycle_skips() {
+    ControllerProfile profile =
+        profile_with_macro(ControllerProfileLogicalButton::kSouth);
+    profile.macros[0].trigger_mask |= 1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    profile.macros[0].step_count = profile.macro_step_count = 3;
+    profile.macro_steps[0] = {kControllerProfileOverrideButtons, 10, 8};
+    profile.macro_steps[1] = {kControllerProfileOverrideButtons, 0, 2};
+    profile.macro_steps[2] = {kControllerProfileOverrideButtons, 20, 4};
+    ControllerState held = state_with_buttons(1);
+    held.left_trigger = UINT16_MAX;
+    ControllerSyntheticInputContext context{};
+    profile.macros[0].mode = ControllerProfileMacroMode::kWhileHeld;
+    auto output = controller_synthetic_input_apply(&context, held, profile, 0);
+    require(output.state.button_north && output.state.left_trigger == 0,
+            "while-held macro did not consume its entire physical trigger");
+    output = controller_synthetic_input_apply(&context, held, profile, 10);
+    require(output.state.button_west && !output.state.button_east,
+            "zero-duration interior step delayed the next timed state");
+    output = controller_synthetic_input_apply(&context, held, profile, 30);
+    require(output.state.button_north, "while-held macro did not repeat");
+    output = controller_synthetic_input_apply(
+        &context, state_with_buttons(1), profile, 31);
+    require(!output.state.button_north && !output.state.button_west,
+            "partial trigger release did not stop while-held playback");
+    output = controller_synthetic_input_apply(&context, held, profile, 32);
+    require(output.state.button_north, "completed trigger did not rearm playback");
+
+    context = {};
+    profile.macros[0].mode = ControllerProfileMacroMode::kRepeat;
+    profile.macros[0].repeat_count = 3;
+    (void)controller_synthetic_input_apply(&context, held, profile, 0);
+    output = controller_synthetic_input_apply(&context, held, profile, 89);
+    require(output.state.button_west, "repeat count omitted its last cycle");
+    output = controller_synthetic_input_apply(&context, held, profile, 90);
+    require(!output.state.button_west && !output.state.button_north,
+            "finite macro repeated past its exact cycle count");
+    output = controller_synthetic_input_apply(&context, held, profile, 120);
+    require(!output.state.button_west && !output.state.button_north,
+            "held finite macro phantom-restarted after completing");
+
+    context = {};
+    profile.macros[0].mode = ControllerProfileMacroMode::kToggle;
+    constexpr uint32_t start = UINT32_MAX - 5u;
+    (void)controller_synthetic_input_apply(&context, held, profile, start);
+    output = controller_synthetic_input_apply(
+        &context, controller_neutral_state(), profile, 4);
+    require(output.state.button_west, "toggle macro lost phase over clock wrap");
+    output = controller_synthetic_input_apply(
+        &context, controller_neutral_state(), profile, 3999999994u);
+    require(output.state.button_west,
+            "long-gap toggle macro overflowed or iterated missed cycles");
+    output = controller_synthetic_input_apply(
+        &context, held, profile, 3999999995u);
+    require(!output.state.button_north && !output.state.button_west &&
+                output.state.left_trigger == 0,
+            "matching rising trigger did not toggle active macro off");
+    (void)controller_synthetic_input_apply(
+        &context, controller_neutral_state(), profile, 3999999996u);
+    (void)controller_synthetic_input_apply(
+        &context, held, profile, 3999999997u);
+    output = controller_synthetic_input_apply(
+        &context, state_with_buttons(1u << 9), profile, 3999999998u);
+    require(controller_profile_extract_button_mask(output.state) == 0,
+            "configured cancel did not kill looping macro output");
+}
+
 }  // namespace
 
 int main() {
@@ -539,5 +750,8 @@ int main() {
     test_multiple_macro_bindings_share_step_pool();
     test_auto_burst_toggle_cancel_and_external_cancel();
     test_four_contexts_are_isolated();
+    test_parameterized_turbo_and_finite_burst();
+    test_shift_maps_consumption_and_physical_bindings();
+    test_macro_playback_modes_and_bounded_cycle_skips();
     return 0;
 }

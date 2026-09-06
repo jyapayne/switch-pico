@@ -364,6 +364,177 @@ void test_stall_and_overflow() {
            "overflow preserves complete per-side baseline and accumulated phase");
 }
 
+void test_stateful_rumble_hold_channels_and_stop() {
+    for (unsigned side = 0; side < 2; ++side) {
+        SwitchHdRumbleSynth synth;
+        synth.reset(0);
+        expect(synth.push_rumble(side == 0 ? 128 : 0, side == 1 ? 128 : 0, 0),
+               "single-motor persistent command is accepted");
+        const auto pcm = render(synth, 0, 1200);
+        expect_wave(pcm, side, [side](size_t n) {
+            constexpr uint16_t amplitude = (128u * 32768 + 127) / 255;
+            return wave((side == 0 ? 160.0 : 320.0) * n / 3000, amplitude);
+        }, "stateful motor keeps its isolated frequency and host gain beyond 50 ms");
+        expect_wave(pcm, 1 - side, [](size_t) { return 0; },
+                    "zero-scaled opposite motor and both unused bands stay silent");
+    }
+
+    SwitchHdRumbleSynth synth;
+    synth.reset(0);
+    synth.push_rumble(255, 255, 0);
+    synth.push_rumble(0, 0, 150001);  // Ceil to sample 451.
+    const auto pcm = render(synth, 0, 600);
+    for (unsigned side = 0; side < 2; ++side) {
+        expect_wave(pcm, side, [side](size_t n) {
+            return n < 451 ? wave((side == 0 ? 160.0 : 320.0) * n / 3000) : 0;
+        }, "explicit zero stops both held motors at its timestamp without gain lift");
+    }
+    expect_silent(render(synth, 3000, 150), "stopped persistent state cannot reappear after a gap");
+}
+
+void test_stateful_rumble_pre_epoch_and_late() {
+    SwitchHdRumbleSynth synth;
+    synth.reset(1000000);
+    expect(synth.push_rumble(128, 255, 1000),
+           "persistent command predating the epoch by more than 50 ms is accepted");
+    auto pcm = render(synth, 0, 300);
+    expect_wave(pcm, 0, [](size_t n) {
+        return wave(160.0 * n / 3000, (128u * 32768 + 127) / 255);
+    }, "pre-epoch held low motor starts at stream phase zero without expiry");
+    expect_wave(pcm, 1, [](size_t n) { return wave(320.0 * n / 3000); },
+                "pre-epoch held high motor retains its independent frequency");
+
+    expect(synth.push_rumble(255, 128, 2000), "late ordered persistent command is accepted");
+    pcm = render(synth, 300, 300);
+    expect_wave(pcm, 0, [](size_t n) { return wave(160.0 * (n + 300) / 3000); },
+                "late held command applies at the cursor without resetting host phase");
+    expect_wave(pcm, 1, [](size_t n) {
+        return wave(320.0 * (n + 300) / 3000, (128u * 32768 + 127) / 255);
+    }, "late held command changes amplitude without replaying elapsed history");
+    expect_silent(render(synth, 0, 150), "late persistent updates do not make consumed PCM replayable");
+
+    const uint64_t epoch = UINT64_MAX - 1000;
+    synth.reset(epoch);
+    synth.push_rumble(255, 0, epoch - 100000);
+    synth.push_rumble(0, 255, epoch + 3000);
+    pcm = render(synth, 0, 300);
+    expect_wave(pcm, 0, [](size_t n) { return n < 9 ? wave(160.0 * n / 3000) : 0; },
+                "held low motor stops chronologically across clock rollover");
+    expect_wave(pcm, 1, [](size_t n) { return n < 9 ? 0 : wave(320.0 * n / 3000); },
+                "held high motor starts across clock rollover without phase reset");
+}
+
+void test_stateful_rumble_hd_order_and_watchdogs() {
+    SwitchHdRumbleSynth synth;
+    synth.reset(0);
+    auto initial = one_side(0, state(32));
+    initial.actuators[1] = one_side(1, state(64, 0, 32, 32768)).actuators[1];
+    synth.push(initial, 0);
+    synth.push_rumble(255, 255, 5000);  // Sample 15.
+    expect(!synth.push(one_side(0, state(64, 0)), 4999),
+           "HD cannot overtake a newer stateful host command");
+    synth.push(one_side(0, state(96)), 20000);  // Sample 60; left expires at 210.
+    expect(!synth.push_rumble(0, 0, 19999),
+           "stateful command cannot overtake a newer HD command");
+    synth.push(SwitchHapticsFrame{}, 80000);
+    expect(synth.dropped_updates() == 2, "both host APIs share chronological rejection accounting");
+    auto pcm = render(synth, 0, 300);
+    expect_wave(pcm, 0, [](size_t n) {
+        const double cycles = n < 15 ? n * 80.0 / 3000 :
+            n < 60 ? (15 * 80.0 + (n - 15) * 160.0) / 3000 :
+                     (15 * 80.0 + 45 * 160.0 + (n - 60) * 320.0) / 3000;
+        return n < 210 ? wave(cycles) : 0;
+    }, "HD-stateful-HD transitions preserve phase and restore the updated side watchdog");
+    expect_wave(pcm, 1, [](size_t n) {
+        const double cycles = n < 15 ? n * 160.0 / 3000 :
+                                      (15 * 160.0 + (n - 15) * 320.0) / 3000;
+        return wave(cycles);
+    }, "zero-count HD sides leave the other motor persistent with continuous phase");
+
+    synth.reset(0);
+    synth.push_rumble(255, 255, 0);
+    synth.push(one_side(0, state(64, 0)), 0);
+    synth.push(one_side(1, state(64, 0, 64, 0)), 1000);
+    synth.push_rumble(64, 128, 1000);
+    pcm = render(synth, 0, 300);
+    expect_wave(pcm, 0, [](size_t n) {
+        return n < 3 ? 0 : wave(160.0 * n / 3000, (64u * 32768 + 127) / 255);
+    }, "same-timestamp HD supersedes persistent state in call order");
+    expect_wave(pcm, 1, [](size_t n) {
+        return wave(320.0 * n / 3000, n < 3 ? 32768 : (128u * 32768 + 127) / 255);
+    }, "same-timestamp persistent command supersedes HD and disables its watchdog");
+}
+
+void test_stateful_rumble_feedback_resume() {
+    SwitchHdRumbleSynth synth;
+    synth.reset(0);
+    synth.push_rumble(255, 0, 0);
+    synth.feedback(5001, 74999, 0, 255);  // Samples [16,240).
+    synth.push_rumble(128, 255, 20000);  // Update underneath the overlay.
+    auto pcm = render(synth, 0, 300);
+    expect_wave(pcm, 0, [](size_t n) {
+        if (n >= 16 && n < 240) return feedback_wave(320.0 * n / 3000);
+        return wave(160.0 * n / 3000, n < 16 ? 32768 : (128u * 32768 + 127) / 255);
+    }, "feedback expiry reveals the current persistent low motor and original host phase");
+    expect_wave(pcm, 1, [](size_t n) {
+        if (n < 16) return 0.0;
+        return n < 240 ? feedback_wave(320.0 * n / 3000) : wave(320.0 * n / 3000);
+    }, "feedback remains a both-side overlay and resumes the new persistent high motor");
+
+    synth.reset(0);
+    synth.push_rumble(255, 255, 0);
+    synth.feedback(10000, 70000, 255, 0);
+    synth.push_rumble(0, 0, 40000);
+    pcm = render(synth, 0, 300);
+    for (unsigned side = 0; side < 2; ++side) {
+        expect_wave(pcm, side, [side](size_t n) {
+            if (n < 30) return wave((side == 0 ? 160.0 : 320.0) * n / 3000);
+            return n < 240 ? feedback_wave(160.0 * n / 3000) : 0;
+        }, "host zero cannot cancel priority feedback or resurrect held state after its expiry");
+    }
+}
+
+void test_stateful_rumble_overflow_and_reset() {
+    SwitchHdRumbleSynth overflowing;
+    SwitchHdRumbleSynth reference;
+    overflowing.reset(0);
+    reference.reset(0);
+    overflowing.push_rumble(128, 255, 0);
+    reference.push_rumble(128, 255, 0);
+    render(reference, 0, 3);
+    for (unsigned n = 1; n <= 40; ++n) {
+        const auto frame = one_side(0, state(static_cast<uint8_t>(32 + n % 4 * 16)));
+        overflowing.push(frame, n * 1000);
+        reference.push(frame, n * 1000);
+        render(reference, n * 3, 3);
+    }
+    expect(overflowing.dropped_updates() > 0, "mixed host command overflow reports discarded history");
+    expect_silent(render(overflowing, 0, 30), "mixed command overflow preserves the discard watermark");
+    const auto pcm = render(overflowing, 123, 180);
+    expect(pcm == render(reference, 123, 180),
+           "evicted stateful command preserves per-side expiry mode and phase through HD updates");
+    expect_wave(pcm, 1, [](size_t n) { return wave(320.0 * (n + 123) / 3000); },
+                "overflow cannot discard the untouched persistent motor state");
+
+    overflowing.push_rumble(255, 255, 200000);
+    overflowing.feedback(200000, 1000000, 255, 255);
+    overflowing.reset(1000000);
+    expect_silent(render(overflowing, 0, 600),
+                  "reset clears live persistence and queued host and feedback commands");
+    overflowing.reset(1000000);
+    expect(overflowing.push_rumble(0, 0, 0) && overflowing.dropped_updates() == 0,
+           "reset clears shared ordering and accepts an old profile-zero state");
+    expect_silent(render(overflowing, 0, 300), "profile-zero state is silent even with persistent gain");
+    overflowing.reset(1000000);
+    overflowing.push_rumble(255, 255, 0);
+    const auto restarted = render(overflowing, 0, 300);
+    for (unsigned side = 0; side < 2; ++side) {
+        expect_wave(restarted, side, [side](size_t n) {
+            return wave((side == 0 ? 160.0 : 320.0) * n / 3000);
+        }, "reset restores zero source phases for both persistent motors");
+    }
+}
+
 void test_duplicate_order_and_invalid_frames() {
     SwitchHdRumbleSynth synth;
     synth.reset(0);
@@ -397,6 +568,11 @@ int main() {
     test_late_commands_and_clock_rollover();
     test_stall_and_overflow();
     test_duplicate_order_and_invalid_frames();
+    test_stateful_rumble_hold_channels_and_stop();
+    test_stateful_rumble_pre_epoch_and_late();
+    test_stateful_rumble_hd_order_and_watchdogs();
+    test_stateful_rumble_feedback_resume();
+    test_stateful_rumble_overflow_and_reset();
     if (failures) {
         std::cerr << failures << " synthesis scenarios failed\n";
         return 1;

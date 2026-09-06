@@ -85,6 +85,8 @@
 
       <nav class="section-nav" aria-label="Editor sections">
         <a href="#mapping">Mapping</a>
+        <a href="#shortcuts">Shortcuts</a>
+        <a href="#shift">Shift</a>
         <a href="#analog">Analog</a>
         <a href="#feedback">Feedback</a>
         <a href="#turbo">Turbo</a>
@@ -159,6 +161,26 @@
               </div>
             </aside>
           </div>
+        </section>
+
+        <section class="panel" id="shortcuts" aria-labelledby="shortcutsTitle">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Direct selection</p><h3 id="shortcutsTitle">Profile shortcuts</h3></div>
+            <div class="panel-heading-actions"><p>Hold a modifier and press one face or D-pad button to select a profile directly.</p><button class="section-reset" type="button" data-reset-section="shortcuts">Reset section</button></div>
+          </div>
+          <div class="modifier-controls" id="shortcutModifierFields"></div>
+          <div class="mapping-grid" id="shortcutFields"></div>
+          <p class="field-help">Each selector is unique. Shortcut chords take priority over cycling, motion toggle, Shift and macros. Release before selecting again.</p>
+        </section>
+
+        <section class="panel" id="shift" aria-labelledby="shiftTitle">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Alternate layer</p><h3 id="shiftTitle">Shift button mapping</h3></div>
+            <div class="panel-heading-actions"><p>Hold or toggle one modifier to use these alternate button outputs.</p><button class="section-reset" type="button" data-reset-section="shift">Reset section</button></div>
+          </div>
+          <div class="modifier-controls" id="shiftFields"></div>
+          <div class="mapping-grid" id="shiftMapFields"></div>
+          <p class="field-help">The modifier is consumed while Shift is enabled. Stick and trigger transforms stay on the base profile. Turbo settings and macro triggers remain tied to physical controls.</p>
         </section>
 
         <section class="panel" id="analog">
@@ -260,9 +282,11 @@
               <p class="eyebrow">04 · Repeat</p>
               <h3>Turbo behavior</h3>
             </div>
-            <div class="panel-heading-actions"><p>Off, hold-to-repeat, or press-once Auto Burst per button.</p><button class="section-reset" type="button" data-reset-section="turbo">Reset section</button></div>
+            <div class="panel-heading-actions"><p>Hold Turbo repeats while pressed; Auto Burst toggles continuous repetition; Burst plays a fixed pulse count per fresh press.</p><button class="section-reset" type="button" data-reset-section="turbo">Reset section</button></div>
           </div>
-          <div class="mapping-grid compact" id="turboFields"></div>
+          <div class="subpanel turbo-defaults" id="turboDefaultFields"></div>
+          <p class="timing-notice" id="turboTimingNotice" role="status" aria-live="polite"></p>
+          <div class="turbo-grid" id="turboFields"></div>
         </section>
 
         <section class="panel" id="macro">
@@ -275,32 +299,133 @@
           </div>
           <div class="builtin-actions" id="builtinActions"></div>
           <div class="macro-controls" id="macroControls"></div>
+          <section class="macro-capture" id="macroCapture" aria-labelledby="macroCaptureTitle" data-state="idle">
+            <div class="macro-preview-heading">
+              <div>
+                <p class="eyebrow">Live input · bounded firmware recorder</p>
+                <h4 id="macroCaptureTitle">Record into macro 1</h4>
+              </div>
+              <div class="macro-preview-actions">
+                <button class="button button-secondary" id="macroCaptureRecord" type="button" disabled>Record input</button>
+                <button class="button button-ghost" id="macroCaptureStop" type="button" disabled>Stop recording</button>
+              </div>
+            </div>
+            <p class="field-help">Records raw input before profile mapping, not controller output. Selected analog channels are explicitly quantized; this is not lossless arbitrary-rate capture. Firmware retains timestamped changes between UI polls, within its input-report precision and the budgets below.</p>
+            <fieldset id="macroCaptureOptions" class="capture-options">
+              <legend>Channels to override in every recorded step</legend>
+              <div class="check-grid">
+                <label class="checkbox-pill"><input type="checkbox" data-capture-channel="1" checked><span>Buttons</span></label>
+                <label class="checkbox-pill"><input type="checkbox" data-capture-channel="2"><span>Left stick</span></label>
+                <label class="checkbox-pill"><input type="checkbox" data-capture-channel="4"><span>Right stick</span></label>
+                <label class="checkbox-pill"><input type="checkbox" data-capture-channel="8"><span>Left trigger</span></label>
+                <label class="checkbox-pill"><input type="checkbox" data-capture-channel="16"><span>Right trigger</span></label>
+              </div>
+              <div class="capture-number-fields">
+                <div class="number-field"><label for="macroCaptureAxis">Stick quantization · raw units</label><input class="number-input" id="macroCaptureAxis" form="macroCaptureSettings" type="number" min="1" max="32767" step="1" value="512" required></div>
+                <div class="number-field"><label for="macroCaptureTrigger">Trigger quantization · raw units</label><input class="number-input" id="macroCaptureTrigger" form="macroCaptureSettings" type="number" min="1" max="65535" step="1" value="1024" required></div>
+                <div class="number-field"><label for="macroCaptureDuration">Time limit · ms</label><input class="number-input" id="macroCaptureDuration" form="macroCaptureSettings" type="number" min="1" max="80000" step="1" value="10000" required></div>
+              </div>
+            </fieldset>
+            <p class="field-help" id="macroCaptureBudget"></p>
+            <div class="macro-preview-timing">
+              <strong id="macroCaptureState" role="status" aria-live="polite">Ready</strong>
+              <output id="macroCaptureElapsed">0 ms</output>
+            </div>
+            <progress id="macroCaptureProgress" max="1" value="0" aria-label="Recording event capacity"></progress>
+            <p class="capture-notice" id="macroCaptureNotice" role="status" aria-live="polite"></p>
+            <ol id="macroCaptureEvents" class="capture-events" aria-label="Retained recorded states"></ol>
+            <div class="macro-preview-actions">
+              <button class="button button-secondary" id="macroCaptureUse" type="button" disabled>Use recorded steps</button>
+              <button class="button button-ghost" id="macroCaptureDiscard" type="button" disabled>Discard recording</button>
+              <button class="button button-ghost" id="macroCaptureRecover" type="button" hidden>Read retained recording</button>
+            </div>
+            <p class="field-help">Use replaces only this macro’s steps in the unsaved draft. Trigger, cancel and playback settings stay unchanged. Nothing is written to flash until you choose Save to Pico. Stop is requested on hiding or leaving this page; recordings never resume automatically.</p>
+          </section>
+          <section class="macro-preview" id="macroPreview" aria-labelledby="macroPreviewTitle" data-state="stopped">
+            <div class="macro-preview-heading">
+              <div>
+                <p class="eyebrow">Visual only · never sent to the controller</p>
+                <h4 id="macroPreviewTitle">Macro 1 draft preview</h4>
+              </div>
+              <div class="macro-preview-actions">
+                <button class="button button-secondary" id="macroPreviewPlay" type="button">Play preview</button>
+                <button class="button button-ghost" id="macroPreviewStop" type="button" disabled>Stop</button>
+                <button class="button button-ghost" id="macroPreviewRestart" type="button">Restart</button>
+              </div>
+            </div>
+            <p class="field-help">Highlighted fields override input for this step. Passthrough fields keep controller input; their values are not simulated. Zero-duration steps take no preview time.</p>
+            <p class="field-help" id="macroPreviewModeHelp"></p>
+            <div class="macro-preview-timing">
+              <span id="macroPreviewStatus" role="status" aria-live="polite">Ready</span>
+              <output id="macroPreviewTime">0 / 0 ms</output>
+            </div>
+            <progress id="macroPreviewProgress" max="1" value="0" aria-label="Draft preview elapsed time"></progress>
+            <div class="macro-preview-buttons" data-preview-field="buttons" data-mode="passthrough">
+              <div class="playtest-card-heading"><strong>Buttons</strong><span data-preview-mode>Passthrough</span></div>
+              <div class="check-grid" id="macroPreviewButtons"></div>
+            </div>
+            <div class="playtest-grid">
+              <article class="playtest-card" data-preview-field="left_stick" data-mode="passthrough">
+                <div class="playtest-card-heading"><strong>Left stick</strong><span data-preview-mode>Passthrough</span></div>
+                <div class="stick-scope">
+                  <span class="stick-axis stick-axis-x"></span><span class="stick-axis stick-axis-y"></span>
+                  <i class="stick-dot stick-dot-output"></i>
+                </div>
+                <output data-preview-value>Controller input</output>
+              </article>
+              <article class="playtest-card" data-preview-field="right_stick" data-mode="passthrough">
+                <div class="playtest-card-heading"><strong>Right stick</strong><span data-preview-mode>Passthrough</span></div>
+                <div class="stick-scope">
+                  <span class="stick-axis stick-axis-x"></span><span class="stick-axis stick-axis-y"></span>
+                  <i class="stick-dot stick-dot-output"></i>
+                </div>
+                <output data-preview-value>Controller input</output>
+              </article>
+              <article class="playtest-card macro-preview-triggers">
+                <div data-preview-field="left_trigger" data-mode="passthrough">
+                  <div class="playtest-card-heading"><strong>Left trigger</strong><span data-preview-mode>Passthrough</span></div>
+                  <progress max="65535" value="0" aria-label="Preview left trigger"></progress>
+                  <output data-preview-value>Controller input</output>
+                </div>
+                <div data-preview-field="right_trigger" data-mode="passthrough">
+                  <div class="playtest-card-heading"><strong>Right trigger</strong><span data-preview-mode>Passthrough</span></div>
+                  <progress max="65535" value="0" aria-label="Preview right trigger"></progress>
+                  <output data-preview-value>Controller input</output>
+                </div>
+              </article>
+            </div>
+          </section>
           <div class="macro-steps-heading">
             <div>
               <p class="eyebrow">Sequence</p>
               <h4 id="macroStepsTitle">Macro 1 steps</h4>
+              <p class="field-help" id="macroDuration"></p>
             </div>
             <span class="macro-step-action">
               <button class="button button-secondary" id="addMacroStepButton" type="button">Add state step</button>
             </span>
           </div>
-          <div class="macro-steps" id="macroSteps"></div>
+          <p class="field-help" id="macroReorderHelp">Insert adds a 100 ms button step before the current step (5 bytes). Drag a step handle, use Move up / Move down, or press Alt + Arrow Up / Down on its handle to reorder.</p>
+          <p class="macro-notice" id="macroNotice" role="status" aria-live="polite"></p>
+          <div class="macro-steps" id="macroSteps" role="list" aria-label="Selected macro steps" aria-describedby="macroReorderHelp"></div>
         </section>
       </form>
     </section>
   </main>
+  <form id="macroCaptureSettings" hidden></form>
 
   <dialog class="copy-dialog" id="copyDialog">
     <form method="dialog">
       <p class="eyebrow">Duplicate profile</p>
       <h3>Choose a destination</h3>
+      <p class="field-help">Copy this current draft, including unsaved settings, to the destination. This replaces its stored profile and name; the source draft is unchanged.</p>
       <label class="field-label" for="copyIdentity">Controller</label>
       <select class="select" id="copyIdentity"></select>
       <label class="field-label" for="copySlot">Profile slot</label>
       <select class="select" id="copySlot"></select>
       <div class="dialog-actions">
         <button class="button button-ghost" value="cancel">Cancel</button>
-        <button class="button button-primary" id="confirmCopyButton" value="default">Copy profile</button>
+        <button class="button button-primary" id="confirmCopyButton" value="default">Copy draft to Pico</button>
       </div>
     </form>
   </dialog>

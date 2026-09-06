@@ -41,6 +41,8 @@ struct HapticsExperimentDiagnostics {
     uint8_t mode = 0;
     uint32_t host_updates = 0;
     uint32_t dropped_updates = 0;
+    uint8_t packet_frames = 64;
+    bool last_packet_nonzero = false;
 };
 
 // Core 0 before launching BTstack; request/snapshot are cross-core safe.
@@ -51,6 +53,10 @@ void haptics_experiment_snapshot(HapticsExperimentDiagnostics* output);
 bool haptics_experiment_submit(uint8_t slot, uint32_t generation,
                                uint64_t received_us,
                                const SwitchHapticsFrame& frame);
+// Stateful, already profile-scaled XInput strengths, including explicit zero.
+bool haptics_experiment_submit_rumble(uint8_t slot, uint32_t generation,
+                                      uint64_t received_us,
+                                      uint8_t low, uint8_t high);
 
 // Core 1 / BTstack only. Poll consumes management requests, not PCM cadence.
 void haptics_experiment_attach(uint8_t slot, uint32_t generation,
@@ -61,6 +67,5 @@ bool haptics_experiment_owns(const uni_hid_device_t* device);
 bool haptics_experiment_gameplay_owns(const uni_hid_device_t* device);
 bool haptics_experiment_feedback(uni_hid_device_t* device,
                                  uint8_t low, uint8_t high, uint16_t duration_ms);
-void haptics_experiment_suspend_gameplay();
 bool haptics_experiment_on_can_send_now(uni_hid_device_t* device,
                                        uint16_t cid);

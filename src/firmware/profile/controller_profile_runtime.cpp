@@ -8,6 +8,7 @@ namespace {
 
 struct ControllerProfileRuntimeContext {
     bool active = false;
+    bool connection_seen = false;
     uint32_t connection_generation = 0;
     ControllerIdentity identity{};
     uint32_t database_generation = 0;
@@ -18,13 +19,13 @@ struct ControllerProfileRuntimeContext {
     bool runtime_generations_initialized = false;
     AdapterUsbMode output_mode = AdapterUsbMode::kSwitchProbe;
     uint32_t configuration_reset_generation = 0;
-    bool switching_chord_held = false;
-    bool switching_chord_armed = true;
-    bool motion_toggle_chord_held = false;
-    bool switching_activation_requested = false;
-    uint32_t held_switching_chord = 0;
-    uint8_t switching_target_profile_index = 0;
-    uint32_t switching_transaction_id = 0;
+    uint32_t previous_hotkey_control_mask = 0;
+    uint32_t held_hotkey_chord = 0;
+    uint32_t held_hotkey_release_mask = 0;
+    uint32_t held_shortcut_selectors = 0;
+    bool activation_requested = true;
+    uint8_t target_profile_index = 0;
+    uint32_t activation_transaction_id = 0;
     bool profile_change_pending = false;
     ControllerProfileRuntimeProfileChangeEvent pending_profile_change{};
     bool initial_profile_indication_resolved = false;
@@ -63,6 +64,20 @@ uint32_t effective_motion_toggle_chord(
                : profile.motion_toggle_chord;
 }
 
+bool chord_held(uint32_t controls, uint32_t chord) {
+    return chord != 0 && (controls & chord) == chord;
+}
+
+uint32_t shortcut_selector_mask(const ControllerProfile& profile) {
+    uint32_t mask = 0;
+    for (const uint8_t selector : profile.shortcuts.selectors) {
+        if (selector < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT) {
+            mask |= 1u << selector;
+        }
+    }
+    return mask;
+}
+
 void initialize_defaults() {
     if (g_initialized) {
         return;
@@ -85,7 +100,7 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
                      const ControllerIdentity& identity,
                      uint32_t connection_generation,
                      uint32_t observed_database_generation,
-                     const ControllerState& current_input) {
+                     const Bluepad32SlotSnapshot& input_snapshot) {
     ProfileServiceActiveProfileSnapshot snapshot{};
     profile_service_active_profile_snapshot(identity, &snapshot);
 
@@ -99,14 +114,15 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
         context->active_profile_index;
     const bool previous_profile_valid =
         context->profile_snapshot_valid;
+    const bool had_connection = context->connection_seen;
     if (!same_connection) {
         context->runtime_generations_initialized = false;
-        context->switching_chord_held = false;
-        context->switching_chord_armed = true;
-        context->switching_activation_requested = false;
-        context->held_switching_chord = 0;
-        context->switching_target_profile_index = 0;
-        context->switching_transaction_id = 0;
+        context->previous_hotkey_control_mask = 0;
+        context->held_hotkey_chord = 0;
+        context->held_hotkey_release_mask = 0;
+        context->held_shortcut_selectors = 0;
+        context->activation_requested = true;
+        context->activation_transaction_id = 0;
         context->profile_change_pending = false;
         context->pending_profile_change = {};
         context->initial_profile_indication_resolved = false;
@@ -115,6 +131,7 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
     }
 
     context->active = true;
+    context->connection_seen = true;
     context->connection_generation = connection_generation;
     context->identity = identity;
     context->database_generation = snapshot.valid
@@ -125,13 +142,17 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
     context->profile = snapshot.valid ? snapshot.profile : g_default_profile;
     const uint32_t current_input_control_mask =
         controller_profile_extract_control_mask(
-            current_input, context->profile);
+            input_snapshot.state, context->profile);
     controller_synthetic_input_cancel(
         &context->synthetic, current_input_control_mask);
-    const uint32_t motion_chord =
-        effective_motion_toggle_chord(context->profile);
-    context->motion_toggle_chord_held =
-        (current_input_control_mask & motion_chord) == motion_chord;
+    const uint32_t hotkey_control_mask =
+        (current_input_control_mask & ~0xffffu) |
+        input_snapshot.pre_hotkey_button_mask;
+    // Refreshes must not turn a held input into a fresh command. The first
+    // connection retains the existing ability to start a held cycle chord.
+    context->previous_hotkey_control_mask =
+        had_connection ? hotkey_control_mask :
+        hotkey_control_mask & effective_motion_toggle_chord(context->profile);
     if (!context->initial_profile_indication_resolved && snapshot.valid) {
         context->initial_profile_indication_resolved = true;
         const uint8_t policy = static_cast<uint8_t>(
@@ -147,13 +168,8 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
             context->initial_profile_indication_pending = true;
         }
     }
-    if (context->switching_chord_held &&
-        !context->switching_activation_requested) {
-        context->switching_target_profile_index =
-            static_cast<uint8_t>(
-                (context->active_profile_index + 1u) %
-                CONTROLLER_PROFILE_COUNT);
-    }
+    // A pending target and its consuming chord belong to the observation that
+    // started them, not to the newly loaded profile's bindings.
     if (same_identity && previous_profile_valid && snapshot.valid &&
         previous_profile_index != context->active_profile_index) {
         context->pending_profile_change = {
@@ -176,6 +192,7 @@ ControllerProfileRuntimeContext* update_context(
     if (!snapshot.active) {
         if (context.active) {
             clear_context(&context);
+            context.connection_seen = true;
         }
         return nullptr;
     }
@@ -188,72 +205,105 @@ ControllerProfileRuntimeContext* update_context(
         context.database_generation != database_generation) {
         refresh_profile(
             &context, snapshot.identity, snapshot.connection_generation,
-            database_generation, snapshot.state);
+            database_generation, snapshot);
     }
     return &context;
 }
-void process_profile_switching(
-    ControllerProfileRuntimeContext* context,
-    const ControllerIdentity& identity,
-    uint32_t switching_input_control_mask,
-    ControllerState* consumed_input) {
-    if (context == nullptr || consumed_input == nullptr) {
+void request_activation(ControllerProfileRuntimeContext* context,
+                        const ControllerIdentity& identity) {
+    if (context->activation_requested) {
         return;
     }
-
-    if (context->switching_chord_held) {
-        if ((switching_input_control_mask &
-             context->held_switching_chord) ==
-            context->held_switching_chord) {
-            controller_profile_remove_control_mask(
-                context->held_switching_chord, consumed_input);
-            if (!context->switching_activation_requested) {
-                const ConfigurationTransactionStatus status =
-                    profile_service_activate_internal(
-                        context->switching_transaction_id, identity,
-                        context->switching_target_profile_index);
-                if (status != ConfigurationTransactionStatus::kBusy) {
-                    context->switching_activation_requested = true;
-                }
-            }
-            return;
-        }
-        context->switching_chord_held = false;
-        context->switching_activation_requested = false;
-        context->held_switching_chord = 0;
-        context->switching_transaction_id = 0;
-    }
-
-    const uint32_t chord =
-        effective_switching_chord(context->profile);
-    const bool chord_fully_held =
-        (switching_input_control_mask & chord) == chord;
-    if (!chord_fully_held) {
-        context->switching_chord_armed = true;
+    if (context->target_profile_index == context->active_profile_index) {
+        context->activation_requested = true;
         return;
     }
-    if (!context->switching_chord_armed) {
-        return;
-    }
-
-    context->switching_chord_armed = false;
-    context->switching_chord_held = true;
-    context->held_switching_chord = chord;
-    context->switching_target_profile_index =
-        static_cast<uint8_t>(
-            (context->active_profile_index + 1u) %
-            CONTROLLER_PROFILE_COUNT);
-    context->switching_transaction_id =
-        next_activation_transaction_id();
-    controller_profile_remove_control_mask(
-        context->held_switching_chord, consumed_input);
     const ConfigurationTransactionStatus status =
         profile_service_activate_internal(
-            context->switching_transaction_id, identity,
-            context->switching_target_profile_index);
+            context->activation_transaction_id, identity,
+            context->target_profile_index);
     if (status != ConfigurationTransactionStatus::kBusy) {
-        context->switching_activation_requested = true;
+        context->activation_requested = true;
     }
+}
+
+uint32_t process_hotkeys(ControllerProfileRuntimeContext* context,
+                         uint8_t slot, uint32_t controls) {
+    const ControllerProfile& profile = context->profile;
+    const uint32_t selectors = shortcut_selector_mask(profile);
+    const uint32_t modifier =
+        profile.shortcuts.modifier < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT
+            ? 1u << profile.shortcuts.modifier : 0;
+    const uint32_t pressed_selectors = controls & selectors;
+    const bool direct = (controls & modifier) != 0 && pressed_selectors != 0;
+    const uint32_t cycle_chord = effective_switching_chord(profile);
+    const uint32_t motion_chord = effective_motion_toggle_chord(profile);
+    const bool cycle = chord_held(controls, cycle_chord);
+    const bool motion = chord_held(controls, motion_chord);
+    uint32_t consumed = (direct ? modifier | pressed_selectors : 0) |
+                        (cycle ? cycle_chord : 0) |
+                        (motion ? motion_chord : 0);
+
+    if (context->held_hotkey_chord != 0) {
+        consumed |= context->held_hotkey_chord |
+                    (controls & context->held_shortcut_selectors);
+        const bool released = context->held_shortcut_selectors != 0
+            ? (controls & context->held_hotkey_release_mask) == 0 ||
+              !chord_held(controls, context->held_hotkey_chord &
+                                       ~context->held_shortcut_selectors)
+            : !chord_held(controls, context->held_hotkey_chord);
+        if (released) {
+            context->held_hotkey_chord = 0;
+            context->held_hotkey_release_mask = 0;
+            context->held_shortcut_selectors = 0;
+            context->activation_requested = true;
+            context->activation_transaction_id = 0;
+        } else if (chord_held(controls, context->held_hotkey_chord)) {
+            request_activation(context, context->identity);
+        } else {
+            // An ambiguous direct chord remains rejected until its modifier
+            // or all of its original selectors are released.
+            context->activation_requested = true;
+        }
+        if (!released) return consumed;
+    }
+    if (!direct && !cycle && !motion) {
+        return consumed;
+    }
+
+    const uint32_t chord = direct ? modifier | pressed_selectors :
+                           cycle ? cycle_chord : motion_chord;
+    context->held_hotkey_chord = chord;
+    context->held_hotkey_release_mask = direct ? pressed_selectors : chord;
+    context->held_shortcut_selectors = direct ? selectors : 0;
+    context->activation_requested = true;
+    if (chord_held(context->previous_hotkey_control_mask, chord)) {
+        return consumed;
+    }
+    if (direct) {
+        if ((pressed_selectors & (pressed_selectors - 1u)) != 0) {
+            return consumed;
+        }
+        for (uint8_t index = 0; index < CONTROLLER_PROFILE_COUNT; ++index) {
+            const uint8_t selector = profile.shortcuts.selectors[index];
+            if (selector < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT &&
+                (pressed_selectors & (1u << selector)) != 0) {
+                context->target_profile_index = index;
+                break;
+            }
+        }
+    } else if (cycle) {
+        context->target_profile_index = static_cast<uint8_t>(
+            (context->active_profile_index + 1u) % CONTROLLER_PROFILE_COUNT);
+    } else {
+        bluepad32_input_backend_toggle_motion(
+            slot, context->connection_generation);
+        return consumed;
+    }
+    context->activation_requested = false;
+    context->activation_transaction_id = next_activation_transaction_id();
+    request_activation(context, context->identity);
+    return consumed;
 }
 
 }  // namespace
@@ -276,50 +326,32 @@ ControllerProfileTransformResult controller_profile_runtime_transform(
     if (context == nullptr) {
         return g_neutral_output;
     }
-    ControllerState consumed_input = snapshot.state;
+    const uint32_t reset_generation =
+        configuration_service_reset_generation();
     const uint32_t state_control_mask =
         controller_profile_extract_control_mask(
             snapshot.state, context->profile);
     const uint32_t input_control_mask =
         (state_control_mask & ~0xffffu) |
         snapshot.pre_hotkey_button_mask;
-    const uint32_t motion_toggle_chord =
-        effective_motion_toggle_chord(context->profile);
-    const bool motion_toggle_chord_held =
-        (input_control_mask & motion_toggle_chord) ==
-        motion_toggle_chord;
-    if (motion_toggle_chord_held) {
-        if (!context->motion_toggle_chord_held) {
-            bluepad32_input_backend_toggle_motion(
-                slot, snapshot.connection_generation);
-        }
-        controller_profile_remove_control_mask(
-            motion_toggle_chord, &consumed_input);
-    }
-    context->motion_toggle_chord_held =
-        motion_toggle_chord_held;
-    process_profile_switching(
-        context, snapshot.identity, input_control_mask,
-        &consumed_input);
-
-    const uint32_t reset_generation =
-        configuration_service_reset_generation();
-    if (!context->runtime_generations_initialized) {
-        context->runtime_generations_initialized = true;
-        context->output_mode = output_mode;
-        context->configuration_reset_generation = reset_generation;
-    } else if (context->output_mode != output_mode ||
-               context->configuration_reset_generation !=
-                   reset_generation) {
+    if (context->runtime_generations_initialized &&
+        (context->output_mode != output_mode ||
+         context->configuration_reset_generation != reset_generation)) {
         controller_synthetic_input_cancel(
-            &context->synthetic,
-            controller_profile_extract_control_mask(
-                consumed_input, context->profile));
-        context->output_mode = output_mode;
-        context->configuration_reset_generation = reset_generation;
+            &context->synthetic, state_control_mask);
+        context->previous_hotkey_control_mask = input_control_mask;
+        context->activation_requested = true;
+        context->activation_transaction_id = 0;
     }
+    context->runtime_generations_initialized = true;
+    context->output_mode = output_mode;
+    context->configuration_reset_generation = reset_generation;
+    const uint32_t consumed_controls =
+        process_hotkeys(context, slot, input_control_mask);
+    context->previous_hotkey_control_mask = input_control_mask;
     return controller_synthetic_input_apply(
-        &context->synthetic, consumed_input, context->profile, now_ms);
+        &context->synthetic, snapshot.state, context->profile, now_ms,
+        consumed_controls, consumed_controls != 0);
 }
 
 bool controller_profile_runtime_take_initial_profile_indication(

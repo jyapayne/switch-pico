@@ -15,6 +15,9 @@
 namespace UsbConfigurationManagement {
 namespace {
 
+uint32_t g_capture_read_run = 0;
+uint16_t g_capture_read_index = 0;
+
 uint16_t read_u16(const uint8_t* input) {
     return static_cast<uint16_t>(input[0]) |
            static_cast<uint16_t>(input[1] << 8);
@@ -78,6 +81,10 @@ Status profile_service_status(const ProfileServiceMetadata& metadata) {
 
 bool valid_out_size(Operation operation, size_t size) {
     switch (operation) {
+        case Operation::kMacroCapture:
+            return size == kRequestHeaderSize + 5 ||
+                   size == kRequestHeaderSize + 7 ||
+                   size == kRequestHeaderSize + 16;
         case Operation::kModeSet:
             return size == kRequestHeaderSize + 5;
         case Operation::kReboot:
@@ -231,10 +238,55 @@ size_t encode_haptics_experiment(uint8_t* output, size_t output_size) {
     payload[72] = diagnostics.mode;
     write_u32(&payload[76], diagnostics.host_updates);
     write_u32(&payload[80], diagnostics.dropped_updates);
+    payload[73] = diagnostics.packet_frames;
+    payload[74] = diagnostics.last_packet_nonzero ? 1 : 0;
     return encode_response(
         Operation::kHapticsExperiment, Status::kOk, 0,
         kHapticsExperimentSchemaVersion, diagnostics.run_id,
         payload, sizeof(payload), output, output_size);
+}
+
+size_t encode_macro_capture(uint8_t* output, size_t output_size) {
+    Bluepad32CaptureSnapshot capture{};
+    if (!bluepad32_input_backend_capture_page(
+            g_capture_read_run, g_capture_read_index, &capture)) {
+        return encode_response(Operation::kMacroCapture, Status::kMalformed, 0,
+                               kMacroCaptureSchemaVersion, 0,
+                               nullptr, 0, output, output_size);
+    }
+    uint8_t payload[kMacroCaptureHeaderSize +
+                    BLUEPAD32_CAPTURE_PAGE_EVENTS * kMacroCaptureEventSize]{};
+    write_u32(payload, capture.run_id);
+    write_u32(payload + 4, capture.connection_generation);
+    write_u32(payload + 8, capture.elapsed_us);
+    payload[12] = capture.slot;
+    payload[13] = static_cast<uint8_t>(capture.state);
+    payload[14] = capture.options.channels;
+    payload[15] = capture.event_count;
+    write_u16(payload + 16, capture.total_events);
+    write_u16(payload + 18, capture.first_index);
+    write_u16(payload + 20, capture.options.axis_quantum);
+    write_u16(payload + 22, capture.options.trigger_quantum);
+    write_u32(payload + 24, capture.options.max_duration_ms);
+    payload[28] = capture.options.max_events;
+    for (uint8_t index = 0; index < capture.event_count; ++index) {
+        const CaptureEvent& event = capture.events[index];
+        uint8_t* encoded = payload + kMacroCaptureHeaderSize +
+                           index * kMacroCaptureEventSize;
+        write_u32(encoded, event.at_us);
+        write_u16(encoded + 4, event.buttons);
+        write_u16(encoded + 6, static_cast<uint16_t>(event.left_x));
+        write_u16(encoded + 8, static_cast<uint16_t>(event.left_y));
+        write_u16(encoded + 10, static_cast<uint16_t>(event.right_x));
+        write_u16(encoded + 12, static_cast<uint16_t>(event.right_y));
+        write_u16(encoded + 14, event.left_trigger);
+        write_u16(encoded + 16, event.right_trigger);
+    }
+    return encode_response(
+        Operation::kMacroCapture, Status::kOk, 0, kMacroCaptureSchemaVersion,
+        capture.run_id, payload,
+        kMacroCaptureHeaderSize + capture.event_count * kMacroCaptureEventSize,
+        output, output_size);
 }
 
 size_t encode_haptics_transport_probe(uint8_t* output, size_t output_size) {
@@ -274,6 +326,18 @@ size_t encode_haptics_transport_probe(uint8_t* output, size_t output_size) {
     write_u32(&payload[116], probe.max_poll_gap_us);
     write_u32(&payload[120], probe.controller_acl_packet_bytes);
     write_u32(&payload[124], probe.controller_acl_packet_count);
+    write_u32(&payload[128], probe.requested_sys_khz);
+    write_u32(&payload[132], probe.measured_sys_khz);
+    write_u32(&payload[136], probe.measured_usb_khz);
+    write_u32(&payload[140], probe.core_voltage_mv);
+    write_u32(&payload[144], probe.flash_clock_divider);
+    write_u32(&payload[148], probe.cyw43_pio_divider256);
+    write_u32(&payload[152], static_cast<uint32_t>(probe.temperature_millicelsius));
+    write_u32(&payload[156], probe.host_completed_writes);
+    write_u32(&payload[160], probe.acl_writes);
+    write_u32(&payload[164], probe.other_writes);
+    write_u32(&payload[168], probe.write_failures);
+    write_u32(&payload[172], probe.packet_read_optimized);
     return encode_response(
         Operation::kHapticsTransportProbe, Status::kOk, 0,
         kHapticsTransportProbeSchemaVersion, probe.run_id,
@@ -547,6 +611,35 @@ bool process_out_request() {
 
     const uint8_t* payload = request.payload;
     switch (request.operation) {
+        case Operation::kMacroCapture: {
+            if (request.payload_size == 16 && payload[0] == 1) {
+                CaptureOptions options{};
+                options.channels = payload[6];
+                options.max_events = payload[7];
+                options.axis_quantum = UsbConfigurationManagement::read_u16(payload + 8);
+                options.trigger_quantum = UsbConfigurationManagement::read_u16(payload + 10);
+                options.max_duration_ms = UsbConfigurationManagement::read_u32(payload + 12);
+                if (!bluepad32_input_backend_capture_start(
+                        payload[1], UsbConfigurationManagement::read_u32(payload + 2), options)) return false;
+                g_capture_read_run = 0;
+                g_capture_read_index = 0;
+                return true;
+            }
+            if (request.payload_size == 5 && payload[0] == 0) {
+                return bluepad32_input_backend_capture_stop(UsbConfigurationManagement::read_u32(payload + 1));
+            }
+            if (request.payload_size == 7 && payload[0] == 2) {
+                const uint32_t run = UsbConfigurationManagement::read_u32(payload + 1);
+                const uint16_t index = UsbConfigurationManagement::read_u16(payload + 5);
+                Bluepad32CaptureSnapshot snapshot{};
+                if (!bluepad32_input_backend_capture_page(run, index, &snapshot))
+                    return false;
+                g_capture_read_run = run;
+                g_capture_read_index = index;
+                return true;
+            }
+            return false;
+        }
         case Operation::kModeSet: {
             const uint32_t transaction_id =
                 static_cast<uint32_t>(payload[0]) |
@@ -880,6 +973,9 @@ bool usb_configuration_management_vendor_control(
         case Operation::kHapticsTransportProbe:
             response_size =
                 encode_haptics_transport_probe(response, sizeof(response));
+            break;
+        case Operation::kMacroCapture:
+            response_size = encode_macro_capture(response, sizeof(response));
             break;
         case Operation::kProfileList: {
             ProfileServiceListSnapshot snapshot{};

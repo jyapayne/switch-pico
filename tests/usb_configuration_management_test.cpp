@@ -501,7 +501,7 @@ void test_profile_vendor_requests() {
                     static_cast<uint8_t>(
                         CONTROLLER_PROFILE_SCHEMA_VERSION) &&
                 control_payload[kResponseHeaderSize + 1] == 0 &&
-                control_payload[kResponseHeaderSize + 2] == 0 &&
+                control_payload[kResponseHeaderSize + 2] == 0x80 &&
                 control_payload[kResponseHeaderSize + 3] == 1,
             "selected profile response was not encoded");
 
@@ -733,15 +733,15 @@ std::vector<uint8_t> read_haptics_payload() {
                 control_payload[6] == static_cast<uint8_t>(Status::kOk) &&
                 control_payload[7] == 0 &&
                 read_u16(control_payload, 8) == 84 &&
-                read_u16(control_payload, 10) == 3,
-            "experiment schema-3 envelope is invalid");
+                read_u16(control_payload, 10) == 5,
+            "experiment schema-5 envelope is invalid");
     std::vector<uint8_t> payload(
         control_payload.begin() + kResponseHeaderSize, control_payload.end());
     require(read_u32(control_payload, 16) ==
                 configuration_crc32(payload.data(), payload.size()),
             "experiment response CRC is invalid");
-    require(payload[71] == 0 && payload[73] == 0 &&
-                payload[74] == 0 && payload[75] == 0,
+    require(payload[71] == 0 && (payload[73] == 32 || payload[73] == 64) &&
+                payload[74] <= 1 && payload[75] == 0,
             "experiment reserved payload bytes must remain zero");
     return payload;
 }
@@ -788,6 +788,7 @@ void test_haptics_experiment_requests() {
     }
     std::vector<uint8_t> expected(84, 0);
     expected[69] = 0xff;
+    expected[73] = 64;
 #ifndef SWITCH_PICO_HAPTICS_EXPERIMENT
     expected[68] = 6;
     require(read_haptics_payload() == expected,
@@ -943,7 +944,7 @@ void test_haptics_transport_probe_requests() {
     require(control_payload.size() >= kResponseHeaderSize,
             "transport probe response header is truncated");
     require(control_payload[5] == 0x41 && control_payload[7] == 0 &&
-                read_u16(control_payload, 10) == 2,
+                read_u16(control_payload, 10) == 3,
             "transport probe operation, flags, or schema are invalid");
     const std::vector<uint8_t> payload(
         control_payload.begin() + kResponseHeaderSize, control_payload.end());
@@ -951,18 +952,18 @@ void test_haptics_transport_probe_requests() {
                 configuration_crc32(payload.data(), payload.size()),
             "transport probe response CRC is invalid");
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-    require(control_payload.size() == kResponseHeaderSize + 128 &&
-                read_u16(control_payload, 8) == 128 &&
+    require(control_payload.size() == kResponseHeaderSize + 176 &&
+                read_u16(control_payload, 8) == 176 &&
                 control_payload[6] == static_cast<uint8_t>(Status::kOk) &&
                 read_u32(control_payload, 12) == 0x10203040,
-            "transport probe schema-2 envelope is invalid");
+            "transport probe schema-3 envelope is invalid");
     const uint32_t fields[] = {
         0x10203040, 0x50607080, 0xffff, 4, 5, 6, 7, 8, 9, 10,
         11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         0xfffffff0, 1, 27, 0xffffffff, 29, 30,
         1021, 10,
     };
-    std::vector<uint8_t> expected(128);
+    std::vector<uint8_t> expected(176);
     for (size_t index = 0; index < 32; ++index) {
         write_u32(&expected, index * 4, fields[index]);
     }
@@ -1139,6 +1140,43 @@ void profile_service_selected_snapshot(
 void profile_service_transaction_snapshot(
     ProfileServiceTransactionSnapshot* output) {
     *output = current_profile_transaction;
+}
+
+namespace {
+ControllerMacroCapture capture_fixture;
+}
+
+bool bluepad32_input_backend_capture_start(
+    uint8_t slot, uint32_t generation, const CaptureOptions& options) {
+    return capture_fixture.start(slot, generation, options, 0,
+                                 controller_neutral_state());
+}
+
+bool bluepad32_input_backend_capture_stop(uint32_t run_id) {
+    if (run_id == 0 || run_id != capture_fixture.run_id()) return false;
+    capture_fixture.stop(100000);
+    return true;
+}
+
+bool bluepad32_input_backend_capture_page(
+    uint32_t run_id, uint16_t first, Bluepad32CaptureSnapshot* output) {
+    if (output == nullptr || (run_id && run_id != capture_fixture.run_id()) ||
+        first > capture_fixture.event_count()) return false;
+    *output = {};
+    output->run_id = capture_fixture.run_id();
+    output->connection_generation = capture_fixture.generation();
+    output->elapsed_us = capture_fixture.elapsed_us(100000);
+    output->slot = capture_fixture.slot();
+    output->state = capture_fixture.state();
+    output->options = capture_fixture.options();
+    output->total_events = capture_fixture.event_count();
+    output->first_index = first;
+    while (output->event_count < BLUEPAD32_CAPTURE_PAGE_EVENTS &&
+           capture_fixture.event(first + output->event_count,
+                                 &output->events[output->event_count])) {
+        ++output->event_count;
+    }
+    return true;
 }
 
 void bluepad32_input_backend_request_pairing_snapshot() {

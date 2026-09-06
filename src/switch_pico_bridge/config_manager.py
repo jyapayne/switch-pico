@@ -66,6 +66,16 @@ OP_PROFILE_METADATA_SET = 0x3B
 OP_PROFILE_IDENTIFY = 0x3C
 OP_HAPTICS_EXPERIMENT = 0x40
 OP_HAPTICS_TRANSPORT_PROBE = 0x41
+OP_MACRO_CAPTURE = 0x42
+MACRO_CAPTURE_SCHEMA_VERSION = 1
+MACRO_CAPTURE_STATES = (
+    "idle",
+    "recording",
+    "stopped",
+    "full",
+    "timed_out",
+    "disconnected",
+)
 
 STATUS_OK = 0
 STATUS_PENDING = 1
@@ -111,8 +121,10 @@ PROFILE_LEGACY_SCHEMA_VERSION = 1
 PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2
 PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3
 PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4
-PROFILE_SCHEMA_VERSION = 5
-PROFILE_SIZE = 256
+PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5
+PROFILE_SCHEMA_VERSION = 6
+PROFILE_LEGACY_SIZE = 256
+PROFILE_SIZE = 384
 PROFILE_CAPACITY = 8
 PROFILE_IDENTITY_CAPACITY = 16
 PROFILE_LIST_CAPACITY = PROFILE_IDENTITY_CAPACITY + 1
@@ -128,6 +140,14 @@ PROFILE_MACRO_STEP_SIZE = 19
 PROFILE_MAXIMUM_WAIT_MS = 10000
 PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD = 0x8000
 PROFILE_DEFAULT_DIGITAL_THRESHOLD = 22934
+PROFILE_TURBO_RATE_MIN = 1
+PROFILE_TURBO_RATE_MAX = 30
+PROFILE_TURBO_DUTY_MIN = 1
+PROFILE_TURBO_DUTY_MAX = 99
+PROFILE_TURBO_BURST_MIN = 1
+PROFILE_TURBO_BURST_MAX = 255
+PROFILE_MACRO_REPEAT_MIN = 1
+PROFILE_MACRO_REPEAT_MAX = 255
 PROFILE_PLAYTEST_SCHEMA_VERSION = 2
 PROFILE_PLAYTEST_SIZE = 54
 PROFILE_PLAYTEST_SLOT_COUNT = 4
@@ -135,14 +155,20 @@ PROFILE_METADATA_SCHEMA_VERSION = 1
 PROFILE_METADATA_MAX_BYTES = 31
 PROFILE_METADATA_VALUE_SIZE = 32
 PROFILE_METADATA_SIZE = 288
-HAPTICS_EXPERIMENT_SCHEMA_VERSION = 3
+HAPTICS_EXPERIMENT_SCHEMA_VERSION = 5
 HAPTICS_EXPERIMENT_SIZE = 84
 HAPTICS_EXPERIMENT_SLOT_COUNT = 4
-HAPTICS_TRANSPORT_PROBE_SCHEMA_VERSION = 2
-HAPTICS_TRANSPORT_PROBE_SIZE = 128
+HAPTICS_TRANSPORT_PROBE_SCHEMA_VERSION = 3
+HAPTICS_TRANSPORT_PROBE_SIZE = 176
 HAPTICS_EXPERIMENT_STATES = (
-    "idle", "pending", "running", "completed",
-    "stopped", "disconnected", "unsupported", "error",
+    "idle",
+    "pending",
+    "running",
+    "completed",
+    "stopped",
+    "disconnected",
+    "unsupported",
+    "error",
 )
 HAPTICS_EXPERIMENT_MODES = ("fixture", "gameplay")
 HAPTICS_EXPERIMENT_ERRORS = {
@@ -171,15 +197,18 @@ HAPTICS_GAMEPLAY_EVIDENCE_NOTE = (
 )
 HAPTICS_GAMEPLAY_ARMING_NOTE = (
     "PC-controlled gameplay arming does not persist across power cycles. "
-    "Firmware built with SWITCH_PICO_HD_RUMBLE=ON automatically arms only "
-    "slot 0 by default; use gameplay --slot to select another controller."
+    "Firmware built with SWITCH_PICO_HD_RUMBLE=ON automatically arms the first "
+    "eligible DualSense that becomes ready, in any slot. One native stream is "
+    "selected at a time; use gameplay --slot to select another controller."
 )
 HAPTICS_GAMEPLAY_TIMING = {
     "sample_rate_hz": 3000,
     "stereo_frames_per_packet": 64,
     "lookback_us": 64000000 / 3000,
-    "command_window_us": 8000,
-    "watchdog_us": 50000,
+    "switch_command_window_us": 8000,
+    "switch_watchdog_us": 50000,
+    "xinput_command_policy": "held_until_changed_or_stopped",
+    "xinput_carrier_hz": {"left_low": 160, "right_high": 320},
     "band_gains": {"low": 2.0, "high": 2.0},
     "response_exponent": 0.8,
 }
@@ -235,7 +264,10 @@ LOGICAL_BUTTONS = (
 LOGICAL_CONTROLS = LOGICAL_BUTTONS + ("left_trigger", "right_trigger")
 PROFILE_LOGICAL_CONTROL_MASK = (1 << len(LOGICAL_CONTROLS)) - 1
 RUMBLE_POLICIES = ("none", "rumble", "led", "rumble_and_led")
-TURBO_MODES = ("off", "turbo", "auto_burst")
+TURBO_MODES = ("off", "turbo", "auto_burst", "burst")
+SHIFT_MODES = ("off", "hold", "toggle")
+MACRO_PLAYBACK_MODES = ("once", "while_held", "toggle", "repeat")
+SHORTCUT_SELECTOR_BUTTONS = LOGICAL_BUTTONS[:4] + LOGICAL_BUTTONS[12:]
 MACRO_STEP_TYPES = ("state", "end")
 MACRO_OVERRIDE_NAMES = (
     "buttons",
@@ -264,8 +296,7 @@ class UsbDevice(Protocol):
         index: int = 0,
         data_or_w_length: Any = None,
         timeout: int | None = None,
-    ) -> Any:
-        ...
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -350,6 +381,8 @@ class HapticsExperimentDiagnostics:
     mode: int
     host_updates: int
     dropped_updates: int
+    packet_frames: int = 64
+    last_packet_nonzero: bool = False
 
     @property
     def state_name(self) -> str:
@@ -386,13 +419,53 @@ class HapticsExperimentDiagnostics:
             "first_tone_submission_delay_us": self.first_tone_submission_delay_us,
         }
         if self.mode == 1:
-            values["gameplay"] = HAPTICS_GAMEPLAY_TIMING
+            values["gameplay"] = {
+                **HAPTICS_GAMEPLAY_TIMING,
+                "stereo_frames_per_packet": self.packet_frames,
+                "lookback_us": self.packet_frames * 1000000 / 3000,
+            }
             values["evidence_note"] = HAPTICS_GAMEPLAY_EVIDENCE_NOTE
             values["arming_note"] = HAPTICS_GAMEPLAY_ARMING_NOTE
         else:
             values["pattern"] = HAPTICS_EXPERIMENT_PATTERN
             values["evidence_note"] = HAPTICS_EXPERIMENT_EVIDENCE_NOTE
         return values
+
+
+@dataclass(frozen=True)
+class MacroCaptureEvent:
+    at_us: int
+    buttons: int
+    left_x: int
+    left_y: int
+    right_x: int
+    right_y: int
+    left_trigger: int
+    right_trigger: int
+
+
+@dataclass(frozen=True)
+class MacroCapturePage:
+    run_id: int
+    connection_generation: int
+    elapsed_us: int
+    slot: int
+    state: int
+    channels: int
+    total_events: int
+    first_index: int
+    axis_quantum: int
+    trigger_quantum: int
+    max_duration_ms: int
+    max_events: int
+    events: tuple[MacroCaptureEvent, ...]
+
+    @property
+    def state_name(self) -> str:
+        return MACRO_CAPTURE_STATES[self.state]
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {**asdict(self), "state_name": self.state_name}
 
 
 @dataclass(frozen=True)
@@ -429,6 +502,18 @@ class HapticsTransportProbe:
     max_poll_gap_us: int
     controller_acl_packet_bytes: int
     controller_acl_packet_count: int
+    requested_sys_khz: int
+    measured_sys_khz: int
+    measured_usb_khz: int
+    core_voltage_mv: int
+    flash_clock_divider: int
+    cyw43_pio_divider256: int
+    temperature_millicelsius: int
+    host_completed_writes: int
+    acl_writes: int
+    other_writes: int
+    write_failures: int
+    packet_read_optimized: int
 
     def to_json_object(self) -> dict[str, Any]:
         return {
@@ -478,9 +563,7 @@ class PairingRecord:
                 2: "public identity",
                 3: "random identity",
             }
-            suffix = address_types.get(
-                self.address_type, f"type {self.address_type}"
-            )
+            suffix = address_types.get(self.address_type, f"type {self.address_type}")
             return f"BLE ({suffix})"
         return f"unknown transport {self.transport}"
 
@@ -507,9 +590,7 @@ def _require_bool(value: Any, name: str) -> bool:
     return value
 
 
-def _require_object(
-    value: Any, fields: Sequence[str], name: str
-) -> dict[str, Any]:
+def _require_object(value: Any, fields: Sequence[str], name: str) -> dict[str, Any]:
     if type(value) is not dict:
         raise ConfigManagerError(f"{name} must be a JSON object")
     expected = set(fields)
@@ -528,9 +609,7 @@ def _require_object(
 
 def _require_enum(value: Any, choices: Sequence[str], name: str) -> int:
     if type(value) is not str or value not in choices:
-        raise ConfigManagerError(
-            f"{name} must be one of {', '.join(choices)}"
-        )
+        raise ConfigManagerError(f"{name} must be one of {', '.join(choices)}")
     return choices.index(value)
 
 
@@ -538,9 +617,7 @@ def _button_index(value: Any, name: str) -> int:
     if value is None:
         return PROFILE_NONE_BUTTON
     if type(value) is not str or value not in LOGICAL_BUTTONS:
-        raise ConfigManagerError(
-            f"{name} must be a logical button name or null"
-        )
+        raise ConfigManagerError(f"{name} must be a logical button name or null")
     return LOGICAL_BUTTONS.index(value)
 
 
@@ -548,6 +625,7 @@ def _button_name(value: int) -> str | None:
     if value == PROFILE_NONE_BUTTON:
         return None
     return LOGICAL_BUTTONS[value]
+
 
 def _control_index(value: Any, name: str) -> int:
     if value is None:
@@ -564,7 +642,6 @@ def _control_name(value: int) -> str | None:
     return LOGICAL_CONTROLS[value]
 
 
-
 def _button_mask_from_json(value: Any, name: str) -> int:
     if type(value) is not list:
         raise ConfigManagerError(f"{name} must be a JSON array")
@@ -578,6 +655,7 @@ def _button_mask_from_json(value: Any, name: str) -> int:
             raise ConfigManagerError(f"{name} contains a duplicate button")
         mask |= bit
     return mask
+
 
 def _control_mask_from_json(value: Any, name: str) -> int:
     if type(value) is not list:
@@ -595,19 +673,11 @@ def _control_mask_from_json(value: Any, name: str) -> int:
 
 
 def _control_mask_to_json(mask: int) -> list[str]:
-    return [
-        name
-        for index, name in enumerate(LOGICAL_CONTROLS)
-        if mask & (1 << index)
-    ]
+    return [name for index, name in enumerate(LOGICAL_CONTROLS) if mask & (1 << index)]
 
 
 def _button_mask_to_json(mask: int) -> list[str]:
-    return [
-        name
-        for index, name in enumerate(LOGICAL_BUTTONS)
-        if mask & (1 << index)
-    ]
+    return [name for index, name in enumerate(LOGICAL_BUTTONS) if mask & (1 << index)]
 
 
 @dataclass(frozen=True)
@@ -713,9 +783,11 @@ class ProfileListEntry:
             0,
             PROFILE_CAPACITY - 1,
         )
-        if type(self.alias) is not str or "\x00" in self.alias or len(
-            self.alias.encode("utf-8")
-        ) > PROFILE_METADATA_MAX_BYTES:
+        if (
+            type(self.alias) is not str
+            or "\x00" in self.alias
+            or len(self.alias.encode("utf-8")) > PROFILE_METADATA_MAX_BYTES
+        ):
             raise ConfigManagerError(
                 "controller alias must contain at most 31 UTF-8 bytes"
             )
@@ -736,12 +808,12 @@ class ProfileMetadata:
                 for index, name in enumerate(self.profile_names)
             ),
         ):
-            if type(value) is not str or "\x00" in value or len(
-                value.encode("utf-8")
-            ) > PROFILE_METADATA_MAX_BYTES:
-                raise ConfigManagerError(
-                    f"{label} must contain at most 31 UTF-8 bytes"
-                )
+            if (
+                type(value) is not str
+                or "\x00" in value
+                or len(value.encode("utf-8")) > PROFILE_METADATA_MAX_BYTES
+            ):
+                raise ConfigManagerError(f"{label} must contain at most 31 UTF-8 bytes")
 
 
 @dataclass(frozen=True)
@@ -789,14 +861,14 @@ class ProfilePlaytest:
                 "right": self.triggers[1],
             },
             "battery": (
-                round((self.battery - 1) / 250 * 100)
-                if self.battery != 0
-                else None
+                round((self.battery - 1) / 250 * 100) if self.battery != 0 else None
             ),
             "capabilities": [
-                name for bit, name in enumerate(
+                name
+                for bit, name in enumerate(
                     ("rumble", "lightbar", "player_leds", "motion")
-                ) if self.capabilities & (1 << bit)
+                )
+                if self.capabilities & (1 << bit)
             ],
             "motion": (
                 {
@@ -807,6 +879,7 @@ class ProfilePlaytest:
                 else None
             ),
         }
+
 
 @dataclass(frozen=True)
 class StickConfig:
@@ -821,12 +894,8 @@ class StickConfig:
     def __post_init__(self) -> None:
         _require_int(self.center_x, "stick center_x", -0x8000, 0x7FFF)
         _require_int(self.center_y, "stick center_y", -0x8000, 0x7FFF)
-        _require_int(
-            self.inner_deadzone, "stick inner_deadzone", 0, 0x7FFF
-        )
-        _require_int(
-            self.outer_saturation, "stick outer_saturation", 1, 0x7FFF
-        )
+        _require_int(self.inner_deadzone, "stick inner_deadzone", 0, 0x7FFF)
+        _require_int(self.outer_saturation, "stick outer_saturation", 1, 0x7FFF)
         if self.inner_deadzone >= self.outer_saturation:
             raise ConfigManagerError(
                 "stick inner_deadzone must be below outer_saturation"
@@ -904,9 +973,7 @@ class StickConfig:
                 1,
                 0x7FFF,
             ),
-            _require_int(
-                obj["curve_q8_8"], f"{name}.curve_q8_8", 1, 0xFFFF
-            ),
+            _require_int(obj["curve_q8_8"], f"{name}.curve_q8_8", 1, 0xFFFF),
             _require_bool(obj["invert_x"], f"{name}.invert_x"),
             _require_bool(obj["invert_y"], f"{name}.invert_y"),
         )
@@ -921,20 +988,14 @@ class TriggerConfig:
     output: int
 
     def __post_init__(self) -> None:
-        _require_int(
-            self.lower_deadzone, "trigger lower_deadzone", 0, 0xFFFF
-        )
-        _require_int(
-            self.upper_saturation, "trigger upper_saturation", 1, 0xFFFF
-        )
+        _require_int(self.lower_deadzone, "trigger lower_deadzone", 0, 0xFFFF)
+        _require_int(self.upper_saturation, "trigger upper_saturation", 1, 0xFFFF)
         if self.lower_deadzone >= self.upper_saturation:
             raise ConfigManagerError(
                 "trigger lower_deadzone must be below upper_saturation"
             )
         _require_int(self.curve_q8_8, "trigger curve_q8_8", 1, 0xFFFF)
-        _require_int(
-            self.digital_threshold, "trigger digital_threshold", 0, 0xFFFF
-        )
+        _require_int(self.digital_threshold, "trigger digital_threshold", 0, 0xFFFF)
         if (
             type(self.output) is not int
             or self.output != PROFILE_NONE_BUTTON
@@ -952,22 +1013,15 @@ class TriggerConfig:
     ) -> TriggerConfig:
         if len(payload) != 10 or payload[9] != 0:
             raise ConfigManagerError("invalid trigger configuration encoding")
-        if (
-            schema_version < PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
-            and payload[8] != 0
-        ):
+        if schema_version < PROFILE_CONTROL_MAPPING_SCHEMA_VERSION and payload[8] != 0:
             raise ConfigManagerError("invalid legacy trigger configuration")
         output = (
             payload[8]
             if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
             else len(LOGICAL_BUTTONS) + source_index
         )
-        lower, upper, curve_q8_8, threshold = struct.unpack(
-            "<HHHH", payload[:8]
-        )
-        return cls(
-            lower, upper, curve_q8_8, threshold, output
-        )
+        lower, upper, curve_q8_8, threshold = struct.unpack("<HHHH", payload[:8])
+        return cls(lower, upper, curve_q8_8, threshold, output)
 
     def to_bytes(self) -> bytes:
         return struct.pack(
@@ -1025,9 +1079,7 @@ class TriggerConfig:
                 1,
                 0xFFFF,
             ),
-            _require_int(
-                obj["curve_q8_8"], f"{name}.curve_q8_8", 1, 0xFFFF
-            ),
+            _require_int(obj["curve_q8_8"], f"{name}.curve_q8_8", 1, 0xFFFF),
             _require_int(
                 obj["digital_threshold"],
                 f"{name}.digital_threshold",
@@ -1039,10 +1091,7 @@ class TriggerConfig:
 
 
 def _migrate_legacy_trigger_threshold(trigger: TriggerConfig) -> TriggerConfig:
-    if (
-        trigger.digital_threshold
-        != PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD
-    ):
+    if trigger.digital_threshold != PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD:
         return trigger
     return TriggerConfig(
         trigger.lower_deadzone,
@@ -1077,18 +1126,14 @@ class MacroStep:
             0,
             PROFILE_MAXIMUM_WAIT_MS,
         )
-        _require_int(
-            self.output_button_mask, "macro output button mask", 0, 0xFFFF
-        )
+        _require_int(self.output_button_mask, "macro output button mask", 0, 0xFFFF)
         for name in (
             "left_stick_x",
             "left_stick_y",
             "right_stick_x",
             "right_stick_y",
         ):
-            _require_int(
-                getattr(self, name), f"macro {name}", -0x8000, 0x7FFF
-            )
+            _require_int(getattr(self, name), f"macro {name}", -0x8000, 0x7FFF)
         _require_int(self.left_trigger, "macro left_trigger", 0, 0xFFFF)
         _require_int(self.right_trigger, "macro right_trigger", 0, 0xFFFF)
         if self.step_type == 1 and any(
@@ -1106,23 +1151,16 @@ class MacroStep:
         ):
             raise ConfigManagerError("end macro step must otherwise be zero")
         if self.step_type == 0:
-            if (
-                not self.override_flags & 1
-                and self.output_button_mask != 0
-            ):
-                raise ConfigManagerError(
-                    "macro buttons require the buttons override"
-                )
-            if (
-                not self.override_flags & 2
-                and (self.left_stick_x != 0 or self.left_stick_y != 0)
+            if not self.override_flags & 1 and self.output_button_mask != 0:
+                raise ConfigManagerError("macro buttons require the buttons override")
+            if not self.override_flags & 2 and (
+                self.left_stick_x != 0 or self.left_stick_y != 0
             ):
                 raise ConfigManagerError(
                     "macro left stick values require the left_stick override"
                 )
-            if (
-                not self.override_flags & 4
-                and (self.right_stick_x != 0 or self.right_stick_y != 0)
+            if not self.override_flags & 4 and (
+                self.right_stick_x != 0 or self.right_stick_y != 0
             ):
                 raise ConfigManagerError(
                     "macro right stick values require the right_stick override"
@@ -1179,9 +1217,7 @@ class MacroStep:
         return bytes(payload)
 
     @classmethod
-    def from_sparse_bytes(
-        cls, payload: bytes, name: str
-    ) -> tuple[MacroStep, int]:
+    def from_sparse_bytes(cls, payload: bytes, name: str) -> tuple[MacroStep, int]:
         if len(payload) < 3:
             raise ConfigManagerError(f"{name} is truncated")
         flags, duration = struct.unpack_from("<BH", payload)
@@ -1228,9 +1264,7 @@ class MacroStep:
                 if self.override_flags & (1 << index)
             ],
             "duration_ms": self.duration_ms,
-            "output_buttons": _button_mask_to_json(
-                self.output_button_mask
-            ),
+            "output_buttons": _button_mask_to_json(self.output_button_mask),
             "left_stick": {
                 "x": self.left_stick_x,
                 "y": self.left_stick_y,
@@ -1262,21 +1296,13 @@ class MacroStep:
             raise ConfigManagerError(f"{name}.overrides must be a JSON array")
         override_flags = 0
         for override in overrides:
-            index = _require_enum(
-                override, MACRO_OVERRIDE_NAMES, f"{name}.overrides"
-            )
+            index = _require_enum(override, MACRO_OVERRIDE_NAMES, f"{name}.overrides")
             bit = 1 << index
             if override_flags & bit:
-                raise ConfigManagerError(
-                    f"{name}.overrides contains a duplicate"
-                )
+                raise ConfigManagerError(f"{name}.overrides contains a duplicate")
             override_flags |= bit
-        left = _require_object(
-            obj["left_stick"], ("x", "y"), f"{name}.left_stick"
-        )
-        right = _require_object(
-            obj["right_stick"], ("x", "y"), f"{name}.right_stick"
-        )
+        left = _require_object(obj["left_stick"], ("x", "y"), f"{name}.left_stick")
+        right = _require_object(obj["right_stick"], ("x", "y"), f"{name}.right_stick")
         triggers = _require_object(
             obj["triggers"], ("left", "right"), f"{name}.triggers"
         )
@@ -1289,21 +1315,11 @@ class MacroStep:
                 0,
                 PROFILE_MAXIMUM_WAIT_MS,
             ),
-            _button_mask_from_json(
-                obj["output_buttons"], f"{name}.output_buttons"
-            ),
-            _require_int(
-                left["x"], f"{name}.left_stick.x", -0x8000, 0x7FFF
-            ),
-            _require_int(
-                left["y"], f"{name}.left_stick.y", -0x8000, 0x7FFF
-            ),
-            _require_int(
-                right["x"], f"{name}.right_stick.x", -0x8000, 0x7FFF
-            ),
-            _require_int(
-                right["y"], f"{name}.right_stick.y", -0x8000, 0x7FFF
-            ),
+            _button_mask_from_json(obj["output_buttons"], f"{name}.output_buttons"),
+            _require_int(left["x"], f"{name}.left_stick.x", -0x8000, 0x7FFF),
+            _require_int(left["y"], f"{name}.left_stick.y", -0x8000, 0x7FFF),
+            _require_int(right["x"], f"{name}.right_stick.x", -0x8000, 0x7FFF),
+            _require_int(right["y"], f"{name}.right_stick.y", -0x8000, 0x7FFF),
             _require_int(
                 triggers["left"],
                 f"{name}.triggers.left",
@@ -1320,10 +1336,152 @@ class MacroStep:
 
 
 @dataclass(frozen=True)
+class ProfileShortcuts:
+    modifier: int = PROFILE_NONE_BUTTON
+    profiles: tuple[int, ...] = (PROFILE_NONE_BUTTON,) * PROFILE_CAPACITY
+
+    def __post_init__(self) -> None:
+        if type(self.modifier) is not int or (
+            self.modifier != PROFILE_NONE_BUTTON
+            and not 0 <= self.modifier < len(LOGICAL_CONTROLS)
+        ):
+            raise ConfigManagerError("invalid shortcut modifier")
+        if type(self.profiles) is not tuple or len(self.profiles) != PROFILE_CAPACITY:
+            raise ConfigManagerError("shortcuts must contain eight profile selectors")
+        selected: set[int] = set()
+        for selector in self.profiles:
+            if type(selector) is not int:
+                raise ConfigManagerError("invalid shortcut selector")
+            if selector == PROFILE_NONE_BUTTON:
+                continue
+            if not (0 <= selector < 4 or 12 <= selector < 16):
+                raise ConfigManagerError(
+                    "shortcut selector must be a face or D-pad button"
+                )
+            if selector in selected or selector == self.modifier:
+                raise ConfigManagerError(
+                    "shortcut selectors must be unique and differ from modifier"
+                )
+            if self.modifier == PROFILE_NONE_BUTTON:
+                raise ConfigManagerError("enabled shortcuts require a modifier")
+            selected.add(selector)
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            "modifier": _control_name(self.modifier),
+            "profiles": [_button_name(value) for value in self.profiles],
+        }
+
+    @classmethod
+    def from_json_object(cls, value: Any) -> ProfileShortcuts:
+        obj = _require_object(value, ("modifier", "profiles"), "profile.shortcuts")
+        if type(obj["profiles"]) is not list:
+            raise ConfigManagerError("profile.shortcuts.profiles must be an array")
+        return cls(
+            _control_index(obj["modifier"], "profile.shortcuts.modifier"),
+            tuple(
+                _button_index(selector, f"profile.shortcuts.profiles[{index}]")
+                for index, selector in enumerate(obj["profiles"])
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ProfileShift:
+    mode: int = 0
+    modifier: int = PROFILE_NONE_BUTTON
+    button_map: tuple[int, ...] = tuple(range(len(LOGICAL_BUTTONS)))
+
+    def __post_init__(self) -> None:
+        _require_int(self.mode, "Shift mode", 0, len(SHIFT_MODES) - 1)
+        if type(self.modifier) is not int or (
+            self.modifier != PROFILE_NONE_BUTTON
+            and not 0 <= self.modifier < len(LOGICAL_CONTROLS)
+        ):
+            raise ConfigManagerError("invalid Shift modifier")
+        if self.mode != 0 and self.modifier == PROFILE_NONE_BUTTON:
+            raise ConfigManagerError("enabled Shift requires a modifier")
+        if type(self.button_map) is not tuple or len(self.button_map) != len(
+            LOGICAL_BUTTONS
+        ):
+            raise ConfigManagerError("Shift button map must contain 16 mappings")
+        for output in self.button_map:
+            if type(output) is not int or (
+                output != PROFILE_NONE_BUTTON and not 0 <= output < len(LOGICAL_BUTTONS)
+            ):
+                raise ConfigManagerError("Shift outputs must be buttons or null")
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            "mode": SHIFT_MODES[self.mode],
+            "modifier": _control_name(self.modifier),
+            "button_map": {
+                name: _button_name(self.button_map[index])
+                for index, name in enumerate(LOGICAL_BUTTONS)
+            },
+        }
+
+    @classmethod
+    def from_json_object(cls, value: Any) -> ProfileShift:
+        obj = _require_object(
+            value, ("mode", "modifier", "button_map"), "profile.shift"
+        )
+        mappings = _require_object(
+            obj["button_map"], LOGICAL_BUTTONS, "profile.shift.button_map"
+        )
+        return cls(
+            _require_enum(obj["mode"], SHIFT_MODES, "profile.shift.mode"),
+            _control_index(obj["modifier"], "profile.shift.modifier"),
+            tuple(
+                _button_index(mappings[name], f"profile.shift.button_map.{name}")
+                for name in LOGICAL_BUTTONS
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class TurboSettings:
+    rate_hz: int = 15
+    duty_percent: int = 50
+    burst_count: int = 3
+
+    def __post_init__(self) -> None:
+        _require_int(
+            self.rate_hz, "Turbo rate", PROFILE_TURBO_RATE_MIN, PROFILE_TURBO_RATE_MAX
+        )
+        _require_int(
+            self.duty_percent,
+            "Turbo duty",
+            PROFILE_TURBO_DUTY_MIN,
+            PROFILE_TURBO_DUTY_MAX,
+        )
+        _require_int(
+            self.burst_count,
+            "Turbo burst count",
+            PROFILE_TURBO_BURST_MIN,
+            PROFILE_TURBO_BURST_MAX,
+        )
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            "rate_hz": self.rate_hz,
+            "duty_percent": self.duty_percent,
+            "burst_count": self.burst_count,
+        }
+
+    @classmethod
+    def from_json_object(cls, value: Any, name: str) -> TurboSettings:
+        obj = _require_object(value, ("rate_hz", "duty_percent", "burst_count"), name)
+        return cls(obj["rate_hz"], obj["duty_percent"], obj["burst_count"])
+
+
+@dataclass(frozen=True)
 class ControllerMacro:
     trigger_mask: int
     cancel_control: int
     steps: tuple[MacroStep, ...]
+    playback: int = 0
+    repeat_count: int = 1
 
     def __post_init__(self) -> None:
         _require_int(
@@ -1345,9 +1503,21 @@ class ControllerMacro:
                 for step in self.steps
             )
         ):
-            raise ConfigManagerError(
-                "macro must contain zero to eight state steps"
-            )
+            raise ConfigManagerError("macro must contain zero to eight state steps")
+        _require_int(self.playback, "macro playback", 0, len(MACRO_PLAYBACK_MODES) - 1)
+        _require_int(
+            self.repeat_count,
+            "macro repeat count",
+            PROFILE_MACRO_REPEAT_MIN,
+            PROFILE_MACRO_REPEAT_MAX,
+        )
+        if (
+            self.trigger_mask
+            and self.steps
+            and self.playback != 0
+            and not any(step.duration_ms for step in self.steps)
+        ):
+            raise ConfigManagerError("looping macros require a nonzero cycle duration")
 
     @classmethod
     def empty(cls) -> ControllerMacro:
@@ -1358,18 +1528,21 @@ class ControllerMacro:
             "trigger": _control_mask_to_json(self.trigger_mask),
             "cancel": _control_name(self.cancel_control),
             "steps": [step.to_json_object() for step in self.steps],
+            "playback": MACRO_PLAYBACK_MODES[self.playback],
+            "repeat_count": self.repeat_count,
         }
 
     @classmethod
-    def from_json_object(cls, value: Any, name: str) -> ControllerMacro:
-        obj = _require_object(
-            value, ("trigger", "cancel", "steps"), name
-        )
+    def from_json_object(
+        cls, value: Any, name: str, *, schema_version: int = PROFILE_SCHEMA_VERSION
+    ) -> ControllerMacro:
+        fields = ["trigger", "cancel", "steps"]
+        if schema_version >= PROFILE_SCHEMA_VERSION:
+            fields.extend(("playback", "repeat_count"))
+        obj = _require_object(value, fields, name)
         steps = obj["steps"]
         if type(steps) is not list or len(steps) > PROFILE_MACRO_STEPS_PER_MACRO:
-            raise ConfigManagerError(
-                f"{name}.steps must contain zero to eight steps"
-            )
+            raise ConfigManagerError(f"{name}.steps must contain zero to eight steps")
         return cls(
             _control_mask_from_json(obj["trigger"], f"{name}.trigger"),
             _control_index(obj["cancel"], f"{name}.cancel"),
@@ -1377,6 +1550,12 @@ class ControllerMacro:
                 MacroStep.from_json_object(step, f"{name}.steps[{index}]")
                 for index, step in enumerate(steps)
             ),
+            (
+                _require_enum(obj["playback"], MACRO_PLAYBACK_MODES, f"{name}.playback")
+                if schema_version >= PROFILE_SCHEMA_VERSION
+                else 0
+            ),
+            obj["repeat_count"] if schema_version >= PROFILE_SCHEMA_VERSION else 1,
         )
 
 
@@ -1394,14 +1573,16 @@ class ControllerProfile:
     motion_toggle_chord: int
     macros: tuple[ControllerMacro, ...]
     turbo_modes: tuple[int, ...]
+    shortcuts: ProfileShortcuts = ProfileShortcuts()
+    shift: ProfileShift = ProfileShift()
+    turbo_defaults: TurboSettings = TurboSettings()
+    turbo_overrides: tuple[TurboSettings | None, ...] = (None,) * len(LOGICAL_BUTTONS)
 
     def __post_init__(self) -> None:
         if type(self.button_map) is not tuple or len(self.button_map) != len(
             LOGICAL_BUTTONS
         ):
-            raise ConfigManagerError(
-                "button map must contain 16 logical mappings"
-            )
+            raise ConfigManagerError("button map must contain 16 logical mappings")
         for mapping in self.button_map:
             if type(mapping) is not int or (
                 mapping != PROFILE_NONE_BUTTON
@@ -1415,9 +1596,7 @@ class ControllerProfile:
         if not isinstance(self.left_trigger, TriggerConfig) or not isinstance(
             self.right_trigger, TriggerConfig
         ):
-            raise ConfigManagerError(
-                "profile triggers must be TriggerConfig values"
-            )
+            raise ConfigManagerError("profile triggers must be TriggerConfig values")
         routed_triggers = [
             trigger.output
             for trigger in (self.left_trigger, self.right_trigger)
@@ -1427,12 +1606,8 @@ class ControllerProfile:
             raise ConfigManagerError(
                 "left and right trigger cannot target the same analog trigger"
             )
-        _require_int(
-            self.weak_rumble_scale, "weak rumble scale", 0, 0xFF
-        )
-        _require_int(
-            self.strong_rumble_scale, "strong rumble scale", 0, 0xFF
-        )
+        _require_int(self.weak_rumble_scale, "weak rumble scale", 0, 0xFF)
+        _require_int(self.strong_rumble_scale, "strong rumble scale", 0, 0xFF)
         _require_int(
             self.confirmation_policy,
             "confirmation policy",
@@ -1463,27 +1638,38 @@ class ControllerProfile:
                 "profile macros exceed the sixteen-step shared pool"
             )
         encoded_size = sum(
-            len(step.to_sparse_bytes())
-            for macro in self.macros
-            for step in macro.steps
+            len(step.to_sparse_bytes()) for macro in self.macros for step in macro.steps
         )
         if encoded_size > PROFILE_MACRO_STREAM_SIZE:
-            raise ConfigManagerError(
-                "profile macros exceed the 136-byte sparse stream"
-            )
+            raise ConfigManagerError("profile macros exceed the 136-byte sparse stream")
         triggers = [
-            macro.trigger_mask
-            for macro in self.macros
-            if macro.trigger_mask != 0
+            macro.trigger_mask for macro in self.macros if macro.trigger_mask != 0
         ]
         if len(triggers) != len(set(triggers)):
             raise ConfigManagerError("macro trigger chords must be unique")
-        if type(self.turbo_modes) is not tuple or len(
-            self.turbo_modes
-        ) != len(LOGICAL_BUTTONS):
+        if type(self.turbo_modes) is not tuple or len(self.turbo_modes) != len(
+            LOGICAL_BUTTONS
+        ):
             raise ConfigManagerError("Turbo modes must contain 16 entries")
         for mode in self.turbo_modes:
             _require_int(mode, "Turbo mode", 0, len(TURBO_MODES) - 1)
+        if not isinstance(self.shortcuts, ProfileShortcuts):
+            raise ConfigManagerError("profile shortcuts must be ProfileShortcuts")
+        if not isinstance(self.shift, ProfileShift):
+            raise ConfigManagerError("profile Shift must be ProfileShift")
+        if not isinstance(self.turbo_defaults, TurboSettings):
+            raise ConfigManagerError("Turbo defaults must be TurboSettings")
+        if (
+            type(self.turbo_overrides) is not tuple
+            or len(self.turbo_overrides) != len(LOGICAL_BUTTONS)
+            or not all(
+                settings is None or isinstance(settings, TurboSettings)
+                for settings in self.turbo_overrides
+            )
+        ):
+            raise ConfigManagerError(
+                "Turbo overrides must contain 16 settings or null entries"
+            )
 
     @classmethod
     def default(cls) -> ControllerProfile:
@@ -1513,31 +1699,29 @@ class ControllerProfile:
             confirmation_policy=3,
             switching_chord=0,
             motion_toggle_chord=0,
-            macros=tuple(
-                ControllerMacro.empty() for _ in range(PROFILE_MACRO_COUNT)
-            ),
+            macros=tuple(ControllerMacro.empty() for _ in range(PROFILE_MACRO_COUNT)),
             turbo_modes=(0,) * len(LOGICAL_BUTTONS),
         )
 
     @classmethod
     def from_bytes(cls, payload: bytes) -> ControllerProfile:
         payload = bytes(payload)
-        if len(payload) != PROFILE_SIZE:
+        if len(payload) not in (PROFILE_LEGACY_SIZE, PROFILE_SIZE):
             raise ConfigManagerError("invalid profile size")
         version, size = struct.unpack_from("<HH", payload)
+        expected_size = (
+            PROFILE_SIZE if version >= PROFILE_SCHEMA_VERSION else PROFILE_LEGACY_SIZE
+        )
         if (
             version < PROFILE_LEGACY_SCHEMA_VERSION
             or version > PROFILE_SCHEMA_VERSION
-            or size != PROFILE_SIZE
+            or size != expected_size
+            or len(payload) != expected_size
         ):
             raise ConfigManagerError("unsupported profile schema")
-        has_control_mapping = (
-            version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
-        )
-        has_action_controls = (
-            version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
-        )
-        sparse_macros = version == PROFILE_SCHEMA_VERSION
+        has_control_mapping = version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
+        has_action_controls = version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
+        sparse_macros = version >= PROFILE_SPARSE_MACRO_SCHEMA_VERSION
         if sparse_macros:
             if payload[75] & 0xCC:
                 raise ConfigManagerError("profile action flags are invalid")
@@ -1564,13 +1748,11 @@ class ControllerProfile:
             right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
 
         if sparse_macros:
-            switching_chord = (
-                struct.unpack_from("<H", payload, 76)[0]
-                | ((payload[75] & 0x03) << 16)
+            switching_chord = struct.unpack_from("<H", payload, 76)[0] | (
+                (payload[75] & 0x03) << 16
             )
-            motion_toggle_chord = (
-                struct.unpack_from("<H", payload, 78)[0]
-                | (((payload[75] >> 4) & 0x03) << 16)
+            motion_toggle_chord = struct.unpack_from("<H", payload, 78)[0] | (
+                ((payload[75] >> 4) & 0x03) << 16
             )
             turbo_modes = tuple(payload[80:96])
             macros: list[ControllerMacro] = []
@@ -1581,9 +1763,8 @@ class ControllerProfile:
                 descriptor = payload[offset : offset + 6]
                 if descriptor[2] & 0x80 or descriptor[3] != stream_offset:
                     raise ConfigManagerError("invalid sparse macro descriptor")
-                trigger_mask = (
-                    struct.unpack_from("<H", descriptor)[0]
-                    | ((descriptor[2] & 0x03) << 16)
+                trigger_mask = struct.unpack_from("<H", descriptor)[0] | (
+                    (descriptor[2] & 0x03) << 16
                 )
                 cancel = (descriptor[2] >> 2) & 0x1F
                 if cancel > len(LOGICAL_CONTROLS) - 1 and cancel != 0x1F:
@@ -1601,8 +1782,9 @@ class ControllerProfile:
                 for step_index in range(step_count):
                     step, step_size = MacroStep.from_sparse_bytes(
                         payload[
-                            120 + stream_offset + consumed :
-                            120 + stream_offset + encoded_size
+                            120 + stream_offset + consumed : 120
+                            + stream_offset
+                            + encoded_size
                         ],
                         f"profile.macros[{macro_index}].steps[{step_index}]",
                     )
@@ -1615,20 +1797,24 @@ class ControllerProfile:
                         trigger_mask,
                         PROFILE_NONE_BUTTON if cancel == 0x1F else cancel,
                         tuple(steps),
+                        payload[336 + macro_index * 2]
+                        if version >= PROFILE_SCHEMA_VERSION
+                        else 0,
+                        payload[337 + macro_index * 2]
+                        if version >= PROFILE_SCHEMA_VERSION
+                        else 1,
                     )
                 )
                 stream_offset += consumed
                 total_steps += step_count
-            if payload[120 + stream_offset :] != bytes(
+            if payload[120 + stream_offset : PROFILE_LEGACY_SIZE] != bytes(
                 PROFILE_MACRO_STREAM_SIZE - stream_offset
             ):
                 raise ConfigManagerError("nonzero sparse macro padding")
         else:
             switching_chord = struct.unpack_from("<H", payload, 76)[0]
             motion_toggle_chord = (
-                struct.unpack_from("<H", payload, 98)[0]
-                if has_control_mapping
-                else 0
+                struct.unpack_from("<H", payload, 98)[0] if has_control_mapping else 0
             )
             if has_control_mapping:
                 trigger_mask = struct.unpack_from("<H", payload, 78)[0]
@@ -1640,9 +1826,7 @@ class ControllerProfile:
                 ):
                     raise ConfigManagerError("invalid legacy macro trigger")
                 trigger_mask = (
-                    0
-                    if legacy_trigger == PROFILE_NONE_BUTTON
-                    else 1 << legacy_trigger
+                    0 if legacy_trigger == PROFILE_NONE_BUTTON else 1 << legacy_trigger
                 )
                 cancel_control = payload[79]
             if has_action_controls:
@@ -1655,13 +1839,15 @@ class ControllerProfile:
             legacy_steps = tuple(
                 MacroStep.from_bytes(
                     payload[
-                        100 + index * PROFILE_MACRO_STEP_SIZE :
-                        100 + (index + 1) * PROFILE_MACRO_STEP_SIZE
+                        100 + index * PROFILE_MACRO_STEP_SIZE : 100
+                        + (index + 1) * PROFILE_MACRO_STEP_SIZE
                     ]
                 )
                 for index in range(PROFILE_LEGACY_MACRO_STEP_CAPACITY)
             )
-            if any(step != MacroStep.end() for step in legacy_steps[legacy_count - 1 :]):
+            if any(
+                step != MacroStep.end() for step in legacy_steps[legacy_count - 1 :]
+            ):
                 raise ConfigManagerError("invalid legacy macro end padding")
             state_steps = legacy_steps[: legacy_count - 1]
             if any(step.step_type != 0 for step in state_steps):
@@ -1671,6 +1857,28 @@ class ControllerProfile:
                 *(ControllerMacro.empty() for _ in range(PROFILE_MACRO_COUNT - 1)),
             ]
             turbo_modes = tuple(payload[82:98])
+        shortcuts = ProfileShortcuts()
+        shift = ProfileShift()
+        turbo_defaults = TurboSettings()
+        turbo_overrides: list[TurboSettings | None] = [None] * len(LOGICAL_BUTTONS)
+        if version >= PROFILE_SCHEMA_VERSION:
+            shortcuts = ProfileShortcuts(payload[256], tuple(payload[257:265]))
+            shift = ProfileShift(payload[265], payload[266], tuple(payload[267:283]))
+            turbo_defaults = TurboSettings(*payload[283:286])
+            override_mask = struct.unpack_from("<H", payload, 286)[0]
+            settings_offset = 288
+            for button in range(len(LOGICAL_BUTTONS)):
+                if override_mask & (1 << button):
+                    turbo_overrides[button] = TurboSettings(
+                        *payload[settings_offset : settings_offset + 3]
+                    )
+                    settings_offset += 3
+            if payload[settings_offset:336] != bytes(336 - settings_offset):
+                raise ConfigManagerError("nonzero Turbo override padding")
+            if payload[344:] != bytes(40):
+                raise ConfigManagerError("profile reserved fields must be zero")
+        elif any(mode > 2 for mode in turbo_modes):
+            raise ConfigManagerError("invalid legacy Turbo mode")
 
         return cls(
             button_map=tuple(payload[4:20]),
@@ -1685,12 +1893,15 @@ class ControllerProfile:
             motion_toggle_chord=motion_toggle_chord,
             macros=tuple(macros),
             turbo_modes=turbo_modes,
+            shortcuts=shortcuts,
+            shift=shift,
+            turbo_defaults=turbo_defaults,
+            turbo_overrides=tuple(turbo_overrides),
         )
+
     def to_bytes(self) -> bytes:
         payload = bytearray(PROFILE_SIZE)
-        struct.pack_into(
-            "<HH", payload, 0, PROFILE_SCHEMA_VERSION, PROFILE_SIZE
-        )
+        struct.pack_into("<HH", payload, 0, PROFILE_SCHEMA_VERSION, PROFILE_SIZE)
         payload[4:20] = bytes(self.button_map)
         payload[20:36] = self.left_stick.to_bytes()
         payload[36:52] = self.right_stick.to_bytes()
@@ -1703,9 +1914,8 @@ class ControllerProfile:
                 self.confirmation_policy,
             )
         )
-        payload[75] = (
-            ((self.switching_chord >> 16) & 0x03)
-            | (((self.motion_toggle_chord >> 16) & 0x03) << 4)
+        payload[75] = ((self.switching_chord >> 16) & 0x03) | (
+            ((self.motion_toggle_chord >> 16) & 0x03) << 4
         )
         struct.pack_into("<H", payload, 76, self.switching_chord & 0xFFFF)
         struct.pack_into("<H", payload, 78, self.motion_toggle_chord & 0xFFFF)
@@ -1713,9 +1923,7 @@ class ControllerProfile:
 
         stream = bytearray()
         for macro_index, macro in enumerate(self.macros):
-            encoded_steps = b"".join(
-                step.to_sparse_bytes() for step in macro.steps
-            )
+            encoded_steps = b"".join(step.to_sparse_bytes() for step in macro.steps)
             descriptor_offset = 96 + macro_index * 6
             struct.pack_into(
                 "<H", payload, descriptor_offset, macro.trigger_mask & 0xFFFF
@@ -1725,18 +1933,44 @@ class ControllerProfile:
                 if macro.cancel_control == PROFILE_NONE_BUTTON
                 else macro.cancel_control
             )
-            payload[descriptor_offset + 2] = (
-                ((macro.trigger_mask >> 16) & 0x03) | (cancel << 2)
+            payload[descriptor_offset + 2] = ((macro.trigger_mask >> 16) & 0x03) | (
+                cancel << 2
             )
             payload[descriptor_offset + 3] = len(stream)
             payload[descriptor_offset + 4] = len(macro.steps)
             payload[descriptor_offset + 5] = len(encoded_steps)
             stream.extend(encoded_steps)
+            payload[336 + macro_index * 2] = macro.playback
+            payload[337 + macro_index * 2] = macro.repeat_count
         if len(stream) > PROFILE_MACRO_STREAM_SIZE:
-            raise ConfigManagerError(
-                "profile macros exceed the 136-byte sparse stream"
-            )
+            raise ConfigManagerError("profile macros exceed the 136-byte sparse stream")
         payload[120 : 120 + len(stream)] = stream
+        payload[256] = self.shortcuts.modifier
+        payload[257:265] = bytes(self.shortcuts.profiles)
+        payload[265] = self.shift.mode
+        payload[266] = self.shift.modifier
+        payload[267:283] = bytes(self.shift.button_map)
+        payload[283:286] = bytes(
+            (
+                self.turbo_defaults.rate_hz,
+                self.turbo_defaults.duty_percent,
+                self.turbo_defaults.burst_count,
+            )
+        )
+        override_mask = 0
+        settings_offset = 288
+        for button, settings in enumerate(self.turbo_overrides):
+            if settings is not None:
+                override_mask |= 1 << button
+                payload[settings_offset : settings_offset + 3] = bytes(
+                    (
+                        settings.rate_hz,
+                        settings.duty_percent,
+                        settings.burst_count,
+                    )
+                )
+                settings_offset += 3
+        struct.pack_into("<H", payload, 286, override_mask)
         return bytes(payload)
 
     def to_json_object(self) -> dict[str, Any]:
@@ -1758,20 +1992,24 @@ class ControllerProfile:
             "rumble": {
                 "weak_scale": self.weak_rumble_scale,
                 "strong_scale": self.strong_rumble_scale,
-                "confirmation_policy": RUMBLE_POLICIES[
-                    self.confirmation_policy
-                ],
+                "confirmation_policy": RUMBLE_POLICIES[self.confirmation_policy],
             },
             "switching_chord": _control_mask_to_json(self.switching_chord),
-            "motion_toggle_chord": _control_mask_to_json(
-                self.motion_toggle_chord
-            ),
-            "macros": [
-                macro.to_json_object() for macro in self.macros
-            ],
+            "motion_toggle_chord": _control_mask_to_json(self.motion_toggle_chord),
+            "macros": [macro.to_json_object() for macro in self.macros],
             "turbo": {
                 name: TURBO_MODES[self.turbo_modes[index]]
                 for index, name in enumerate(LOGICAL_BUTTONS)
+            },
+            "shortcuts": self.shortcuts.to_json_object(),
+            "shift": self.shift.to_json_object(),
+            "turbo_settings": {
+                "defaults": self.turbo_defaults.to_json_object(),
+                "overrides": {
+                    LOGICAL_BUTTONS[index]: settings.to_json_object()
+                    for index, settings in enumerate(self.turbo_overrides)
+                    if settings is not None
+                },
             },
         }
 
@@ -1806,17 +2044,24 @@ class ControllerProfile:
         if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
             fields.append("motion_toggle_chord")
         fields.append(
-            "macros" if schema_version == PROFILE_SCHEMA_VERSION else "macro"
+            "macros"
+            if schema_version >= PROFILE_SPARSE_MACRO_SCHEMA_VERSION
+            else "macro"
         )
+        if schema_version >= PROFILE_SCHEMA_VERSION:
+            fields.extend(("shortcuts", "shift", "turbo_settings"))
         obj = _require_object(value, fields, "profile")
-        if _require_int(obj["size"], "profile.size", 0, 0xFFFF) != PROFILE_SIZE:
+        expected_size = (
+            PROFILE_SIZE
+            if schema_version >= PROFILE_SCHEMA_VERSION
+            else PROFILE_LEGACY_SIZE
+        )
+        if _require_int(obj["size"], "profile.size", 0, 0xFFFF) != expected_size:
             raise ConfigManagerError("unsupported profile schema")
         button_map = _require_object(
             obj["button_map"], LOGICAL_BUTTONS, "profile.button_map"
         )
-        sticks = _require_object(
-            obj["sticks"], ("left", "right"), "profile.sticks"
-        )
+        sticks = _require_object(obj["sticks"], ("left", "right"), "profile.sticks")
         triggers = _require_object(
             obj["triggers"], ("left", "right"), "profile.triggers"
         )
@@ -1825,9 +2070,7 @@ class ControllerProfile:
             ("weak_scale", "strong_scale", "confirmation_policy"),
             "profile.rumble",
         )
-        turbo = _require_object(
-            obj["turbo"], LOGICAL_BUTTONS, "profile.turbo"
-        )
+        turbo = _require_object(obj["turbo"], LOGICAL_BUTTONS, "profile.turbo")
         left_trigger = TriggerConfig.from_json_object(
             triggers["left"],
             "profile.triggers.left",
@@ -1849,9 +2092,7 @@ class ControllerProfile:
             if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
             else _button_mask_from_json
         )
-        switching_chord = mask_parser(
-            obj["switching_chord"], "profile.switching_chord"
-        )
+        switching_chord = mask_parser(obj["switching_chord"], "profile.switching_chord")
         motion_toggle_chord = (
             mask_parser(
                 obj["motion_toggle_chord"],
@@ -1860,13 +2101,16 @@ class ControllerProfile:
             if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
             else 0
         )
-        if schema_version == PROFILE_SCHEMA_VERSION:
+        if schema_version >= PROFILE_SPARSE_MACRO_SCHEMA_VERSION:
             macro_values = obj["macros"]
-            if type(macro_values) is not list or len(macro_values) != PROFILE_MACRO_COUNT:
+            if (
+                type(macro_values) is not list
+                or len(macro_values) != PROFILE_MACRO_COUNT
+            ):
                 raise ConfigManagerError("profile.macros must contain four macros")
             macros = tuple(
                 ControllerMacro.from_json_object(
-                    macro, f"profile.macros[{index}]"
+                    macro, f"profile.macros[{index}]", schema_version=schema_version
                 )
                 for index, macro in enumerate(macro_values)
             )
@@ -1882,9 +2126,7 @@ class ControllerProfile:
                     "profile.macro.steps must contain one to eight steps"
                 )
             decoded_steps = tuple(
-                MacroStep.from_json_object(
-                    step, f"profile.macro.steps[{index}]"
-                )
+                MacroStep.from_json_object(step, f"profile.macro.steps[{index}]")
                 for index, step in enumerate(steps)
             )
             if decoded_steps[-1] != MacroStep.end() or any(
@@ -1894,34 +2136,49 @@ class ControllerProfile:
                     "legacy macro must end with one canonical end step"
                 )
             if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
-                trigger_mask = mask_parser(
-                    macro["trigger"], "profile.macro.trigger"
-                )
+                trigger_mask = mask_parser(macro["trigger"], "profile.macro.trigger")
                 cancel_control = (
-                    _control_index(
-                        macro["cancel"], "profile.macro.cancel"
-                    )
+                    _control_index(macro["cancel"], "profile.macro.cancel")
                     if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
-                    else _button_index(
-                        macro["cancel"], "profile.macro.cancel"
-                    )
+                    else _button_index(macro["cancel"], "profile.macro.cancel")
                 )
             else:
-                trigger = _button_index(
-                    macro["trigger"], "profile.macro.trigger"
-                )
-                trigger_mask = (
-                    0 if trigger == PROFILE_NONE_BUTTON else 1 << trigger
-                )
-                cancel_control = _button_index(
-                    macro["cancel"], "profile.macro.cancel"
-                )
+                trigger = _button_index(macro["trigger"], "profile.macro.trigger")
+                trigger_mask = 0 if trigger == PROFILE_NONE_BUTTON else 1 << trigger
+                cancel_control = _button_index(macro["cancel"], "profile.macro.cancel")
             macros = (
-                ControllerMacro(
-                    trigger_mask, cancel_control, decoded_steps[:-1]
-                ),
+                ControllerMacro(trigger_mask, cancel_control, decoded_steps[:-1]),
                 *(ControllerMacro.empty() for _ in range(PROFILE_MACRO_COUNT - 1)),
             )
+
+        shortcuts = ProfileShortcuts()
+        shift = ProfileShift()
+        turbo_defaults = TurboSettings()
+        turbo_overrides: list[TurboSettings | None] = [None] * len(LOGICAL_BUTTONS)
+        if schema_version >= PROFILE_SCHEMA_VERSION:
+            shortcuts = ProfileShortcuts.from_json_object(obj["shortcuts"])
+            shift = ProfileShift.from_json_object(obj["shift"])
+            settings = _require_object(
+                obj["turbo_settings"],
+                ("defaults", "overrides"),
+                "profile.turbo_settings",
+            )
+            turbo_defaults = TurboSettings.from_json_object(
+                settings["defaults"], "profile.turbo_settings.defaults"
+            )
+            overrides = settings["overrides"]
+            if type(overrides) is not dict or any(
+                name not in LOGICAL_BUTTONS for name in overrides
+            ):
+                raise ConfigManagerError(
+                    "Turbo overrides must map button names to settings"
+                )
+            for name, override in overrides.items():
+                turbo_overrides[LOGICAL_BUTTONS.index(name)] = (
+                    TurboSettings.from_json_object(
+                        override, f"profile.turbo_settings.overrides.{name}"
+                    )
+                )
 
         return cls(
             button_map=tuple(
@@ -1956,10 +2213,18 @@ class ControllerProfile:
             macros=macros,
             turbo_modes=tuple(
                 _require_enum(
-                    turbo[name], TURBO_MODES, f"profile.turbo.{name}"
+                    turbo[name],
+                    TURBO_MODES
+                    if schema_version >= PROFILE_SCHEMA_VERSION
+                    else TURBO_MODES[:3],
+                    f"profile.turbo.{name}",
                 )
                 for name in LOGICAL_BUTTONS
             ),
+            shortcuts=shortcuts,
+            shift=shift,
+            turbo_defaults=turbo_defaults,
+            turbo_overrides=tuple(turbo_overrides),
         )
 
     @classmethod
@@ -1991,17 +2256,20 @@ def _host_transaction_id() -> int:
 def encode_request(operation: int, payload: bytes = b"") -> bytes:
     if len(payload) + REQUEST_HEADER_SIZE > MAXIMUM_REQUEST_SIZE:
         raise ConfigManagerError("management request exceeds EP0 limit")
-    return struct.pack(
-        "<4sBBBBHHI",
-        b"SPMG",
-        PROTOCOL_VERSION,
-        operation,
-        0,
-        0,
-        len(payload),
-        0,
-        _crc32(payload),
-    ) + payload
+    return (
+        struct.pack(
+            "<4sBBBBHHI",
+            b"SPMG",
+            PROTOCOL_VERSION,
+            operation,
+            0,
+            0,
+            len(payload),
+            0,
+            _crc32(payload),
+        )
+        + payload
+    )
 
 
 def parse_response(payload: bytes, expected_operation: int) -> Envelope:
@@ -2021,13 +2289,9 @@ def parse_response(payload: bytes, expected_operation: int) -> Envelope:
     if magic != b"SPMG":
         raise ConfigManagerError("device does not implement switch-pico management")
     if version != PROTOCOL_VERSION:
-        raise ConfigManagerError(
-            f"unsupported management protocol version {version}"
-        )
+        raise ConfigManagerError(f"unsupported management protocol version {version}")
     if operation != expected_operation:
-        raise ConfigManagerError(
-            f"unexpected management operation 0x{operation:02x}"
-        )
+        raise ConfigManagerError(f"unexpected management operation 0x{operation:02x}")
     if len(payload) != RESPONSE_HEADER_SIZE + payload_size:
         raise ConfigManagerError("invalid management payload size")
     body = bytes(payload[RESPONSE_HEADER_SIZE:])
@@ -2052,9 +2316,7 @@ def _raise_status(envelope: Envelope, *, pending_ok: bool = False) -> None:
     if envelope.status == STATUS_PENDING:
         raise ConfigManagerError("device operation is still pending")
     raise ConfigManagerError(
-        STATUS_NAMES.get(
-            envelope.status, f"unknown device status {envelope.status}"
-        )
+        STATUS_NAMES.get(envelope.status, f"unknown device status {envelope.status}")
     )
 
 
@@ -2070,9 +2332,7 @@ def _control_in(device: UsbDevice, operation: int) -> Envelope:
     return parse_response(bytes(payload), operation)
 
 
-def _control_out(
-    device: UsbDevice, operation: int, payload: bytes = b""
-) -> None:
+def _control_out(device: UsbDevice, operation: int, payload: bytes = b"") -> None:
     request = encode_request(operation, payload)
     device.ctrl_transfer(
         0x40,
@@ -2098,9 +2358,7 @@ def read_info(device: UsbDevice) -> DeviceInfo:
             f"unknown device capability flags 0x{capabilities:02x}"
         )
     if capabilities != 0 and not capabilities & CAPABILITY_INPUT:
-        raise ConfigManagerError(
-            "device capability flags omit required input support"
-        )
+        raise ConfigManagerError("device capability flags omit required input support")
     return DeviceInfo(
         firmware_version=(
             envelope.payload[0],
@@ -2110,10 +2368,203 @@ def read_info(device: UsbDevice) -> DeviceInfo:
         board=envelope.payload[3],
         active_mode=active_mode,
         capabilities=capabilities,
-        maximum_configuration_size=struct.unpack_from(
-            "<H", envelope.payload, 6
-        )[0],
+        maximum_configuration_size=struct.unpack_from("<H", envelope.payload, 6)[0],
     )
+
+
+def read_macro_capture(
+    device: UsbDevice,
+    run_id: int = 0,
+    first_index: int = 0,
+) -> MacroCapturePage:
+    _require_int(run_id, "capture run ID", 0, 0xFFFFFFFF)
+    _require_int(first_index, "capture first index", 0, 128)
+    _control_out(device, OP_MACRO_CAPTURE, struct.pack("<BIH", 2, run_id, first_index))
+    envelope = _control_in(device, OP_MACRO_CAPTURE)
+    _raise_status(envelope)
+    payload = envelope.payload
+    if envelope.schema_version != MACRO_CAPTURE_SCHEMA_VERSION:
+        raise ConfigManagerError("unsupported macro capture schema")
+    if envelope.flags or len(payload) < 32:
+        raise ConfigManagerError("invalid macro capture header")
+    actual_run, generation, elapsed = struct.unpack_from("<III", payload)
+    slot, state, channels, count = struct.unpack_from("<4B", payload, 12)
+    total, first, axis, trigger, duration, limit = struct.unpack_from(
+        "<HHHHIB", payload, 16
+    )
+    if (
+        envelope.generation != actual_run
+        or (run_id and actual_run != run_id)
+        or state >= len(MACRO_CAPTURE_STATES)
+        or slot >= 4
+        or channels == 0
+        or channels > 31
+        or count > 32
+        or total > limit
+        or not 1 <= limit <= 128
+        or first != first_index
+        or first + count > total
+        or len(payload) != 32 + count * 20
+        or not 1 <= axis <= 32767
+        or not 1 <= trigger <= 65535
+        or not 1 <= duration <= 80000
+        or elapsed > duration * 1000
+        or any(payload[29:32])
+    ):
+        raise ConfigManagerError("invalid macro capture bounds or run identity")
+    events = []
+    previous = -1
+    for index in range(count):
+        offset = 32 + index * 20
+        event = MacroCaptureEvent(*struct.unpack_from("<IHhhhhHH", payload, offset))
+        if (
+            event.at_us <= previous
+            or event.at_us > elapsed
+            or any(payload[offset + 18 : offset + 20])
+        ):
+            raise ConfigManagerError("invalid macro capture event timeline")
+        previous = event.at_us
+        events.append(event)
+    return MacroCapturePage(
+        actual_run,
+        generation,
+        elapsed,
+        slot,
+        state,
+        channels,
+        total,
+        first,
+        axis,
+        trigger,
+        duration,
+        limit,
+        tuple(events),
+    )
+
+
+def start_macro_capture(
+    device: UsbDevice,
+    slot: int,
+    connection_generation: int,
+    *,
+    channels: int = 1,
+    max_events: int = 8,
+    axis_quantum: int = 512,
+    trigger_quantum: int = 1024,
+    max_duration_ms: int = 10000,
+) -> MacroCapturePage:
+    for value, name, low, high in (
+        (slot, "capture slot", 0, 3),
+        (connection_generation, "capture generation", 0, 0xFFFFFFFF),
+        (channels, "capture channels", 1, 31),
+        (max_events, "capture capacity", 1, 128),
+        (axis_quantum, "capture axis quantum", 1, 32767),
+        (trigger_quantum, "capture trigger quantum", 1, 65535),
+        (max_duration_ms, "capture duration", 1, 80000),
+    ):
+        _require_int(value, name, low, high)
+    _control_out(
+        device,
+        OP_MACRO_CAPTURE,
+        struct.pack(
+            "<BBIBBHHI",
+            1,
+            slot,
+            connection_generation,
+            channels,
+            max_events,
+            axis_quantum,
+            trigger_quantum,
+            max_duration_ms,
+        ),
+    )
+    page = read_macro_capture(device)
+    if page.slot != slot or page.connection_generation != connection_generation:
+        raise ConfigManagerError("capture controller changed during start")
+    return page
+
+
+def stop_macro_capture(device: UsbDevice, run_id: int) -> MacroCapturePage:
+    _require_int(run_id, "capture run ID", 1, 0xFFFFFFFF)
+    _control_out(device, OP_MACRO_CAPTURE, struct.pack("<BI", 0, run_id))
+    return read_macro_capture(device, run_id)
+
+
+def collect_macro_capture(device: UsbDevice, run_id: int) -> MacroCapturePage:
+    page = read_macro_capture(device, run_id)
+    if page.state_name in ("idle", "recording"):
+        raise ConfigManagerError("stop recording before collecting macro steps")
+    events = list(page.events)
+    while len(events) < page.total_events:
+        following = read_macro_capture(device, run_id, len(events))
+        if (
+            following.run_id != page.run_id
+            or following.connection_generation != page.connection_generation
+            or following.elapsed_us != page.elapsed_us
+            or following.total_events != page.total_events
+            or following.state != page.state
+            or following.channels != page.channels
+            or following.slot != page.slot
+            or following.axis_quantum != page.axis_quantum
+            or following.trigger_quantum != page.trigger_quantum
+            or following.max_duration_ms != page.max_duration_ms
+            or following.max_events != page.max_events
+            or not following.events
+        ):
+            raise ConfigManagerError("macro capture changed while reading pages")
+        if events and following.events[0].at_us <= events[-1].at_us:
+            raise ConfigManagerError("macro capture pages overlap")
+        events.extend(following.events)
+    return MacroCapturePage(
+        page.run_id,
+        page.connection_generation,
+        page.elapsed_us,
+        page.slot,
+        page.state,
+        page.channels,
+        page.total_events,
+        0,
+        page.axis_quantum,
+        page.trigger_quantum,
+        page.max_duration_ms,
+        page.max_events,
+        tuple(events),
+    )
+
+
+def capture_macro_steps(page: MacroCapturePage) -> tuple[MacroStep, ...]:
+    if (
+        page.state_name in ("idle", "recording")
+        or page.first_index != 0
+        or len(page.events) != page.total_events
+        or not page.events
+        or page.events[0].at_us != 0
+    ):
+        raise ConfigManagerError("a complete stopped capture is required")
+    steps = []
+    for index, event in enumerate(page.events):
+        end_us = (
+            page.events[index + 1].at_us
+            if index + 1 < len(page.events)
+            else page.elapsed_us
+        )
+        duration = (end_us + 500) // 1000 - (event.at_us + 500) // 1000
+        steps.append(
+            MacroStep(
+                0,
+                page.channels,
+                duration,
+                event.buttons,
+                event.left_x,
+                event.left_y,
+                event.right_x,
+                event.right_y,
+                event.left_trigger,
+                event.right_trigger,
+            )
+        )
+    return tuple(steps)
+
 
 def read_runtime_diagnostics(device: UsbDevice) -> RuntimeDiagnostics:
     envelope = _control_in(device, OP_RUNTIME_DIAGNOSTICS)
@@ -2140,12 +2591,15 @@ def parse_haptics_experiment(envelope: Envelope) -> HapticsExperimentDiagnostics
     if len(envelope.payload) != HAPTICS_EXPERIMENT_SIZE:
         raise ConfigManagerError("invalid haptics experiment payload size")
     counters = struct.unpack_from("<17I", envelope.payload)
-    state, slot, last_error, reserved = struct.unpack_from(
-        "<4B", envelope.payload, 68
-    )
+    state, slot, last_error, reserved = struct.unpack_from("<4B", envelope.payload, 68)
     mode = envelope.payload[72]
+    packet_frames = envelope.payload[73]
+    if packet_frames not in (32, 64) or (mode == 0 and packet_frames != 64):
+        raise ConfigManagerError("invalid haptics packet size")
     host_updates, dropped_updates = struct.unpack_from("<2I", envelope.payload, 76)
-    if envelope.flags != 0 or reserved != 0 or any(envelope.payload[73:76]):
+    if envelope.payload[74] not in (0, 1):
+        raise ConfigManagerError("invalid haptics nonzero flag")
+    if envelope.flags != 0 or reserved != 0 or envelope.payload[75] != 0:
         raise ConfigManagerError("invalid haptics experiment reserved flags")
     if state >= len(HAPTICS_EXPERIMENT_STATES):
         raise ConfigManagerError(f"invalid haptics experiment state {state}")
@@ -2156,9 +2610,15 @@ def parse_haptics_experiment(envelope: Envelope) -> HapticsExperimentDiagnostics
     ):
         raise ConfigManagerError(f"invalid haptics experiment slot {slot}")
     return HapticsExperimentDiagnostics(
-        *counters, state=state, slot=None if slot == 0xFF else slot,
-        last_error=last_error, mode=mode, host_updates=host_updates,
+        *counters,
+        state=state,
+        slot=None if slot == 0xFF else slot,
+        last_error=last_error,
+        mode=mode,
+        host_updates=host_updates,
         dropped_updates=dropped_updates,
+        packet_frames=packet_frames,
+        last_packet_nonzero=bool(envelope.payload[74]),
     )
 
 
@@ -2188,7 +2648,7 @@ def parse_haptics_transport_probe(envelope: Envelope) -> HapticsTransportProbe:
         raise ConfigManagerError("invalid haptics transport probe payload size")
     if envelope.flags != 0:
         raise ConfigManagerError("invalid haptics transport probe reserved flags")
-    fields = struct.unpack("<32I", envelope.payload)
+    fields = struct.unpack("<38Ii5I", envelope.payload)
     if fields[2] > 0xFFFF:
         raise ConfigManagerError("invalid haptics transport probe connection handle")
     if fields[25] not in (0, 1):
@@ -2229,8 +2689,10 @@ def read_haptics_experiment_profile(
 
 
 def _print_haptics_experiment_profile(
-    snapshot: HapticsExperimentDiagnostics, transport: HapticsTransportProbe,
-    *, as_json: bool,
+    snapshot: HapticsExperimentDiagnostics,
+    transport: HapticsTransportProbe,
+    *,
+    as_json: bool,
 ) -> None:
     if as_json:
         values = snapshot.to_json_object()
@@ -2245,18 +2707,42 @@ def _print_haptics_experiment_profile(
         f"handle=0x{transport.connection_handle:04x}; active={transport.active}"
     )
     for label, calls, maximum, total in (
-        ("timer lateness", transport.timer_wakes,
-         transport.max_timer_lateness_us, transport.total_timer_lateness_us),
-        ("permission wait", transport.permission_callbacks,
-         transport.max_permission_wait_us, transport.total_permission_wait_us),
-        ("l2cap_send", transport.send_calls,
-         transport.max_send_us, transport.total_send_us),
-        ("HCI write", transport.write_calls,
-         transport.max_write_us, transport.total_write_us),
-        ("HCI read", transport.read_calls,
-         transport.max_read_us, transport.total_read_us),
-        ("data-source poll", transport.poll_calls,
-         transport.max_poll_us, transport.total_poll_us),
+        (
+            "timer lateness",
+            transport.timer_wakes,
+            transport.max_timer_lateness_us,
+            transport.total_timer_lateness_us,
+        ),
+        (
+            "permission wait",
+            transport.permission_callbacks,
+            transport.max_permission_wait_us,
+            transport.total_permission_wait_us,
+        ),
+        (
+            "l2cap_send",
+            transport.send_calls,
+            transport.max_send_us,
+            transport.total_send_us,
+        ),
+        (
+            "HCI write",
+            transport.write_calls,
+            transport.max_write_us,
+            transport.total_write_us,
+        ),
+        (
+            "HCI read",
+            transport.read_calls,
+            transport.max_read_us,
+            transport.total_read_us,
+        ),
+        (
+            "data-source poll",
+            transport.poll_calls,
+            transport.max_poll_us,
+            transport.total_poll_us,
+        ),
     ):
         print(f"  {label}: calls={calls}, max_us={maximum}, total_us={total}")
     print(f"  read_packets: {transport.read_packets}")
@@ -2296,7 +2782,9 @@ def _raise_haptics_experiment_failure(
 
 
 def _print_haptics_experiment(
-    snapshot: HapticsExperimentDiagnostics, *, as_json: bool,
+    snapshot: HapticsExperimentDiagnostics,
+    *,
+    as_json: bool,
 ) -> None:
     values = snapshot.to_json_object()
     if as_json:
@@ -2342,8 +2830,11 @@ def _print_haptics_experiment(
 
 
 def _watch_haptics_experiment(
-    device: UsbDevice, snapshot: HapticsExperimentDiagnostics,
-    deadline: float, *, as_json: bool,
+    device: UsbDevice,
+    snapshot: HapticsExperimentDiagnostics,
+    deadline: float,
+    *,
+    as_json: bool,
 ) -> None:
     run_id = snapshot.run_id
     slot = snapshot.slot
@@ -2376,7 +2867,8 @@ def _watch_haptics_experiment(
 
 
 def _run_haptics_experiment_command(
-    device: UsbDevice, args: argparse.Namespace,
+    device: UsbDevice,
+    args: argparse.Namespace,
 ) -> None:
     if args.haptics_command == "profile":
         snapshot, transport = read_haptics_experiment_profile(device)
@@ -2390,9 +2882,7 @@ def _run_haptics_experiment_command(
             _print_haptics_experiment(before, as_json=args.json)
             print(HAPTICS_EXPERIMENT_ENABLE_HINT, file=sys.stderr)
         elif args.watch:
-            _watch_haptics_experiment(
-                device, before, deadline, as_json=args.json
-            )
+            _watch_haptics_experiment(device, before, deadline, as_json=args.json)
         else:
             _print_haptics_experiment(before, as_json=args.json)
             _raise_haptics_experiment_failure(before)
@@ -2420,17 +2910,17 @@ def _run_haptics_experiment_command(
             )
             return
     _control_out(
-        device, OP_HAPTICS_EXPERIMENT,
+        device,
+        OP_HAPTICS_EXPERIMENT,
         bytes(({"start": 1, "gameplay": 2, "stop": 0}[action], args.slot)),
     )
     print(
         f"{action.capitalize()} request accepted; pending firmware confirmation. "
         "USB ACK is not evidence of stream start, completion, or playback.",
-        file=sys.stderr if args.json else sys.stdout, flush=True,
+        file=sys.stderr if args.json else sys.stdout,
+        flush=True,
     )
-    expected_run_id = (
-        (before.run_id + 1) & 0xFFFFFFFF if starting else before.run_id
-    )
+    expected_run_id = (before.run_id + 1) & 0xFFFFFFFF if starting else before.run_id
     expected_mode = (1 if action == "gameplay" else 0) if starting else before.mode
     observed_run = False
     while True:
@@ -2449,9 +2939,7 @@ def _run_haptics_experiment_command(
                 _print_haptics_experiment(snapshot, as_json=args.json)
                 _raise_haptics_experiment_failure(snapshot)
             if starting and args.watch:
-                _watch_haptics_experiment(
-                    device, snapshot, deadline, as_json=args.json
-                )
+                _watch_haptics_experiment(device, snapshot, deadline, as_json=args.json)
                 return
             if starting and (
                 snapshot.state_name == "running"
@@ -2474,7 +2962,8 @@ def _run_haptics_experiment_command(
                     f"state {snapshot.state_name}"
                 )
         elif (
-            action == "stop" or observed_run
+            action == "stop"
+            or observed_run
             or (snapshot.run_id, snapshot.slot, snapshot.mode)
             != (before.run_id, before.slot, before.mode)
         ):
@@ -2515,9 +3004,7 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
     ):
         raise ConfigManagerError("invalid stored pairing-window duration")
     if requested_mode >= len(REQUESTED_MODE_NAMES):
-        raise ConfigManagerError(
-            f"invalid stored requested USB mode {requested_mode}"
-        )
+        raise ConfigManagerError(f"invalid stored requested USB mode {requested_mode}")
     return AdapterConfiguration(
         pairing_window_seconds=pairing_window_seconds,
         generation=envelope.generation,
@@ -2557,13 +3044,10 @@ def write_configuration(
         <= configuration.pairing_window_seconds
         <= PAIRING_WINDOW_SECONDS_MAX
     ):
-        raise ConfigManagerError(
-            "pairing window must be between 10 and 300 seconds"
-        )
-    if (
-        type(configuration.requested_mode) is not int
-        or not 0 <= configuration.requested_mode < len(REQUESTED_MODE_NAMES)
-    ):
+        raise ConfigManagerError("pairing window must be between 10 and 300 seconds")
+    if type(
+        configuration.requested_mode
+    ) is not int or not 0 <= configuration.requested_mode < len(REQUESTED_MODE_NAMES):
         raise ConfigManagerError("invalid requested USB mode")
     payload = struct.pack(
         "<HB5x",
@@ -2589,17 +3073,13 @@ def write_configuration(
             OP_CONFIGURATION_CHUNK,
             struct.pack("<IHH", transaction_id, offset, len(chunk)) + chunk,
         )
-    _control_out(
-        device, OP_CONFIGURATION_COMMIT, struct.pack("<I", transaction_id)
-    )
+    _control_out(device, OP_CONFIGURATION_COMMIT, struct.pack("<I", transaction_id))
     return _wait_for_transaction(device, transaction_id, timeout)
 
 
 def reset_configuration(device: UsbDevice, timeout: float) -> TransactionStatus:
     transaction_id = _host_transaction_id()
-    _control_out(
-        device, OP_CONFIGURATION_RESET, struct.pack("<I", transaction_id)
-    )
+    _control_out(device, OP_CONFIGURATION_RESET, struct.pack("<I", transaction_id))
     return _wait_for_transaction(device, transaction_id, timeout)
 
 
@@ -2624,10 +3104,9 @@ def set_mode(
 
 
 def request_reboot(device: UsbDevice, transaction_id: int) -> None:
-    _require_int(
-        transaction_id, "transaction ID", 1, HOST_TRANSACTION_ID_MASK
-    )
+    _require_int(transaction_id, "transaction ID", 1, HOST_TRANSACTION_ID_MASK)
     _control_out(device, OP_REBOOT, struct.pack("<I", transaction_id))
+
 
 def request_bootsel_reboot(device: UsbDevice) -> None:
     _control_out(device, OP_BOOTSEL_REBOOT)
@@ -2654,6 +3133,7 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
         PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
         PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
         PROFILE_ACTION_CONTROL_SCHEMA_VERSION,
+        PROFILE_SPARSE_MACRO_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile-list schema")
@@ -2686,9 +3166,7 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
         except UnicodeDecodeError as exc:
             raise ConfigManagerError("invalid profile-list alias") from exc
         if index == 0 and not identity.is_global_fallback:
-            raise ConfigManagerError(
-                "profile list does not begin with global fallback"
-            )
+            raise ConfigManagerError("profile list does not begin with global fallback")
         if index != 0 and identity.is_global_fallback:
             raise ConfigManagerError("duplicate global fallback profile entry")
         if identity in identities:
@@ -2732,9 +3210,15 @@ def read_selected_profile(device: UsbDevice) -> ControllerProfile:
         PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION,
         PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
         PROFILE_ACTION_CONTROL_SCHEMA_VERSION,
+        PROFILE_SPARSE_MACRO_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile schema")
+    if (
+        len(envelope.payload) < 4
+        or struct.unpack_from("<H", envelope.payload)[0] != envelope.schema_version
+    ):
+        raise ConfigManagerError("profile envelope schema does not match payload")
     return ControllerProfile.from_bytes(envelope.payload)
 
 
@@ -2747,9 +3231,7 @@ def read_profile(
     return read_selected_profile(device)
 
 
-def _decode_profile_metadata_value(
-    payload: bytes, offset: int, label: str
-) -> str:
+def _decode_profile_metadata_value(payload: bytes, offset: int, label: str) -> str:
     size = payload[offset]
     encoded = payload[offset + 1 : offset + PROFILE_METADATA_VALUE_SIZE]
     if size > PROFILE_METADATA_MAX_BYTES or any(encoded[size:]):
@@ -2767,9 +3249,7 @@ def parse_profile_metadata(envelope: Envelope) -> ProfileMetadata:
         or len(envelope.payload) != PROFILE_METADATA_SIZE
     ):
         raise ConfigManagerError("invalid profile metadata payload")
-    alias = _decode_profile_metadata_value(
-        envelope.payload, 0, "controller alias"
-    )
+    alias = _decode_profile_metadata_value(envelope.payload, 0, "controller alias")
     names = tuple(
         _decode_profile_metadata_value(
             envelope.payload,
@@ -2782,9 +3262,7 @@ def parse_profile_metadata(envelope: Envelope) -> ProfileMetadata:
 
 
 def read_selected_profile_metadata(device: UsbDevice) -> ProfileMetadata:
-    return parse_profile_metadata(
-        _control_in(device, OP_PROFILE_METADATA_READ)
-    )
+    return parse_profile_metadata(_control_in(device, OP_PROFILE_METADATA_READ))
 
 
 def read_profile_metadata(
@@ -2809,9 +3287,7 @@ def set_profile_metadata(
         raise ConfigManagerError("profile metadata must be text")
     encoded = value.encode("utf-8")
     if len(encoded) > PROFILE_METADATA_MAX_BYTES:
-        raise ConfigManagerError(
-            "profile metadata must contain at most 31 UTF-8 bytes"
-        )
+        raise ConfigManagerError("profile metadata must contain at most 31 UTF-8 bytes")
     transaction_id = _host_transaction_id()
     _control_out(
         device,
@@ -2821,14 +3297,10 @@ def set_profile_metadata(
         + bytes((profile_index, len(encoded)))
         + encoded,
     )
-    return _wait_for_profile_transaction(
-        device, transaction_id, timeout
-    )
+    return _wait_for_profile_transaction(device, transaction_id, timeout)
 
 
-def identify_controller(
-    device: UsbDevice, identity: ControllerIdentity
-) -> None:
+def identify_controller(device: UsbDevice, identity: ControllerIdentity) -> None:
     if identity.is_global_fallback:
         raise ConfigManagerError("default profile has no controller to identify")
     _control_out(device, OP_PROFILE_IDENTIFY, identity.to_bytes())
@@ -2852,8 +3324,18 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
         if flags != 0 or payload[1] != 0xFF or any(payload[2:]):
             raise ConfigManagerError("invalid disconnected playtest payload")
         return ProfilePlaytest(
-            False, None, 0, 0, None, 0,
-            (0, 0), (0, 0), (0, 0), 0, 0, None,
+            False,
+            None,
+            0,
+            0,
+            None,
+            0,
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            0,
+            0,
+            None,
         )
     if (
         payload[1] >= PROFILE_PLAYTEST_SLOT_COUNT
@@ -2862,8 +3344,8 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
     ):
         raise ConfigManagerError("invalid connected playtest payload")
     identity = ControllerIdentity.from_bytes(payload[12:26])
-    left_x, left_y, right_x, right_y, left_trigger, right_trigger = (
-        struct.unpack_from("<hhhhHH", payload, 26)
+    left_x, left_y, right_x, right_y, left_trigger, right_trigger = struct.unpack_from(
+        "<hhhhHH", payload, 26
     )
     motion_values = struct.unpack_from("<hhhhhh", payload, 42)
     if not has_motion and any(motion_values):
@@ -2892,7 +3374,9 @@ def read_profile_transaction_status(device: UsbDevice) -> TransactionStatus:
     envelope = _control_in(device, OP_PROFILE_TRANSACTION_STATUS)
     _raise_status(envelope, pending_ok=True)
     if (
-        envelope.schema_version != PROFILE_SCHEMA_VERSION
+        not PROFILE_LEGACY_SCHEMA_VERSION
+        <= envelope.schema_version
+        <= PROFILE_SCHEMA_VERSION
         or len(envelope.payload) != 20
     ):
         raise ConfigManagerError("invalid profile transaction-status payload")
@@ -2907,18 +3391,16 @@ def _wait_for_profile_transaction(
     while time.monotonic() < deadline:
         envelope = _control_in(device, OP_PROFILE_TRANSACTION_STATUS)
         if (
-            envelope.schema_version != PROFILE_SCHEMA_VERSION
+            not PROFILE_LEGACY_SCHEMA_VERSION
+            <= envelope.schema_version
+            <= PROFILE_SCHEMA_VERSION
             or len(envelope.payload) != 20
         ):
-            raise ConfigManagerError(
-                "invalid profile transaction-status payload"
-            )
+            raise ConfigManagerError("invalid profile transaction-status payload")
         values = struct.unpack("<IHHIII", envelope.payload)
         status = TransactionStatus(*values, status=envelope.status)
         if status.transaction_id != transaction_id:
-            raise ConfigManagerError(
-                "device reported a different profile transaction"
-            )
+            raise ConfigManagerError("device reported a different profile transaction")
         _raise_status(envelope, pending_ok=True)
         if status.status == STATUS_OK:
             return status
@@ -2976,9 +3458,7 @@ def reset_profile(
     _control_out(
         device,
         OP_PROFILE_RESET,
-        struct.pack("<I", transaction_id)
-        + identity.to_bytes()
-        + bytes((wire_index,)),
+        struct.pack("<I", transaction_id) + identity.to_bytes() + bytes((wire_index,)),
     )
     return _wait_for_profile_transaction(device, transaction_id, timeout)
 
@@ -3007,10 +3487,7 @@ def parse_pairing_snapshot(envelope: Envelope) -> PairingSnapshot:
         raise ConfigManagerError("short pairing snapshot")
     record_count = envelope.payload[0]
     required = 4 + record_count * PAIRING_RECORD_SIZE
-    if (
-        record_count > PAIRING_RECORD_CAPACITY
-        or len(envelope.payload) != required
-    ):
+    if record_count > PAIRING_RECORD_CAPACITY or len(envelope.payload) != required:
         raise ConfigManagerError("invalid pairing record count")
     records: list[PairingRecord] = []
     offset = 4
@@ -3066,17 +3543,13 @@ def _candidate_devices() -> Iterable[UsbDevice]:
     for vendor_id, product_id in USB_IDENTITIES:
         devices = cast(
             Iterable[UsbDevice] | None,
-            usb.core.find(
-                find_all=True, idVendor=vendor_id, idProduct=product_id
-            ),
+            usb.core.find(find_all=True, idVendor=vendor_id, idProduct=product_id),
         )
         if devices is not None:
             yield from devices
 
 
-def find_pico(
-    bus: int | None, address: int | None, timeout: float = 3.0
-) -> UsbDevice:
+def find_pico(bus: int | None, address: int | None, timeout: float = 3.0) -> UsbDevice:
     deadline = time.monotonic() + timeout
     failures: list[Exception] = []
     while True:
@@ -3167,13 +3640,9 @@ def _capture_reenumeration_snapshot(
         if (
             device is previous_device
             or (
-                previous_enumeration is not None
-                and enumeration == previous_enumeration
+                previous_enumeration is not None and enumeration == previous_enumeration
             )
-            or (
-                selected_location is not None
-                and location == selected_location
-            )
+            or (selected_location is not None and location == selected_location)
         ):
             continue
         other_count += 1
@@ -3239,8 +3708,7 @@ def _wait_for_reenumeration(
     while True:
         candidates = list(_candidate_devices())
         if not disappeared and not any(
-            _is_previous_enumeration(device, snapshot)
-            for device in candidates
+            _is_previous_enumeration(device, snapshot) for device in candidates
         ):
             disappeared = True
         if disappeared:
@@ -3284,8 +3752,7 @@ def _wait_for_reenumeration(
         ) from failures[-1]
     if snapshot.selected_location is not None:
         raise ConfigManagerError(
-            "Pico did not re-enumerate on its original physical USB port "
-            "after reboot"
+            "Pico did not re-enumerate on its original physical USB port after reboot"
         )
     raise ConfigManagerError("Pico did not re-enumerate after reboot")
 
@@ -3303,24 +3770,19 @@ def configure_mode(
         raise ConfigManagerError("requested USB mode is not available")
     before_info = read_info(device)
     before_configuration = read_configuration(device)
-    if (
-        before_configuration.requested_mode == requested_mode
-        and _mode_is_active(requested_mode, before_info.active_mode)
+    if before_configuration.requested_mode == requested_mode and _mode_is_active(
+        requested_mode, before_info.active_mode
     ):
         return device, False
     reenumeration_snapshot = _capture_reenumeration_snapshot(device)
 
     transaction = set_mode(device, requested_mode, timeout)
     request_reboot(device, transaction.transaction_id)
-    reenumerated = _wait_for_reenumeration(
-        reenumeration_snapshot, timeout
-    )
+    reenumerated = _wait_for_reenumeration(reenumeration_snapshot, timeout)
     after_info = read_info(reenumerated)
     after_configuration = read_configuration(reenumerated)
     if after_configuration.requested_mode != requested_mode:
-        raise ConfigManagerError(
-            "requested USB mode was not stored after reboot"
-        )
+        raise ConfigManagerError("requested USB mode was not stored after reboot")
     if not _mode_is_active(requested_mode, after_info.active_mode):
         raise ConfigManagerError(
             f"device activated {after_info.mode_name()} instead of "
@@ -3351,8 +3813,7 @@ def _print_profiles(entries: Sequence[ProfileListEntry]) -> None:
                 f"VID:PID {identity.vendor_id:04X}:{identity.product_id:04X}"
             )
         print(
-            f"{index}: {description} "
-            f"(active profile {entry.active_profile_index + 1})"
+            f"{index}: {description} (active profile {entry.active_profile_index + 1})"
         )
 
 
@@ -3371,9 +3832,7 @@ def _load_profile(path: Path) -> ControllerProfile:
     try:
         payload = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise ConfigManagerError(
-            f"could not read profile JSON {path}: {exc}"
-        ) from exc
+        raise ConfigManagerError(f"could not read profile JSON {path}: {exc}") from exc
     return ControllerProfile.from_json(payload)
 
 
@@ -3381,9 +3840,7 @@ def _save_profile(path: Path, profile: ControllerProfile) -> None:
     try:
         path.write_text(profile.to_json(), encoding="utf-8")
     except OSError as exc:
-        raise ConfigManagerError(
-            f"could not write profile JSON {path}: {exc}"
-        ) from exc
+        raise ConfigManagerError(f"could not write profile JSON {path}: {exc}") from exc
 
 
 def _profile_number(value: str) -> int:
@@ -3408,10 +3865,9 @@ def _identity_index(value: str) -> int:
             "identity must be a non-negative list index"
         ) from exc
     if index < 0:
-        raise argparse.ArgumentTypeError(
-            "identity must be a non-negative list index"
-        )
+        raise argparse.ArgumentTypeError("identity must be a non-negative list index")
     return index
+
 
 def _tcp_port(value: str) -> int:
     try:
@@ -3421,11 +3877,8 @@ def _tcp_port(value: str) -> int:
             "port must be a number from 0 to 65535"
         ) from exc
     if not 0 <= port <= 0xFFFF:
-        raise argparse.ArgumentTypeError(
-            "port must be a number from 0 to 65535"
-        )
+        raise argparse.ArgumentTypeError("port must be a number from 0 to 65535")
     return port
-
 
 
 def _add_identity_argument(parser: argparse.ArgumentParser) -> None:
@@ -3465,9 +3918,7 @@ def build_parser() -> argparse.ArgumentParser:
     haptics = commands.add_parser(
         "haptics-experiment", help="control the opt-in DualSense PCM experiment"
     )
-    haptics_commands = haptics.add_subparsers(
-        dest="haptics_command", required=True
-    )
+    haptics_commands = haptics.add_subparsers(dest="haptics_command", required=True)
     for action, help_text in (
         ("start", "run the finite PCM fixture"),
         ("gameplay", "arm continuous Nintendo HD-rumble PCM until stopped"),
@@ -3477,29 +3928,33 @@ def build_parser() -> argparse.ArgumentParser:
         experiment = haptics_commands.add_parser(action, help=help_text)
         if action != "status":
             experiment.add_argument(
-                "--slot", type=int, choices=range(HAPTICS_EXPERIMENT_SLOT_COUNT),
-                default=0, help="connected controller slot (default: 0)",
+                "--slot",
+                type=int,
+                choices=range(HAPTICS_EXPERIMENT_SLOT_COUNT),
+                default=0,
+                help="connected controller slot (default: 0)",
             )
         if action != "stop":
             experiment.add_argument(
-                "--watch", action="store_true",
+                "--watch",
+                action="store_true",
                 help="capture 100 ms status samples until terminal or --timeout; "
-                     "does not stop an armed gameplay stream",
+                "does not stop an armed gameplay stream",
             )
         experiment.add_argument(
-            "--json", action="store_true",
+            "--json",
+            action="store_true",
             help="emit JSON diagnostics (one object per sample with --watch)",
         )
     profile = haptics_commands.add_parser(
         "profile", help="read a run-correlated transport timing snapshot"
     )
     profile.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="emit diagnostics with a nested transport profile object",
     )
-    reboot = commands.add_parser(
-        "reboot", help="reboot into a firmware or ROM target"
-    )
+    reboot = commands.add_parser("reboot", help="reboot into a firmware or ROM target")
     reboot.add_argument("target", choices=("bootsel",))
     mode = commands.add_parser("mode", help="select the persistent USB mode")
     mode.add_argument("mode", choices=SELECTABLE_MODE_NAMES)
@@ -3521,9 +3976,7 @@ def build_parser() -> argparse.ArgumentParser:
         "profiles",
         help="open the editor or manage controller profiles as JSON",
     )
-    profile_commands = profiles.add_subparsers(
-        dest="profile_command", required=True
-    )
+    profile_commands = profiles.add_subparsers(dest="profile_command", required=True)
     profile_commands.add_parser(
         "list", help="list profile identities and active profiles"
     )
@@ -3577,9 +4030,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_identity_argument(profile_activate)
 
     pairings = commands.add_parser("pairings", help="list or clear pairings")
-    pairing_commands = pairings.add_subparsers(
-        dest="pairing_command", required=True
-    )
+    pairing_commands = pairings.add_subparsers(dest="pairing_command", required=True)
     pairing_commands.add_parser("list", help="list stored pairings")
     pairing_clear = pairing_commands.add_parser("clear", help="clear pairings")
     pairing_clear.add_argument("--yes", action="store_true")
@@ -3594,34 +4045,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "haptics-experiment" and not math.isfinite(args.timeout):
         print("error: --timeout must be finite", file=sys.stderr)
         return 2
-    if (
-        args.command == "config"
-        and args.config_command == "reset"
-        and not args.yes
-    ):
+    if args.command == "config" and args.config_command == "reset" and not args.yes:
         print("error: config reset requires --yes", file=sys.stderr)
         return 2
-    if (
-        args.command == "pairings"
-        and args.pairing_command == "clear"
-        and not args.yes
-    ):
+    if args.command == "pairings" and args.pairing_command == "clear" and not args.yes:
         print("error: pairings clear requires --yes", file=sys.stderr)
         return 2
-    if (
-        args.command == "profiles"
-        and args.profile_command == "reset"
-        and not args.yes
-    ):
+    if args.command == "profiles" and args.profile_command == "reset" and not args.yes:
         print("error: profiles reset requires --yes", file=sys.stderr)
         return 2
 
     imported_profile: ControllerProfile | None = None
     try:
         if args.command == "profiles" and args.profile_command == "edit":
-            profile_web = importlib.import_module(
-                ".profile_web", __package__
-            )
+            profile_web = importlib.import_module(".profile_web", __package__)
             profile_web.run_profile_editor(
                 bus=args.bus,
                 address=args.address,
@@ -3647,41 +4084,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Mode capabilities: {info.capability_summary()}")
             print(f"Configuration generation: {configuration.generation}")
             print(f"Configuration CRC: {configuration.crc:08x}")
-            print(
-                "Pairing window: "
-                f"{configuration.pairing_window_seconds} seconds"
-            )
+            print(f"Pairing window: {configuration.pairing_window_seconds} seconds")
         elif args.command == "diagnostics":
             diagnostics = read_runtime_diagnostics(device)
             print(f"Initialization stage: {diagnostics.initialization_stage}")
             print(f"Rumble timer ticks: {diagnostics.rumble_timer_ticks}")
-            print(
-                "Configuration timer ticks: "
-                f"{diagnostics.configuration_timer_ticks}"
-            )
+            print(f"Configuration timer ticks: {diagnostics.configuration_timer_ticks}")
             print(f"Controller reports: {diagnostics.controller_reports}")
-            print(
-                "Host rumble requests: "
-                f"{diagnostics.host_rumble_requests}"
-            )
-            print(
-                "Local feedback requests: "
-                f"{diagnostics.local_feedback_requests}"
-            )
+            print(f"Host rumble requests: {diagnostics.host_rumble_requests}")
+            print(f"Local feedback requests: {diagnostics.local_feedback_requests}")
             print(f"Rumble dispatches: {diagnostics.rumble_dispatches}")
             print(f"Active slots: {diagnostics.active_slots}")
-            print(
-                "Rumble-capable slots: "
-                f"{diagnostics.rumble_capable_slots}"
-            )
-            print(
-                "Feedback-pending slots: "
-                f"{diagnostics.feedback_pending_slots}"
-            )
-            print(
-                "Rumble-pending slots: "
-                f"{diagnostics.rumble_pending_slots}"
-            )
+            print(f"Rumble-capable slots: {diagnostics.rumble_capable_slots}")
+            print(f"Feedback-pending slots: {diagnostics.feedback_pending_slots}")
+            print(f"Rumble-pending slots: {diagnostics.rumble_pending_slots}")
         elif args.command == "haptics-experiment":
             _run_haptics_experiment_command(device, args)
         elif args.command == "reboot":
@@ -3697,9 +4113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "config":
             if args.config_command == "show":
                 configuration = read_configuration(device)
-                print(
-                    f"pairing_window_seconds={configuration.pairing_window_seconds}"
-                )
+                print(f"pairing_window_seconds={configuration.pairing_window_seconds}")
                 print(
                     "requested_mode="
                     f"{REQUESTED_MODE_NAMES[configuration.requested_mode]}"
@@ -3725,10 +4139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 status = reset_configuration(device, args.timeout)
-                print(
-                    "Reset configuration at generation "
-                    f"{status.stored_generation}."
-                )
+                print(f"Reset configuration at generation {status.stored_generation}.")
         elif args.command == "profiles":
             entries = list_profiles(device)
             if args.profile_command == "list":
@@ -3736,9 +4147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 identity = _resolve_profile_identity(entries, args.identity)
                 if args.profile_command == "export":
-                    profile = read_profile(
-                        device, identity, args.profile_index
-                    )
+                    profile = read_profile(device, identity, args.profile_index)
                     _save_profile(args.path, profile)
                     print(
                         f"Exported profile {args.profile_index + 1} "
@@ -3759,9 +4168,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"(CRC {status.stored_crc:08x})."
                     )
                 elif args.profile_command == "reset":
-                    reset_profile(
-                        device, identity, args.profile_index, args.timeout
-                    )
+                    reset_profile(device, identity, args.profile_index, args.timeout)
                     target = (
                         "all profiles"
                         if args.profile_index is None
@@ -3769,9 +4176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     print(f"Reset {target} for identity {args.identity}.")
                 else:
-                    activate_profile(
-                        device, identity, args.profile_index, args.timeout
-                    )
+                    activate_profile(device, identity, args.profile_index, args.timeout)
                     print(
                         f"Activated profile {args.profile_index + 1} "
                         f"for identity {args.identity}."

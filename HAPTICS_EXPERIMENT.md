@@ -2,7 +2,7 @@
 
 ## Goal and evidence
 
-Native Nintendo HD-rumble decoding is connected to the proven Bluetooth PCM transport through opt-in gameplay mode. A dedicated HD image auto-arms one DualSense in slot 0. Normal builds retain compatibility rumble, and the deterministic transport fixture remains available. Console gameplay was user-tested; precise actuator-onset latency and perceptual equivalence to Nintendo hardware are not claimed.
+Native Nintendo HD-rumble decoding and stateful XInput motor strengths feed the DualSense Bluetooth PCM backend. Standard AIO/XInput builds enable the qualified 300 MHz/1.3 V transport by default and auto-arm the first eligible DualSense that becomes ready, in any slot. One native stream is selected at a time; other controllers retain compatibility rumble. The deterministic transport fixture remains available. Console gameplay was user-tested; precise actuator-onset latency and perceptual equivalence to Nintendo hardware are not claimed.
 
 The user observed 1–2 seconds of gameplay-to-haptics delay in OMP session `01a06fa9-cdc7-72de-ac0e-7de08c355f06`. Both a DS5Dongle-style 0x39 stream and a short 0x32 stream failed after continuous silence, latest-state replacement and can-send callbacks were tried. Do not repeat those changes as newly discovered fixes or attribute the observed delay to profile feedback.
 
@@ -27,13 +27,13 @@ Sources:
 
 ## Implementation contract
 
-1. Build-only opt-in `SWITCH_PICO_HAPTICS_EXPERIMENT`; separate build directory/artifacts. Preserve wake identity, pairing storage, USB modes and ordinary firmware artifacts. Use stock clock/voltage. Experimental builds use the controller's advertised outgoing ACL capacity and one-packet receive batches with explicit rescheduling; normal builds retain the three-credit cap and sixteen-packet batches. Incoming flow control and all FIFO sizes remain unchanged.
-2. One selected connected Sony DualSense/DualSense Edge, Bluetooth Classic, sufficient negotiated MTU. The fixture requires explicit start. `SWITCH_PICO_HD_RUMBLE=ON` additionally auto-arms continuous gameplay for a DualSense in slot 0; it emits silence until host commands or local confirmation arrive. Other controllers retain compatibility output.
-3. 142-byte report 0x32 plus A2 transaction = 143-byte L2CAP SDU. The first report selects native mode using sized state block 0x90, length 63, with rumble-selection bits and other write flags clear; it carries one silent 64-byte haptic block (0x92). Subsequent reports use compact audio control `{0x91,3,0x62,16,counter}` and **two** 64-byte haptic blocks: descriptor 0xd2, length 64, followed by 128 sample bytes. Thus 0xd2 is valid here, unlike the original spike's single-block mismatch. Deterministic padding and Bluetooth CRC. No speaker, microphone, USB audio endpoint, Opus or resampler.
-4. Steady-state 64 stereo frames per report at 3 kHz, 46.875 reports/s. Absolute microsecond/sample deadlines use integer rational arithmetic; preserve fractional time and skip obsolete packets after stalls rather than burst-replaying them. Timer wakeups account for SDK +1 tick. Can-send permission and audio deadlines are separate. Arm flags before requests and handle synchronous callbacks without recursive stream generation.
+1. AIO/XInput defaults enable `SWITCH_PICO_HAPTICS_EXPERIMENT`, `SWITCH_PICO_HD_RUMBLE`, packet-level CYW43 reads and bounded HCI credit batching at 300 MHz/1.3 V. UART is unchanged. Preserve wake identity, pairing storage and USB modes. Incoming flow control and FIFO capacities remain unchanged; the controller's advertised outgoing capacity is eight ACL packets on this hardware.
+2. One selected Sony DualSense/DualSense Edge, Bluetooth Classic, sufficient negotiated MTU. Auto-arm chooses the first eligible ready controller, not necessarily slot 0, and later controllers do not steal an active stream. The fixture requires explicit start. Idle native output remains silent; other models and unselected slots use their controller-specific compatibility paths.
+3. Report 0x32 plus A2 remains a 143-byte L2CAP SDU. The first report selects native mode with sized state block 0x90/63 and one silent 0x92/64 haptic block. Subsequent reports use compact controls `{0x91,3,0x62,16,counter}`. Qualified gameplay carries one 64-byte block (32 stereo frames, descriptor 0x92); the fixture and unoptimized builds carry two blocks (64 frames, descriptor 0xd2). The counter advances by the number of blocks. Padding and Bluetooth CRC remain deterministic. No speaker, microphone, USB audio endpoint, Opus or resampler.
+4. At 3 kHz, 32/64 stereo frames require 93.75/46.875 reports/s. Absolute rational deadlines preserve fractional time and skip obsolete packets after stalls rather than burst-replaying them. Timer wakeups account for SDK +1 tick. Can-send permission and audio deadlines remain separate; flags are armed before requests and synchronous callbacks cannot recursively generate a stream.
 5. The deterministic fixture remains a finite 288-report / 6.144-second sequence: 48 priming intervals, four cycles of left 100 Hz / silence / right 200 Hz / silence (12 reports = 256 ms per phase), then 48 trailing-silence reports. Its peak remains 32/127. Gameplay is continuous, has no one-second priming pattern, and uses timestamped Switch commands instead. Stop restores compatibility output; disconnect cancels without stale-pointer use.
 6. No historical PCM FIFO. Generate only the current due block when transmission is permitted; bounded control mailbox across cores. Record packet counts, skipped blocks, failed sends, synchronous callbacks, generation cost, send gaps, lateness, request wait and first-tone timestamps. HCI submission is not physical actuator onset.
-7. Host `haptics-experiment start`, `gameplay`, `status`, `stop`, and `profile` use existing USB management framing. Ordinary builds report unsupported. General runtime diagnostics remain unchanged. The experiment response is schema 3; transport profiling remains schema 2. Update the host and experimental firmware together.
+7. Host `haptics-experiment start`, `gameplay`, `status`, `stop`, and `profile` retain USB management framing. AIO builds enable these operations; explicitly disabled/UART builds do not. Operation 0x40 uses schema 5 and transport profiling uses schema 3. Update firmware and host tools together.
 8. Regression coverage must include synchronous callback delivery, rational clock and late wakeups, reference packet interpretation, finite completion/stop, disconnect/reconnect and compatibility restoration. Native probes cannot prove controller acceptance or physical latency.
 
 ## Gameplay mode
@@ -44,21 +44,25 @@ Build using the provisioned Pico SDK/toolchain environment:
 cmake -S . -B build-hd-rumble -DPICO_BOARD=pico2_w \
   -DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32 \
   -DSWITCH_PICO_HD_RUMBLE=ON \
+  -DSWITCH_PICO_SYS_CLOCK_MHZ=300 -DSWITCH_PICO_OVERCLOCK_MV=1300 \
+  -DSWITCH_PICO_CYW43_PACKET_READ=ON -DSWITCH_PICO_HCI_CREDIT_BATCH=ON \
   -DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM=ON -DSWITCH_PICO_LOG=OFF
 cmake --build build-hd-rumble
 ```
 
-Load `build-hd-rumble/switch-pico.elf` or `.uf2`. The HD option implies the experimental transport and auto-arms slot 0 on connection. On the Switch, reconnect the DualSense with PS. Manual PC arming is `uv run switch-pico-config haptics-experiment gameplay --slot 0`; it does not persist across power cycles. `stop` disarms the native stream, not ordinary compatibility rumble. The standard `build.py` commands explicitly disable both HD and experiment options.
+Load `build-hd-rumble/switch-pico.elf` or `.uf2`, or use the standard `build.py --aio` entry point and `firmware/switch-pico-aio.uf2`. Both use the optimized native path. Reconnect a DualSense with PS if needed. Manual selection uses `haptics-experiment gameplay --slot N` after stopping any active run; CLI slots are zero-based, so the second controller is `--slot 1`. Manual arming does not persist across power cycles. `stop` disarms the native stream and restores compatibility output. A new eligible connection may auto-arm; there is no periodic re-arm that defeats an explicit stop.
 
 The decoder preserves each actuator's one-to-three ordered substeps and frequency indices. Amplitudes become linear Q0.15 values via precomputed lookups; compatibility magnitudes retain their previous mapping. Profile strong/weak scales apply to the low/high bands of both actuators without discarding substeps.
 
-The synthesizer has independent left/right low/high phase accumulators. Frequencies are `40 * 2^(index/32)` and `80 * 2^(index/32)` Hz. Each command occupies an 8 ms window, split into 24/12/8 PCM samples per substep for counts 1/2/3 at 3 kHz. New reports supersede unplayed old substeps; identical compressed words hold final state rather than replaying deltas. Each side expires 50 ms after its last update, matching the existing conservative Switch-rumble timeout policy.
+The synthesizer has independent left/right low/high phase accumulators. Frequencies are `40 * 2^(index/32)` and `80 * 2^(index/32)` Hz. Each Switch command occupies an 8 ms window, split into 24/12/8 PCM samples per substep for counts 1/2/3. New reports supersede unplayed old substeps; identical compressed words hold final state rather than replaying deltas. Each Switch-updated side expires after 50 ms, matching the existing conservative timeout policy.
 
-One report interval (21.333 ms) of causal lookback preserves commands received between Bluetooth sends without predicting future input. Fixed 16-entry cross-core and synthesis command histories contain decoded states, not PCM. Overflow is counted; stale sample intervals are skipped, not replayed as a backlog. `host_updates` and `dropped_updates` expose command ingestion and loss.
+One report interval of causal lookback is 10.667 ms in the qualified 32-frame path and 21.333 ms in the 64-frame path. Fixed 16-entry cross-core and synthesis histories contain commands, not PCM. Overflow is counted and obsolete sample intervals are not replayed. XInput holds use a distinct persistent command: strong/low magnitude drives the left 160 Hz band, weak/high drives the right 320 Hz band, until a new command or zero stop. They do not fake refreshes to evade the Switch watchdog. Retained XInput state is seeded once per native run, including manual re-arming after compatibility output.
 
-Native gameplay uses balanced **2x low/high gain after profile scaling**, followed by a gentle **0.8-power curve** on the combined amplitude. This lifts quiet and medium effects while retaining their low/high ratio. The curve is a 257-entry lookup with integer interpolation, not per-sample floating-point math. Combined output weights are capped at 65535, preventing coefficient overflow and waveform clipping. Zero remains zero. Frequencies, timing, and local-confirmation strength are unchanged. This response replaced the initial 1.5x gain and a low-band-only experiment after user comparison.
+Native gameplay uses balanced **2x low/high gain after profile scaling**, followed by a gentle **0.8-power curve** on the combined amplitude. This lifts quiet and medium effects while retaining their low/high ratio. The curve is a 257-entry lookup with integer interpolation, not per-sample floating-point math. Combined weights are capped at 65535 to avoid overflow and clipping. Zero remains zero. The amplitude curve does not alter carrier frequencies or local-confirmation gain; packet timing follows the transport configuration above. This response replaced the initial 1.5x and low-band-only experiments after user comparison.
 
-The gameplay stream continues with silence while idle. It is stopped on disconnect, explicit stop, or a stalled send-permission watchdog; it yields to compatibility behavior in XInput mode. Existing LED feedback can drain without switching the controller out of native haptics. Continuous idle streaming trades power for avoiding repeated audio-mode startup.
+Local confirmation remains a transient overlay and resumes the current host state. USB reset/unmount/suspend clears held XInput output. In Auto mode, an unmount intentionally watchdog-reboots to Switch probe; this includes a reset that clears TinyUSB's configured/mounted state. A libusb reset can consequently report “Entity not found” while the device re-enumerates. Persistent manual XInput mode is exempt from that Auto-mode reboot policy.
+
+The gameplay stream continues with silence while idle. It stops on disconnect, explicit stop, or a stalled send-permission watchdog. Existing LED feedback can drain without switching the controller out of native haptics. Continuous idle streaming trades power for avoiding repeated audio-mode startup.
 
 ## Building and running
 
@@ -68,12 +72,13 @@ Use the repository's provisioned Pico SDK/toolchain environment. These CMake com
 cmake -S . -B build-haptics -DPICO_BOARD=pico2_w \
   -DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32 \
   -DSWITCH_PICO_HAPTICS_EXPERIMENT=ON \
+  -DSWITCH_PICO_HD_RUMBLE=OFF \
   -DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM=ON \
   -DSWITCH_PICO_LOG=OFF
 cmake --build build-haptics
 ```
 
-The experimental artifacts are `build-haptics/switch-pico.elf` and `.uf2`. For the same-clock flash comparison, use another build directory and `-DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM=OFF`. The standard `build.py` entry points explicitly disable the experiment, including when reusing an old CMake cache.
+The fixture artifacts are `build-haptics/switch-pico.elf` and `.uf2`; disabling auto-arm lets `start` run without first stopping gameplay. For a same-clock flash comparison, use a separate directory and `SWITCH_PICO_HAPTICS_EXPERIMENT_RAM=OFF`. Standard AIO/XInput `build.py` entry points explicitly enable the qualified defaults even with an old CMake cache; UART entry points explicitly disable them.
 
 After loading the chosen image and connecting a DualSense:
 
@@ -88,11 +93,11 @@ For the deterministic fixture only, the first tone is intentionally scheduled 1.
 
 ## Protocol
 
-USB vendor management operation 0x40: OUT two-byte payload `{action, slot}` (0=stop, 1=finite fixture, 2=continuous gameplay; slot 0..3); existing request envelope. IN is schema 3, 84 bytes. The first 72 bytes retain the previous layout; mode and gameplay counters follow.
+USB vendor operation 0x40: OUT `{action, slot}` (0=stop, 1=finite fixture, 2=gameplay; slots 0..3), using the existing envelope. IN is schema 5, 84 bytes.
 
 - Seventeen little-endian u32 fields: run_id, connection_generation, start_us, generated_packets, sent_packets, skipped_packets, send_failures, can_send_requests, synchronous_callbacks, max_generate_us, max_send_gap_us, max_lateness_us, max_request_wait_us, first_tone_due_us, first_tone_sent_us, last_sent_us, elapsed_us.
 - Four u8 fields: state, slot, last_error, reserved (zero).
-- Byte 72: mode (0=fixture, 1=gameplay); bytes 73–75: zero reserved bytes.
+- Byte 72: mode (0=fixture, 1=gameplay); byte 73: actual stereo frames per packet (32 or 64); byte 74: whether the last successfully submitted PCM packet was nonzero (0/1); byte 75: zero reserved. Nonzero PCM is firmware output evidence, not measured actuator motion.
 - Little-endian u32 at 76: `host_updates`; at 80: `dropped_updates`.
 - State: idle=0, pending=1, running=2, completed=3, stopped=4, disconnected=5, unsupported=6, error=7. Disabled build reports unsupported.
 - Microsecond timestamps are low 32 bits of Pico uptime; use unsigned modular differences for this bounded experiment. Host receipt time is not a hardware onset measurement.
@@ -100,7 +105,7 @@ USB vendor management operation 0x40: OUT two-byte payload `{action, slot}` (0=s
 
 ### Transport timing probe
 
-Operation `0x41` is IN-only. Schema 2 contains 32 little-endian u32 fields in the declaration order of `HapticsTransportProbe` in `input/haptics_transport_probe.h` (128 bytes). The final two fields expose ACL packet size/count from the controller's raw HCI Read Buffer Size response, before the SDK's software cap. Measurements reset for each run, retain their final values, and correlate by run ID and connection generation. Ordinary firmware reports this operation as unsupported.
+Operation `0x41` is IN-only. Schema 3 contains 44 little-endian 32-bit fields in `HapticsTransportProbe` declaration order (176 bytes). The first 32 retain the prior counters and raw advertised ACL capacity. Appended fields report requested/measured system clock, measured USB clock, regulator setting, flash divider, CYW43 PIO divider in 1/256 units, estimated temperature (signed milli-Celsius), credit/ACL/other HCI write counts, write failures, and packet-read optimization. Regulator voltage is a setting, not a multimeter reading; temperature assumes a 3.3 V ADC reference and is uncalibrated. Counters correlate by run ID/generation; snapshots are not an atomic cross-operation instant.
 
 ```sh
 uv run switch-pico-config haptics-experiment profile --json
@@ -122,11 +127,13 @@ Only after timing evidence, consider selected L2CAP/HCI/CYW43 and USB hot call c
 
 ## Optional overclocking
 
-Overclocking is permitted, but the first transport run stays at the Pico 2 W's stock 150 MHz and stock regulator setting. Compare flash versus SRAM at the same clock first; then compare clocks with identical packet contents and scheduling. An overclock cannot repair a malformed block descriptor or a lost synchronous callback, and it does not increase Bluetooth's negotiated air rate or controller ACL credits.
+The initial investigation used stock 150 MHz. The qualified AIO default is now **300 MHz at 1.3 V**. CPU clocks do not increase Bluetooth air rate or repair protocol/scheduling errors.
 
-The [ClockworkPi thread](https://forum.clockworkpi.com/t/overclocking-pico-2/18226) reports successful 300 MHz and higher configurations, alongside warnings about peripheral limits. [Pimoroni's measurements](https://learn.pimoroni.com/article/overclocking-the-pico-2) found 312 MHz at 1.1 V on one sample under their initial benchmark. Those are experimental observations, not a stability guarantee for this board running both cores, USB and CYW43 simultaneously. Do not copy the article's extreme voltages, voltage-limit removal, or dry-ice setup.
+The first 300 MHz image stopped at its flash-divider guard: RP2350 had discarded optional boot2/XIP setup, so `PICO_FLASH_SPI_CLKDIV` was not applied. `PICO_EMBED_XIP_SETUP=1` fixed that boot path; its linked copy/execute path was checked. The corrected 300 MHz/1.3 V image booted and passed input-plus-rumble tests. On this board 400 MHz/1.3 V did not boot; the user-requested 400 MHz/1.4 V variant booted and passed a short run but was not faster in the measured workload.
 
-For a subsequent opt-in clock experiment, record requested/measured system clock, regulator voltage, flash divider, CYW43 PIO divider, temperature/environment, and the same packet diagnostics. Preserve the 48 MHz USB clock; adjust flash and CYW43 dividers before raising the system clock so neither bus is inadvertently overclocked. Validate USB enumeration/control transfers, sustained controller input, reconnect, flash-safe persistence and packet timing—not just a CPU benchmark. Keep a stock UF2 and BOOTSEL recovery path. No clock or voltage change is applied by this transport experiment.
+An explicit `SWITCH_PICO_SYS_CLOCK_MHZ=400` plus `SWITCH_PICO_OVERCLOCK_MV=1400` permits that experiment; it alone lifts the regulator's 1.3 V limit. Lower-voltage builds restore the limit after lowering voltage, including warm reboot. Stock 150 MHz is an explicit option, not the default AIO image. USB remains 48 MHz. Flash/PIO dividers are 4/4 at 300 MHz and 6/(5+86/256) at 400 MHz, keeping flash at 75/66.67 MHz and CYW43 SPI at about 37.5 MHz.
+
+[Pimoroni's measurements](https://learn.pimoroni.com/article/overclocking-the-pico-2) are useful experimental evidence, not a stability or lifetime guarantee for every Pico 2 W. Do not generalize their extreme-voltage/cooling experiments. Keep a recovery image that understands the current profile schema; old pre-migration firmware does not understand catalog 2/schema 6.
 
 ## Verification and acceptance
 
@@ -229,3 +236,54 @@ The user described the 1.5x mix as thin/hollow and lacking body. A 2x low / 1.5x
 The final USB-driven test delivered all **513 host commands**, with **zero dropped updates**, **zero Bluetooth skips**, and **zero send failures**. Controller input continued with 1,408 reports during the test. Maximum observed packet generation was 687 us and report gap 23,925 us. Local-feedback gain, frequencies, the 50 ms watchdog, the 21.333 ms lookback, and controller buffering remain unchanged.
 
 Final checks: **151 focused tests passed**. HD gameplay, deterministic experiment, normal all-in-one, and Pico/UART builds succeeded. The accepted response and IMU scheduler correction are flashed; image files are `build-hd-rumble/switch-pico.elf` and `.uf2`. The stream remains armed. These follow-on refinements are separate from the committed HD integration.
+
+### Qualified lower-latency transport and standard-image cutover
+
+The following comparisons used real 8 ms USB rumble output while continuously
+reading USB motion reports, not only an idle PCM fixture. Read/poll means
+include empty calls and nested work and must not be interpreted as additive
+CPU utilization.
+
+| Configuration | Mean read call | Mean poll call | Result |
+|---|---:|---:|---|
+| Stock 150 MHz | 971 us | 2,494 us | 2,050 commands received; six skipped audio slots |
+| 300 MHz / 1.3 V | 665 us | 1,370 us | 2,050 commands; zero drops/skips/send failures |
+| 400 MHz / 1.4 V | 730 us | 1,485 us | 2,050 commands; zero drops/skips/send failures |
+| 300 MHz + packet-level reads | 421 us | 1,139 us | 2,050 commands; zero drops/skips/send failures |
+| 300 MHz + packet reads + credit batching | 274 us | 572 us | 2,050 commands; zero drops/skips/send failures |
+
+Packet-level reads use one published ring-index snapshot and one consumer
+publication/notification per complete packet. Partial packets stay
+unconsumed; a build-local SDK patch propagates SPI read errors. Credit
+batching retains controller-to-host flow control and three host ACL credits,
+returning at two completed packets or a bounded timer deadline. SCO remains
+immediate. Lifecycle cancellation and synchronous callbacks have regressions.
+
+The packet-read stress run passed 8,194 commands with zero drops/skips/failures.
+The subsequent 32-frame run also passed all 8,194 commands over about 65 s,
+submitted 6,165 audio reports, and had a worst observed report gap of
+12,594 us (nominal 10,666.67 us). No physical actuator-onset bound is claimed.
+
+The user described the controlled test effects as notably good. Preserve this
+reference separately from actual game effects: alternate 256 ms of left word
+`0x68402100` / neutral right, then neutral left / right word `0x4840a100`,
+refreshing every 8 ms. Neutral is `0x40400100`; words are little-endian in the
+eight-byte rumble payload of USB report `0x10`. These are fixed 160/320 Hz
+bands with primary/secondary amplitude codes 80/16, using the normal profile
+scaling and 2x/0.8 response—not an extra test-only boost. Sustained reference
+effects do not establish that short or swept game effects will feel identical.
+
+Native XInput was exercised with the DualSense on API slot 1 while a Switch
+Pro occupied slot 0. The Pro received two compatibility dispatches without
+entering the native stream; four DualSense commands held left/right output
+for 700 ms and explicit zeros stopped it. The stream stayed selected on the
+DualSense and configuration generation remained 9. The former slot-0-only
+auto-arm condition was removed and a mixed-controller regression verifies
+first-eligible selection without a later controller stealing ownership.
+
+Final integrated verification includes 228 passing repository tests, standard
+AIO/XInput builds with the native defaults, the manual fixture and unchanged
+Pico/UART builds. The profile catalog was migrated and all sixteen stored
+profiles were compared with the pre-migration backup; the temporary editor
+profile and name were restored. No configuration, bond, or wake-identity reset
+was part of the transport work.

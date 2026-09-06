@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-// Operation 0x41, schema 2: 32 little-endian u32 fields in declaration order.
+// Operation 0x41, schema 3: 44 little-endian 32-bit fields.
 // All durations are host-side microseconds, not radio/actuator latency.
 struct HapticsTransportProbe {
     uint32_t run_id = 0;
@@ -37,6 +37,18 @@ struct HapticsTransportProbe {
     uint32_t max_poll_gap_us = 0;
     uint32_t controller_acl_packet_bytes = 0;
     uint32_t controller_acl_packet_count = 0;
+    uint32_t requested_sys_khz = 0;
+    uint32_t measured_sys_khz = 0;
+    uint32_t measured_usb_khz = 0;
+    uint32_t core_voltage_mv = 0;
+    uint32_t flash_clock_divider = 0;
+    uint32_t cyw43_pio_divider256 = 0;
+    int32_t temperature_millicelsius = 0;
+    uint32_t host_completed_writes = 0;
+    uint32_t acl_writes = 0;
+    uint32_t other_writes = 0;
+    uint32_t write_failures = 0;
+    uint32_t packet_read_optimized = 0;
 };
 
 // Prepare before core 1 starts. Snapshot alone is called from USB/core 0.

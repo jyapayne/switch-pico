@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <initializer_list>
 
 namespace {
 
@@ -13,6 +14,11 @@ struct FakeFlash {
   int programs = 0;
   int erases = 0;
   int fail_after_programs = -1;
+  int fail_after_erases = -1;
+  size_t torn_page_bytes = 0;
+  int corrupt_previous_after_programs = -1;
+  uint8_t corrupt_arena = 0;
+  size_t corrupt_offset = 0;
   bool corrupt_next_program = false;
 };
 
@@ -48,6 +54,11 @@ bool fake_erase(void *context, uint8_t arena) {
   if (arena >= PROFILE_STORAGE_ARENA_COUNT) {
     return false;
   }
+  if (storage->fail_after_erases >= 0 &&
+      storage->erases >= storage->fail_after_erases) {
+    memset(storage->bytes[arena], 0xff, PROFILE_STORAGE_ARENA_SIZE / 2);
+    return false;
+  }
   memset(storage->bytes[arena], 0xff, PROFILE_STORAGE_ARENA_SIZE);
   ++storage->erases;
   return true;
@@ -59,9 +70,14 @@ bool fake_program(void *context, uint8_t arena, size_t offset,
   if (arena >= PROFILE_STORAGE_ARENA_COUNT || page == nullptr ||
       size != PROFILE_STORAGE_PAGE_SIZE ||
       offset % PROFILE_STORAGE_PAGE_SIZE != 0 ||
-      offset + size > PROFILE_STORAGE_ARENA_SIZE ||
-      (storage->fail_after_programs >= 0 &&
-       storage->programs >= storage->fail_after_programs)) {
+      offset + size > PROFILE_STORAGE_ARENA_SIZE) {
+    return false;
+  }
+  if (storage->fail_after_programs >= 0 &&
+      storage->programs >= storage->fail_after_programs) {
+    for (size_t index = 0; index < storage->torn_page_bytes; ++index) {
+      storage->bytes[arena][offset + index] &= page[index];
+    }
     return false;
   }
   for (size_t index = 0; index < size; ++index) {
@@ -72,6 +88,9 @@ bool fake_program(void *context, uint8_t arena, size_t offset,
     storage->corrupt_next_program = false;
   }
   ++storage->programs;
+  if (storage->programs == storage->corrupt_previous_after_programs) {
+    storage->bytes[storage->corrupt_arena][storage->corrupt_offset] ^= 1;
+  }
   return memcmp(&storage->bytes[arena][offset], page, size) == 0;
 }
 
@@ -109,7 +128,16 @@ void write_u32(uint8_t *output, uint32_t value) {
   output[3] = static_cast<uint8_t>(value >> 24);
 }
 
-void install_legacy_database() {
+void encode_schema5(const ControllerProfile &profile, uint8_t *output) {
+  uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  require(controller_profile_encode(profile, encoded, sizeof(encoded)),
+          "profile fixture did not encode");
+  memcpy(output, encoded, CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE);
+  write_u16(output, CONTROLLER_PROFILE_SPARSE_MACRO_SCHEMA_VERSION);
+  write_u16(output + 2, CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE);
+}
+
+void install_legacy_database(uint32_t generation = 41) {
   constexpr size_t kLegacyStart =
       PROFILE_STORAGE_TOTAL_SIZE - PROFILE_STORAGE_LEGACY_TOTAL_SIZE;
   constexpr uint8_t kArena = 1;
@@ -130,22 +158,20 @@ void install_legacy_database() {
   payload[10] = 3;
   payload[11] = 1;
 
-  uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  uint8_t encoded[CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE]{};
   const ControllerIdentity global = controller_identity_global();
   for (uint8_t profile = 0; profile < PROFILE_STORAGE_LEGACY_PROFILE_COUNT;
        ++profile) {
     ControllerProfile value = controller_profile_default(global, profile);
     value.weak_rumble_scale = static_cast<uint8_t>(20 + profile);
-    require(controller_profile_encode(value, encoded, sizeof(encoded)),
-            "legacy fallback profile did not encode");
+    encode_schema5(value, encoded);
     memcpy(payload + 32 + profile * sizeof(encoded), encoded, sizeof(encoded));
   }
 
-  constexpr size_t kEntrySize = 16 + PROFILE_STORAGE_LEGACY_PROFILE_COUNT *
-                                         CONTROLLER_PROFILE_ENCODED_SIZE;
   uint8_t *entry =
       payload + 32 +
-      PROFILE_STORAGE_LEGACY_PROFILE_COUNT * CONTROLLER_PROFILE_ENCODED_SIZE;
+      PROFILE_STORAGE_LEGACY_PROFILE_COUNT *
+          CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
   const ControllerIdentity stable = identity(7);
   require(controller_identity_encode(stable, entry,
                                      CONTROLLER_IDENTITY_ENCODED_SIZE),
@@ -156,20 +182,182 @@ void install_legacy_database() {
        ++profile) {
     ControllerProfile value = controller_profile_default(stable, profile);
     value.strong_rumble_scale = static_cast<uint8_t>(40 + profile);
-    require(controller_profile_encode(value, encoded, sizeof(encoded)),
-            "legacy stable profile did not encode");
+    encode_schema5(value, encoded);
     memcpy(entry + 16 + profile * sizeof(encoded), encoded, sizeof(encoded));
   }
-  (void)kEntrySize;
 
   memcpy(header, "SPPF", 4);
   write_u16(&header[4], 1);
   write_u16(&header[6], 2);
-  write_u32(&header[8], 41);
+  write_u32(&header[8], generation);
   write_u32(&header[12], PROFILE_STORAGE_LEGACY_DATABASE_SIZE);
   write_u32(&header[16], profile_storage_crc32(
                              payload, PROFILE_STORAGE_LEGACY_DATABASE_SIZE));
   write_u32(&header[20], profile_storage_crc32(header, 20));
+}
+
+ControllerIdentity catalog_identity(uint8_t index) {
+  return index == 0 ? controller_identity_global() : identity(index);
+}
+
+ControllerProfile catalog_profile(uint8_t index, uint8_t slot, bool extended) {
+  ControllerProfile profile =
+      controller_profile_default(catalog_identity(index), slot);
+  profile.weak_rumble_scale = static_cast<uint8_t>(10 + index);
+  profile.strong_rumble_scale = static_cast<uint8_t>(30 + slot);
+  profile.macros[0].trigger_mask = 1u << 10;
+  profile.macros[0].step_count = 8;
+  profile.macros[1].trigger_mask = 1u << 11;
+  profile.macros[1].first_step = 8;
+  profile.macros[1].step_count = 8;
+  profile.macros[2].first_step = 16;
+  profile.macros[3].first_step = 16;
+  profile.macro_step_count = 16;
+  // Fill 132 of the old 136 stream bytes, including the old page tail.
+  for (uint8_t step = 0; step < profile.macro_step_count; ++step) {
+    auto &value = profile.macro_steps[step];
+    value.duration_ms = static_cast<uint16_t>(1 + step);
+    if (step < 14) {
+      value.override_flags = kControllerProfileOverrideButtons |
+                             kControllerProfileOverrideLeftStick;
+      value.output_button_mask = static_cast<uint16_t>(1u << (step % 16));
+      value.left_stick_x = static_cast<int16_t>(100 * step - 500);
+      value.left_stick_y = static_cast<int16_t>(100 * slot + index);
+    }
+  }
+  if (extended) {
+    profile.shortcuts.modifier = 4;
+    const uint8_t selectors[8] = {0, 1, 2, 3, 12, 13, 14, 15};
+    memcpy(profile.shortcuts.selectors, selectors, sizeof(selectors));
+    profile.shift.mode = ControllerProfileShiftMode::kToggle;
+    profile.shift.modifier = 17;
+    profile.shift.button_map[0] = 15;
+    profile.turbo_modes[0] = ControllerProfileTurboMode::kBurst;
+    profile.turbo_defaults = {7, 33, 5};
+    profile.turbo_override_mask = UINT16_MAX;
+    for (uint8_t button = 0; button < 16; ++button) {
+      profile.turbo_overrides[button] = {
+          static_cast<uint8_t>(button + 1),
+          static_cast<uint8_t>(button + 2),
+          static_cast<uint8_t>(button + 3)};
+    }
+    profile.macros[0].mode = ControllerProfileMacroMode::kRepeat;
+    profile.macros[0].repeat_count = 255;
+  }
+  return profile;
+}
+
+void install_catalog_record(uint16_t version, size_t offset, uint8_t type,
+                            const ControllerIdentity &identity_value,
+                            uint8_t slot, uint32_t generation,
+                            const uint8_t *payload, size_t size) {
+  uint8_t *record = &flash.bytes[0][offset];
+  memset(record, 0, PROFILE_STORAGE_RECORD_SIZE);
+  memcpy(record, "SPCR", 4);
+  write_u16(record + 4, version);
+  record[6] = type;
+  record[7] = slot;
+  write_u32(record + 8, generation);
+  write_u16(record + 12, static_cast<uint16_t>(size));
+  write_u16(record + 14, type == 1 ? (version == 1 ? 5 : 6) : 0);
+  write_u32(record + 16, profile_storage_crc32(payload, size));
+  require(controller_identity_encode(identity_value, record + 20,
+                                     CONTROLLER_IDENTITY_ENCODED_SIZE),
+          "catalog fixture identity did not encode");
+  write_u32(record + 34, profile_storage_crc32(record, 34));
+  if (size != 0) {
+    memcpy(record + (version == 1 ? 256 : 128), payload, size);
+  }
+}
+
+void install_populated_catalog(uint16_t version, bool fill_arena = false) {
+  size_t offset = PROFILE_STORAGE_RECORDS_OFFSET;
+  uint32_t generation = 1000;
+  for (uint8_t index = 0;
+       index <= CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY; ++index) {
+    const ControllerIdentity id = catalog_identity(index);
+    for (uint8_t slot = 0; slot < CONTROLLER_PROFILE_COUNT; ++slot) {
+      const ControllerProfile profile = catalog_profile(index, slot, version == 2);
+      uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+      if (version == 1) {
+        encode_schema5(profile, payload);
+      } else {
+        require(controller_profile_encode(profile, payload, sizeof(payload)),
+                "catalog2 fixture profile did not encode");
+      }
+      install_catalog_record(
+          version, offset, 1, id, slot, ++generation, payload,
+          version == 1 ? CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE
+                       : CONTROLLER_PROFILE_ENCODED_SIZE);
+      offset += PROFILE_STORAGE_RECORD_SIZE;
+    }
+    uint8_t alias[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+    alias[0] = 1;
+    alias[1] = static_cast<uint8_t>('A' + index);
+    install_catalog_record(version, offset, 5, id, CONTROLLER_PROFILE_ALL,
+                           ++generation, alias, sizeof(alias));
+    offset += PROFILE_STORAGE_RECORD_SIZE;
+    uint8_t names[PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE]{};
+    for (uint8_t slot = 0; slot < CONTROLLER_PROFILE_COUNT; ++slot) {
+      const size_t base = slot * PROFILE_STORAGE_METADATA_PAYLOAD_SIZE;
+      names[base] = 2;
+      names[base + 1] = static_cast<uint8_t>('A' + index);
+      names[base + 2] = static_cast<uint8_t>('0' + slot);
+    }
+    install_catalog_record(version, offset, 6, id, CONTROLLER_PROFILE_ALL,
+                           ++generation, names, sizeof(names));
+    offset += PROFILE_STORAGE_RECORD_SIZE;
+    install_catalog_record(version, offset, 4, id, index % 8,
+                           ++generation, nullptr, 0);
+    offset += PROFILE_STORAGE_RECORD_SIZE;
+  }
+  while (fill_arena && offset < PROFILE_STORAGE_ARENA_SIZE) {
+    install_catalog_record(version, offset, 4, catalog_identity(0), 0,
+                           ++generation, nullptr, 0);
+    offset += PROFILE_STORAGE_RECORD_SIZE;
+  }
+  uint8_t *superblock = flash.bytes[0];
+  memset(superblock, 0, PROFILE_STORAGE_SUPERBLOCK_SIZE);
+  memcpy(superblock, "SPCA", 4);
+  write_u16(superblock + 4, version);
+  write_u32(superblock + 8, 20);
+  write_u32(superblock + 12, profile_storage_crc32(superblock, 12));
+}
+
+void require_populated_catalog(const ProfileStorage &storage, bool extended) {
+  require(storage.identity_count() ==
+              CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1,
+          "catalog lost a populated identity");
+  for (uint8_t index = 0;
+       index <= CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY; ++index) {
+    const ControllerIdentity id = catalog_identity(index);
+    const auto *entry = storage.find(id);
+    require(entry != nullptr && entry->active_profile == index % 8,
+            "catalog lost an active profile index");
+    char value[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+    require(storage.get_alias(id, value, sizeof(value)) ==
+                ProfileStorageResult::kOk &&
+                value[0] == 'A' + index && value[1] == '\0',
+            "catalog lost a controller alias");
+    for (uint8_t slot = 0; slot < CONTROLLER_PROFILE_COUNT; ++slot) {
+      ControllerProfile actual{};
+      const ControllerProfile expected = catalog_profile(index, slot, extended);
+      uint8_t actual_bytes[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+      uint8_t expected_bytes[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+      require(storage.get(id, slot, &actual) == ProfileStorageResult::kOk &&
+                  controller_profile_encode(actual, actual_bytes,
+                                            sizeof(actual_bytes)) &&
+                  controller_profile_encode(expected, expected_bytes,
+                                            sizeof(expected_bytes)) &&
+                  memcmp(actual_bytes, expected_bytes, sizeof(actual_bytes)) == 0,
+              "catalog lost profile content or a macro at the old page tail");
+      require(storage.get_profile_name(id, slot, value, sizeof(value)) ==
+                  ProfileStorageResult::kOk &&
+                  value[0] == 'A' + index && value[1] == '0' + slot &&
+                  value[2] == '\0',
+              "catalog lost a profile name");
+    }
+  }
 }
 
 void test_empty_catalog_and_eight_profiles() {
@@ -247,6 +435,14 @@ void test_interrupted_and_corrupt_append_recovery() {
                   ProfileStorageResult::kOk &&
               value.weak_rumble_scale == 11,
           "corrupt newest record displaced the previous record");
+  second.weak_rumble_scale = 44;
+  require(after_corruption.set(global, 0, second) == ProfileStorageResult::kOk,
+          "interrupted second-page slot was reused instead of skipped");
+  ProfileStorage after_retry;
+  require(after_retry.initialize(fake_io()) &&
+              after_retry.get(global, 0, &value) == ProfileStorageResult::kOk &&
+              value.weak_rumble_scale == 44,
+          "append after interrupted and corrupt slots did not survive reload");
 }
 
 void test_profile_names_and_aliases_recover() {
@@ -351,6 +547,186 @@ void test_legacy_migration_is_atomic_and_complete() {
           "migrated catalog did not survive reload");
 }
 
+void test_populated_catalog_publication_power_loss() {
+  static FakeFlash baseline;
+  for (uint16_t version = 1; version <= 2; ++version) {
+    erase_all();
+    install_populated_catalog(version, true);
+    baseline = flash;
+    ProfileStorage completed;
+    require(completed.initialize(fake_io()), "populated catalog did not load");
+    require_populated_catalog(completed, version == 2);
+    if (version == 2) {
+      require(completed.set_alias(catalog_identity(0), "New", 3) ==
+                  ProfileStorageResult::kOk,
+              "populated catalog could not compact all 187 live records");
+    }
+    const int publication_programs = flash.programs;
+    for (size_t torn_bytes : {size_t{0}, size_t{129}}) {
+      // Include interruption during arena erase and before every program page,
+      // including both pages of every record and the final superblock.
+      for (int cut = -1; cut < publication_programs; ++cut) {
+        flash = baseline;
+        flash.torn_page_bytes = torn_bytes;
+        ProfileStorage interrupted;
+        if (version == 2) {
+          require(interrupted.initialize(fake_io()),
+                  "catalog2 power-loss baseline did not load");
+        }
+        if (cut < 0) {
+          flash.fail_after_erases = 0;
+        } else {
+          flash.fail_after_programs = cut;
+        }
+        if (version == 1) {
+          require(!interrupted.initialize(fake_io()),
+                  "incomplete catalog1 migration silently initialized empty");
+        } else {
+          require(interrupted.set_alias(catalog_identity(0), "New", 3) ==
+                      ProfileStorageResult::kIoError,
+                  "incomplete compaction or append reported success");
+        }
+        require(memcmp(flash.bytes[0], baseline.bytes[0],
+                       PROFILE_STORAGE_ARENA_SIZE) == 0,
+                "interrupted publication modified the old published arena");
+        flash.fail_after_erases = -1;
+        flash.fail_after_programs = -1;
+        flash.torn_page_bytes = 0;
+        ProfileStorage recovered;
+        require(recovered.initialize(fake_io()),
+                "catalog did not recover after an interrupted publication");
+        require_populated_catalog(recovered, version == 2);
+        require(recovered.snapshot().generation >= 1248,
+                "catalog publication regressed the stored generation");
+      }
+    }
+  }
+}
+
+void test_migration_verifies_all_records_before_publication() {
+  erase_all();
+  install_populated_catalog(1);
+  static FakeFlash baseline;
+  baseline = flash;
+  // Corrupt an already-verified first record while the last record is being
+  // copied. A per-write readback alone would publish an incomplete catalog.
+  flash.corrupt_previous_after_programs =
+      2 * PROFILE_STORAGE_MAX_LIVE_RECORDS;
+  flash.corrupt_arena = 1;
+  flash.corrupt_offset = PROFILE_STORAGE_RECORDS_OFFSET + 128 + 283;
+  ProfileStorage interrupted;
+  require(!interrupted.initialize(fake_io()) &&
+              flash.bytes[1][0] == 0xff &&
+              memcmp(flash.bytes[0], baseline.bytes[0],
+                     PROFILE_STORAGE_ARENA_SIZE) == 0,
+          "migration published before fully verifying the copied arena");
+  flash.corrupt_previous_after_programs = -1;
+  ProfileStorage recovered;
+  require(recovered.initialize(fake_io()),
+          "migration did not retry after copy verification failed");
+  require_populated_catalog(recovered, false);
+}
+
+void test_retired_bank_migration_power_loss() {
+  erase_all();
+  install_legacy_database();
+  static FakeFlash baseline;
+  baseline = flash;
+  ProfileStorage complete;
+  require(complete.initialize(fake_io()), "retired bank did not migrate");
+  const int programs = flash.programs;
+  for (int cut = -1; cut < programs; ++cut) {
+    flash = baseline;
+    flash.torn_page_bytes = 129;
+    if (cut < 0) {
+      flash.fail_after_erases = 0;
+    } else {
+      flash.fail_after_programs = cut;
+    }
+    ProfileStorage interrupted;
+    require(!interrupted.initialize(fake_io()) &&
+                memcmp(flash.bytes[1], baseline.bytes[1],
+                       PROFILE_STORAGE_ARENA_SIZE) == 0,
+            "interrupted retired-bank migration lost the old database");
+    flash.fail_after_erases = -1;
+    flash.fail_after_programs = -1;
+    flash.torn_page_bytes = 0;
+    ProfileStorage recovered;
+    ControllerProfile profile{};
+    require(recovered.initialize(fake_io()) &&
+                recovered.find(identity(7)) != nullptr &&
+                recovered.find(identity(7))->active_profile == 2 &&
+                recovered.get(identity(7), 2, &profile) ==
+                    ProfileStorageResult::kOk &&
+                profile.strong_rumble_scale == 42 &&
+                recovered.get(catalog_identity(0), 3, &profile) ==
+                    ProfileStorageResult::kOk &&
+                profile.weak_rumble_scale == 23 &&
+                recovered.snapshot().generation > 41,
+            "retired-bank migration did not recover its profiles/generation");
+  }
+}
+
+void test_late_second_page_program_is_not_reused() {
+  erase_all();
+  ProfileStorage storage;
+  require(storage.initialize(fake_io()), "catalog did not initialize");
+  // The first page and first bytes of page two are erased; only a late
+  // default-rate byte was programmed when power was lost.
+  flash.bytes[0][PROFILE_STORAGE_RECORDS_OFFSET + 128 + 283] = 0;
+  ProfileStorage recovered;
+  require(recovered.initialize(fake_io()), "partial record did not recover");
+  const auto id = catalog_identity(0);
+  ControllerProfile profile = catalog_profile(0, 7, true);
+  require(recovered.set(id, 7, profile) == ProfileStorageResult::kOk,
+          "scanner reused a partially programmed second page");
+  profile.turbo_defaults.rate_hz = 23;
+  require(recovered.set(id, 7, profile) == ProfileStorageResult::kOk,
+          "newest profile did not append");
+  const uint32_t newest = recovered.find(id)->profile_record[7];
+  flash.bytes[0][newest + 128 + 283] ^= 1;
+  ProfileStorage fallback;
+  ControllerProfile value{};
+  require(fallback.initialize(fake_io()) &&
+              fallback.get(id, 7, &value) == ProfileStorageResult::kOk &&
+              value.turbo_defaults.rate_hz == 7 &&
+              value.macros[0].repeat_count == 255,
+          "corrupted schema6 newest record did not fall back to its predecessor");
+}
+
+void test_unreadable_legacy_data_is_not_erased() {
+  erase_all();
+  install_legacy_database();
+  constexpr size_t base = PROFILE_STORAGE_ARENA_SIZE -
+                          PROFILE_STORAGE_LEGACY_BANK_SIZE;
+  flash.bytes[1][base + PROFILE_STORAGE_LEGACY_HEADER_SIZE + 32] ^= 1;
+  static FakeFlash baseline;
+  baseline = flash;
+  ProfileStorage storage;
+  require(!storage.initialize(fake_io()) &&
+              memcmp(flash.bytes, baseline.bytes, sizeof(flash.bytes)) == 0,
+          "unreadable old data was silently replaced with an empty catalog");
+}
+
+void test_legacy_high_generation_remains_mutable() {
+  erase_all();
+  install_legacy_database(0x80000000u);
+  ProfileStorage storage;
+  require(storage.initialize(fake_io()),
+          "high-generation legacy bank could not migrate");
+  const auto global = controller_identity_global();
+  auto changed = controller_profile_default(global, 0);
+  changed.weak_rumble_scale = 77;
+  require(storage.set(global, 0, changed) == ProfileStorageResult::kOk,
+          "high-generation migrated profile could not be updated");
+  ProfileStorage reloaded;
+  ControllerProfile restored{};
+  require(reloaded.initialize(fake_io()) &&
+              reloaded.get(global, 0, &restored) == ProfileStorageResult::kOk &&
+              restored.weak_rumble_scale == 77,
+          "high-generation update was lost after reload");
+}
+
 } // namespace
 
 int main() {
@@ -360,6 +736,12 @@ int main() {
   test_profile_names_and_aliases_recover();
   test_compaction_preserves_latest_records();
   test_legacy_migration_is_atomic_and_complete();
+  test_legacy_high_generation_remains_mutable();
+  test_populated_catalog_publication_power_loss();
+  test_migration_verifies_all_records_before_publication();
+  test_retired_bank_migration_power_loss();
+  test_late_second_page_program_is_not_reused();
+  test_unreadable_legacy_data_is_not_erased();
   std::cout << "profile storage tests passed\n";
   return 0;
 }

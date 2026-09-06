@@ -10,6 +10,7 @@
 #include "adapter/adapter_mode_controller.h"
 #include "input/bluepad32_input_backend.h"
 #include "platform/pico/bootsel_pairing_button.h"
+#include "platform/pico/system_clock.h"
 #include "profile/controller_profile_runtime.h"
 #endif
 
@@ -210,6 +211,9 @@ static void log_usb_state() {
 }
 
 int main() {
+#ifdef SWITCH_PICO_BLUEPAD32
+    system_clock_initialize();
+#endif
     board_init();
     stdio_init_all();
 

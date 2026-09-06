@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 
-
 @pytest.mark.parametrize("experiment_enabled", [False, True])
 def test_usb_configuration_management_native(
-    tmp_path: Path, experiment_enabled: bool,
+    tmp_path: Path,
+    experiment_enabled: bool,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
@@ -27,6 +27,7 @@ def test_usb_configuration_management_native(
             f"-I{root / 'tests' / 'usb_management_native_stubs'}",
             f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "usb_configuration_management_test.cpp"),
+            str(root / "src" / "firmware" / "input" / "controller_macro_capture.cpp"),
             "-o",
             str(executable),
         ],

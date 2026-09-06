@@ -22,10 +22,12 @@ void controller_profile_remove_control_mask(
 void controller_profile_apply_button_mask(uint16_t button_mask,
                                           ControllerState* state);
 uint16_t controller_profile_map_button_mask(
-    uint16_t input_button_mask, const ControllerProfile& profile);
+    uint16_t input_button_mask, const ControllerProfile& profile,
+    const uint8_t* button_map = nullptr);
 
 ControllerProfileTransformResult controller_profile_transform(
-    const ControllerState& input, const ControllerProfile& profile);
+    const ControllerState& input, const ControllerProfile& profile,
+    const uint8_t* button_map = nullptr);
 
 uint8_t controller_profile_scale_rumble_magnitude(uint8_t magnitude,
                                                   uint8_t scale);

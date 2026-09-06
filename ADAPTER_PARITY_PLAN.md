@@ -85,10 +85,10 @@ The Bluetooth, UART, Switch, and XInput paths now share `ControllerState`:
 | Stick sensitivity | Complete | Per-stick center calibration, inner deadzone, outer saturation, fixed-point curve, and inversion run before every output serializer. |
 | Trigger ranges | Complete for current outputs | Per-trigger deadzone, saturation, curve, and digital threshold preserve analog XInput values and configured Switch thresholds. |
 | Vibration intensity | Complete | Independent weak/strong profile scales apply to host rumble; local confirmation policy remains separate. |
-| Macros | Complete | One bounded eight-step deterministic macro per profile supports buttons, D-pad, sticks, triggers, waits, and explicit end. |
-| Turbo and Auto Burst | Complete | Fixed-point phase accumulation produces 15 activations per second with deterministic cancellation. |
-| Persistent profiles | Complete | Global fallback plus sixteen stable identities each store four fixed 256-byte profiles in a two-bank atomic database. |
-| Profile switching | Complete | PC commands and a configurable controller chord persist selection with isolated rumble/onboard/transient controller LED confirmation. |
+| Macros | Complete | Four sequences share sixteen steps and 136 sparse bytes; Once, While held, Toggle and bounded Repeat are supported. |
+| Turbo, Auto Burst and finite Burst | Complete | Configurable 1–30 Hz and 1–99% duty, shared defaults/sparse overrides, and 1–255 finite pulses use bounded phase arithmetic. |
+| Persistent profiles | Complete | Eight schema-6/384-byte profiles per global/stable identity use a two-arena indexed catalog with migration and atomic publication. |
+| Profile switching | Complete | PC activation, retained cycle chord and eight direct modifier shortcuts publish feedback only after commit. |
 | Firmware updater | Partial | UF2 updating works; version query and guided reboot/install tool are missing. |
 | Switch 2 | Unverified | Requires real-hardware qualification. |
 | Windows/SteamOS/Linux/Android compatibility | Partial | Windows XInput feasibility passed; other host/output combinations need qualification. |
@@ -613,22 +613,21 @@ Completion evidence:
 - the browser editor renders and selects all eight slots
 - Pico 2 W hardware read and activated profile 8, then restored profile 1
 
-### Candidate profile and Profile Studio enhancements — Set A complete
+### Profile and Profile Studio enhancements — Sets A and B complete
 
 The live playtest, eight-slot catalog, controller-native labels, automatic
-active-profile synchronization, and all Set A usability work are complete.
-Set B and Set C remain candidates; their order reflects user value and
-dependency, not a commitment to implement every item.
+active-profile synchronization, and Sets A/B are implemented. Set C remains
+candidate work; the native Switch-family output plan below is separate.
 
 | Priority | Candidate | Intended scope | Dependency or principal risk |
 |---|---|---|---|
-| A1 — Complete | Named and copyable profiles | Store a short profile name; rename, duplicate to another slot or controller, expose JSON import/export in the browser, and reset one section without replacing the entire profile. Names use catalog metadata records, so the 256-byte input profile remains stable. | Implemented with atomic metadata records and existing profile transactions; no report-path cost. |
+| A1 — Complete | Named and copyable profiles | Profile names and controller aliases use catalog metadata rather than input-profile fields. Copy/export/import preserve the current draft and per-section resets leave other settings unchanged. | Atomic metadata records; no report-path cost. |
 | A2 — Complete | Visual response-curve editor | Replace raw `curve_q8_8` as the primary control with a graph, named presets, fine adjustment, live raw/output markers, and “apply to other side” for sticks or triggers. Retain the exact fixed-point value as the wire representation. | Implemented entirely in Profile Studio; existing profiles round-trip unchanged. |
 | A3 — Complete | Controller aliases and Identify action | Allow names such as “Living-room DualSense”; show battery, transport, and capabilities as secondary details; provide an Identify button that briefly rumbles or lights only the selected live controller. | Implemented with catalog alias records, capability-gated live telemetry, and a bounded non-persistent Identify command. |
-| B1 | Direct profile shortcuts | Assign a modifier plus face button or D-pad direction to select profiles 1–8 directly while retaining the existing cycle chord. Publish feedback only after the activation record commits. | Profile schema/runtime change; chord precedence and consumption must remain deterministic. |
-| B2 | One Shift layer per profile | While a configured modifier is held or toggled, apply one alternate button map over the base profile. Start with buttons only; do not layer analog transforms, Turbo, or macros initially. | Profile schema change and explicit precedence between base mapping, Shift, Turbo, and macros. |
-| B3 | Macro authoring tools | Record live controller input, insert, duplicate, remove, and drag-reorder steps; preview playback; show time and sparse-byte cost on every edit. Later add once, while-held, toggle, and bounded-repeat playback modes. | Editing tools fit the current format; new playback modes require schema/runtime work and must remain within the shared 16-step/136-byte budget. |
-| B4 | Configurable Turbo and finite Burst | Add a bounded repeat rate, duty cycle, and finite Burst count while retaining hold Turbo and Auto Burst. Support shared defaults with optional per-button overrides rather than duplicating full settings sixteen times. | Profile schema/runtime change; scheduling must preserve the existing deterministic phase accumulator. |
+| B1 — Complete | Direct profile shortcuts | Modifier plus unique face/D-pad selectors address profiles 1–8, with the cycle chord retained and feedback after commit. | Deterministic arbitration, selector rollover and held/generation transitions are covered. |
+| B2 — Complete | One Shift layer per profile | Hold/Toggle selects one alternate button map; base analog tuning, physical Turbo settings and macro definitions stay shared. | Modifier consumption and reset precedence are explicit. |
+| B3 — Complete | Macro authoring tools | Timestamped firmware recording, insert/duplicate/remove/drag/keyboard reorder, visual-only preview and live duration/byte budgets; Once/While held/Toggle/Repeat playback. | Eight steps per macro, sixteen shared steps and 136 sparse bytes remain fixed. |
+| B4 — Complete | Configurable Turbo and finite Burst | Shared rate/duty/count defaults with per-button overrides retain hold Turbo and Auto Burst. | Fixed-point timing skips elapsed cycles; UI warns about pulses narrower than host sampling. |
 | C1 | Motion calibration and tuning | Expose live gyro/accelerometer values, bias calibration, axis orientation/inversion, sensitivity, drift threshold, smoothing, and hold/toggle activation. Preserve native Switch motion units rather than introducing gyro-to-stick emulation first. | Controller-specific validation and physical motion testing; filters must not add report latency. |
 | C2 | Feedback preview and profile lighting | Add non-persistent weak/strong rumble tests, profile-switch preview, and player LED/lightbar preview. Optionally persist an RGB profile color where the controller supports it. | New bounded management command; unsupported output capabilities must be visibly disabled. |
 
@@ -684,6 +683,25 @@ Research basis:
   https://partner.steamgames.com/doc/features/steam_controller/action_set_layers
 - Xbox Elite Shift: modifier-driven alternate mappings —
   https://support.xbox.com/en-US/help/hardware-network/controller/shift-elite-series-2
+
+Set B delivery evidence:
+
+- Schema 6 retains the complete 136-byte macro stream and moves the profile
+  payload to 384 bytes. Catalog 2 retains 512-byte records and existing arena
+  capacity; names/aliases do not grow with the profile.
+- Native regressions exercise interrupted page/arena publication, full
+  identity capacity, old formats and high generation values, competing
+  shortcuts, source-coordinate Shift/Turbo, finite timing and playback resets.
+- Hardware migration preserved all sixteen stored profiles, their names and
+  active indices. A temporary inactive profile-8 save/readback covered the new
+  fields and was restored afterward.
+- Real Profile Studio checks covered recording start/timeout/Use, a saved
+  recorded step, repeat and continuous visual previews, and desktop/mobile
+  layouts. The live recording run contained idle input; button-edge and
+  quantization cases are covered by native regressions.
+- Recording uses management operation `0x42`, schema 1: bounded pages of
+  firmware-timestamped input, explicit start/stop/run identity and visible
+  capacity/time/disconnect termination. It does not write profiles until Save.
 
 ### Native Switch-family HD rumble — Planned
 

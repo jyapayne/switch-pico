@@ -28,6 +28,8 @@ unsigned active_snapshot_count = 0;
 std::array<ActivationAttempt, 32> activation_attempts{};
 size_t activation_attempt_count = 0;
 unsigned activation_busy_attempts = 0;
+ConfigurationTransactionStatus activation_result =
+    ConfigurationTransactionStatus::kPending;
 uint8_t last_motion_toggle_slot = 0;
 uint32_t last_motion_toggle_connection_generation = 0;
 unsigned motion_toggle_count = 0;
@@ -57,6 +59,7 @@ void prepare_profiles() {
     activation_attempts = {};
     activation_attempt_count = 0;
     activation_busy_attempts = 0;
+    activation_result = ConfigurationTransactionStatus::kPending;
     last_motion_toggle_slot = 0;
     last_motion_toggle_connection_generation = 0;
     motion_toggle_count = 0;
@@ -875,6 +878,288 @@ void test_runtime_slot_synthetic_isolation() {
             "slot-local configured cancel affected another slot");
 }
 
+void test_shortcut_arbitration_latching_and_commit_feedback() {
+    prepare_profiles();
+    ControllerProfile& profile = rows[0].profiles[0];
+    constexpr uint16_t modifier = 1u << 9;
+    constexpr uint16_t chord = modifier | 1u;
+    profile.shortcuts.modifier = 9;
+    profile.shortcuts.selectors[2] = 0;
+    profile.shortcuts.selectors[3] = 1;
+    profile.switching_chord = chord;
+    profile.motion_toggle_chord = chord;
+    profile.shift.mode = ControllerProfileShiftMode::kToggle;
+    profile.shift.modifier = 9;
+    profile.shift.button_map[2] = 3;
+    profile.macros[0] = {chord, CONTROLLER_PROFILE_NO_BUTTON, 0, 1};
+    profile.macro_step_count = 1;
+    profile.macro_steps[0] = {kControllerProfileOverrideButtons, 100, 8};
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+
+    apply_button_mask(chord | 2u, &snapshot);
+    auto output = runtime_transform(0, snapshot, 1);
+    require(activation_attempt_count == 0 && motion_toggle_count == 0 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "ambiguous direct selectors triggered a lower-priority action");
+    apply_button_mask(chord, &snapshot);
+    output = runtime_transform(0, snapshot, 2);
+    require(activation_attempt_count == 0 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "ambiguous chord chose a target when one selector was released");
+    apply_button_mask(modifier, &snapshot);
+    (void)runtime_transform(0, snapshot, 3);
+    apply_button_mask(chord | 4u, &snapshot);
+    output = runtime_transform(0, snapshot, 4);
+    require(activation_attempt_count == 1 &&
+                activation_attempts[0].profile_index == 2 &&
+                motion_toggle_count == 0 && output.state.button_west &&
+                !output.state.button_north && !output.state.button_south &&
+                !output.state.button_capture,
+            "direct shortcut did not outrank cycle, motion, Shift and macro");
+    bool available = true;
+    (void)take_profile_change(0, &available);
+    require(!available, "accepted but uncommitted shortcut produced feedback");
+
+    ControllerProfile& committed = rows[0].profiles[2];
+    committed.shortcuts.modifier = 9;
+    committed.shortcuts.selectors[4] = 0;
+    committed.button_map[2] = 3;
+    committed.confirmation_policy = ControllerProfileConfirmationPolicy::kLed;
+    rows[0].active_profile = 2;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 5);
+    const auto event = take_profile_change(0, &available);
+    require(available && event.active_profile_number == 3 &&
+                event.policy == ControllerProfileConfirmationPolicy::kLed &&
+                activation_attempt_count == 1 && output.state.button_north &&
+                !output.state.button_capture && !output.state.button_south,
+            "committed shortcut redirected a held chord or lost commit feedback");
+    (void)take_profile_change(0, &available);
+    require(!available, "shortcut published duplicate commit feedback");
+    apply_button_mask(modifier, &snapshot);
+    (void)runtime_transform(0, snapshot, 6);
+    activation_result = ConfigurationTransactionStatus::kStorageError;
+    apply_button_mask(chord, &snapshot);
+    output = runtime_transform(0, snapshot, 7);
+    (void)runtime_transform(0, snapshot, 8);
+    (void)take_profile_change(0, &available);
+    require(activation_attempt_count == 2 &&
+                activation_attempts[1].profile_index == 4 && !available &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "failed activation retried, leaked its chord, or produced feedback");
+
+    prepare_profiles();
+    rows[0].profiles[0].shortcuts.modifier = 9;
+    rows[0].profiles[0].shortcuts.selectors[0] = 0;
+    snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+    apply_button_mask(chord, &snapshot);
+    output = runtime_transform(0, snapshot, 1);
+    (void)take_profile_change(0, &available);
+    require(activation_attempt_count == 0 && !available &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "already-active direct target was not a consumed no-op");
+}
+
+void test_busy_shortcut_target_and_generation_isolation() {
+    prepare_profiles();
+    constexpr uint16_t chord = (1u << 9) | 1u;
+    rows[0].profiles[0].shortcuts.modifier = 9;
+    rows[0].profiles[0].shortcuts.selectors[3] = 0;
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+    activation_busy_attempts = 3;
+    apply_button_mask(chord, &snapshot);
+    (void)runtime_transform(0, snapshot, 1);
+    rows[0].active_profile = 1;
+    rows[0].profiles[1].shortcuts.modifier = 9;
+    rows[0].profiles[1].shortcuts.selectors[6] = 0;
+    ++database_generation;
+    (void)runtime_transform(0, snapshot, 2);
+    require(activation_attempt_count == 2 &&
+                activation_attempts[1].profile_index == 3 &&
+                activation_attempts[0].transaction_id ==
+                    activation_attempts[1].transaction_id,
+            "profile refresh changed a busy shortcut's latched target");
+    ++snapshot.connection_generation;
+    auto output = runtime_transform(0, snapshot, 3);
+    require(activation_attempt_count == 2 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "new connection generation inherited or retriggered held activation");
+    apply_button_mask(0, &snapshot);
+    (void)runtime_transform(0, snapshot, 4);
+    apply_button_mask(chord, &snapshot);
+    (void)runtime_transform(0, snapshot, 5);
+    require(activation_attempt_count == 3 &&
+                activation_attempts[2].profile_index == 6 &&
+                activation_attempts[2].transaction_id !=
+                    activation_attempts[0].transaction_id,
+            "new generation could not rearm with its own target");
+    output = runtime_transform(0, snapshot, 6, AdapterUsbMode::kXInput);
+    (void)runtime_transform(0, snapshot, 7, AdapterUsbMode::kXInput);
+    require(activation_attempt_count == 3 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "output-mode reset leaked a pending activation retry");
+}
+
+void test_cycle_motion_arbitration_and_held_refresh() {
+    prepare_profiles();
+    constexpr uint16_t chord = (1u << 9) | 1u;
+    rows[0].profiles[0].switching_chord = chord;
+    rows[0].profiles[0].motion_toggle_chord = chord;
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+    apply_button_mask(chord, &snapshot);
+    auto output = runtime_transform(0, snapshot, 1);
+    require(activation_attempt_count == 1 && motion_toggle_count == 0 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "one cycle chord also toggled motion");
+    apply_button_mask(1u, &snapshot);
+    (void)runtime_transform(0, snapshot, 2);
+    apply_button_mask(chord, &snapshot);
+    (void)runtime_transform(0, snapshot, 2);
+    require(activation_attempt_count == 2 && motion_toggle_count == 0,
+            "re-completing a released cycle chord did not rearm");
+    apply_button_mask(1u, &snapshot);
+    (void)runtime_transform(0, snapshot, 2);
+    rows[0].profiles[0].motion_toggle_chord = 1u;
+    rows[0].profiles[0].switching_chord = 2u;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 3);
+    require(motion_toggle_count == 0 && !output.state.button_south,
+            "partial held chord became a new action after profile refresh");
+    apply_button_mask(0, &snapshot);
+    (void)runtime_transform(0, snapshot, 4);
+    apply_button_mask(1u, &snapshot);
+    output = runtime_transform(0, snapshot, 5);
+    require(motion_toggle_count == 1 && !output.state.button_south,
+            "motion did not rearm after the higher-priority chord released");
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 6);
+    require(motion_toggle_count == 1 && !output.state.button_south,
+            "profile refresh phantom-toggled held motion chord");
+}
+
+void test_shift_slot_and_context_resets() {
+    prepare_profiles();
+    std::array<Bluepad32SlotSnapshot, 4> snapshots{};
+    constexpr uint8_t outputs[4] = {1, 2, 3, 12};
+    for (uint8_t slot = 0; slot < 4; ++slot) {
+        auto& profile = rows[slot].profiles[0];
+        profile.shift.mode = ControllerProfileShiftMode::kToggle;
+        profile.shift.modifier = 9;
+        profile.shift.button_map[0] = outputs[slot];
+        snapshots[slot] = make_snapshot(slot);
+        (void)runtime_transform(slot, snapshots[slot], 0);
+        apply_button_mask((1u << 9) | 1u, &snapshots[slot]);
+        const auto output = runtime_transform(slot, snapshots[slot], 1);
+        require(controller_profile_extract_button_mask(output.state) ==
+                    (1u << outputs[slot]),
+                "Shift activation was not physical, consumed and slot-local");
+    }
+    ++snapshots[0].connection_generation;
+    auto output = runtime_transform(0, snapshots[0], 2);
+    require(output.state.button_south && !output.state.button_capture,
+            "connection reset phantom-toggled held Shift");
+    output = runtime_transform(1, snapshots[1], 2);
+    require(output.state.button_west && !output.state.button_south,
+            "one slot's Shift reset disturbed another slot");
+    output = runtime_transform(1, snapshots[1], 3, AdapterUsbMode::kXInput);
+    require(output.state.button_south && !output.state.button_west,
+            "mode reset retained or retriggered toggle Shift");
+    rows[2].profiles[1].shift = rows[2].profiles[0].shift;
+    rows[2].active_profile = 1;
+    ++database_generation;
+    output = runtime_transform(2, snapshots[2], 4);
+    require(output.state.button_south && !output.state.button_north &&
+                !output.state.button_capture,
+            "profile activation retained or phantom-toggled Shift");
+    output = runtime_transform(3, snapshots[3], 4);
+    require(output.state.button_south && !output.state.dpad_up,
+            "database refresh did not reset the remaining Shift slot");
+    apply_button_mask(1u, &snapshots[3]);
+    (void)runtime_transform(3, snapshots[3], 5);
+    apply_button_mask((1u << 9) | 1u, &snapshots[3]);
+    output = runtime_transform(3, snapshots[3], 6);
+    require(output.state.dpad_up && !output.state.button_south,
+            "Shift could not rearm after reset and physical release");
+    ++configuration_reset_generation;
+    output = runtime_transform(3, snapshots[3], 7);
+    require(output.state.button_south && !output.state.dpad_up,
+            "configuration reset retained Shift toggle state");
+}
+
+void test_held_synthetic_sources_and_disconnect_rearming() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.macros[0] = {1u, 9, 0, 1};
+    profile.macros[0].mode = ControllerProfileMacroMode::kToggle;
+    profile.macro_step_count = 1;
+    profile.macro_steps[0].override_flags = kControllerProfileOverrideLeftStick;
+    profile.macro_steps[0].duration_ms = 10;
+    profile.macro_steps[0].left_stick_x = 12345;
+    profile.turbo_modes[1] = ControllerProfileTurboMode::kBurst;
+    profile.turbo_modes[2] = ControllerProfileTurboMode::kAutoBurst;
+    profile.shortcuts.modifier = 9;
+    profile.shortcuts.selectors[2] = 3;
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+    apply_button_mask(7u, &snapshot);
+    auto output = runtime_transform(0, snapshot, 1);
+    require(output.state.left_stick_x == 12345 &&
+                output.state.button_east && output.state.button_west &&
+                !output.state.button_south,
+            "independent looping macro and Burst sources did not start");
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 2);
+    require(output.state.left_stick_x == 0 && output.state.button_south &&
+                !output.state.button_east && !output.state.button_west,
+            "refresh phantom-restarted a held edge-triggered synthetic source");
+    apply_button_mask(0, &snapshot);
+    (void)runtime_transform(0, snapshot, 3);
+    apply_button_mask(7u, &snapshot);
+    output = runtime_transform(0, snapshot, 4);
+    require(output.state.left_stick_x == 12345 &&
+                output.state.button_east && output.state.button_west,
+            "synthetic sources could not rearm after refresh and release");
+    snapshot.active = false;
+    (void)runtime_transform(0, snapshot, 5);
+    snapshot.active = true;
+    apply_button_mask((1u << 9) | 8u, &snapshot);
+    output = runtime_transform(0, snapshot, 6);
+    require(activation_attempt_count == 0 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.state.left_stick_x == 0,
+            "reconnect treated an already-held shortcut as a new command");
+    apply_button_mask(0, &snapshot);
+    (void)runtime_transform(0, snapshot, 7);
+    apply_button_mask((1u << 9) | 8u, &snapshot);
+    (void)runtime_transform(0, snapshot, 8);
+    require(activation_attempt_count == 1 &&
+                activation_attempts[0].profile_index == 2,
+            "reconnected shortcut did not rearm on physical release");
+}
+
+void test_shortcut_selector_rollover_without_modifier_release() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.shortcuts.modifier = 9;
+    profile.shortcuts.selectors[1] = 0;
+    profile.shortcuts.selectors[2] = 1;
+    auto snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+    apply_button_mask((1u << 9) | 1u, &snapshot);
+    (void)runtime_transform(0, snapshot, 1);
+    apply_button_mask((1u << 9) | 2u, &snapshot);
+    const auto output = runtime_transform(0, snapshot, 2);
+    require(activation_attempt_count == 2 &&
+                activation_attempts[0].profile_index == 1 &&
+                activation_attempts[1].profile_index == 2 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "swapping shortcut selectors while holding the modifier lost the new action");
+}
+
 }  // namespace
 
 bool bluepad32_input_backend_toggle_motion(
@@ -903,7 +1188,7 @@ ConfigurationTransactionStatus profile_service_activate_internal(
         --activation_busy_attempts;
         return ConfigurationTransactionStatus::kBusy;
     }
-    return ConfigurationTransactionStatus::kPending;
+    return activation_result;
 }
 
 
@@ -941,5 +1226,11 @@ int main() {
     test_switching_slot_isolation();
     test_all_runtime_cancellation_causes();
     test_runtime_slot_synthetic_isolation();
+    test_shortcut_arbitration_latching_and_commit_feedback();
+    test_busy_shortcut_target_and_generation_isolation();
+    test_cycle_motion_arbitration_and_held_refresh();
+    test_shift_slot_and_context_resets();
+    test_held_synthetic_sources_and_disconnect_rearming();
+    test_shortcut_selector_rollover_without_modifier_release();
     return 0;
 }

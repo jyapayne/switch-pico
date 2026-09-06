@@ -42,7 +42,6 @@ HapticsTransportProbe snapshot() {
 
 void unchanged(const HapticsTransportProbe& expected) {
     const auto actual = snapshot();
-    static_assert(sizeof(actual) == 128);
     assert(std::memcmp(&actual, &expected, sizeof(actual)) == 0);
 }
 

@@ -101,7 +101,8 @@ struct uni_controller_t {
     uint8_t battery;
 };
 
-struct uni_hid_device_t;
+struct uni_hid_device_s;
+typedef struct uni_hid_device_s uni_hid_device_t;
 typedef void (*btstack_packet_handler_t)(uint8_t, uint16_t, uint8_t*,
                                          uint16_t);
 struct btstack_packet_callback_registration_t {
@@ -131,9 +132,19 @@ struct uni_bt_conn_t {
     bd_addr_t btaddr;
     hci_con_handle_t handle;
     uni_bt_conn_protocol_t protocol;
+    bool connected;
+    uint16_t interrupt_cid;
+    uint16_t control_cid;
 };
 
-struct uni_hid_device_t {
+struct uni_circular_buffer_t {
+    unsigned queued;
+};
+inline uint8_t uni_circular_buffer_is_empty(const uni_circular_buffer_t* buffer) {
+    return buffer->queued == 0;
+}
+
+struct uni_hid_device_s {
     uint16_t vendor_id;
     uint16_t product_id;
     uni_bt_conn_t conn;
@@ -151,6 +162,7 @@ struct uni_hid_device_t {
     uint8_t lightbar_blue;
     int player_led_calls;
     uint8_t player_leds;
+    uni_circular_buffer_t outgoing_buffer;
 };
 
 struct uni_platform {

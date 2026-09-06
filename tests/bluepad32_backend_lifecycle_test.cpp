@@ -2,6 +2,11 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#include <algorithm>
+#include <array>
+#include <vector>
+#endif
 
 #include <uni.h>
 #include "platform/pico/controller_color_config.h"
@@ -433,7 +438,9 @@ void cyw43_arch_gpio_put(int, bool enabled) {
     ++observed_status_led_writes;
 }
 
-void multicore_launch_core1(void (*)()) {
+void multicore_launch_core1_with_stack(void (*)(), uint32_t* stack, size_t size) {
+    require(stack != nullptr && size % 8 == 0,
+            "core 1 launch needs an aligned bounded stack");
     ++core1_launch_calls;
 }
 
@@ -443,6 +450,10 @@ void tight_loop_contents() {
 
 uint32_t btstack_run_loop_get_time_ms() {
     return now_ms;
+}
+
+uint32_t time_us_32() {
+    return now_ms * 1000u;
 }
 
 
@@ -465,6 +476,55 @@ void switch2_wake_diagnostics(Switch2WakeDiagnostics*) {
 
 #include "core/controller_identity.cpp"
 #include "input/bluepad32_input_backend.cpp"
+
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+namespace {
+std::vector<btstack_timer_source_t*> native_timers;
+std::array<uint8_t, 143> last_native_packet{};
+uint16_t last_native_cid = 0;
+}
+
+void native_test_add_timer(btstack_timer_source_t* timer) {
+    btstack_run_loop_remove_timer(timer);
+    timer->due_ms = uint64_t{now_ms} + timer->timeout_ms + 1;
+    native_timers.push_back(timer);
+}
+
+int btstack_run_loop_remove_timer(btstack_timer_source_t* timer) {
+    const auto found = std::find(native_timers.begin(), native_timers.end(), timer);
+    if (found == native_timers.end()) return 0;
+    native_timers.erase(found);
+    return 1;
+}
+
+uint64_t time_us_64() { return uint64_t{now_ms} * 1000; }
+uint16_t l2cap_get_remote_mtu_for_local_cid(uint16_t) { return 143; }
+uint8_t l2cap_request_can_send_now_event(uint16_t cid) {
+    for (const auto& slot : g_slots) {
+        if (slot.device != nullptr && slot.device->conn.interrupt_cid == cid) {
+            require(haptics_experiment_on_can_send_now(slot.device, cid),
+                    "native send permission was not consumed");
+            return ERROR_CODE_SUCCESS;
+        }
+    }
+    require(false, "native permission targeted a detached connection");
+    return 1;
+}
+
+uint8_t l2cap_send(uint16_t cid, const uint8_t* data, uint16_t size) {
+    require(size == last_native_packet.size(), "native report size changed");
+    std::copy(data, data + size, last_native_packet.begin());
+    last_native_cid = cid;
+    return ERROR_CODE_SUCCESS;
+}
+
+void haptics_transport_probe_prepare() {}
+void haptics_transport_probe_begin(uint32_t, uint32_t, uint16_t) {}
+void haptics_transport_probe_end() {}
+void haptics_transport_probe_timer(uint32_t) {}
+void haptics_transport_probe_permission(uint32_t) {}
+void haptics_transport_probe_send(uint32_t, uint32_t, bool) {}
+#endif
 
 namespace {
 void require_clear_completion_pending() {
@@ -2476,11 +2536,220 @@ void test_flash_core_init_fatal() {
             "flash-safe Core1 init failure must halt before CYW43 init");
 }
 
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) && defined(SWITCH_PICO_USB_OUTPUT_MODES)
+void advance_native_backend(uint32_t duration_ms) {
+    const uint32_t end_ms = now_ms + duration_ms;
+    while (now_ms < end_ms) {
+        ++now_ms;
+        for (;;) {
+            const auto due = std::find_if(
+                native_timers.begin(), native_timers.end(),
+                [](const auto* timer) {
+                    return timer != &g_rumble_timer &&
+                           timer != &g_configuration_timer &&
+                           timer->due_ms <= now_ms;
+                });
+            if (due == native_timers.end()) break;
+            auto* timer = *due;
+            native_timers.erase(due);
+            timer->handler(timer);
+        }
+        if (now_ms % kRumblePollIntervalMs == 0)
+            process_rumble_timer(&g_rumble_timer);
+    }
+}
+
+void require_native_channels(bool left, bool right) {
+    HapticsExperimentDiagnostics status;
+    haptics_experiment_snapshot(&status);
+    require(status.state == HapticsExperimentState::kRunning &&
+                status.mode == 1,
+            "stateful host rumble lost native gameplay ownership");
+    unsigned active[2]{};
+    for (unsigned frame = 0; frame < status.packet_frames; ++frame) {
+        active[0] += last_native_packet[10 + frame * 2] != 0;
+        active[1] += last_native_packet[11 + frame * 2] != 0;
+    }
+    require((left ? active[0] > status.packet_frames / 2u : active[0] == 0) &&
+                (right ? active[1] > status.packet_frames / 2u : active[1] == 0),
+            "native PCM did not preserve the requested stateful channels");
+}
+
+void test_native_stateful_routing() {
+    start_pairing_backend();
+    test_adapter_mode = AdapterUsbMode::kXInput;
+    auto selected = device(0, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    selected.vendor_id = 0x054c;
+    selected.product_id = 0x0ce6;
+    selected.conn.connected = true;
+    selected.conn.interrupt_cid = 0x80;
+    selected.outgoing_buffer.queued = 1;
+    require(platform_on_device_ready(&selected) == UNI_ERROR_SUCCESS,
+            "selected DualSense was rejected");
+    process_rumble_timer(&g_rumble_timer);
+    HapticsExperimentDiagnostics status;
+    haptics_experiment_snapshot(&status);
+    require(status.mode == 1 && status.state == HapticsExperimentState::kPending,
+            "XInput DualSense did not auto-arm into native Prepare");
+    const uint32_t generation = g_slots[0].connection_generation;
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{180, 0});
+    advance_native_backend(70);
+    const int prepare_calls = selected.rumble_calls;
+    selected.outgoing_buffer.queued = 0;
+    advance_native_backend(350);
+    require_native_channels(true, false);
+    require(selected.rumble_calls == prepare_calls &&
+                last_native_cid == selected.conn.interrupt_cid,
+            "XInput interleaved compatibility rumble into native PCM");
+
+    auto unselected = device(1, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    unselected.vendor_id = selected.vendor_id;
+    unselected.product_id = selected.product_id;
+    unselected.conn.connected = true;
+    unselected.conn.interrupt_cid = 0x82;
+    require(platform_on_device_ready(&unselected) == UNI_ERROR_SUCCESS,
+            "unselected DualSense was rejected");
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{22, 33});
+    advance_native_backend(10);
+    require(unselected.rumble_calls == 1 && unselected.last_low == 22 &&
+                unselected.last_high == 33,
+            "unselected controller lost compatibility fallback");
+    require(!haptics_experiment_submit_rumble(1, generation, time_us_64(), 255, 255),
+            "native stream accepted an unselected slot");
+
+    bluepad32_input_backend_queue_profile_feedback(
+        0, generation, 1, ControllerProfileConfirmationPolicy::kRumble);
+    advance_native_backend(40);
+    require_native_channels(true, true);
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{0, 170});
+    advance_native_backend(220);
+    require_native_channels(false, true);
+    require(selected.rumble_calls == prepare_calls,
+            "profile feedback escaped the native overlay");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{0, 0});
+    advance_native_backend(80);
+    require_native_channels(false, false);
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{150, 0});
+    advance_native_backend(80);
+    require(haptics_experiment_request(0, 0), "native stop was rejected");
+    advance_native_backend(20);
+    require(!haptics_experiment_owns(&selected) && selected.last_low == 150 &&
+                selected.last_high == 0 &&
+                selected.last_rumble_duration_ms == kXInputHostRumbleDurationMs,
+            "explicit native stop lost the latest compatibility fallback");
+    require(haptics_experiment_request(2, 0), "manual gameplay rearm failed");
+    advance_native_backend(300);
+    require_native_channels(true, false);
+    const int rearm_calls = selected.rumble_calls;
+    advance_native_backend(300);
+    require(selected.rumble_calls == rearm_calls,
+            "held XInput state required periodic compatibility refresh");
+
+    require(haptics_experiment_request(0, 0), "second native stop failed");
+    advance_native_backend(20);
+    require(selected.last_low == 150 && selected.last_high == 0 &&
+                selected.last_rumble_duration_ms == kXInputHostRumbleDurationMs,
+            "manual rearm discarded held state needed by the next Stop");
+    require(haptics_experiment_request(1, 0), "fixture start failed");
+    advance_native_backend(10);
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{0, 160});
+    advance_native_backend(6200);
+    require(haptics_experiment_request(2, 0), "post-fixture gameplay arm failed");
+    advance_native_backend(300);
+    require_native_channels(false, true);
+
+    // A real HD frame replaces stateful XInput semantics and keeps its watchdog.
+    test_adapter_mode = AdapterUsbMode::kSwitchProbe;
+    ControllerRumbleOutput hd{};
+    hd.hd.actuators[0].sample_count = 1;
+    hd.hd.actuators[1].sample_count = 1;
+    hd.hd.actuators[0].samples[0].low_amplitude_q15 = 20000;
+    hd.hd.actuators[0].samples[0].low_frequency_index = 64;
+    bluepad32_input_backend_queue_rumble(0, hd);
+    advance_native_backend(40);
+    require_native_channels(true, false);
+    advance_native_backend(100);
+    require_native_channels(false, false);
+
+    test_adapter_mode = AdapterUsbMode::kXInput;
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{255, 0});
+    platform_on_device_disconnected(&selected);
+    require(!haptics_experiment_submit_rumble(0, generation, time_us_64(), 255, 255),
+            "disconnected generation remained eligible for native output");
+    require(platform_on_device_ready(&selected) == UNI_ERROR_SUCCESS,
+            "replacement DualSense was rejected");
+    advance_native_backend(300);
+    require_native_channels(false, false);
+    require(!haptics_experiment_submit_rumble(0, generation, time_us_64(), 255, 255),
+            "old generation reached a replacement native stream");
+    require(haptics_experiment_request(0, 0), "replacement stop failed");
+    advance_native_backend(20);
+    platform_on_device_disconnected(&selected);
+    platform_on_device_disconnected(&unselected);
+}
+
+void test_native_second_slot_selection() {
+    start_pairing_backend();
+    test_adapter_mode = AdapterUsbMode::kXInput;
+    auto pro = device(0, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    pro.vendor_id = 0x057e;
+    pro.product_id = 0x2009;
+    pro.conn.connected = true;
+    pro.conn.interrupt_cid = 0x80;
+    require(platform_on_device_ready(&pro) == UNI_ERROR_SUCCESS,
+            "first-slot Switch Pro was rejected");
+    auto dualsense = device(1, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    dualsense.vendor_id = 0x054c;
+    dualsense.product_id = 0x0ce6;
+    dualsense.conn.connected = true;
+    dualsense.conn.interrupt_cid = 0x82;
+    require(platform_on_device_ready(&dualsense) == UNI_ERROR_SUCCESS,
+            "second-slot DualSense was rejected");
+    advance_native_backend(30);
+    HapticsExperimentDiagnostics status;
+    haptics_experiment_snapshot(&status);
+    require(status.state == HapticsExperimentState::kRunning && status.slot == 1,
+            "native auto-arm ignored the first eligible DualSense outside slot zero");
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{90, 0});
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{20, 0});
+    advance_native_backend(200);
+    require_native_channels(true, false);
+    require(pro.rumble_calls == 1 && last_native_cid == 0x82,
+            "mixed controller slots lost their independent rumble paths");
+    auto later = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    later.vendor_id = dualsense.vendor_id;
+    later.product_id = dualsense.product_id;
+    later.conn.connected = true;
+    later.conn.interrupt_cid = 0x84;
+    require(platform_on_device_ready(&later) == UNI_ERROR_SUCCESS,
+            "later DualSense was rejected");
+    advance_native_backend(30);
+    haptics_experiment_snapshot(&status);
+    require(status.slot == 1 && last_native_cid == 0x82,
+            "a later DualSense stole the selected native stream");
+    require(haptics_experiment_request(0, 1), "selected stream did not stop");
+    advance_native_backend(20);
+    platform_on_device_disconnected(&dualsense);
+    platform_on_device_disconnected(&pro);
+    platform_on_device_disconnected(&later);
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
     require(argc == 2, "scenario argument required");
     const std::string scenario = argv[1];
+#if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) && defined(SWITCH_PICO_USB_OUTPUT_MODES)
+    if (scenario == "native-stateful") {
+        test_native_stateful_routing();
+        return 0;
+    }
+    if (scenario == "native-second-slot") {
+        test_native_second_slot_selection();
+        return 0;
+    }
+#endif
     if (scenario == "ready-forward") {
         test_ready_order(false);
     } else if (scenario == "ready-reverse") {

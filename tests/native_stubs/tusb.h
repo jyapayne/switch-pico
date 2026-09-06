@@ -89,6 +89,7 @@ void tud_hid_report_received_cb(uint8_t instance, uint8_t report_id,
 uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance);
 void tud_mount_cb(void);
 void tud_umount_cb(void);
+void tud_suspend_cb(bool remote_wakeup_en);
 uint8_t const* tud_descriptor_device_cb(void);
 uint8_t const* tud_descriptor_configuration_cb(uint8_t index);
 uint16_t const* tud_descriptor_string_cb(uint8_t index, uint16_t langid);

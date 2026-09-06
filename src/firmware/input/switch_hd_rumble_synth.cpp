@@ -186,6 +186,28 @@ bool SwitchHdRumbleSynth::push(const SwitchHapticsFrame& frame,
     return true;
 }
 
+bool SwitchHdRumbleSynth::push_rumble(uint8_t low_magnitude,
+                                      uint8_t high_magnitude,
+                                      uint64_t received_us) {
+    Command command;
+    if ((have_host_ && older(received_us, last_host_us_)) ||
+        !timestamp_sample(received_us, command.sample)) {
+        count_drop();
+        return false;
+    }
+    have_host_ = true;
+    last_host_us_ = received_us;
+    command.persistent = true;
+    command.frame.actuators[0].sample_count = 1;
+    command.frame.actuators[1].sample_count = 1;
+    command.frame.actuators[0].samples[0].low_amplitude_q15 =
+        (static_cast<uint32_t>(low_magnitude) * 32768u + 127u) / 255u;
+    command.frame.actuators[1].samples[0].high_amplitude_q15 =
+        (static_cast<uint32_t>(high_magnitude) * 32768u + 127u) / 255u;
+    enqueue(command);
+    return true;
+}
+
 void SwitchHdRumbleSynth::feedback(uint64_t at_us, uint32_t duration_us,
                                   uint8_t low_magnitude,
                                   uint8_t high_magnitude) {
@@ -241,6 +263,7 @@ void SwitchHdRumbleSynth::apply(const Command& command) {
             sides_[side].frame = command.frame.actuators[side];
             sides_[side].start = command.sample;
             sides_[side].expires = command.sample + kWatchdogSamples;
+            sides_[side].persistent = command.persistent;
         }
     }
 }
@@ -281,7 +304,7 @@ uint64_t SwitchHdRumbleSynth::next_boundary(uint64_t limit) const {
         for (unsigned index = 1; index < side.frame.sample_count; ++index) {
             consider(side.start + index * spacing);
         }
-        consider(side.expires);
+        if (!side.persistent) consider(side.expires);
     }
     consider(feedback_expires_);
     return limit;
@@ -341,7 +364,8 @@ void SwitchHdRumbleSynth::render(uint64_t first_sample, uint32_t frames,
             const auto& sample = host_sample(side);
             increment[side][0] = kPhaseIncrement[sample.low_frequency_index];
             increment[side][1] = kPhaseIncrement[sample.high_frequency_index + 32];
-            const bool expired = due(sides_[side].expires, cursor_);
+            const bool expired = !sides_[side].persistent &&
+                                 due(sides_[side].expires, cursor_);
             amplitude[side][0] = expired ? 0 : sample.low_amplitude_q15;
             amplitude[side][1] = expired ? 0 : sample.high_amplitude_q15;
             if (!overlay) apply_host_gain(amplitude[side][0], amplitude[side][1]);

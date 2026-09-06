@@ -45,9 +45,9 @@ void test_profile_wire_schema() {
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)),
             "default profile did not encode");
-    require(encoded[0] == 5 && encoded[1] == 0 &&
-                encoded[2] == 0 && encoded[3] == 1,
-            "profile header is not little-endian v5/256");
+    require(encoded[0] == 6 && encoded[1] == 0 &&
+                encoded[2] == 0x80 && encoded[3] == 1,
+            "profile header is not little-endian v6/384");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
         require(encoded[4 + index] == index,
@@ -174,7 +174,7 @@ void test_profile_wire_schema() {
             "reversed raw trigger range was accepted");
     invalid = profile;
     invalid.turbo_modes[0] =
-        static_cast<ControllerProfileTurboMode>(3);
+        static_cast<ControllerProfileTurboMode>(4);
     require(!controller_profile_validate(invalid),
             "invalid Turbo mode was accepted");
     invalid = profile;
@@ -225,7 +225,7 @@ void test_legacy_profile_migration() {
                         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8) &&
                 encoded[60] == CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
                 encoded[70] == CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL,
-            "migrated default profile did not encode as v5");
+            "migrated default profile did not encode as v6");
 
     require(controller_profile_decode(
                 kLegacyNarrowRawRangeProfile,
@@ -269,7 +269,7 @@ void test_legacy_profile_migration() {
                     kLegacyCustomThresholdProfile[79],
             "legacy macro trigger was not migrated to descriptor zero");
 
-    uint8_t previous_encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    uint8_t previous_encoded[CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE]{};
     memcpy(previous_encoded, kLegacyDefaultProfile,
            sizeof(previous_encoded));
     previous_encoded[0] = static_cast<uint8_t>(
@@ -300,7 +300,17 @@ void test_legacy_profile_migration() {
                     static_cast<uint8_t>(
                         ControllerProfileLogicalButton::kCapture) &&
                 migrated.motion_toggle_chord == 0,
-            "v2 profile controls did not migrate to v5");
+            "v2 profile controls did not migrate to v6");
+    previous_encoded[80] = 2;
+    previous_encoded[100] = 0;
+    previous_encoded[101] = kControllerProfileOverrideButtons;
+    previous_encoded[102] = 25;
+    previous_encoded[104] = 1;
+    require(controller_profile_decode(
+                previous_encoded, sizeof(previous_encoded), &migrated) &&
+                migrated.macros[0].step_count == 1 &&
+                migrated.macro_steps[0].output_button_mask == 1,
+            "legacy nonempty macro did not migrate into shared pool");
 
     ControllerProfile current =
         controller_profile_default(controller_identity_global(), 0);
@@ -346,7 +356,7 @@ void test_database_round_trip_and_capacity() {
     require(encoded_database[4] ==
                     CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION &&
                 encoded_database[5] == 0,
-            "database encoder did not emit v2");
+            "database encoder did not emit v3");
     require(controller_profile_database_decode(
                 read_encoded_database, nullptr, &decoded_database),
             "database did not decode");
@@ -360,10 +370,150 @@ void test_database_round_trip_and_capacity() {
             "nonzero database header reservation was accepted");
 }
 
+void test_set_b_sparse_extension_and_migration() {
+    ControllerProfile profile =
+        controller_profile_default(controller_identity_global(), 0);
+    profile.shortcuts.modifier = 16;
+    profile.shortcuts.selectors[0] = 0;
+    profile.shortcuts.selectors[7] = 15;
+    profile.shift.mode = ControllerProfileShiftMode::kToggle;
+    profile.shift.modifier = 17;
+    profile.shift.button_map[0] = CONTROLLER_PROFILE_NO_BUTTON;
+    profile.turbo_modes[15] = ControllerProfileTurboMode::kBurst;
+    profile.turbo_defaults = {30, 99, 255};
+    profile.turbo_override_mask = (1u << 2) | (1u << 15);
+    profile.turbo_overrides[2] = {1, 1, 1};
+    profile.turbo_overrides[15] = {23, 37, 17};
+    profile.turbo_overrides[0] = {0, 0, 0};
+    profile.macros[0] = {1, 0xff, 0, 8, ControllerProfileMacroMode::kRepeat, 255};
+    profile.macro_step_count = 8;
+    for (uint8_t macro = 1; macro < CONTROLLER_PROFILE_MACRO_COUNT; ++macro) {
+        profile.macros[macro].first_step = 8;
+        profile.macros[macro].mode = static_cast<ControllerProfileMacroMode>(macro - 1);
+    }
+    for (uint8_t step = 0; step < 8; ++step) {
+        profile.macro_steps[step] = {31, 25, 1, -2, 3, -4, 5, 0x1234, 0xabcd};
+    }
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    ControllerProfile decoded{};
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                controller_profile_decode(encoded, sizeof(encoded), &decoded),
+            "full sparse stream and Set B extension did not round trip");
+    require(encoded[254] == 0xcd && encoded[255] == 0xab &&
+                encoded[256] == 16 && encoded[264] == 15 &&
+                encoded[265] == 2 && encoded[266] == 17 &&
+                encoded[267] == 0xff && encoded[283] == 30 &&
+                encoded[286] == 4 && encoded[287] == 0x80 &&
+                encoded[288] == 1 && encoded[291] == 23 &&
+                encoded[336] == 3 && encoded[337] == 255,
+            "Set B fields overlap macro data or use wrong sparse ordering");
+    require(decoded.turbo_overrides[15].duty_percent == 37 &&
+                decoded.macros[0].repeat_count == 255 &&
+                decoded.shortcuts.selectors[7] == 15,
+            "Set B extension settings were not decoded");
+    for (size_t offset = 294; offset < 336; ++offset) {
+        require(encoded[offset] == 0, "absent override was not canonical zero");
+    }
+    encoded[294] = 1;
+    require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+            "nonzero sparse Turbo padding was accepted");
+    encoded[294] = 0;
+    encoded[383] = 1;
+    require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+            "nonzero extension reservation was accepted");
+    encoded[383] = 0;
+    encoded[337] = 0;
+    require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+            "zero macro repeat count was accepted");
+    encoded[337] = 255;
+    uint8_t legacy[CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE]{};
+    memcpy(legacy, encoded, sizeof(legacy));
+    legacy[0] = 5;
+    legacy[2] = 0;
+    legacy[95] = 2;
+    require(controller_profile_decode(legacy, sizeof(legacy), &decoded) &&
+                decoded.macros[0].step_count == 8 &&
+                decoded.macro_steps[7].right_trigger == 0xabcd &&
+                decoded.macros[0].mode == ControllerProfileMacroMode::kOnce &&
+                decoded.shortcuts.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
+                decoded.turbo_override_mask == 0,
+            "schema5 full136-byte macro stream did not migrate");
+    require(controller_profile_encode(decoded, encoded, sizeof(encoded)) &&
+                memcmp(&legacy[4], &encoded[4], sizeof(legacy) - 4) == 0,
+            "schema5 migration changed existing profile data");
+    legacy[0] = 6;
+    require(!controller_profile_decode(legacy, sizeof(legacy), &decoded),
+            "schema6 accepted a legacy-sized payload");
+    profile.shortcuts.selectors[7] = 0;
+    require(!controller_profile_validate(profile), "duplicate shortcut was accepted");
+    profile.shortcuts.selectors[7] = 15;
+    profile.shift.button_map[0] = 16;
+    require(!controller_profile_validate(profile), "analog Shift output was accepted");
+    profile.shift.button_map[0] = 0;
+    profile.turbo_overrides[2].rate_hz = 31;
+    require(!controller_profile_validate(profile), "out-of-range Turbo rate was accepted");
+    profile.turbo_overrides[2].rate_hz = 1;
+    for (uint8_t step = 0; step < 8; ++step) {
+        profile.macro_steps[step].duration_ms = 0;
+    }
+    require(!controller_profile_validate(profile), "zero-duration looping macro was accepted");
+    profile.macros[0].mode = ControllerProfileMacroMode::kOnce;
+    require(controller_profile_validate(profile), "zero-duration once macro was rejected");
+}
+
+void test_legacy_database_strides() {
+    for (uint8_t version = 1; version <= 2; ++version) {
+        const uint8_t count = version == 1 ? 4 : 8;
+        const size_t entry_size = 16 + count * 256;
+        const size_t entries_offset = 32 + count * 256;
+        const size_t total_size = entries_offset + 16 * entry_size;
+        memset(encoded_database, 0, sizeof(encoded_database));
+        memcpy(encoded_database, "SPDB", 4);
+        encoded_database[4] = version;
+        encoded_database[6] = static_cast<uint8_t>(total_size);
+        encoded_database[7] = static_cast<uint8_t>(total_size >> 8);
+        encoded_database[8] = 16;
+        encoded_database[9] = count;
+        encoded_database[10] = count - 1;
+        encoded_database[11] = 1;
+        for (uint8_t index = 0; index < count; ++index) {
+            memcpy(&encoded_database[32 + index * 256], kLegacyDefaultProfile, 256);
+        }
+        const size_t last_entry = entries_offset + 15 * entry_size;
+        require(controller_identity_encode(identity(16), &encoded_database[last_entry], 14),
+                "legacy database identity did not encode");
+        encoded_database[last_entry + 14] = count - 1;
+        encoded_database[last_entry + 15] = 1;
+        for (uint8_t index = 0; index < count; ++index) {
+            memcpy(&encoded_database[last_entry + 16 + index * 256],
+                   kLegacyCustomThresholdProfile, 256);
+        }
+        require(controller_profile_database_decode(
+                    read_encoded_database, nullptr, &decoded_database),
+                "legacy database strides were not preserved");
+        const ControllerProfileDatabaseEntry* entry =
+            controller_profile_database_find(decoded_database, identity(16));
+        require(entry != nullptr && entry->active_profile == count - 1 &&
+                    entry->profiles[count - 1].triggers[1].digital_threshold == 0xabcd,
+                "last legacy bank profile was read from the wrong offset");
+        if (count == 4) {
+            require(entry->profiles[7].triggers[0].digital_threshold ==
+                        CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
+                    "new profile slots were not defaulted during migration");
+        }
+        encoded_database[4] = 3;
+        require(!controller_profile_database_decode(
+                    read_encoded_database, nullptr, &decoded_database),
+                "current database version accepted legacy strides");
+    }
+}
+
 }  // namespace
 int main() {
     test_profile_wire_schema();
     test_legacy_profile_migration();
     test_database_round_trip_and_capacity();
+    test_set_b_sparse_extension_and_migration();
+    test_legacy_database_strides();
     return 0;
 }

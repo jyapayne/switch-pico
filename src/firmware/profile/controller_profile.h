@@ -9,8 +9,10 @@ constexpr uint16_t CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION = 1;
 constexpr uint16_t CONTROLLER_PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2;
 constexpr uint16_t CONTROLLER_PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3;
 constexpr uint16_t CONTROLLER_PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4;
-constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 5;
-constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 256;
+constexpr uint16_t CONTROLLER_PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5;
+constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 6;
+constexpr size_t CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE = 256;
+constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 384;
 constexpr uint8_t CONTROLLER_PROFILE_COUNT = 8;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT = 16;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT = 18;
@@ -27,12 +29,26 @@ constexpr uint8_t CONTROLLER_PROFILE_NO_BUTTON = 0xff;
 constexpr uint8_t CONTROLLER_PROFILE_ALL = 0xff;
 // Exact 16-bit counterpart of the existing 358-of-1023 Switch boundary.
 constexpr uint16_t CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD = 22934;
+constexpr uint8_t CONTROLLER_PROFILE_TURBO_RATE_MIN = 1;
+constexpr uint8_t CONTROLLER_PROFILE_TURBO_RATE_MAX = 30;
+constexpr uint8_t CONTROLLER_PROFILE_TURBO_DUTY_MIN = 1;
+constexpr uint8_t CONTROLLER_PROFILE_TURBO_DUTY_MAX = 99;
+constexpr uint8_t CONTROLLER_PROFILE_TURBO_BURST_MIN = 1;
+constexpr uint8_t CONTROLLER_PROFILE_TURBO_BURST_MAX = 255;
 
 constexpr uint8_t CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY = 16;
 constexpr uint16_t CONTROLLER_PROFILE_DATABASE_LEGACY_SCHEMA_VERSION = 1;
-constexpr uint16_t CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION = 2;
+constexpr uint16_t CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION = 3;
 constexpr size_t CONTROLLER_PROFILE_DATABASE_HEADER_SIZE = 32;
 constexpr size_t CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE = 16;
+constexpr size_t CONTROLLER_PROFILE_DATABASE_LEGACY_ENTRY_SIZE =
+    CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE +
+    CONTROLLER_PROFILE_COUNT * CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
+constexpr size_t CONTROLLER_PROFILE_DATABASE_LEGACY_ENCODED_SIZE =
+    CONTROLLER_PROFILE_DATABASE_HEADER_SIZE +
+    CONTROLLER_PROFILE_COUNT * CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE +
+    CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY *
+        CONTROLLER_PROFILE_DATABASE_LEGACY_ENTRY_SIZE;
 constexpr size_t CONTROLLER_PROFILE_DATABASE_ENTRY_SIZE =
     CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE +
     CONTROLLER_PROFILE_COUNT * CONTROLLER_PROFILE_ENCODED_SIZE;
@@ -42,7 +58,9 @@ constexpr size_t CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE =
     CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY *
         CONTROLLER_PROFILE_DATABASE_ENTRY_SIZE;
 
-static_assert(CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE == 35104,
+static_assert(CONTROLLER_PROFILE_DATABASE_LEGACY_ENCODED_SIZE == 35104,
+              "legacy profile database wire size changed");
+static_assert(CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE == 52512,
               "profile database wire size changed");
 enum class ControllerProfileLogicalButton : uint8_t {
     kSouth = 0,
@@ -78,6 +96,39 @@ enum class ControllerProfileTurboMode : uint8_t {
     kOff = 0,
     kTurbo = 1,
     kAutoBurst = 2,
+    kBurst = 3,
+};
+
+enum class ControllerProfileShiftMode : uint8_t {
+    kOff = 0,
+    kHold = 1,
+    kToggle = 2,
+};
+
+enum class ControllerProfileMacroMode : uint8_t {
+    kOnce = 0,
+    kWhileHeld = 1,
+    kToggle = 2,
+    kRepeat = 3,
+};
+
+struct ControllerProfileShortcutConfiguration {
+    uint8_t modifier = CONTROLLER_PROFILE_NO_BUTTON;
+    uint8_t selectors[CONTROLLER_PROFILE_COUNT]{
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+};
+
+struct ControllerProfileShiftConfiguration {
+    ControllerProfileShiftMode mode = ControllerProfileShiftMode::kOff;
+    uint8_t modifier = CONTROLLER_PROFILE_NO_BUTTON;
+    uint8_t button_map[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+};
+
+struct ControllerProfileTurboSettings {
+    uint8_t rate_hz = 15;
+    uint8_t duty_percent = 50;
+    uint8_t burst_count = 3;
 };
 
 
@@ -127,6 +178,8 @@ struct ControllerProfileMacro {
     uint8_t cancel_control = CONTROLLER_PROFILE_NO_BUTTON;
     uint8_t first_step = 0;
     uint8_t step_count = 0;
+    ControllerProfileMacroMode mode = ControllerProfileMacroMode::kOnce;
+    uint8_t repeat_count = 1;
 };
 
 struct ControllerProfile {
@@ -145,6 +198,12 @@ struct ControllerProfile {
         turbo_modes[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{};
     ControllerProfileMacroStep
         macro_steps[CONTROLLER_PROFILE_MACRO_STEP_CAPACITY]{};
+    ControllerProfileShortcutConfiguration shortcuts{};
+    ControllerProfileShiftConfiguration shift{};
+    ControllerProfileTurboSettings turbo_defaults{};
+    uint16_t turbo_override_mask = 0;
+    ControllerProfileTurboSettings
+        turbo_overrides[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{};
 };
 
 struct ControllerProfileDatabaseEntry {

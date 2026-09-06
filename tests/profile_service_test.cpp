@@ -133,6 +133,15 @@ void test_eight_profile_transactions_and_active_cache() {
 
   ControllerProfile eighth = controller_profile_default(global, 7);
   eighth.strong_rumble_scale = 37;
+  eighth.shortcuts.modifier = 4;
+  eighth.shortcuts.selectors[7] = 15;
+  eighth.shift.mode = ControllerProfileShiftMode::kHold;
+  eighth.shift.modifier = 17;
+  eighth.shift.button_map[0] = 2;
+  eighth.turbo_modes[0] = ControllerProfileTurboMode::kBurst;
+  eighth.turbo_defaults = {11, 37, 9};
+  eighth.turbo_override_mask = 1u << 15;
+  eighth.turbo_overrides[15] = {30, 99, 255};
   write_profile(1, global, 7, eighth, 0);
   require(profile_service_select(global, 7) ==
               ConfigurationTransactionStatus::kCommitted,
@@ -140,8 +149,11 @@ void test_eight_profile_transactions_and_active_cache() {
   ProfileServiceSelectedSnapshot selected{};
   profile_service_selected_snapshot(&selected);
   require(selected.valid && selected.profile_index == 7 &&
-              selected.profile.strong_rumble_scale == 37,
-          "selected profile eight was not decoded on demand");
+              selected.profile.strong_rumble_scale == 37 &&
+              selected.profile.shortcuts.selectors[7] == 15 &&
+              selected.profile.shift.button_map[0] == 2 &&
+              selected.profile.turbo_overrides[15].burst_count == 255,
+          "selected profile eight lost its schema6 extension");
 
   require(profile_service_activate(2, global, 7) ==
               ConfigurationTransactionStatus::kPending,
@@ -152,8 +164,10 @@ void test_eight_profile_transactions_and_active_cache() {
           "profile eight activation did not persist");
   active = active_snapshot(global);
   require(active.valid && active.profile_index == 7 &&
-              active.profile.strong_rumble_scale == 37,
-          "active cache did not publish profile eight");
+              active.profile.strong_rumble_scale == 37 &&
+              active.profile.shift.modifier == 17 &&
+              active.profile.turbo_defaults.duty_percent == 37,
+          "active cache did not publish the complete schema6 profile");
 
   const ControllerIdentity connected = stable_identity();
   require(profile_service_observe_identity_on_storage_core(connected),
@@ -173,11 +187,28 @@ void test_eight_profile_transactions_and_active_cache() {
   require(profile_service_activate_internal(0x80000007u, connected, 6) ==
               ConfigurationTransactionStatus::kPending,
           "controller activation was not queued");
+  const auto host_before_activation = transaction_snapshot();
+  profile_service_task_on_storage_core(3999);
+  active = active_snapshot(connected);
+  require(active.valid && active.profile_index == 0,
+          "internal activation published before the one-second commit interval");
   profile_service_task_on_storage_core(4000);
   active = active_snapshot(connected);
   require(active.valid && active.profile_index == 6 &&
               active.profile.weak_rumble_scale == 61,
           "controller activation did not refresh the active cache");
+  require(transaction_snapshot().transaction.transaction_id ==
+              host_before_activation.transaction.transaction_id &&
+              transaction_snapshot().transaction.status ==
+                  host_before_activation.transaction.status,
+          "internal activation replaced the host-visible transaction snapshot");
+  const uint32_t activated_generation = active.metadata.generation;
+  require(profile_service_activate_internal(0x80000008u, connected, 6) ==
+              ConfigurationTransactionStatus::kPending,
+          "unchanged internal activation was not accepted");
+  profile_service_task_on_storage_core(5000);
+  require(active_snapshot(connected).metadata.generation == activated_generation,
+          "unchanged internal activation published a fake commit");
 
   require(profile_service_reset(4, global, CONTROLLER_PROFILE_ALL) ==
               ConfigurationTransactionStatus::kPending,
@@ -246,6 +277,148 @@ void test_profile_bounds_and_transaction_namespace() {
           "transaction namespaces were not enforced");
 }
 
+void test_schema6_validation_and_atomic_selection() {
+  const ControllerIdentity id = stable_identity();
+  require(profile_service_select(id, 6) ==
+              ConfigurationTransactionStatus::kCommitted,
+          "transaction validation baseline was not selected");
+  ProfileServiceSelectedSnapshot old_selection{};
+  profile_service_selected_snapshot(&old_selection);
+  ControllerProfile updated = old_selection.profile;
+  updated.shortcuts.modifier = 5;
+  updated.shortcuts.selectors[6] = 14;
+  updated.turbo_defaults = {30, 1, 255};
+  updated.macros[0].trigger_mask = 1u << 10;
+  updated.macros[0].step_count = 1;
+  updated.macros[0].mode = ControllerProfileMacroMode::kRepeat;
+  updated.macros[0].repeat_count = 255;
+  updated.macro_step_count = 1;
+  for (uint8_t index = 1; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index)
+    updated.macros[index].first_step = 1;
+  updated.macro_steps[0].duration_ms = 7;
+  uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  require(controller_profile_encode(updated, encoded, sizeof(encoded)),
+          "extended service profile did not encode");
+  require(profile_service_begin(20, id, 6, 5, 256, 0) ==
+              ConfigurationTransactionStatus::kUnsupportedSchema &&
+              profile_service_begin(21, id, 6, 6, 256, 0) ==
+                  ConfigurationTransactionStatus::kMalformed &&
+              profile_service_begin(22, id, 6, 6, 385, 0) ==
+                  ConfigurationTransactionStatus::kTooLarge,
+          "service admitted old-schema or incorrectly-sized writes");
+
+  // A valid transport CRC cannot authorize an invalid extension.
+  encoded[283] = 0;
+  require(profile_service_begin(
+              23, id, 6, 6, sizeof(encoded),
+              profile_storage_crc32(encoded, sizeof(encoded))) ==
+              ConfigurationTransactionStatus::kReceiving &&
+              profile_service_append(23, 0, encoded, sizeof(encoded)) ==
+                  ConfigurationTransactionStatus::kReceiving &&
+              profile_service_commit(23) ==
+                  ConfigurationTransactionStatus::kMalformed,
+          "service admitted invalid schema6 turbo settings");
+  ProfileServiceSelectedSnapshot selected{};
+  profile_service_selected_snapshot(&selected);
+  require(selected.valid &&
+              selected.metadata.generation == old_selection.metadata.generation &&
+              selected.profile.turbo_defaults.rate_hz ==
+                  old_selection.profile.turbo_defaults.rate_hz,
+          "rejected extension replaced the old selected snapshot");
+
+  require(controller_profile_encode(updated, encoded, sizeof(encoded)),
+          "valid replacement did not encode");
+  require(profile_service_begin(
+              24, id, 6, 6, sizeof(encoded),
+              profile_storage_crc32(encoded, sizeof(encoded))) ==
+              ConfigurationTransactionStatus::kReceiving &&
+              profile_service_append(24, 0, encoded, 256) ==
+                  ConfigurationTransactionStatus::kReceiving &&
+              profile_service_append(24, 256, encoded + 256, 128) ==
+                  ConfigurationTransactionStatus::kReceiving &&
+              profile_service_commit(24) ==
+                  ConfigurationTransactionStatus::kPending,
+          "service did not receive both parts of the schema6 payload");
+  profile_service_selected_snapshot(&selected);
+  require(selected.metadata.generation == old_selection.metadata.generation &&
+              active_snapshot(id).profile.turbo_defaults.rate_hz ==
+                  old_selection.profile.turbo_defaults.rate_hz,
+          "pending write replaced a selected or active profile before commit");
+  profile_service_task_on_storage_core(8000);
+  profile_service_selected_snapshot(&selected);
+  require(transaction_snapshot().transaction.status ==
+              ConfigurationTransactionStatus::kCommitted &&
+              selected.valid && selected.profile.shortcuts.selectors[6] == 14 &&
+              selected.profile.macros[0].repeat_count == 255 &&
+              active_snapshot(id).profile.turbo_defaults.rate_hz == 30,
+          "committed schema6 profile did not atomically refresh snapshots");
+}
+
+void test_catalog1_selected_and_active_snapshots_migrate() {
+  memset(flash.bytes, 0xff, sizeof(flash.bytes));
+  const ControllerIdentity id = controller_identity_global();
+  ControllerProfile original = controller_profile_default(id, 7);
+  original.weak_rumble_scale = 73;
+  original.macros[0].trigger_mask = 1u << 10;
+  original.macros[0].step_count = 1;
+  original.macro_step_count = 1;
+  for (uint8_t index = 1; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index)
+    original.macros[index].first_step = 1;
+  original.macro_steps[0].duration_ms = 125;
+  uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  require(controller_profile_encode(original, payload, sizeof(payload)),
+          "old service snapshot fixture did not encode");
+  payload[0] = 5;
+  payload[2] = 0;
+  payload[3] = 1;
+  const auto put_u32 = [](uint8_t *output, uint32_t value) {
+    for (uint8_t byte = 0; byte < 4; ++byte) {
+      output[byte] = static_cast<uint8_t>(value >> (8 * byte));
+    }
+  };
+  for (uint8_t record_index = 0; record_index < 2; ++record_index) {
+    uint8_t *record = &flash.bytes[0][PROFILE_STORAGE_RECORDS_OFFSET +
+                                    record_index * PROFILE_STORAGE_RECORD_SIZE];
+    memset(record, 0, PROFILE_STORAGE_RECORD_SIZE);
+    memcpy(record, "SPCR", 4);
+    record[4] = 1;
+    record[6] = record_index == 0 ? 1 : 4;
+    record[7] = 7;
+    put_u32(record + 8, 41 + record_index);
+    if (record_index == 0) {
+      record[13] = 1;
+      record[14] = 5;
+      memcpy(record + 256, payload, 256);
+      put_u32(record + 16, profile_storage_crc32(payload, 256));
+    }
+    require(controller_identity_encode(id, record + 20,
+                                       CONTROLLER_IDENTITY_ENCODED_SIZE),
+            "old service identity did not encode");
+    put_u32(record + 34, profile_storage_crc32(record, 34));
+  }
+  uint8_t *superblock = flash.bytes[0];
+  memset(superblock, 0, PROFILE_STORAGE_SUPERBLOCK_SIZE);
+  memcpy(superblock, "SPCA", 4);
+  superblock[4] = 1;
+  put_u32(superblock + 8, 9);
+  put_u32(superblock + 12, profile_storage_crc32(superblock, 12));
+  profile_service_initialize_on_storage_core();
+  require(profile_service_select(id, 7) ==
+              ConfigurationTransactionStatus::kCommitted,
+          "migrated profile could not be selected");
+  ProfileServiceSelectedSnapshot selected{};
+  profile_service_selected_snapshot(&selected);
+  const auto active = active_snapshot(id);
+  require(selected.valid && active.valid && active.profile_index == 7 &&
+              selected.profile.weak_rumble_scale == 73 &&
+              active.profile.macro_steps[0].duration_ms == 125 &&
+              selected.profile.shortcuts.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.shift.mode == ControllerProfileShiftMode::kOff &&
+              selected.profile.macros[0].mode == ControllerProfileMacroMode::kOnce &&
+              selected.metadata.generation > 42,
+          "old selection/activation snapshots lost migrated content or defaults");
+}
+
 } // namespace
 
 ProfileStorageIo pico_profile_storage_io() { return fake_io(); }
@@ -253,6 +426,8 @@ ProfileStorageIo pico_profile_storage_io() { return fake_io(); }
 int main() {
   test_eight_profile_transactions_and_active_cache();
   test_profile_bounds_and_transaction_namespace();
+  test_schema6_validation_and_atomic_selection();
+  test_catalog1_selected_and_active_snapshots_migrate();
   std::cout << "profile service tests passed\n";
   return 0;
 }

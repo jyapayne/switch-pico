@@ -57,6 +57,14 @@ bool valid_control_output(uint8_t output) {
            output == CONTROLLER_PROFILE_NO_BUTTON;
 }
 
+bool valid_turbo_settings(const ControllerProfileTurboSettings& settings) {
+    return settings.rate_hz >= CONTROLLER_PROFILE_TURBO_RATE_MIN &&
+           settings.rate_hz <= CONTROLLER_PROFILE_TURBO_RATE_MAX &&
+           settings.duty_percent >= CONTROLLER_PROFILE_TURBO_DUTY_MIN &&
+           settings.duty_percent <= CONTROLLER_PROFILE_TURBO_DUTY_MAX &&
+           settings.burst_count >= CONTROLLER_PROFILE_TURBO_BURST_MIN;
+}
+
 bool valid_macro_step(const ControllerProfileMacroStep& step) {
     if ((step.override_flags & ~kMacroOverrideMask) != 0 ||
         step.duration_ms > CONTROLLER_PROFILE_MAX_WAIT_MS) {
@@ -277,6 +285,40 @@ bool controller_profile_validate(const ControllerProfile& profile) {
             return false;
         }
     }
+    if (!valid_control_output(profile.shortcuts.modifier) ||
+        !valid_control_output(profile.shift.modifier) ||
+        static_cast<uint8_t>(profile.shift.mode) >
+            static_cast<uint8_t>(ControllerProfileShiftMode::kToggle) ||
+        (profile.shift.mode != ControllerProfileShiftMode::kOff &&
+         profile.shift.modifier == CONTROLLER_PROFILE_NO_BUTTON) ||
+        !valid_turbo_settings(profile.turbo_defaults)) {
+        return false;
+    }
+    uint16_t selectors = 0;
+    for (uint8_t selector : profile.shortcuts.selectors) {
+        if (selector == CONTROLLER_PROFILE_NO_BUTTON) {
+            continue;
+        }
+        if (!(selector < 4 || (selector >= 12 && selector < 16)) ||
+            selector == profile.shortcuts.modifier ||
+            profile.shortcuts.modifier == CONTROLLER_PROFILE_NO_BUTTON ||
+            (selectors & (1u << selector)) != 0) {
+            return false;
+        }
+        selectors |= static_cast<uint16_t>(1u << selector);
+    }
+    for (uint8_t output : profile.shift.button_map) {
+        if (!valid_button(output)) {
+            return false;
+        }
+    }
+    for (uint8_t button = 0;
+         button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++button) {
+        if ((profile.turbo_override_mask & (1u << button)) != 0 &&
+            !valid_turbo_settings(profile.turbo_overrides[button])) {
+            return false;
+        }
+    }
     for (const ControllerProfileStickConfiguration& stick : profile.sticks) {
         if (stick.inner_deadzone >= stick.outer_saturation ||
             stick.outer_saturation > 32767 || stick.curve_q8_8 == 0) {
@@ -318,6 +360,9 @@ bool controller_profile_validate(const ControllerProfile& profile) {
             profile.macros[macro_index];
         if ((macro.trigger_mask & ~kLogicalControlMask) != 0 ||
             !valid_control_output(macro.cancel_control) ||
+            static_cast<uint8_t>(macro.mode) >
+                static_cast<uint8_t>(ControllerProfileMacroMode::kRepeat) ||
+            macro.repeat_count == 0 ||
             macro.first_step != expected_first_step ||
             macro.step_count > CONTROLLER_PROFILE_MACRO_STEPS_PER_MACRO ||
             macro.step_count >
@@ -331,6 +376,7 @@ bool controller_profile_validate(const ControllerProfile& profile) {
             }
         }
         trigger_masks[macro_index] = macro.trigger_mask;
+        uint32_t duration_ms = 0;
         for (uint8_t step = 0; step < macro.step_count; ++step) {
             const ControllerProfileMacroStep& value =
                 profile.macro_steps[expected_first_step + step];
@@ -338,6 +384,12 @@ bool controller_profile_validate(const ControllerProfile& profile) {
                 return false;
             }
             encoded_macro_size += sparse_macro_step_size(value);
+            duration_ms += value.duration_ms;
+        }
+        if (macro.trigger_mask != 0 && macro.step_count != 0 &&
+            macro.mode != ControllerProfileMacroMode::kOnce &&
+            duration_ms == 0) {
+            return false;
         }
         expected_first_step =
             static_cast<uint8_t>(expected_first_step + macro.step_count);
@@ -359,7 +411,7 @@ bool controller_profile_validate(const ControllerProfile& profile) {
     }
     for (ControllerProfileTurboMode mode : profile.turbo_modes) {
         if (static_cast<uint8_t>(mode) >
-            static_cast<uint8_t>(ControllerProfileTurboMode::kAutoBurst)) {
+            static_cast<uint8_t>(ControllerProfileTurboMode::kBurst)) {
             return false;
         }
     }
@@ -449,6 +501,30 @@ bool controller_profile_encode(const ControllerProfile& profile,
         }
         descriptor[5] =
             static_cast<uint8_t>(stream_offset - macro_start);
+        output[336 + macro_index * 2] = static_cast<uint8_t>(macro.mode);
+        output[337 + macro_index * 2] = macro.repeat_count;
+    }
+    output[256] = profile.shortcuts.modifier;
+    memcpy(&output[257], profile.shortcuts.selectors,
+           CONTROLLER_PROFILE_COUNT);
+    output[265] = static_cast<uint8_t>(profile.shift.mode);
+    output[266] = profile.shift.modifier;
+    memcpy(&output[267], profile.shift.button_map,
+           CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT);
+    output[283] = profile.turbo_defaults.rate_hz;
+    output[284] = profile.turbo_defaults.duty_percent;
+    output[285] = profile.turbo_defaults.burst_count;
+    profile_write_u16(&output[286], profile.turbo_override_mask);
+    size_t settings_offset = 288;
+    for (uint8_t button = 0;
+         button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++button) {
+        if ((profile.turbo_override_mask & (1u << button)) != 0) {
+            const ControllerProfileTurboSettings& settings =
+                profile.turbo_overrides[button];
+            output[settings_offset++] = settings.rate_hz;
+            output[settings_offset++] = settings.duty_percent;
+            output[settings_offset++] = settings.burst_count;
+        }
     }
     return stream_offset <= CONTROLLER_PROFILE_MACRO_STREAM_SIZE;
 }
@@ -456,13 +532,19 @@ bool controller_profile_encode(const ControllerProfile& profile,
 bool controller_profile_decode(const uint8_t* input, size_t input_size,
                                ControllerProfile* output) {
     if (input == nullptr || output == nullptr ||
-        input_size != CONTROLLER_PROFILE_ENCODED_SIZE) {
+        (input_size != CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE &&
+         input_size != CONTROLLER_PROFILE_ENCODED_SIZE)) {
         return false;
     }
     const uint16_t schema_version = profile_read_u16(&input[0]);
+    const size_t expected_size =
+        schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION
+            ? CONTROLLER_PROFILE_ENCODED_SIZE
+            : CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
     if (schema_version < CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION ||
         schema_version > CONTROLLER_PROFILE_SCHEMA_VERSION ||
-        profile_read_u16(&input[2]) != CONTROLLER_PROFILE_ENCODED_SIZE ||
+        input_size != expected_size ||
+        profile_read_u16(&input[2]) != expected_size ||
         !profile_bytes_are_zero(&input[31], 5) ||
         !profile_bytes_are_zero(&input[47], 5)) {
         return false;
@@ -472,7 +554,7 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     const bool has_action_controls =
         schema_version >= CONTROLLER_PROFILE_ACTION_CONTROL_SCHEMA_VERSION;
     const bool sparse_macros =
-        schema_version == CONTROLLER_PROFILE_SCHEMA_VERSION;
+        schema_version >= CONTROLLER_PROFILE_SPARSE_MACRO_SCHEMA_VERSION;
     if ((has_control_mapping
              ? input[61] != 0 || input[71] != 0
              : !profile_bytes_are_zero(&input[60], 2) ||
@@ -575,6 +657,11 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                 cancel == 0x1fu ? CONTROLLER_PROFILE_NO_BUTTON : cancel;
             macro.first_step = decoded_step_count;
             macro.step_count = descriptor[4];
+            if (schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION) {
+                macro.mode = static_cast<ControllerProfileMacroMode>(
+                    input[336 + macro_index * 2]);
+                macro.repeat_count = input[337 + macro_index * 2];
+            }
 
             size_t consumed = 0;
             for (uint8_t step_index = 0;
@@ -666,10 +753,46 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
         macro.first_step = 0;
         macro.step_count = static_cast<uint8_t>(legacy_step_count - 1u);
         profile.macro_step_count = macro.step_count;
+        for (uint8_t index = 1; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+            profile.macros[index].first_step = profile.macro_step_count;
+        }
         for (uint8_t index = 0;
              index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
             profile.turbo_modes[index] =
                 static_cast<ControllerProfileTurboMode>(input[82 + index]);
+        }
+    }
+    if (schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION) {
+        profile.shortcuts.modifier = input[256];
+        memcpy(profile.shortcuts.selectors, &input[257],
+               CONTROLLER_PROFILE_COUNT);
+        profile.shift.mode = static_cast<ControllerProfileShiftMode>(input[265]);
+        profile.shift.modifier = input[266];
+        memcpy(profile.shift.button_map, &input[267],
+               CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT);
+        profile.turbo_defaults = {input[283], input[284], input[285]};
+        profile.turbo_override_mask = profile_read_u16(&input[286]);
+        size_t settings_offset = 288;
+        for (uint8_t button = 0;
+             button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++button) {
+            if ((profile.turbo_override_mask & (1u << button)) != 0) {
+                profile.turbo_overrides[button] = {
+                    input[settings_offset], input[settings_offset + 1],
+                    input[settings_offset + 2]};
+                settings_offset += 3;
+            }
+        }
+        if (!profile_bytes_are_zero(
+                &input[settings_offset], 336 - settings_offset) ||
+            !profile_bytes_are_zero(&input[344], 40)) {
+            return false;
+        }
+    } else {
+        for (ControllerProfileTurboMode mode : profile.turbo_modes) {
+            if (static_cast<uint8_t>(mode) >
+                static_cast<uint8_t>(ControllerProfileTurboMode::kAutoBurst)) {
+                return false;
+            }
         }
     }
     if (!controller_profile_validate(profile)) {
@@ -826,15 +949,28 @@ bool controller_profile_database_decode(
         return false;
     }
     const uint16_t schema_version = profile_read_u16(&header[4]);
+    const bool legacy =
+        schema_version < CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION;
+    const uint8_t profile_count = header[9];
+    const size_t profile_size = legacy
+        ? CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE
+        : CONTROLLER_PROFILE_ENCODED_SIZE;
+    const size_t entry_size =
+        CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE +
+        profile_count * profile_size;
+    const size_t entries_offset =
+        kFallbackOffset + profile_count * profile_size;
+    const size_t encoded_size =
+        entries_offset + CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY * entry_size;
     if (memcmp(header, kDatabaseMagic, sizeof(kDatabaseMagic)) != 0 ||
-        (schema_version !=
-             CONTROLLER_PROFILE_DATABASE_LEGACY_SCHEMA_VERSION &&
-         schema_version != CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION) ||
-        profile_read_u16(&header[6]) !=
-            CONTROLLER_PROFILE_DATABASE_ENCODED_SIZE ||
+        schema_version < CONTROLLER_PROFILE_DATABASE_LEGACY_SCHEMA_VERSION ||
+        schema_version > CONTROLLER_PROFILE_DATABASE_SCHEMA_VERSION ||
+        profile_read_u16(&header[6]) != encoded_size ||
         header[8] != CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY ||
-        header[9] != CONTROLLER_PROFILE_COUNT ||
-        header[10] >= CONTROLLER_PROFILE_COUNT ||
+        (profile_count != CONTROLLER_PROFILE_COUNT &&
+         !(schema_version == CONTROLLER_PROFILE_DATABASE_LEGACY_SCHEMA_VERSION &&
+           profile_count == 4)) ||
+        header[10] >= profile_count ||
         header[11] > CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY ||
         !profile_bytes_are_zero(&header[12], sizeof(header) - 12)) {
         return false;
@@ -844,14 +980,14 @@ bool controller_profile_database_decode(
     output->fallback_active_profile = header[10];
     uint8_t encoded_profile[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     for (uint8_t profile_index = 0;
-         profile_index < CONTROLLER_PROFILE_COUNT; ++profile_index) {
+         profile_index < profile_count; ++profile_index) {
         const size_t profile_offset =
             kFallbackOffset +
-            profile_index * CONTROLLER_PROFILE_ENCODED_SIZE;
+            profile_index * profile_size;
         if (!read(context, profile_offset, encoded_profile,
-                  sizeof(encoded_profile)) ||
+                  profile_size) ||
             !controller_profile_decode(
-                encoded_profile, sizeof(encoded_profile),
+                encoded_profile, profile_size,
                 &output->fallback_profiles[profile_index])) {
             controller_profile_database_default(output);
             return false;
@@ -863,7 +999,7 @@ bool controller_profile_database_decode(
          entry_index < CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY;
          ++entry_index) {
         const size_t entry_offset =
-            kEntriesOffset + entry_index * CONTROLLER_PROFILE_DATABASE_ENTRY_SIZE;
+            entries_offset + entry_index * entry_size;
         uint8_t entry_header[CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE]{};
         if (!read(context, entry_offset, entry_header,
                   sizeof(entry_header))) {
@@ -875,15 +1011,14 @@ bool controller_profile_database_decode(
                 !read_zero_region(
                     read, context,
                     entry_offset + CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE,
-                    CONTROLLER_PROFILE_COUNT *
-                        CONTROLLER_PROFILE_ENCODED_SIZE)) {
+                    profile_count * profile_size)) {
                 controller_profile_database_default(output);
                 return false;
             }
             continue;
         }
         if (entry_header[15] != 1 ||
-            entry_header[14] >= CONTROLLER_PROFILE_COUNT) {
+            entry_header[14] >= profile_count) {
             controller_profile_database_default(output);
             return false;
         }
@@ -900,14 +1035,14 @@ bool controller_profile_database_decode(
         entry.active_profile = entry_header[14];
         ++decoded_used_count;
         for (uint8_t profile_index = 0;
-             profile_index < CONTROLLER_PROFILE_COUNT; ++profile_index) {
+             profile_index < profile_count; ++profile_index) {
             const size_t profile_offset =
                 entry_offset + CONTROLLER_PROFILE_DATABASE_ENTRY_HEADER_SIZE +
-                profile_index * CONTROLLER_PROFILE_ENCODED_SIZE;
+                profile_index * profile_size;
             if (!read(context, profile_offset, encoded_profile,
-                      sizeof(encoded_profile)) ||
+                      profile_size) ||
                 !controller_profile_decode(encoded_profile,
-                                           sizeof(encoded_profile),
+                                           profile_size,
                                            &entry.profiles[profile_index])) {
                 controller_profile_database_default(output);
                 return false;

@@ -14,6 +14,7 @@ public:
     void reset(uint64_t epoch_us);
 
     // Zero-count sides are untouched (including their independent watchdog).
+    // Updated sides resume the 50 ms watchdog even after persistent rumble.
     // Duplicate timestamps are accepted in call order; the last update wins.
     // Out-of-order or malformed batches are rejected and counted. Pre-epoch
     // batches retain their original substep position and expiry; already
@@ -21,6 +22,14 @@ public:
     // at the render cursor's current substep, never replaying earlier substeps
     // or extending their original expiry.
     bool push(const SwitchHapticsFrame& frame, uint64_t received_us);
+
+    // Profile-scaled conventional host rumble: low drives left at 160 Hz and
+    // high drives right at 320 Hz, with the opposite bands silent. Both sides
+    // persist until replaced or reset; zero stops both. Pre-epoch commands do
+    // not expire. Host timestamp ordering is shared with push(), including
+    // duplicate last-wins and late-command phase/history behavior.
+    bool push_rumble(uint8_t low_magnitude, uint8_t high_magnitude,
+                     uint64_t received_us);
 
     // Signed int8 PCM encoded in bytes, left then right. Calls normally advance
     // monotonically; forward gaps advance phase analytically, not sample by
@@ -32,7 +41,7 @@ public:
     // duration or two zero magnitudes cancels only the override at at_us.
     // Host oscillators and updates continue underneath it; expiry reveals the
     // current host state. Override phases also free-run from the stream epoch.
-    // Feedback timestamps must be chronological independently of push().
+    // Feedback timestamps are chronological independently of both host APIs.
     void feedback(uint64_t at_us, uint32_t duration_us,
                   uint8_t low_magnitude, uint8_t high_magnitude);
 
@@ -48,10 +57,12 @@ private:
         uint16_t low = 0;
         uint16_t high = 0;
         bool is_feedback = false;
+        bool persistent = false;
     };
 
     struct Side {
         SwitchHapticsActuatorFrame frame{1, {}};
+        bool persistent = false;
         int64_t start = 0;
         int64_t expires = 0;
     };

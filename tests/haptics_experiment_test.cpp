@@ -223,8 +223,8 @@ uint64_t start(uint8_t slot = 0) {
     return now_us;
 }
 
-uint64_t due(uint64_t started, uint32_t packet) {
-    return started + (static_cast<uint64_t>(packet) * 64000 + 2) / 3;
+uint64_t due(uint64_t started, uint32_t packet, uint32_t frames = 64) {
+    return started + (static_cast<uint64_t>(packet) * frames * 1000 + 2) / 3;
 }
 
 void verify_block(const Pcm& packet, uint32_t index, bool forced_silence = false) {
@@ -622,10 +622,15 @@ void gameplay_timeline_and_lifecycle() {
     assert(haptics_experiment_gameplay_owns(&devices[0]));
     now_us = started + 8000;
     feed(false);
-    run_until(due(started, 1) + 1000);
+    const uint32_t frames = snapshot().packet_frames;
+    run_until(due(started, 1, frames) + 1000);
     assert(pcm.size() == 2 && snapshot().host_updates == 2);
+    assert(pcm[1].bytes[7] == frames / 32);
+    assert(pcm[1].bytes[8] == (frames == 32 ? 0x92 : 0xd2));
+    for (unsigned byte = 10 + frames * 2; byte < 139; ++byte)
+        assert(pcm[1].bytes[byte] == 0);
     unsigned left_nonzero = 0, right_nonzero = 0;
-    for (unsigned frame = 0; frame < 64; ++frame) {
+    for (unsigned frame = 0; frame < frames; ++frame) {
         const auto left = pcm[1].bytes[10 + frame * 2];
         const auto right = pcm[1].bytes[11 + frame * 2];
         if (frame < 24) {
@@ -636,7 +641,7 @@ void gameplay_timeline_and_lifecycle() {
             right_nonzero += right != 0;
         }
     }
-    assert(left_nonzero > 10 && right_nonzero > 20);
+    assert(left_nonzero > 10 && right_nonzero > (frames - 24) / 2);
     SwitchHapticsFrame stale{};
     stale.actuators[0].sample_count = 1;
     stale.actuators[0].samples[0].low_amplitude_q15 = 16000;
@@ -693,6 +698,81 @@ void gameplay_queued_start_and_command_overflow() {
     assert(snapshot().state == HapticsExperimentState::kRunning);
     assert(snapshot().host_updates == 17 && snapshot().dropped_updates == 1);
     assert(snapshot().skipped_packets != 0 && pcm.size() == sent_before + 1);
+}
+
+void stateful_rumble_prepare_feedback_and_zero() {
+    reset();
+    devices[0].credit = false;
+    emit_generic(&devices[0], GenericKind::kLed);
+    assert(haptics_experiment_request(2, 0));
+    haptics_experiment_poll();
+    assert(snapshot().state == HapticsExperimentState::kPending);
+    assert(haptics_experiment_submit_rumble(0, 100, now_us, 180, 0));
+    assert(!haptics_experiment_submit_rumble(1, 101, now_us, 255, 255));
+    assert(!haptics_experiment_submit_rumble(0, 99, now_us, 255, 255));
+    run_until(now_us + 70000);  // Preparation must not age out held strengths.
+    devices[0].credit = true;
+    assert(!dispatch(&devices[0], devices[0].conn.control_cid));
+    run_until(now_us + 3000);
+    assert(snapshot().state == HapticsExperimentState::kRunning);
+    const auto assert_channels = [](bool left, bool right) {
+        const uint32_t frames = snapshot().packet_frames;
+        unsigned active[2]{};
+        for (uint32_t frame = 0; frame < frames; ++frame) {
+            active[0] += pcm.back().bytes[10 + frame * 2] != 0;
+            active[1] += pcm.back().bytes[11 + frame * 2] != 0;
+        }
+        assert(left ? active[0] > frames / 2 : active[0] == 0);
+        assert(right ? active[1] > frames / 2 : active[1] == 0);
+    };
+    run_until(now_us + 300000);
+    assert_channels(true, false);
+    assert(haptics_experiment_feedback(&devices[0], 255, 255, 100));
+    assert(haptics_experiment_submit_rumble(0, 100, now_us, 0, 170));
+    run_until(now_us + 60000);
+    assert_channels(true, true);
+    run_until(now_us + 200000);
+    assert_channels(false, true);  // Overlay reveals the newest held command.
+    assert(generic_sent.size() == 1 &&
+           generic_sent.front().kind == GenericKind::kLed);
+    assert(haptics_experiment_submit_rumble(0, 100, now_us, 0, 0));
+    run_until(now_us + 80000);
+    assert_channels(false, false);
+    assert(haptics_experiment_request(0, 0));
+    assert(!haptics_experiment_submit_rumble(0, 100, now_us, 255, 255));
+    haptics_experiment_poll();
+    run_until(now_us + 10000);
+    assert(snapshot().state == HapticsExperimentState::kStopped);
+
+    assert(haptics_experiment_request(1, 0));
+    assert(!haptics_experiment_submit_rumble(0, 100, now_us, 255, 255));
+    haptics_experiment_poll();
+    assert(snapshot().mode == 0 && snapshot().packet_frames == 64);
+}
+
+void stateful_rumble_generation_and_overflow() {
+    reset();
+    assert(haptics_experiment_request(2, 0));
+    assert(haptics_experiment_submit_rumble(0, 100, now_us, 255, 0));
+    haptics_experiment_detach(&devices[0]);
+    haptics_experiment_attach(0, 101, &devices[0]);
+    assert(!haptics_experiment_submit_rumble(0, 100, now_us, 255, 0));
+    haptics_experiment_poll();
+    assert(snapshot().state == HapticsExperimentState::kDisconnected);
+    assert(haptics_experiment_request(2, 0));
+    haptics_experiment_poll();
+    run_until(now_us + 100000);
+    for (unsigned byte = 10; byte < 138; ++byte)
+        assert(pcm.back().bytes[byte] == 0);
+    for (unsigned command = 0; command < 17; ++command) {
+        assert(haptics_experiment_submit_rumble(
+            0, 101, now_us, command == 16 ? 0 : 255, 0));
+    }
+    run_until(now_us + 80000);
+    assert(snapshot().host_updates == 17 && snapshot().dropped_updates == 1);
+    for (unsigned byte = 10; byte < 138; ++byte)
+        assert(pcm.back().bytes[byte] == 0);
+    assert(generic_sent.empty());
 }
 
 }  // namespace
@@ -812,6 +892,8 @@ int main(int argc, char** argv) {
     timing_cost_reentrancy_and_wrap();
     gameplay_timeline_and_lifecycle();
     gameplay_queued_start_and_command_overflow();
+    stateful_rumble_prepare_feedback_and_zero();
+    stateful_rumble_generation_and_overflow();
     gameplay_missing_callback_is_bounded();
     std::cout << "haptics experiment behavioral regressions passed\n";
 }

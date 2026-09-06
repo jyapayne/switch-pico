@@ -3,6 +3,9 @@
 #include <btstack.h>
 #include <pico/critical_section.h>
 #include <pico/stdlib.h>
+#if PICO_ON_DEVICE
+#include "platform/pico/system_clock.h"
+#endif
 
 extern "C" {
 #include <cyw43.h>
@@ -188,6 +191,19 @@ void haptics_transport_probe_snapshot(HapticsTransportProbe* output) {
     critical_section_enter_blocking(&g_lock);
     *output = g_probe;
     critical_section_exit(&g_lock);
+#if PICO_ON_DEVICE
+    const SystemClockStatus clock = system_clock_status();
+    output->requested_sys_khz = clock.requested_sys_khz;
+    output->measured_sys_khz = clock.measured_sys_khz;
+    output->measured_usb_khz = clock.measured_usb_khz;
+    output->core_voltage_mv = clock.core_voltage_mv;
+    output->flash_clock_divider = clock.flash_clock_divider;
+    output->cyw43_pio_divider256 = clock.cyw43_pio_divider256;
+    output->temperature_millicelsius = clock.temperature_millicelsius;
+#endif
+#ifdef SWITCH_PICO_CYW43_PACKET_READ
+    output->packet_read_optimized = 1;
+#endif
 }
 
 void haptics_transport_probe_begin(uint32_t run_id, uint32_t generation,
@@ -254,6 +270,9 @@ void haptics_transport_probe_send(uint32_t duration_us, uint32_t return_us,
 
 extern "C" int __wrap_cyw43_bluetooth_hci_write(uint8_t* buffer, size_t length) {
     Call call(g_in_write);
+    const bool acl = buffer != nullptr && length >= 4 && buffer[3] == 2;
+    const bool completed = buffer != nullptr && length >= 6 &&
+                           buffer[3] == 1 && buffer[4] == 0x35 && buffer[5] == 0x0c;
     const int result = __real_cyw43_bluetooth_hci_write(buffer, length);
     if (call.live()) {
         const uint32_t elapsed = now_us() - call.start_us;
@@ -262,6 +281,10 @@ extern "C" int __wrap_cyw43_bluetooth_hci_write(uint8_t* buffer, size_t length) 
             critical_section_enter_blocking(&g_lock);
             duration(g_probe.write_calls, g_probe.max_write_us,
                      g_probe.total_write_us, elapsed);
+            add(g_probe.host_completed_writes, completed ? 1 : 0);
+            add(g_probe.acl_writes, acl ? 1 : 0);
+            add(g_probe.other_writes, !acl && !completed ? 1 : 0);
+            add(g_probe.write_failures, result != 0 ? 1 : 0);
             critical_section_exit(&g_lock);
         }
     }

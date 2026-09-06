@@ -7,7 +7,10 @@ import pytest
 
 
 @pytest.mark.parametrize("ram", [0, 1], ids=["flash", "sram"])
-def test_haptics_experiment_native(tmp_path: Path, ram: int) -> None:
+@pytest.mark.parametrize("short_packets", [False, True], ids=["64frames", "32frames"])
+def test_haptics_experiment_native(
+    tmp_path: Path, ram: int, short_packets: bool
+) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
@@ -24,6 +27,15 @@ def test_haptics_experiment_native(tmp_path: Path, ram: int) -> None:
             "-pedantic",
             "-DSWITCH_PICO_HAPTICS_EXPERIMENT=1",
             f"-DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM={ram}",
+            *(
+                [
+                    "-DSWITCH_PICO_CYW43_PACKET_READ=1",
+                    "-DSWITCH_PICO_HCI_CREDIT_BATCH=1",
+                    "-DSWITCH_PICO_SYS_CLOCK_MHZ=300",
+                ]
+                if short_packets
+                else []
+            ),
             f"-I{root / 'tests' / 'haptics_experiment_native_stubs'}",
             f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "haptics_experiment_test.cpp"),

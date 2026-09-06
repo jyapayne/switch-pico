@@ -334,14 +334,17 @@ void controller_profile_apply_button_mask(uint16_t button_mask,
 }
 
 uint16_t controller_profile_map_button_mask(
-    uint16_t input_button_mask, const ControllerProfile& profile) {
+    uint16_t input_button_mask, const ControllerProfile& profile,
+    const uint8_t* button_map) {
+    const uint8_t* selected_map =
+        button_map == nullptr ? profile.button_map : button_map;
     uint16_t output_button_mask = 0;
     for (uint8_t input = 0;
          input < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++input) {
         if ((input_button_mask & static_cast<uint16_t>(1u << input)) == 0) {
             continue;
         }
-        const uint8_t output = profile.button_map[input];
+        const uint8_t output = selected_map[input];
         if (output < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT) {
             output_button_mask |= static_cast<uint16_t>(1u << output);
         }
@@ -350,13 +353,17 @@ uint16_t controller_profile_map_button_mask(
 }
 
 ControllerProfileTransformResult controller_profile_transform(
-    const ControllerState& input, const ControllerProfile& profile) {
+    const ControllerState& input, const ControllerProfile& profile,
+    const uint8_t* button_map) {
+    const uint8_t* selected_map =
+        button_map == nullptr ? profile.button_map : button_map;
     ControllerProfileTransformResult result{};
     result.state = input;
     const uint16_t input_button_mask =
         controller_profile_extract_button_mask(input);
     uint16_t output_button_mask =
-        controller_profile_map_button_mask(input_button_mask, profile);
+        controller_profile_map_button_mask(
+            input_button_mask, profile, selected_map);
     uint16_t output_triggers[2]{};
     uint16_t output_thresholds[2] = {
         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
@@ -370,7 +377,7 @@ ControllerProfileTransformResult controller_profile_transform(
              static_cast<uint16_t>(1u << input_button)) == 0) {
             continue;
         }
-        const uint8_t output = profile.button_map[input_button];
+        const uint8_t output = selected_map[input_button];
         if (output >= CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
             output < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT) {
             output_triggers[

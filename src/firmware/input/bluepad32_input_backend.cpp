@@ -104,6 +104,9 @@ struct RumbleEnvelope {
     uint32_t connection_generation;
     ControllerRumbleOutput rumble;
     uint16_t duration_ms;
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    uint64_t received_us = 0;
+#endif
 };
 struct FeedbackEnvelope {
     uint32_t connection_generation;
@@ -166,6 +169,10 @@ struct BackendSlot {
 
 critical_section_t g_state_lock;
 BackendSlot g_slots[kSlotCount];
+ControllerMacroCapture g_macro_capture;
+// Catalog migration/compaction needs more than the 4 KiB scratch bank.
+// Supply a dedicated static stack in main SRAM rather than overflowing it.
+alignas(8) uint32_t g_core1_stack[4096];
 BleIdentityMapping g_ble_identity_mappings[kSlotCount]{};
 
 // These acknowledgement generations and request producers are only used by
@@ -203,6 +210,9 @@ uint32_t g_controller_reports = 0;
 uint32_t g_host_rumble_requests = 0;
 uint32_t g_local_feedback_requests = 0;
 uint32_t g_rumble_dispatches = 0;
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+uint32_t g_seeded_native_run_id = 0;
+#endif
 
 uint16_t host_rumble_duration_ms() {
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
@@ -515,6 +525,8 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
         target.state = state;
         target.pre_hotkey_button_mask = pre_hotkey_button_mask;
         ++target.state_generation;
+        g_macro_capture.observe(slot, target.connection_generation,
+                                time_us_32(), state);
     }
     critical_section_exit(&g_state_lock);
 }
@@ -833,6 +845,8 @@ void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
     __atomic_add_fetch(&g_local_feedback_requests, 1, __ATOMIC_RELAXED);
 }
 void reset_slot_hotkeys(BackendSlot& slot) {
+    g_macro_capture.disconnect(static_cast<uint8_t>(&slot - g_slots),
+                               slot.connection_generation, time_us_32());
     slot.motion_enabled = kDefaultMotionEnabled;
     slot.pre_hotkey_button_mask = 0;
     slot.feedback_pending = false;
@@ -1266,6 +1280,47 @@ void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
     device->report_parser.play_dual_rumble(device, 0, duration_ms, weak, strong);
 }
 
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+void seed_native_host_rumble() {
+    HapticsExperimentDiagnostics native;
+    haptics_experiment_snapshot(&native);
+    if (native.mode != 1 || native.slot >= kSlotCount ||
+        native.run_id == g_seeded_native_run_id ||
+        (native.state != HapticsExperimentState::kPending &&
+         native.state != HapticsExperimentState::kRunning)) {
+        return;
+    }
+    g_seeded_native_run_id = native.run_id;
+    RumbleEnvelope retained{};
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[native.slot];
+    const bool valid = slot.active && slot.device != nullptr &&
+                       slot.retained_host_rumble_valid &&
+                       slot.connection_generation == native.connection_generation &&
+                       slot.retained_host_rumble.connection_generation ==
+                           native.connection_generation &&
+                       slot.retained_host_rumble.slot == native.slot &&
+                       slot.retained_host_rumble.duration_ms ==
+                           kXInputHostRumbleDurationMs;
+    if (valid) {
+        retained = slot.retained_host_rumble;
+        // Arming cancels compatibility output even when its mailbox was
+        // already consumed. Keep that held state available for the next Stop.
+        slot.pending_rumble = retained;
+        slot.rumble_pending = true;
+    }
+    critical_section_exit(&g_state_lock);
+    if (valid) {
+        // Replay once on arm, not on a watchdog cadence. The original timestamp
+        // keeps a raced newer USB command authoritative in the host timeline.
+        haptics_experiment_submit_rumble(
+            native.slot, native.connection_generation, retained.received_us,
+            retained.rumble.low_frequency_magnitude,
+            retained.rumble.high_frequency_magnitude);
+    }
+}
+#endif
+
 void process_rumble_timer(btstack_timer_source_t* timer) {
     __atomic_add_fetch(&g_rumble_timer_ticks, 1, __ATOMIC_RELAXED);
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
@@ -1285,7 +1340,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     const bool xinput_host_mode =
         host_rumble_duration_ms() == kXInputHostRumbleDurationMs;
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-    if (xinput_host_mode) haptics_experiment_suspend_gameplay();
+    if (xinput_host_mode) seed_native_host_rumble();
     haptics_experiment_poll();
 #endif
 
@@ -1304,16 +1359,6 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 
         critical_section_enter_blocking(&g_state_lock);
         BackendSlot& slot = g_slots[slot_index];
-#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-        if (haptics_experiment_owns(slot.device) &&
-            !haptics_experiment_gameplay_owns(slot.device)) {
-            // Fixture/startup/restoration exclusively own output. Preserve
-            // stateful XInput requests until compatibility restoration ends.
-            if (!xinput_host_mode) slot.rumble_pending = false;
-            critical_section_exit(&g_state_lock);
-            continue;
-        }
-#endif
         if (slot.retained_host_rumble_valid &&
             (!xinput_host_mode ||
              slot.retained_host_rumble.duration_ms !=
@@ -1325,6 +1370,16 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             slot.retained_host_rumble_valid = false;
             slot.retained_host_rumble = {};
         }
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        if (haptics_experiment_owns(slot.device) &&
+            !haptics_experiment_gameplay_owns(slot.device)) {
+            // Fixture/startup/restoration exclusively own output. Preserve
+            // stateful XInput requests until compatibility restoration ends.
+            if (!xinput_host_mode) slot.rumble_pending = false;
+            critical_section_exit(&g_state_lock);
+            continue;
+        }
+#endif
         if (slot.profile_feedback.active &&
             slot.profile_feedback.connection_generation !=
                 slot.connection_generation) {
@@ -1431,11 +1486,17 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             static_cast<int32_t>(
                 now_ms - slot.feedback_until_ms) < 0;
         if (!profile_rumble_dispatch && !feedback_dispatch &&
-            !local_feedback_active && slot.rumble_pending) {
+            !local_feedback_active && slot.rumble_pending
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+            && !(xinput_host_mode &&
+                 haptics_experiment_gameplay_owns(slot.device))
+#endif
+        ) {
             envelope = slot.pending_rumble;
             slot.rumble_pending = false;
             host_dispatch =
                 envelope.slot == slot_index && slot.active &&
+                envelope.duration_ms == host_rumble_duration_ms() &&
                 slot.device != nullptr &&
                 envelope.connection_generation ==
                     slot.connection_generation;
@@ -1445,11 +1506,10 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         }
         critical_section_exit(&g_state_lock);
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-        if (host_dispatch && haptics_experiment_gameplay_owns(device) &&
-            (envelope.rumble.hd.actuators[0].sample_count != 0 ||
-             envelope.rumble.hd.actuators[1].sample_count != 0)) {
-            // Full timestamped frames already went directly from the USB
-            // producer to the native timeline, even during local feedback.
+        if (host_dispatch && haptics_experiment_gameplay_owns(device)) {
+            // Switch commands have already entered the timestamped timeline.
+            // Consume their finite fallback, never turn it into a PCM overlay
+            // or emit compatibility reports while gameplay owns the device.
             host_dispatch = false;
         }
 #endif
@@ -1666,9 +1726,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         haptics_experiment_attach(
             static_cast<uint8_t>(slot_index), lighting_generation, device);
 #ifdef SWITCH_PICO_HD_RUMBLE
-        if (slot_index == 0 &&
-            host_rumble_duration_ms() != kXInputHostRumbleDurationMs &&
-            connection_identity.vendor_id == 0x054c &&
+        if (connection_identity.vendor_id == 0x054c &&
             (connection_identity.product_id == 0x0ce6 ||
              connection_identity.product_id == 0x0df2)) {
             haptics_experiment_request(2, static_cast<uint8_t>(slot_index));
@@ -1791,6 +1849,57 @@ extern "C" bool uni_platform_on_l2cap_can_send_now(
 }
 #endif
 
+bool bluepad32_input_backend_capture_start(
+    uint8_t slot, uint32_t connection_generation, const CaptureOptions& options) {
+    if (!g_initialized || slot >= kSlotCount) return false;
+    critical_section_enter_blocking(&g_state_lock);
+    const BackendSlot& current = g_slots[slot];
+    const bool accepted = current.active &&
+        current.connection_generation == connection_generation &&
+        g_macro_capture.start(slot, connection_generation, options,
+                              time_us_32(), current.state);
+    critical_section_exit(&g_state_lock);
+    return accepted;
+}
+
+bool bluepad32_input_backend_capture_stop(uint32_t run_id) {
+    if (!g_initialized || run_id == 0) return false;
+    critical_section_enter_blocking(&g_state_lock);
+    const bool matches = run_id == g_macro_capture.run_id();
+    if (matches) g_macro_capture.stop(time_us_32());
+    critical_section_exit(&g_state_lock);
+    return matches;
+}
+
+bool bluepad32_input_backend_capture_page(
+    uint32_t run_id, uint16_t first_index, Bluepad32CaptureSnapshot* output) {
+    if (!g_initialized || output == nullptr) return false;
+    critical_section_enter_blocking(&g_state_lock);
+    g_macro_capture.tick(time_us_32());
+    if ((run_id != 0 && run_id != g_macro_capture.run_id()) ||
+        first_index > g_macro_capture.event_count()) {
+        critical_section_exit(&g_state_lock);
+        return false;
+    }
+    *output = {};
+    output->run_id = g_macro_capture.run_id();
+    output->connection_generation = g_macro_capture.generation();
+    output->elapsed_us = g_macro_capture.elapsed_us(time_us_32());
+    output->slot = g_macro_capture.slot();
+    output->state = g_macro_capture.state();
+    output->options = g_macro_capture.options();
+    output->total_events = g_macro_capture.event_count();
+    output->first_index = first_index;
+    const uint16_t remaining = output->total_events - first_index;
+    output->event_count = remaining < BLUEPAD32_CAPTURE_PAGE_EVENTS
+                              ? remaining : BLUEPAD32_CAPTURE_PAGE_EVENTS;
+    for (uint8_t index = 0; index < output->event_count; ++index) {
+        g_macro_capture.event(first_index + index, &output->events[index]);
+    }
+    critical_section_exit(&g_state_lock);
+    return true;
+}
+
 void bluepad32_input_backend_init() {
     if (g_initialized) {
         return;
@@ -1854,7 +1963,8 @@ void bluepad32_input_backend_start() {
 
 
     g_started = true;
-    multicore_launch_core1(core1_main);
+    multicore_launch_core1_with_stack(
+        core1_main, g_core1_stack, sizeof(g_core1_stack));
 }
 
 void bluepad32_input_backend_open_pairing_window() {
@@ -2068,7 +2178,11 @@ void bluepad32_input_backend_queue_rumble(
 #endif
         const RumbleEnvelope envelope{
             slot_index, slot.connection_generation, rumble,
-            duration_ms};
+            duration_ms
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+            , received_us
+#endif
+        };
         slot.pending_rumble = envelope;
         slot.rumble_pending = true;
         __atomic_add_fetch(
@@ -2084,8 +2198,14 @@ void bluepad32_input_backend_queue_rumble(
     critical_section_exit(&g_state_lock);
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     if (native_candidate) {
-        haptics_experiment_submit(
-            slot_index, native_generation, received_us, rumble.hd);
+        if (duration_ms == kXInputHostRumbleDurationMs) {
+            haptics_experiment_submit_rumble(
+                slot_index, native_generation, received_us,
+                rumble.low_frequency_magnitude, rumble.high_frequency_magnitude);
+        } else {
+            haptics_experiment_submit(
+                slot_index, native_generation, received_us, rumble.hd);
+        }
     }
 #endif
 }

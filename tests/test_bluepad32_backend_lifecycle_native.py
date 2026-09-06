@@ -10,8 +10,21 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
 
-    for adapter_feasibility in (False, True):
-        suffix = "_adapter" if adapter_feasibility else ""
+    for adapter_feasibility, native, short_packets in (
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (True, True, True),
+    ):
+        suffix = (
+            "_native32"
+            if short_packets
+            else "_native64"
+            if native
+            else "_adapter"
+            if adapter_feasibility
+            else ""
+        )
         executable = tmp_path / f"bluepad32_backend_lifecycle_test{suffix}"
         command = [
             compiler,
@@ -24,16 +37,57 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         ]
         if adapter_feasibility:
             command.append("-DSWITCH_PICO_USB_OUTPUT_MODES=1")
+        if native:
+            command.extend(
+                [
+                    "-DSWITCH_PICO_HAPTICS_EXPERIMENT=1",
+                    "-DSWITCH_PICO_HD_RUMBLE=1",
+                    "-DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM=0",
+                    str(root / "src" / "firmware" / "input" / "haptics_experiment.cpp"),
+                    str(
+                        root
+                        / "src"
+                        / "firmware"
+                        / "input"
+                        / "switch_hd_rumble_synth.cpp"
+                    ),
+                    str(
+                        root
+                        / "src"
+                        / "firmware"
+                        / "usb"
+                        / "switch"
+                        / "switch_haptics.cpp"
+                    ),
+                ]
+            )
+        if short_packets:
+            command.extend(
+                [
+                    "-DSWITCH_PICO_CYW43_PACKET_READ=1",
+                    "-DSWITCH_PICO_HCI_CREDIT_BATCH=1",
+                    "-DSWITCH_PICO_SYS_CLOCK_MHZ=300",
+                ]
+            )
         command.extend(
             [
                 f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
                 f"-I{root / 'src' / 'firmware'}",
                 str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
+                str(
+                    root / "src" / "firmware" / "input" / "controller_macro_capture.cpp"
+                ),
                 "-o",
                 str(executable),
             ]
         )
         subprocess.run(command, check=True, cwd=root)
+        if native:
+            subprocess.run([str(executable), "native-stateful"], check=True, cwd=root)
+            subprocess.run(
+                [str(executable), "native-second-slot"], check=True, cwd=root
+            )
+            continue
 
         for scenario in (
             "ready-forward",

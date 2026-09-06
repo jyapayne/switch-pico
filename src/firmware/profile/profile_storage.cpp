@@ -8,8 +8,12 @@ constexpr uint8_t kSuperblockMagic[4] = {'S', 'P', 'C', 'A'};
 constexpr uint8_t kRecordMagic[4] = {'S', 'P', 'C', 'R'};
 constexpr uint8_t kLegacyStorageMagic[4] = {'S', 'P', 'P', 'F'};
 constexpr uint8_t kLegacyDatabaseMagic[4] = {'S', 'P', 'D', 'B'};
-constexpr uint16_t kCatalogVersion = 1;
-constexpr size_t kRecordPayloadOffset = PROFILE_STORAGE_PAGE_SIZE;
+constexpr uint16_t kLegacyCatalogVersion = 1;
+constexpr uint16_t kCatalogVersion = 2;
+constexpr size_t kRecordPayloadOffset = 128;
+constexpr size_t kLegacyRecordPayloadOffset = 256;
+static_assert(kRecordPayloadOffset + CONTROLLER_PROFILE_ENCODED_SIZE ==
+              PROFILE_STORAGE_RECORD_SIZE);
 constexpr size_t kRecordHeaderCrcOffset = 34;
 constexpr size_t kLegacyStart =
     PROFILE_STORAGE_TOTAL_SIZE - PROFILE_STORAGE_LEGACY_TOTAL_SIZE;
@@ -100,7 +104,11 @@ bool ProfileStorage::initialize(const ProfileStorageIo &io) {
   snapshot_ = {};
   identity_count_ = 0;
   epoch_ = 0;
+  catalog_version_ = 0;
   next_offset_ = PROFILE_STORAGE_RECORDS_OFFSET;
+  for (ProfileStorageIdentityIndex &entry : index_) {
+    entry = {};
+  }
   initialized_ = io_.read != nullptr && io_.erase_arena != nullptr &&
                  io_.program_page != nullptr &&
                  io_.arena_size == PROFILE_STORAGE_ARENA_SIZE &&
@@ -110,45 +118,65 @@ bool ProfileStorage::initialize(const ProfileStorageIo &io) {
     return false;
   }
 
-  ProfileStorageIdentityIndex
-      candidate[PROFILE_STORAGE_ARENA_COUNT]
-               [CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1]{};
-  uint8_t counts[PROFILE_STORAGE_ARENA_COUNT]{};
-  uint32_t epochs[PROFILE_STORAGE_ARENA_COUNT]{};
-  uint32_t generations[PROFILE_STORAGE_ARENA_COUNT]{};
-  uint32_t payload_crcs[PROFILE_STORAGE_ARENA_COUNT]{};
-  size_t offsets[PROFILE_STORAGE_ARENA_COUNT]{};
-  bool valid[PROFILE_STORAGE_ARENA_COUNT]{};
   for (uint8_t arena = 0; arena < PROFILE_STORAGE_ARENA_COUNT; ++arena) {
-    valid[arena] = scan_arena(arena, &epochs[arena], &generations[arena],
-                              &payload_crcs[arena], &offsets[arena],
-                              candidate[arena], &counts[arena]);
-  }
-
-  uint8_t selected = 0;
-  if (valid[1] && (!valid[0] || generation_is_newer(epochs[1], epochs[0]))) {
-    selected = 1;
-  }
-  if (valid[selected]) {
+    ProfileStorageIdentityIndex
+        candidate[CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1]{};
+    uint8_t count = 0;
+    uint16_t version = 0;
+    uint32_t epoch = 0;
+    uint32_t generation = 0;
+    uint32_t payload_crc = 0;
+    size_t offset = 0;
+    const ProfileStorageResult scanned =
+        scan_arena(arena, &version, &epoch, &generation, &payload_crc,
+                   &offset, candidate, &count);
+    if (scanned == ProfileStorageResult::kIoError) {
+      initialized_ = false;
+      return false;
+    }
+    if (scanned != ProfileStorageResult::kOk ||
+        (snapshot_.valid && !generation_is_newer(epoch, epoch_))) {
+      continue;
+    }
     for (size_t index = 0;
          index < CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1; ++index) {
-      index_[index] = candidate[selected][index];
+      index_[index] = candidate[index];
     }
-    identity_count_ = counts[selected];
-    epoch_ = epochs[selected];
-    next_offset_ = offsets[selected];
+    identity_count_ = count;
+    epoch_ = epoch;
+    catalog_version_ = version;
+    next_offset_ = offset;
     snapshot_.valid = true;
-    snapshot_.active_bank = selected;
-    snapshot_.generation = generations[selected];
-    snapshot_.payload_crc = payload_crcs[selected];
+    snapshot_.active_bank = arena;
+    snapshot_.generation = generation;
+    snapshot_.payload_crc = payload_crc;
+  }
+  if (snapshot_.valid) {
+    if (catalog_version_ != kCatalogVersion &&
+        compact() != ProfileStorageResult::kOk) {
+      initialized_ = false;
+      return false;
+    }
     return true;
   }
 
-  if (migrate_legacy()) {
-    return true;
+  const ProfileStorageResult migrated = migrate_legacy();
+  if (migrated != ProfileStorageResult::kUnchanged) {
+    initialized_ = migrated == ProfileStorageResult::kOk;
+    return initialized_;
   }
-  for (ProfileStorageIdentityIndex &entry : index_) {
-    entry = {};
+  // Only pristine storage can become an empty catalog. In particular, an
+  // unreadable or interrupted migration must never erase an old database.
+  uint8_t page[PROFILE_STORAGE_PAGE_SIZE]{};
+  for (uint8_t arena = 0; arena < PROFILE_STORAGE_ARENA_COUNT; ++arena) {
+    for (size_t offset = 0; offset < PROFILE_STORAGE_ARENA_SIZE;
+         offset += sizeof(page)) {
+      if (!io_.read(io_.context, arena, offset, page, sizeof(page)) ||
+          !bytes_are(0xff, page, sizeof(page))) {
+        initialized_ = false;
+        return false;
+      }
+    }
   }
   identity_count_ = 1;
   index_[0].used = true;
@@ -156,7 +184,8 @@ bool ProfileStorage::initialize(const ProfileStorageIo &io) {
   for (uint8_t profile = 0; profile < CONTROLLER_PROFILE_COUNT; ++profile) {
     index_[0].profile_record[profile] = PROFILE_STORAGE_NO_RECORD;
   }
-  return publish_empty_arena(0, 1);
+  initialized_ = publish_empty_arena(0, 1);
+  return initialized_;
 }
 
 ProfileStorageResult
@@ -324,12 +353,10 @@ ProfileStorageResult ProfileStorage::get_profile_name(
     output[0] = '\0';
     return ProfileStorageResult::kOk;
   }
-  uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
-  if (!io_.read(
-          io_.context, record_arena(entry->profile_names_record),
-          record_offset(entry->profile_names_record) +
-              kRecordPayloadOffset,
-          payload, sizeof(payload))) {
+  uint8_t payload[PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE]{};
+  if (!read_record_payload(entry->profile_names_record,
+                           RecordType::kProfileNames, payload,
+                           sizeof(payload))) {
     return ProfileStorageResult::kIoError;
   }
   const size_t offset =
@@ -365,14 +392,12 @@ ProfileStorageResult ProfileStorage::set_profile_name(
       (value_size == 0 || memcmp(current, value, value_size) == 0)) {
     return ProfileStorageResult::kUnchanged;
   }
-  uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  uint8_t payload[PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE]{};
   if (entry != nullptr &&
       entry->profile_names_record != PROFILE_STORAGE_NO_RECORD &&
-      !io_.read(
-          io_.context, record_arena(entry->profile_names_record),
-          record_offset(entry->profile_names_record) +
-              kRecordPayloadOffset,
-          payload, sizeof(payload))) {
+      !read_record_payload(entry->profile_names_record,
+                           RecordType::kProfileNames, payload,
+                           sizeof(payload))) {
     return ProfileStorageResult::kIoError;
   }
   const size_t offset =
@@ -408,18 +433,20 @@ const ProfileStorageSnapshot &ProfileStorage::snapshot() const {
   return snapshot_;
 }
 
-bool ProfileStorage::scan_arena(uint8_t arena, uint32_t *epoch,
-                                uint32_t *generation, uint32_t *payload_crc,
-                                size_t *next_offset,
-                                ProfileStorageIdentityIndex *index,
-                                uint8_t *identity_count) const {
+ProfileStorageResult ProfileStorage::scan_arena(
+    uint8_t arena, uint16_t *version, uint32_t *epoch, uint32_t *generation,
+    uint32_t *payload_crc, size_t *next_offset,
+    ProfileStorageIdentityIndex *index, uint8_t *identity_count) const {
   uint8_t superblock[PROFILE_STORAGE_PAGE_SIZE]{};
-  if (!io_.read(io_.context, arena, 0, superblock, sizeof(superblock)) ||
-      memcmp(superblock, kSuperblockMagic, sizeof(kSuperblockMagic)) != 0 ||
-      read_u16(&superblock[4]) != kCatalogVersion ||
+  if (!io_.read(io_.context, arena, 0, superblock, sizeof(superblock))) {
+    return ProfileStorageResult::kIoError;
+  }
+  *version = read_u16(&superblock[4]);
+  if (memcmp(superblock, kSuperblockMagic, sizeof(kSuperblockMagic)) != 0 ||
+      (*version != kCatalogVersion && *version != kLegacyCatalogVersion) ||
       profile_storage_crc32(superblock, 12) != read_u32(&superblock[12]) ||
       !bytes_are(0, &superblock[16], sizeof(superblock) - 16)) {
-    return false;
+    return ProfileStorageResult::kUnchanged;
   }
   *epoch = read_u32(&superblock[8]);
   *generation = 0;
@@ -432,95 +459,132 @@ bool ProfileStorage::scan_arena(uint8_t arena, uint32_t *epoch,
     index[0].profile_record[profile] = PROFILE_STORAGE_NO_RECORD;
   }
 
+  bool have_generation = false;
   for (size_t offset = PROFILE_STORAGE_RECORDS_OFFSET;
        offset + PROFILE_STORAGE_RECORD_SIZE <= PROFILE_STORAGE_ARENA_SIZE;
        offset += PROFILE_STORAGE_RECORD_SIZE) {
-    uint8_t header[PROFILE_STORAGE_PAGE_SIZE]{};
-    uint8_t payload_prefix[4]{};
-    if (!io_.read(io_.context, arena, offset, header, sizeof(header)) ||
-        !io_.read(io_.context, arena, offset + kRecordPayloadOffset,
-                  payload_prefix, sizeof(payload_prefix))) {
-      return false;
+    uint8_t record[PROFILE_STORAGE_RECORD_SIZE]{};
+    if (!io_.read(io_.context, arena, offset, record, sizeof(record))) {
+      return ProfileStorageResult::kIoError;
     }
-    if (!bytes_are(0xff, header, 4) ||
-        !bytes_are(0xff, payload_prefix, sizeof(payload_prefix))) {
+    // The second page is written first. Even a partial program anywhere in
+    // that page consumes the slot when the header page is still erased.
+    if (!bytes_are(0xff, record, sizeof(record))) {
       *next_offset = offset + PROFILE_STORAGE_RECORD_SIZE;
     }
-    if (memcmp(header, kRecordMagic, sizeof(kRecordMagic)) != 0 ||
-        read_u16(&header[4]) != kCatalogVersion ||
-        profile_storage_crc32(header, kRecordHeaderCrcOffset) !=
-            read_u32(&header[kRecordHeaderCrcOffset]) ||
-        !bytes_are(0, &header[kRecordHeaderCrcOffset + 4],
-                   sizeof(header) - kRecordHeaderCrcOffset - 4)) {
+    if (!validate_record(record, *version)) {
       continue;
     }
-    const auto type = static_cast<RecordType>(header[6]);
-    const uint8_t profile_index = header[7];
-    const uint32_t record_generation = read_u32(&header[8]);
-    const size_t payload_size = read_u16(&header[12]);
     ControllerIdentity identity_value{};
-    const bool known_type =
-        type == RecordType::kProfile || type == RecordType::kReset ||
-        type == RecordType::kResetAll || type == RecordType::kActivate ||
-        type == RecordType::kAlias ||
-        type == RecordType::kProfileNames;
-    const bool indexed_profile =
-        type == RecordType::kProfile || type == RecordType::kReset ||
-        type == RecordType::kActivate;
-    const size_t expected_payload_size =
-        type == RecordType::kProfile ||
-                type == RecordType::kProfileNames
-            ? CONTROLLER_PROFILE_ENCODED_SIZE
-            : type == RecordType::kAlias
-                  ? PROFILE_STORAGE_METADATA_PAYLOAD_SIZE
-                  : 0;
-    if (!controller_identity_decode(
-            &header[20], CONTROLLER_IDENTITY_ENCODED_SIZE, &identity_value) ||
-        !valid_identity(identity_value) || !known_type ||
-        (indexed_profile && profile_index >= CONTROLLER_PROFILE_COUNT) ||
-        payload_size != expected_payload_size) {
-      continue;
-    }
-    if (payload_size != 0) {
-      uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
-      if (!io_.read(io_.context, arena, offset + kRecordPayloadOffset,
-                    payload, payload_size) ||
-          profile_storage_crc32(payload, payload_size) !=
-              read_u32(&header[16])) {
-        continue;
-      }
-      if (type == RecordType::kProfile) {
-        ControllerProfile decoded{};
-        if (read_u16(&header[14]) != read_u16(payload) ||
-            !controller_profile_decode(payload, payload_size, &decoded)) {
-          continue;
-        }
-      } else if (type == RecordType::kAlias) {
-        if (read_u16(&header[14]) != 0 ||
-            !metadata_value_valid(payload, payload_size)) {
-          continue;
-        }
-      } else {
-        bool valid_names = read_u16(&header[14]) == 0;
-        for (size_t name = 0;
-             name < CONTROLLER_PROFILE_COUNT && valid_names; ++name) {
-          valid_names = metadata_value_valid(
-              &payload[name * PROFILE_STORAGE_METADATA_PAYLOAD_SIZE],
-              PROFILE_STORAGE_METADATA_PAYLOAD_SIZE);
-        }
-        if (!valid_names) {
-          continue;
-        }
-      }
-    } else if (read_u16(&header[14]) != 0) {
-      continue;
-    }
-    apply_record(index, identity_count, type, identity_value, profile_index,
-                 record_generation, pack_record(arena, offset));
-    if (generation_is_newer(record_generation, *generation)) {
+    controller_identity_decode(&record[20], CONTROLLER_IDENTITY_ENCODED_SIZE,
+                               &identity_value);
+    const uint32_t record_generation = read_u32(&record[8]);
+    apply_record(index, identity_count, static_cast<RecordType>(record[6]),
+                 identity_value, record[7], record_generation,
+                 pack_record(arena, offset));
+    if (!have_generation || generation_is_newer(record_generation, *generation)) {
+      have_generation = true;
       *generation = record_generation;
-      *payload_crc = read_u32(&header[16]);
+      *payload_crc = read_u32(&record[16]);
     }
+  }
+  return ProfileStorageResult::kOk;
+}
+
+bool ProfileStorage::validate_record(const uint8_t *record,
+                                      uint16_t version) const {
+  const size_t payload_offset = version == kLegacyCatalogVersion
+                                    ? kLegacyRecordPayloadOffset
+                                    : kRecordPayloadOffset;
+  if (memcmp(record, kRecordMagic, sizeof(kRecordMagic)) != 0 ||
+      read_u16(&record[4]) != version ||
+      profile_storage_crc32(record, kRecordHeaderCrcOffset) !=
+          read_u32(&record[kRecordHeaderCrcOffset]) ||
+      !bytes_are(0, &record[kRecordHeaderCrcOffset + 4],
+                 payload_offset - kRecordHeaderCrcOffset - 4)) {
+    return false;
+  }
+  const auto type = static_cast<RecordType>(record[6]);
+  const uint8_t profile_index = record[7];
+  const size_t payload_size = read_u16(&record[12]);
+  const uint8_t *payload = &record[payload_offset];
+  ControllerIdentity identity_value{};
+  const bool known_type =
+      type == RecordType::kProfile || type == RecordType::kReset ||
+      type == RecordType::kResetAll || type == RecordType::kActivate ||
+      type == RecordType::kAlias || type == RecordType::kProfileNames;
+  const bool indexed_profile =
+      type == RecordType::kProfile || type == RecordType::kReset ||
+      type == RecordType::kActivate;
+  const size_t expected_payload_size =
+      type == RecordType::kProfile
+          ? (version == kLegacyCatalogVersion
+                 ? CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE
+                 : CONTROLLER_PROFILE_ENCODED_SIZE)
+          : type == RecordType::kProfileNames
+                ? PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE
+                : type == RecordType::kAlias
+                      ? PROFILE_STORAGE_METADATA_PAYLOAD_SIZE
+                      : 0;
+  if (!controller_identity_decode(
+          &record[20], CONTROLLER_IDENTITY_ENCODED_SIZE, &identity_value) ||
+      !valid_identity(identity_value) || !known_type ||
+      (indexed_profile && profile_index >= CONTROLLER_PROFILE_COUNT) ||
+      payload_size != expected_payload_size ||
+      profile_storage_crc32(payload, payload_size) != read_u32(&record[16])) {
+    return false;
+  }
+  if (type == RecordType::kProfile) {
+    ControllerProfile decoded{};
+    return read_u16(&record[14]) == read_u16(payload) &&
+           controller_profile_decode(payload, payload_size, &decoded);
+  }
+  if (read_u16(&record[14]) != 0) {
+    return false;
+  }
+  if (type == RecordType::kAlias) {
+    return metadata_value_valid(payload, payload_size);
+  }
+  if (type == RecordType::kProfileNames) {
+    for (size_t name = 0; name < CONTROLLER_PROFILE_COUNT; ++name) {
+      if (!metadata_value_valid(
+              &payload[name * PROFILE_STORAGE_METADATA_PAYLOAD_SIZE],
+              PROFILE_STORAGE_METADATA_PAYLOAD_SIZE)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool ProfileStorage::read_record_payload(
+    uint32_t record, RecordType type, uint8_t *output, size_t capacity,
+    size_t *size) const {
+  uint8_t header[kRecordHeaderCrcOffset + 4]{};
+  if (record == PROFILE_STORAGE_NO_RECORD ||
+      !io_.read(io_.context, record_arena(record), record_offset(record),
+                header, sizeof(header)) ||
+      memcmp(header, kRecordMagic, sizeof(kRecordMagic)) != 0 ||
+      header[6] != static_cast<uint8_t>(type) ||
+      profile_storage_crc32(header, kRecordHeaderCrcOffset) !=
+          read_u32(&header[kRecordHeaderCrcOffset])) {
+    return false;
+  }
+  const uint16_t version = read_u16(&header[4]);
+  const size_t payload_offset = version == kLegacyCatalogVersion
+                                    ? kLegacyRecordPayloadOffset
+                                    : kRecordPayloadOffset;
+  const size_t payload_size = read_u16(&header[12]);
+  if ((version != kCatalogVersion && version != kLegacyCatalogVersion) ||
+      payload_size > capacity ||
+      payload_size > PROFILE_STORAGE_RECORD_SIZE - payload_offset ||
+      !io_.read(io_.context, record_arena(record),
+                record_offset(record) + payload_offset, output, payload_size) ||
+      profile_storage_crc32(output, payload_size) != read_u32(&header[16])) {
+    return false;
+  }
+  if (size != nullptr) {
+    *size = payload_size;
   }
   return true;
 }
@@ -528,21 +592,17 @@ bool ProfileStorage::scan_arena(uint8_t arena, uint32_t *epoch,
 bool ProfileStorage::read_profile_record(uint32_t record,
                                          ControllerProfile *output) const {
   uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
-  return record != PROFILE_STORAGE_NO_RECORD &&
-         io_.read(io_.context, record_arena(record),
-                  record_offset(record) + kRecordPayloadOffset, encoded,
-                  sizeof(encoded)) &&
-         controller_profile_decode(encoded, sizeof(encoded), output);
+  size_t size = 0;
+  return read_record_payload(record, RecordType::kProfile, encoded,
+                             sizeof(encoded), &size) &&
+         controller_profile_decode(encoded, size, output);
 }
 
 bool ProfileStorage::read_metadata_record(
     uint32_t record, char *output, size_t output_size) const {
   uint8_t payload[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
-  if (record == PROFILE_STORAGE_NO_RECORD ||
-      !io_.read(
-          io_.context, record_arena(record),
-          record_offset(record) + kRecordPayloadOffset,
-          payload, sizeof(payload)) ||
+  if (!read_record_payload(record, RecordType::kAlias, payload,
+                           sizeof(payload)) ||
       payload[0] > PROFILE_STORAGE_METADATA_MAX_BYTES ||
       output_size <= payload[0]) {
     return false;
@@ -601,12 +661,10 @@ ProfileStorageResult ProfileStorage::compact() {
       }
       offset += PROFILE_STORAGE_RECORD_SIZE;
     }
-    uint8_t metadata[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    uint8_t metadata[PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE]{};
     if (entry.alias_record != PROFILE_STORAGE_NO_RECORD) {
-      if (!io_.read(
-              io_.context, record_arena(entry.alias_record),
-              record_offset(entry.alias_record) + kRecordPayloadOffset,
-              metadata, PROFILE_STORAGE_METADATA_PAYLOAD_SIZE) ||
+      if (!read_record_payload(entry.alias_record, RecordType::kAlias,
+                               metadata, PROFILE_STORAGE_METADATA_PAYLOAD_SIZE) ||
           !write_record(
               target, offset, RecordType::kAlias, entry.identity,
               CONTROLLER_PROFILE_ALL, ++generation, metadata,
@@ -616,15 +674,13 @@ ProfileStorageResult ProfileStorage::compact() {
       offset += PROFILE_STORAGE_RECORD_SIZE;
     }
     if (entry.profile_names_record != PROFILE_STORAGE_NO_RECORD) {
-      if (!io_.read(
-              io_.context, record_arena(entry.profile_names_record),
-              record_offset(entry.profile_names_record) +
-                  kRecordPayloadOffset,
-              metadata, CONTROLLER_PROFILE_ENCODED_SIZE) ||
+      if (!read_record_payload(entry.profile_names_record,
+                               RecordType::kProfileNames, metadata,
+                               sizeof(metadata)) ||
           !write_record(
               target, offset, RecordType::kProfileNames,
               entry.identity, CONTROLLER_PROFILE_ALL, ++generation,
-              metadata, CONTROLLER_PROFILE_ENCODED_SIZE)) {
+              metadata, sizeof(metadata))) {
         return ProfileStorageResult::kIoError;
       }
       offset += PROFILE_STORAGE_RECORD_SIZE;
@@ -636,26 +692,23 @@ ProfileStorageResult ProfileStorage::compact() {
     offset += PROFILE_STORAGE_RECORD_SIZE;
   }
 
-  uint8_t superblock[PROFILE_STORAGE_PAGE_SIZE]{};
-  memcpy(superblock, kSuperblockMagic, sizeof(kSuperblockMagic));
-  write_u16(&superblock[4], kCatalogVersion);
-  write_u32(&superblock[8], epoch_ + 1u);
-  write_u32(&superblock[12], profile_storage_crc32(superblock, 12));
-  if (!io_.program_page(io_.context, target, 0, superblock,
-                        sizeof(superblock))) {
+  if (!publish_arena(target, epoch_ + 1u, offset)) {
     return ProfileStorageResult::kIoError;
   }
 
   ProfileStorageIdentityIndex
       rebuilt[CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1]{};
   uint8_t rebuilt_count = 0;
+  uint16_t rebuilt_version = 0;
   uint32_t rebuilt_epoch = 0;
   uint32_t rebuilt_generation = 0;
   uint32_t rebuilt_payload_crc = 0;
   size_t rebuilt_offset = 0;
-  if (!scan_arena(target, &rebuilt_epoch, &rebuilt_generation,
-                  &rebuilt_payload_crc, &rebuilt_offset, rebuilt,
-                  &rebuilt_count)) {
+  if (scan_arena(target, &rebuilt_version, &rebuilt_epoch,
+                 &rebuilt_generation, &rebuilt_payload_crc, &rebuilt_offset,
+                 rebuilt, &rebuilt_count) != ProfileStorageResult::kOk ||
+      rebuilt_count != identity_count_ || rebuilt_offset != offset ||
+      rebuilt_generation != generation) {
     return ProfileStorageResult::kIoError;
   }
   for (size_t index = 0;
@@ -664,6 +717,7 @@ ProfileStorageResult ProfileStorage::compact() {
   }
   identity_count_ = rebuilt_count;
   epoch_ = rebuilt_epoch;
+  catalog_version_ = rebuilt_version;
   next_offset_ = rebuilt_offset;
   snapshot_.active_bank = target;
   snapshot_.generation = rebuilt_generation;
@@ -672,7 +726,7 @@ ProfileStorageResult ProfileStorage::compact() {
   return ProfileStorageResult::kOk;
 }
 
-bool ProfileStorage::migrate_legacy() {
+ProfileStorageResult ProfileStorage::migrate_legacy() {
   struct LegacyHeader {
     bool valid = false;
     uint32_t generation = 0;
@@ -685,8 +739,10 @@ bool ProfileStorage::migrate_legacy() {
   for (uint8_t bank = 0; bank < PROFILE_STORAGE_LEGACY_BANK_COUNT; ++bank) {
     uint8_t header[PROFILE_STORAGE_LEGACY_HEADER_SIZE]{};
     const size_t base = arena_base + bank * PROFILE_STORAGE_LEGACY_BANK_SIZE;
-    if (!io_.read(io_.context, arena, base, header, sizeof(header)) ||
-        memcmp(header, kLegacyStorageMagic, 4) != 0 ||
+    if (!io_.read(io_.context, arena, base, header, sizeof(header))) {
+      return ProfileStorageResult::kIoError;
+    }
+    if (memcmp(header, kLegacyStorageMagic, 4) != 0 ||
         read_u16(&header[4]) != 1 ||
         (read_u16(&header[6]) != 1 && read_u16(&header[6]) != 2) ||
         read_u32(&header[12]) != PROFILE_STORAGE_LEGACY_DATABASE_SIZE ||
@@ -701,8 +757,7 @@ bool ProfileStorage::migrate_legacy() {
     while (remaining != 0) {
       const size_t size = remaining < sizeof(page) ? remaining : sizeof(page);
       if (!io_.read(io_.context, arena, payload_offset, page, size)) {
-        remaining = SIZE_MAX;
-        break;
+        return ProfileStorageResult::kIoError;
       }
       crc = crc32_update(crc, page, size);
       payload_offset += size;
@@ -721,7 +776,7 @@ bool ProfileStorage::migrate_legacy() {
     }
   }
   if (selected < 0) {
-    return false;
+    return ProfileStorageResult::kUnchanged;
   }
 
   const size_t legacy_base =
@@ -738,40 +793,46 @@ bool ProfileStorage::migrate_legacy() {
       database_header[8] != CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY ||
       database_header[9] != PROFILE_STORAGE_LEGACY_PROFILE_COUNT ||
       database_header[10] >= PROFILE_STORAGE_LEGACY_PROFILE_COUNT) {
-    return false;
+    return ProfileStorageResult::kIoError;
   }
   if (!io_.erase_arena(io_.context, 0)) {
-    return false;
+    return ProfileStorageResult::kIoError;
   }
   size_t target_offset = PROFILE_STORAGE_RECORDS_OFFSET;
-  uint32_t generation = 0;
+  uint32_t generation = headers[selected].generation;
   uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
   ControllerProfile decoded{};
   const ControllerIdentity global = controller_identity_global();
   for (uint8_t profile = 0; profile < PROFILE_STORAGE_LEGACY_PROFILE_COUNT;
        ++profile) {
     const size_t source =
-        legacy_base + 32 + profile * CONTROLLER_PROFILE_ENCODED_SIZE;
-    if (!io_.read(io_.context, arena, source, encoded, sizeof(encoded)) ||
-        !controller_profile_decode(encoded, sizeof(encoded), &decoded) ||
+        legacy_base + 32 + profile * CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
+    if (!io_.read(io_.context, arena, source, encoded,
+                   CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE) ||
+        !controller_profile_decode(encoded,
+                                   CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE,
+                                   &decoded) ||
+        !controller_profile_encode(decoded, encoded, sizeof(encoded)) ||
         !write_record(0, target_offset, RecordType::kProfile, global, profile,
                       ++generation, encoded, sizeof(encoded))) {
-      return false;
+      return ProfileStorageResult::kIoError;
     }
     target_offset += PROFILE_STORAGE_RECORD_SIZE;
   }
   if (!write_record(0, target_offset, RecordType::kActivate, global,
                     database_header[10], ++generation, nullptr, 0)) {
-    return false;
+    return ProfileStorageResult::kIoError;
   }
   target_offset += PROFILE_STORAGE_RECORD_SIZE;
 
   constexpr size_t kLegacyEntrySize =
       16 +
-      PROFILE_STORAGE_LEGACY_PROFILE_COUNT * CONTROLLER_PROFILE_ENCODED_SIZE;
+      PROFILE_STORAGE_LEGACY_PROFILE_COUNT *
+          CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
   const size_t entries_base =
       legacy_base + 32 +
-      PROFILE_STORAGE_LEGACY_PROFILE_COUNT * CONTROLLER_PROFILE_ENCODED_SIZE;
+      PROFILE_STORAGE_LEGACY_PROFILE_COUNT *
+          CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
   for (uint8_t entry_index = 0;
        entry_index < CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY;
        ++entry_index) {
@@ -779,7 +840,7 @@ bool ProfileStorage::migrate_legacy() {
     uint8_t entry_header[16]{};
     if (!io_.read(io_.context, arena, entry_base, entry_header,
                   sizeof(entry_header))) {
-      return false;
+      return ProfileStorageResult::kIoError;
     }
     if (entry_header[15] == 0) {
       continue;
@@ -791,46 +852,48 @@ bool ProfileStorage::migrate_legacy() {
             entry_header, CONTROLLER_IDENTITY_ENCODED_SIZE, &identity_value) ||
         !identity_value.stable ||
         controller_identity_is_global(identity_value)) {
-      return false;
+      return ProfileStorageResult::kIoError;
     }
     for (uint8_t profile = 0; profile < PROFILE_STORAGE_LEGACY_PROFILE_COUNT;
          ++profile) {
       const size_t source =
-          entry_base + 16 + profile * CONTROLLER_PROFILE_ENCODED_SIZE;
-      if (!io_.read(io_.context, arena, source, encoded, sizeof(encoded)) ||
-          !controller_profile_decode(encoded, sizeof(encoded), &decoded) ||
+          entry_base + 16 + profile * CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
+      if (!io_.read(io_.context, arena, source, encoded,
+                     CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE) ||
+          !controller_profile_decode(encoded,
+                                     CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE,
+                                     &decoded) ||
+          !controller_profile_encode(decoded, encoded, sizeof(encoded)) ||
           !write_record(0, target_offset, RecordType::kProfile, identity_value,
                         profile, ++generation, encoded, sizeof(encoded))) {
-        return false;
+        return ProfileStorageResult::kIoError;
       }
       target_offset += PROFILE_STORAGE_RECORD_SIZE;
     }
     if (!write_record(0, target_offset, RecordType::kActivate, identity_value,
                       entry_header[14], ++generation, nullptr, 0)) {
-      return false;
+      return ProfileStorageResult::kIoError;
     }
     target_offset += PROFILE_STORAGE_RECORD_SIZE;
   }
 
-  uint8_t superblock[PROFILE_STORAGE_PAGE_SIZE]{};
-  memcpy(superblock, kSuperblockMagic, sizeof(kSuperblockMagic));
-  write_u16(&superblock[4], kCatalogVersion);
-  write_u32(&superblock[8], 1);
-  write_u32(&superblock[12], profile_storage_crc32(superblock, 12));
-  if (!io_.program_page(io_.context, 0, 0, superblock, sizeof(superblock))) {
-    return false;
+  if (!publish_arena(0, 1, target_offset)) {
+    return ProfileStorageResult::kIoError;
   }
 
   ProfileStorageIdentityIndex
       rebuilt[CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1]{};
   uint8_t rebuilt_count = 0;
+  uint16_t rebuilt_version = 0;
   uint32_t rebuilt_epoch = 0;
   uint32_t rebuilt_generation = 0;
   uint32_t rebuilt_payload_crc = 0;
   size_t rebuilt_offset = 0;
-  if (!scan_arena(0, &rebuilt_epoch, &rebuilt_generation, &rebuilt_payload_crc,
-                  &rebuilt_offset, rebuilt, &rebuilt_count)) {
-    return false;
+  if (scan_arena(0, &rebuilt_version, &rebuilt_epoch, &rebuilt_generation,
+                 &rebuilt_payload_crc, &rebuilt_offset, rebuilt,
+                 &rebuilt_count) != ProfileStorageResult::kOk ||
+      rebuilt_offset != target_offset || rebuilt_generation != generation) {
+    return ProfileStorageResult::kIoError;
   }
   for (size_t index = 0;
        index < CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1; ++index) {
@@ -838,28 +901,48 @@ bool ProfileStorage::migrate_legacy() {
   }
   identity_count_ = rebuilt_count;
   epoch_ = rebuilt_epoch;
+  catalog_version_ = rebuilt_version;
   next_offset_ = rebuilt_offset;
   snapshot_.valid = true;
   snapshot_.active_bank = 0;
   snapshot_.generation = rebuilt_generation;
   snapshot_.payload_crc = rebuilt_payload_crc;
-  return true;
+  return ProfileStorageResult::kOk;
 }
 
-bool ProfileStorage::publish_empty_arena(uint8_t arena, uint32_t epoch) {
-  if (!io_.erase_arena(io_.context, arena)) {
-    return false;
+bool ProfileStorage::publish_arena(uint8_t arena, uint32_t epoch,
+                                    size_t records_end) const {
+  // Verify every copied record before making the new arena discoverable.
+  // The old published arena remains untouched throughout this operation.
+  for (size_t offset = PROFILE_STORAGE_RECORDS_OFFSET; offset < records_end;
+       offset += PROFILE_STORAGE_RECORD_SIZE) {
+    uint8_t record[PROFILE_STORAGE_RECORD_SIZE]{};
+    if (!io_.read(io_.context, arena, offset, record, sizeof(record)) ||
+        !validate_record(record, kCatalogVersion)) {
+      return false;
+    }
   }
   uint8_t superblock[PROFILE_STORAGE_PAGE_SIZE]{};
   memcpy(superblock, kSuperblockMagic, sizeof(kSuperblockMagic));
   write_u16(&superblock[4], kCatalogVersion);
   write_u32(&superblock[8], epoch);
   write_u32(&superblock[12], profile_storage_crc32(superblock, 12));
-  if (!io_.program_page(io_.context, arena, 0, superblock,
-                        sizeof(superblock))) {
+  uint8_t verified[PROFILE_STORAGE_PAGE_SIZE]{};
+  return io_.program_page(io_.context, arena, 0, superblock,
+                          sizeof(superblock)) &&
+         io_.read(io_.context, arena, 0, verified, sizeof(verified)) &&
+         memcmp(superblock, verified, sizeof(superblock)) == 0;
+}
+
+bool ProfileStorage::publish_empty_arena(uint8_t arena, uint32_t epoch) {
+  if (!io_.erase_arena(io_.context, arena)) {
+    return false;
+  }
+  if (!publish_arena(arena, epoch, PROFILE_STORAGE_RECORDS_OFFSET)) {
     return false;
   }
   epoch_ = epoch;
+  catalog_version_ = kCatalogVersion;
   next_offset_ = PROFILE_STORAGE_RECORDS_OFFSET;
   snapshot_.valid = true;
   snapshot_.active_bank = arena;
@@ -874,45 +957,51 @@ bool ProfileStorage::write_record(uint8_t arena, size_t offset, RecordType type,
                                   const uint8_t *payload,
                                   size_t payload_size) const {
   const size_t expected_payload_size =
-      type == RecordType::kProfile ||
-              type == RecordType::kProfileNames
+      type == RecordType::kProfile
           ? CONTROLLER_PROFILE_ENCODED_SIZE
-          : type == RecordType::kAlias
-                ? PROFILE_STORAGE_METADATA_PAYLOAD_SIZE
-                : 0;
+          : type == RecordType::kProfileNames
+                ? PROFILE_STORAGE_PROFILE_NAMES_PAYLOAD_SIZE
+                : type == RecordType::kAlias
+                      ? PROFILE_STORAGE_METADATA_PAYLOAD_SIZE
+                      : 0;
   if (arena >= PROFILE_STORAGE_ARENA_COUNT ||
       offset < PROFILE_STORAGE_RECORDS_OFFSET ||
       offset + PROFILE_STORAGE_RECORD_SIZE > PROFILE_STORAGE_ARENA_SIZE ||
-      offset % PROFILE_STORAGE_PAGE_SIZE != 0 ||
+      offset % PROFILE_STORAGE_RECORD_SIZE != 0 ||
       payload_size != expected_payload_size ||
       (payload_size != 0 && payload == nullptr)) {
     return false;
   }
-  if (payload_size != 0) {
-    uint8_t page[PROFILE_STORAGE_PAGE_SIZE]{};
-    memcpy(page, payload, payload_size);
-    if (!io_.program_page(io_.context, arena,
-                          offset + kRecordPayloadOffset,
-                          page, sizeof(page))) {
-      return false;
-    }
-  }
-  uint8_t header[PROFILE_STORAGE_PAGE_SIZE]{};
-  memcpy(header, kRecordMagic, sizeof(kRecordMagic));
-  write_u16(&header[4], kCatalogVersion);
-  header[6] = static_cast<uint8_t>(type);
-  header[7] = profile_index;
-  write_u32(&header[8], generation);
-  write_u16(&header[12], static_cast<uint16_t>(payload_size));
-  write_u16(&header[14], type == RecordType::kProfile ? read_u16(payload) : 0);
-  write_u32(&header[16], profile_storage_crc32(payload, payload_size));
-  if (!controller_identity_encode(identity, &header[20],
+  uint8_t record[PROFILE_STORAGE_RECORD_SIZE]{};
+  memcpy(record, kRecordMagic, sizeof(kRecordMagic));
+  write_u16(&record[4], kCatalogVersion);
+  record[6] = static_cast<uint8_t>(type);
+  record[7] = profile_index;
+  write_u32(&record[8], generation);
+  write_u16(&record[12], static_cast<uint16_t>(payload_size));
+  write_u16(&record[14], type == RecordType::kProfile ? read_u16(payload) : 0);
+  write_u32(&record[16], profile_storage_crc32(payload, payload_size));
+  if (!controller_identity_encode(identity, &record[20],
                                   CONTROLLER_IDENTITY_ENCODED_SIZE)) {
     return false;
   }
-  write_u32(&header[kRecordHeaderCrcOffset],
-            profile_storage_crc32(header, kRecordHeaderCrcOffset));
-  return io_.program_page(io_.context, arena, offset, header, sizeof(header));
+  write_u32(&record[kRecordHeaderCrcOffset],
+            profile_storage_crc32(record, kRecordHeaderCrcOffset));
+  if (payload_size != 0) {
+    memcpy(&record[kRecordPayloadOffset], payload, payload_size);
+  }
+  // Publish the header-containing page last, including for short metadata and
+  // zero-payload records, so every interrupted slot is detectably consumed.
+  if (!io_.program_page(io_.context, arena, offset + PROFILE_STORAGE_PAGE_SIZE,
+                         &record[PROFILE_STORAGE_PAGE_SIZE],
+                         PROFILE_STORAGE_PAGE_SIZE) ||
+      !io_.program_page(io_.context, arena, offset, record,
+                         PROFILE_STORAGE_PAGE_SIZE)) {
+    return false;
+  }
+  uint8_t verified[PROFILE_STORAGE_RECORD_SIZE]{};
+  return io_.read(io_.context, arena, offset, verified, sizeof(verified)) &&
+         memcmp(record, verified, sizeof(record)) == 0;
 }
 
 void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,

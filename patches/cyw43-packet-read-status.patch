@@ -1,0 +1,27 @@
+--- a/cybt_shared_bus_driver.c
++++ b/cybt_shared_bus_driver.c
+@@ -501,8 +501,11 @@
+ cybt_result_t cybt_get_bt_buf_index(cybt_fw_membuf_index_t *p_buf_index) {
+     uint32_t buf[4];
+ 
+-    cybt_mem_read(H2B_BUF_IN_ADDR, (uint8_t *) buf, sizeof(buf));
++    cybt_result_t result = cybt_mem_read(H2B_BUF_IN_ADDR, (uint8_t *) buf, sizeof(buf));
++    if (result != CYBT_SUCCESS) {
++        return result;
++    }
+ 
+     p_buf_index->host2bt_in_val = buf[0];
+     p_buf_index->host2bt_out_val = buf[1];
+     p_buf_index->bt2host_in_val = buf[2];
+@@ -596,7 +599,10 @@
+         if ((mem_addr & 0xFFF) + transfer_size > 0x1000) {
+             transfer_size = 0x1000 - (mem_addr & 0xFFF);
+         }
+-        cyw43_ll_read_backplane_mem(cyw43_ll, mem_addr, transfer_size, p_data);
++        int result = cyw43_ll_read_backplane_mem(cyw43_ll, mem_addr, transfer_size, p_data);
++        if (result != 0) {
++            return CYBT_ERR_HCI_READ_FAILED;
++        }
+         cybt_debug("  read_mem addr 0x%08lx len %ld\n", mem_addr, transfer_size);
+         DUMP_BYTES(p_data, transfer_size);
+         data_len -= transfer_size;
