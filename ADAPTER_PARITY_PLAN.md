@@ -705,6 +705,9 @@ Set B delivery evidence:
 
 ### Native Switch-family HD rumble — Planned
 
+Standalone agent handoff: [SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md).
+It includes implementation locations, acceptance checks and current mixed-controller timing caveats.
+
 Goal: preserve Nintendo's left/right, low/high-band commands on controllers
 that can execute them natively. This is a separate output backend from the
 DualSense PCM synthesizer, not a promise that every controller in “Switch
