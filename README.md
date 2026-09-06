@@ -363,12 +363,15 @@ states refresh at 40 ms. XInput uses held low/left-160-Hz and high/right-320-Hz
 effects until explicitly stopped. Standalone Joy-Cons downmix each band by
 dominant amplitude, choosing left on ties; logical Joy-Con pairing is not added.
 
-**Qualification is incomplete.** A genuine Pro-only controlled run delivered
-all 1,025 commands without new loss or congestion. Earlier mixed Pro/DualSense
-runs exposed substantial shared-radio pressure; the latest held-state
-coalescing optimization still needs that hardware rerun. Joy-Con hardware,
-four-controller operation, captured game effects, and physical actuator timing
-are not qualified by the native regression suite. See
+**Qualification is incomplete.** The optimized Pro-only build passed 1,025
+distinct commands at 125 Hz with no loss or congestion. Separate held-state
+testing coalesced 505 of 513 commands into eight state changes plus refreshes,
+also without loss; the user confirmed both actuators, both bands and clean
+stops. Mixed held-effect traffic also passed at approximately 125 Hz per
+controller. Continuously changing both streams at that rate still loses Pro
+commands and DualSense audio slots; transport experiments remain unqualified.
+Joy-Con hardware, four-controller operation, captured game effects and physical
+actuator timing are not qualified by the native regression suite. See
 [SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md) for the exact
 implementation, quantization policy, evidence and remaining checks.
 

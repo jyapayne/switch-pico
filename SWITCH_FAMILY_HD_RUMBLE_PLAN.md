@@ -84,22 +84,73 @@ uv run switch-pico-config config native-rumble revoke --identity N
 - **Pro-only radio:** genuine Pro reply firmware bytes `03 48`; a controlled
   pre-coalescing 125-Hz run completed all **1,025 commands**, with **1,025
   submitted reports**, **zero new drops**, and **zero congestion attempts**.
+- **Optimized Pro hardware:** the reconnected Pro received 513 commands for
+  separated left/right 160-Hz and 320-Hz pulses. Eight state changes completed,
+  505 unchanged holds coalesced, and 56 reports were submitted including
+  refreshes, with zero loss/congestion. The user confirmed all four pulses
+  worked and stopped cleanly. Worst observed submission latency was 1,031 us.
+  A subsequent 125-Hz run changed amplitude every command: all 1,025 commands
+  completed as 1,025 reports, with zero coalescing, loss or congestion. The
+  diagnostic maximum reached 1,576 us; neither figure is actuator onset.
 - **Mixed radio before coalescing:** can-send-driven Pro isolation with
   DualSense connected completed 195 of 513 commands and dropped 318; the
   idle DualSense PCM stream skipped 30 slots. Stopping its PCM stream but
   keeping its input connection completed 276/513 and dropped 237. These
   failures must not be relabeled as successful fidelity qualification.
-- **Next hardware check:** the held-state-coalescing build is flashed and
-  the Pro approval persists. The Pro did not reconnect after that flash;
-  press its normal Home button, leaving DualSense off initially. Repeat
-  actuator/band isolation and confirm physical vibration, then rerun with
-  DualSense input/PCM and distinguish repeated holds from every-command
-  state changes. Reconnect, approval revocation/resume, LEDs, scaling and
-  stateful XInput still need integrated hardware checks.
+- **Optimized mixed holds:** concurrent USB writers delivered 2,049 commands
+  per controller at approximately 125 Hz each. Pro completed 65 state changes,
+  coalesced 1,984 holds and lost none; DualSense accepted all 2,049 commands
+  with no audio skips/send failures. An earlier sequential-writer test ran
+  only about 62 Hz per controller and must not be cited as a 125-Hz result.
+- **Optimized mixed distinct updates:** changing amplitude every 8 ms on both
+  controllers completed 404/1,025 Pro commands and superseded 621; DualSense
+  accepted all host commands but skipped 46 audio slots. This remains a
+  failed high-rate qualification, not evidence of lossless mixed HD rumble.
+- **Remaining checks:** resolve mixed distinct-update saturation, then qualify
+  approval revocation/resume, LEDs, scaling and stateful XInput on hardware.
+  Pro approval survived firmware reboot and reconnect.
 - **Unavailable evidence:** no real-console USB/BT rumble capture corpus,
   original Joy-Con L/R qualification, four-controller hardware result or
   instrumented actuator onset has been obtained. Do not infer these from
   synthetic vectors or HCI acceptance.
+
+### Active transport experiments
+
+Native rumble remains enabled at the user's request. A reported controller
+power-off after a test is accepted as a failure observation; its cause is not
+established. Pro approval was briefly revoked at configuration generation 12,
+then explicitly restored at 13. Do not revoke it as part of further experiments.
+
+Passive HCI observations found both links in master role, with Pro in sniff
+mode at interval 24 (15 ms) and DualSense active. During saturation, the Pro
+held four or five of the eight outgoing ACL buffers. Those eight buffers are
+distinct from the three controller-to-host incoming flow-control credits.
+Remote feature responses were Pro `bff8cbfecbef7b87` and DualSense
+`bf3a8dfedbff7b87`; the local HCI packet-type mask was `0xcc18`.
+
+| Experiment | Commands per controller | Pro completed / dropped | DS audio skips |
+|---|---:|---:|---:|
+| Distinct nonzero effects, normal policy | 1,025 | 404 / 621 | 46 |
+| Distinct nonzero effects, Pro no-sniff policy, receive bound 1 | 1,025 | 882 / 143 | 2 |
+| Distinct nonzero effects, Pro no-sniff policy, receive bound 2 | 1,025 | 947 / 78 | 5 |
+| Changing zero-amplitude commands, normal policy, receive bound 1 | 513 | 214 / 298 | 21 |
+| Changing zero-amplitude commands, Pro no-sniff policy, receive bound 1 | 513 | 491 / 21 | 1 |
+
+The two zero-amplitude runs each coalesced one command; the other commands
+exercise the 11-byte native transport without driving actuators. They do not
+prove nonzero-effect fidelity. Exit-sniff requests alone failed to keep the
+Pro active; that unproven automatic-wake code has been removed. The no-sniff
+policy is an experimental per-link setting, not a qualified production default.
+
+The current diagnostic build uses receive bound 4 and is awaiting normal
+controller reconnects after flashing. Its temporary `build-aio/link_probe.cpp`
+and `SWITCH_PICO_LINK_PROBE` hooks are **uncommitted experiment code**, not
+packaged release firmware. Operation `0x44`, diagnostic schema 2, captures link
+snapshots, selected HCI command/mode events and disconnect reasons. Separate
+OUT requests allow explicit Pro policy 1 (role-switch only), policy 5 (normal
+role-switch plus sniff), or a readback; no automatic policy change occurs.
+Keep approvals/bonds/profiles unchanged. Remove these hooks and restore or
+qualify the receive bound before publishing another production build.
 
 Linux's current Nintendo driver also documents disconnect risk from excessive
 output traffic and uses input-report-aware throttling. This is corroborating
