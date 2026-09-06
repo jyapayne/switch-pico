@@ -161,9 +161,39 @@ completion state. OUT payload `<HH>` supports:
 - handle `0xffff` + value 2/3 to set incoming-credit batching threshold;
 - handle `0xffff` + value `0x101`/`0x102`/`0x104` to set receive bound 1/2/4.
 
-No link policy changes automatically. The prepared comparison matrix uses
-active Pro policy, tests `(receive, credit)` pairs `(1,2), (2,2), (4,2),
-(4,3), (2,3), (1,3), (1,2)`, and restores baseline controls afterward.
+The interrupted active-policy matrix is invalid across its reconnect. HCI
+recorded reason `0x22` (LMP response timeout) about 32.9 seconds after the
+active-mode transition; this is correlation, not proof of cause. Tests now
+abort on Pro connection-generation changes, changed link fingerprints, USB
+errors, or a changed/stopped DualSense native run.
+
+A subsequent same-boot **normal-policy** matrix completed with stable
+connections. All cases received 513 commands per controller, but all failed
+the no-loss criterion:
+
+| Receive bound | Credit threshold | Pro completed / dropped | DS skips |
+|---:|---:|---:|---:|
+| 1 | 2 | 174 / 338 | 38 |
+| 2 | 2 | 195 / 317 | 31 |
+| 4 | 2 | 207 / 305 | 19 |
+| 4 | 3 | 204 / 309 | 21 |
+| 2 | 3 | 196 / 316 | 26 |
+| 1 | 3 | 183 / 329 | 37 |
+| 1 | 2, repeated baseline | 177 / 335 | 40 |
+
+All but the `(4,3)` trial coalesced one command. Threshold 3 reduced incoming
+credit-return command traffic, but did not materially improve delivery.
+
+Temporary sniff negotiation controls also support Pro handle + `0x200 | N`,
+where N is 8/12/16/24 slots of 0.625 ms. Attempt/timeout were 4/1. The Pro
+re-entered 15 ms sniff before deferred and immediate re-entry requests ran;
+those attempts received Command Disallowed. Briefly gating automatic sniff,
+requesting interval 12, then restoring policy 5 successfully negotiated
+7.5 ms, but no healthy mixed-stream throughput result was obtained: the
+DualSense stream was in can-send timeout. Original interval 24 / policy 5
+were restored and the connected DualSense native stream was re-armed.
+Do not promote interval-only tuning from command acceptance.
+
 Keep approvals/bonds/profiles unchanged. Remove diagnostic hooks and restore
 or qualify settings before publishing another production build.
 
@@ -171,6 +201,54 @@ Linux's current Nintendo driver also documents disconnect risk from excessive
 output traffic and uses input-report-aware throttling. This is corroborating
 timing evidence, not code incorporated into this project:
 https://github.com/torvalds/linux/blob/master/drivers/hid/hid-nintendo.c
+
+## Scheduling literature: applicable principles, not a drop-in port
+
+User-supplied paper: Moonbeom Kim and Jeongyeup Paek,
+[Multiconnection Scheduling With Fair Resource Management for Scalable
+Bluetooth Low-Energy Networks](https://ieeexplore.ieee.org/document/11275955)
+(EMBLEM, IEEE IoT Journal, 2026; online December 2025).
+
+The full text was reviewed. EMBLEM operates in a modified central **BLE link
+layer** on nRF52840/Mynewt/NimBLE, using Bluetooth 5.3 connection subrating,
+anchor placement, event preemption/extension, measured event durations and
+guard resources. Our Pro/DualSense links are **Bluetooth Classic BR/EDR**;
+Classic sniff/subrating is not LE connection subrating. The CYW43439 firmware
+owns radio scheduling, and the HCI APIs used here do not expose equivalent
+anchor placement or event preemption. Its results therefore do not establish
+our achievable capacity or justify copying its BLE constants.
+
+Useful next experiments/design directions:
+
+- Treat both native outputs as clients of one host-side admission scheduler.
+  Use deadlines/age plus bounded per-link service, not independent writers
+  consuming credits opportunistically. This cannot guarantee on-air scheduling.
+- Budget measured queue/credit occupancy and estimated exchange cost, not
+  payload bytes alone. HCI completion delay is a proxy, not measured airtime.
+- Examine window duration and phase as well as interval. For Classic sniff,
+  attempt/timeout and negotiated interval matter together; shortening only
+  the interval can reserve too much service time for one link.
+- Retain guard margin for measured jitter/retransmissions. Exclude reconnects,
+  stopped streams, and coalesced holds from inappropriate rate/latency estimates.
+- Adapt slowly using smoothed demand and hysteresis, rather than issuing
+  radio-parameter updates on every 8 ms rumble change. EMBLEM's illustrated
+  adaptation takes about four seconds, not a per-haptic-frame response.
+- The application output periods share a **64 ms hyperperiod**: eight 8 ms
+  Pro updates and three 64-frame/3-kHz DualSense reports. A small deadline/phase
+  analysis is sufficient; the paper's 1,023-node bitmap tree is unnecessary
+  for four slots. This application calendar is not a Bluetooth radio calendar.
+
+Related sources:
+
+- [RT-BLE: Real-time Multi-Connection Scheduling for Bluetooth Low
+  Energy](https://ieeexplore.ieee.org/document/10229006/) models retransmission
+  latency and allocates connection resources; its
+  [implementation](https://github.com/sada45/RT-BLE) modifies NimBLE/RIOT on
+  nRF52840. Abstract and implementation requirements reviewed, not full paper.
+- [Efficient polling schemes for Bluetooth picocells](https://ieeexplore.ieee.org/document/936938)
+  is directly about Classic master-controlled polling/TDD. Abstract/introduction
+  reviewed; useful direction for service-time-aware polling and fairness,
+  not evidence that its radio scheduler can be installed above HCI here.
 
 ## Read these code paths first
 
