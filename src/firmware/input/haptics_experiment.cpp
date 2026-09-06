@@ -17,12 +17,11 @@
 
 namespace {
 
-#if defined(SWITCH_PICO_CYW43_PACKET_READ) && defined(SWITCH_PICO_HCI_CREDIT_BATCH) && \
-    defined(SWITCH_PICO_SYS_CLOCK_MHZ) && SWITCH_PICO_SYS_CLOCK_MHZ >= 300
-constexpr uint32_t kGameplayFrames = 32;
-#else
-constexpr uint32_t kGameplayFrames = 64;
+#ifndef SWITCH_PICO_HD_PACKET_FRAMES
+#define SWITCH_PICO_HD_PACKET_FRAMES 64
 #endif
+constexpr uint32_t kGameplayFrames = SWITCH_PICO_HD_PACKET_FRAMES;
+static_assert(kGameplayFrames == 32 || kGameplayFrames == 64);
 constexpr uint32_t kPacketDenominator = 3;
 constexpr uint32_t kPackets = 288;
 constexpr uint32_t kPrimingPackets = 48;

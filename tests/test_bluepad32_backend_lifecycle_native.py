@@ -67,6 +67,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                     "-DSWITCH_PICO_CYW43_PACKET_READ=1",
                     "-DSWITCH_PICO_HCI_CREDIT_BATCH=1",
                     "-DSWITCH_PICO_SYS_CLOCK_MHZ=300",
+                    "-DSWITCH_PICO_HD_PACKET_FRAMES=32",
                 ]
             )
         command.extend(

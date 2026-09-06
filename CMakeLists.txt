@@ -62,6 +62,18 @@ option(SWITCH_PICO_HCI_CREDIT_BATCH
 if(SWITCH_PICO_HD_RUMBLE)
     set(SWITCH_PICO_HAPTICS_EXPERIMENT ON)
 endif()
+set(SWITCH_PICO_HD_PACKET_FRAMES "64" CACHE STRING
+    "Native gameplay frames per packet: 64 standard, 32 single-controller experiment")
+set_property(CACHE SWITCH_PICO_HD_PACKET_FRAMES PROPERTY STRINGS 64 32)
+if(NOT SWITCH_PICO_HD_PACKET_FRAMES MATCHES "^(32|64)$")
+    message(FATAL_ERROR "SWITCH_PICO_HD_PACKET_FRAMES must be 32 or 64")
+endif()
+if(SWITCH_PICO_HD_PACKET_FRAMES STREQUAL "32")
+    if(NOT SWITCH_PICO_HAPTICS_EXPERIMENT OR NOT SWITCH_PICO_CYW43_PACKET_READ
+            OR NOT SWITCH_PICO_HCI_CREDIT_BATCH OR SWITCH_PICO_SYS_CLOCK_MHZ LESS 300)
+        message(FATAL_ERROR "32-frame qualification requires native transport, packet reads, credit batching and at least 300 MHz")
+    endif()
+endif()
 set(SWITCH_PICO_INPUT_BACKEND "UART" CACHE STRING "Controller input backend")
 set_property(CACHE SWITCH_PICO_INPUT_BACKEND PROPERTY STRINGS UART BLUEPAD32)
 if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "UART"
@@ -288,6 +300,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
                 ${SWITCH_PICO_SOURCE_DIR}/input/haptics_transport_probe.cpp)
         target_compile_definitions(switch-pico PRIVATE
                 SWITCH_PICO_HAPTICS_EXPERIMENT=1
+                SWITCH_PICO_HD_PACKET_FRAMES=${SWITCH_PICO_HD_PACKET_FRAMES}
                 SWITCH_PICO_HAPTICS_EXPERIMENT_RAM=$<BOOL:${SWITCH_PICO_HAPTICS_EXPERIMENT_RAM}>)
         target_compile_definitions(bluepad32 PRIVATE
                 SWITCH_PICO_HAPTICS_EXPERIMENT=1)

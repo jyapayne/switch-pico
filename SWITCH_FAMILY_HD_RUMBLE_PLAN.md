@@ -20,7 +20,7 @@ Start with a genuine original Switch Pro Controller, then original standalone Jo
 
 ### Important timing qualification caveat
 
-Do not generalize single-controller DualSense results to mixed-controller loads. A 32-frame/93.75-packet-per-second DualSense run passed roughly 65 seconds with one controller, but a later Switch Pro + DualSense test with continuous USB motion reads recorded **80 skipped audio slots over 16.6 seconds**, despite receiving all 2,050 USB commands with no command drops or send failures. Maximum permission wait was 17,180 us and the eight outgoing ACL credits were observed exhausted. Final cadence qualification is active work; do not assume 32-frame PCM is universally sustainable or independently change it as part of this Nintendo backend task.
+Do not generalize single-controller DualSense results to mixed-controller loads. A 32-frame/93.75-packet-per-second run passed roughly 65 seconds with one controller, but a later Switch Pro + DualSense test with continuous USB motion reads recorded **80 skipped audio slots over 16.6 seconds**, despite receiving all 2,050 USB commands with no command drops or send failures. Maximum permission wait was 17,180 us and the eight outgoing ACL credits were observed exhausted. The standard native cadence is consequently **64 frames / 46.875 packets per second** at the same 300 MHz/1.3 V, with 32 frames an explicit experiment. Preserve the current cadence choice and coordinate before changing it as part of this Nintendo backend task.
 
 The Nintendo path should not need PCM packets at all. Its small native commands have a different bandwidth budget, which still needs real multi-controller measurement.
 
