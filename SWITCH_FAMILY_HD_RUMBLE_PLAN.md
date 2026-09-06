@@ -135,22 +135,37 @@ Remote feature responses were Pro `bff8cbfecbef7b87` and DualSense
 | Distinct nonzero effects, Pro no-sniff policy, receive bound 2 | 1,025 | 947 / 78 | 5 |
 | Changing zero-amplitude commands, normal policy, receive bound 1 | 513 | 214 / 298 | 21 |
 | Changing zero-amplitude commands, Pro no-sniff policy, receive bound 1 | 513 | 491 / 21 | 1 |
+| Changing zero-amplitude commands, Pro no-sniff policy, receive bound 4 | 1,025 | 988 / 36 | 4 |
 
-The two zero-amplitude runs each coalesced one command; the other commands
+The zero-amplitude runs each coalesced one command; the other commands
 exercise the 11-byte native transport without driving actuators. They do not
 prove nonzero-effect fidelity. Exit-sniff requests alone failed to keep the
 Pro active; that unproven automatic-wake code has been removed. The no-sniff
 policy is an experimental per-link setting, not a qualified production default.
 
-The current diagnostic build uses receive bound 4 and is awaiting normal
-controller reconnects after flashing. Its temporary `build-aio/link_probe.cpp`
-and `SWITCH_PICO_LINK_PROBE` hooks are **uncommitted experiment code**, not
-packaged release firmware. Operation `0x44`, diagnostic schema 2, captures link
-snapshots, selected HCI command/mode events and disconnect reasons. Separate
-OUT requests allow explicit Pro policy 1 (role-switch only), policy 5 (normal
-role-switch plus sniff), or a readback; no automatic policy change occurs.
-Keep approvals/bonds/profiles unchanged. Remove these hooks and restore or
-qualify the receive bound before publishing another production build.
+The current diagnostic build supports **same-boot** receive bounds 1/2/4 and
+incoming-credit thresholds 2/3, retaining the existing credit timer and three
+advertised receive buffers. Runtime controls were exercised and returned to
+baseline receive bound 1 / credit threshold 2; the radio workload matrix is
+awaiting normal Home/PS reconnects after flashing. Native approval remains on.
+
+Temporary `build-aio/link_probe.cpp`, `link_probe_config.h`,
+`link_probe_credit.patch`, and `SWITCH_PICO_LINK_PROBE` CMake/management hooks
+are **uncommitted experiment code**, not packaged release firmware.
+Operation `0x44`, diagnostic schema 2, returns 468 bytes containing link
+snapshots, selected HCI command/mode events, disconnect reasons, and control
+completion state. OUT payload `<HH>` supports:
+
+- connected Pro handle + policy 1 (role-switch only), 5 (normal role-switch
+  plus sniff), or `0xffff` (readback);
+- handle `0xffff` + value 2/3 to set incoming-credit batching threshold;
+- handle `0xffff` + value `0x101`/`0x102`/`0x104` to set receive bound 1/2/4.
+
+No link policy changes automatically. The prepared comparison matrix uses
+active Pro policy, tests `(receive, credit)` pairs `(1,2), (2,2), (4,2),
+(4,3), (2,3), (1,3), (1,2)`, and restores baseline controls afterward.
+Keep approvals/bonds/profiles unchanged. Remove diagnostic hooks and restore
+or qualify settings before publishing another production build.
 
 Linux's current Nintendo driver also documents disconnect risk from excessive
 output traffic and uses input-report-aware throttling. This is corroborating
