@@ -19,11 +19,9 @@ namespace {
 
 
 bool incoming_connections = false;
-int scan_starts = 0;
-int scan_stops = 0;
 bool scanning_enabled = false;
-int classic_scan_starts = 0;
-int classic_scan_stops = 0;
+bool aggregate_scanning_enabled = false;
+bool background_scan_parameters = false;
 bool classic_scanning_enabled = false;
 uni_platform* installed_platform = nullptr;
 bool observed_status_led_on = false;
@@ -67,6 +65,11 @@ void require_clear_completion_pending();
 void require_clear_snapshot_published();
 void request_repeated_clear_during_disconnect();
 gap_connection_type_t gap_connection_types[256]{};
+uint16_t negotiated_intervals[256]{};
+uint16_t pending_intervals[256]{};
+unsigned interval_requests[256]{};
+bool defer_interval_updates = false;
+bool reject_interval_updates = false;
 uint8_t xbox_left_trigger = 0;
 uint8_t xbox_right_trigger = 0;
 unsigned xbox_quad_calls = 0;
@@ -127,6 +130,8 @@ uni_hid_device_t device(
     result.gamepad = gamepad;
     result.conn.protocol = protocol;
     result.conn.handle = static_cast<hci_con_handle_t>(0x40 + idx);
+    negotiated_intervals[result.conn.handle] = 6;
+    pending_intervals[result.conn.handle] = 0;
     result.conn.btaddr[5] = static_cast<uint8_t>(idx + 1);
     result.vendor_id = static_cast<uint16_t>(0x1000 + idx);
     result.product_id = static_cast<uint16_t>(0x2000 + idx);
@@ -177,6 +182,17 @@ extern "C" bool uni_switch2_pairing_get(
     *address_type = switch2_pairing_types[index];
     memcpy(address, switch2_pairings[index], sizeof(bd_addr_t));
     return true;
+}
+
+extern "C" bool uni_switch2_pairing_known(
+    uint8_t address_type, const uint8_t address[6]) {
+    for (uint8_t index = 0; index < switch2_pairing_count; ++index) {
+        if (switch2_pairing_types[index] == address_type &&
+            memcmp(switch2_pairings[index], address, sizeof(bd_addr_t)) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 extern "C" bool uni_switch2_pairing_clear(void) {
@@ -268,6 +284,15 @@ uni_hid_device_t* uni_hid_device_get_instance_for_connection_handle(
     }
     return nullptr;
 }
+
+uni_hid_device_t* uni_hid_device_get_instance_for_address(const bd_addr_t address) {
+    for (size_t index = 0; index < lookup_device_count; ++index) {
+        if (memcmp(lookup_devices[index]->conn.btaddr, address, sizeof(bd_addr_t)) == 0) {
+            return lookup_devices[index];
+        }
+    }
+    return nullptr;
+}
 void uni_hid_device_disconnect(uni_hid_device_t* device) {
     require_clear_completion_pending();
     request_repeated_clear_during_disconnect();
@@ -281,37 +306,42 @@ void uni_bt_allow_incoming_connections(bool enabled) {
 
 
 void uni_bt_bredr_scan_start() {
-    ++classic_scan_starts;
     classic_scanning_enabled = true;
 }
 
 void uni_bt_bredr_scan_stop() {
-    if (classic_scanning_enabled) {
-        ++classic_scan_stops;
-    }
     classic_scanning_enabled = false;
 }
 
 void uni_bt_le_scan_start() {
-    ++scan_starts;
     scanning_enabled = true;
 }
 
 void uni_bt_le_scan_stop() {
-    if (scanning_enabled) {
-        ++scan_stops;
-    }
     scanning_enabled = false;
+}
+
+void uni_bt_le_set_background_scan(bool enabled) {
+    require(!scanning_enabled, "LE scan timing must change only while scanning is stopped");
+    background_scan_parameters = enabled;
 }
 
 void uni_bt_start_scanning_and_autoconnect_unsafe() {
     require_clear_completion_pending();
     require_clear_snapshot_published();
+    if (aggregate_scanning_enabled) {
+        return;
+    }
+    aggregate_scanning_enabled = true;
     uni_bt_bredr_scan_start();
     uni_bt_le_scan_start();
 }
 
 void uni_bt_stop_scanning_unsafe() {
+    if (!aggregate_scanning_enabled) {
+        return;
+    }
+    aggregate_scanning_enabled = false;
     uni_bt_bredr_scan_stop();
     uni_bt_le_scan_stop();
 }
@@ -329,6 +359,25 @@ gap_connection_type_t gap_get_connection_type(
                        sizeof(gap_connection_types[0])
                ? gap_connection_types[connection_handle]
                : GAP_CONNECTION_INVALID;
+}
+
+uint16_t gap_le_connection_interval(hci_con_handle_t handle) {
+    require(handle < 256, "interval read must target a valid fake connection");
+    return negotiated_intervals[handle];
+}
+
+int gap_update_connection_parameters(hci_con_handle_t handle, uint16_t minimum,
+                                    uint16_t maximum, uint16_t latency,
+                                    uint16_t supervision_timeout) {
+    require(handle < 256 && gap_get_connection_type(handle) == GAP_CONNECTION_LE,
+            "interval policy must not update a Classic or invalid link");
+    require(minimum == maximum && latency == 0 && supervision_timeout >= 100,
+            "interval request must retain valid supervision and peripheral latency");
+    ++interval_requests[handle];
+    if (reject_interval_updates) return 0x0c;
+    if (defer_interval_updates) pending_intervals[handle] = minimum;
+    else negotiated_intervals[handle] = minimum;
+    return ERROR_CODE_SUCCESS;
 }
 
 int gap_link_key_iterator_init(btstack_link_key_iterator_t* iterator) {
@@ -749,7 +798,7 @@ void start_backend() {
     bluepad32_input_backend_init();
     platform_on_init_complete();
     require(incoming_connections && scanning_enabled &&
-                classic_scanning_enabled && scan_starts == 1 &&
+                classic_scanning_enabled &&
                 link_supervision_timeout ==
                     kClassicLinkSupervisionTimeout &&
                 !bondable && accepted_stk_methods == 0 &&
@@ -903,6 +952,14 @@ void ready_switch2(uni_hid_device_t& controller) {
     platform_on_device_connected(&controller);
     require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
             "Switch2 physical device must become ready");
+}
+
+void remember_switch2(const uni_hid_device_t& controller) {
+    require(switch2_pairing_count < UNI_SWITCH2_PAIRING_CAPACITY,
+            "test proprietary trust inventory overflow");
+    switch2_pairing_types[switch2_pairing_count] = controller.switch2_identity_address_type;
+    memcpy(switch2_pairings[switch2_pairing_count], controller.conn.btaddr, sizeof(bd_addr_t));
+    ++switch2_pairing_count;
 }
 
 Bluepad32SlotSnapshot slot_snapshot(uint8_t index) {
@@ -1534,6 +1591,256 @@ void test_switch2_admission() {
             "Pro2 must preserve vertical normal controls and ingest remappable extras");
 }
 
+void test_switch2_radio_policy() {
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    auto classic = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    auto other_ble = device(3, true, UNI_BT_CONN_PROTOCOL_BLE);
+    ready_switch2(left);
+    ready_switch2(right);
+    platform_on_device_connected(&other_ble);
+    require(platform_on_device_ready(&other_ble) == UNI_ERROR_SUCCESS,
+            "unrelated BLE controller must join");
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6,
+            "a pair without Classic must retain fast intervals");
+    platform_on_device_connected(&classic);
+    require(negotiated_intervals[left.conn.handle] == 24 &&
+                negotiated_intervals[right.conn.handle] == 24 &&
+                negotiated_intervals[other_ble.conn.handle] == 6,
+            "Classic setup must relax both physical halves before native attachment, not unrelated BLE");
+    require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
+            "Classic controller must complete setup alongside the pair");
+    const auto pair = slot_snapshot(0);
+    platform_on_device_disconnected(&classic);
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6 &&
+                slot_snapshot(0).connection_generation == pair.connection_generation,
+            "Classic departure must restore fast intervals without rebinding the pair");
+    platform_on_device_connected(&classic);
+    require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
+            "Classic reconnect must complete");
+    platform_on_device_disconnected(&left);
+    require(negotiated_intervals[right.conn.handle] == 6,
+            "a single surviving Switch2 link must return to fast scheduling even with Classic");
+    left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    ready_switch2(left);
+    require(negotiated_intervals[left.conn.handle] == 24 &&
+                negotiated_intervals[right.conn.handle] == 24,
+            "physical index and handle reuse must negotiate mixed intervals on the new connection");
+}
+
+void test_switch2_radio_settling() {
+    start_backend();
+    auto classic = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    platform_on_device_connected(&classic);
+    require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
+            "Classic-first connection must become ready");
+    ready_switch2(left);
+    defer_interval_updates = true;
+    now_ms = UINT32_MAX - 10;
+    platform_on_device_connected(&right);
+    require(interval_requests[right.conn.handle] == 0,
+            "pending Switch2 setup must retain ownership of its initial interval");
+    require(platform_on_device_ready(&right) == UNI_ERROR_SUCCESS,
+            "second Switch2 connection must become ready");
+    platform_on_device_disconnected(&classic);
+    // The controller completes the old update after the topology reversed.
+    for (auto* half : {&left, &right}) {
+        negotiated_intervals[half->conn.handle] = pending_intervals[half->conn.handle];
+    }
+    now_ms += 50;
+    process_configuration_timer(&g_configuration_timer);
+    for (auto* half : {&left, &right}) {
+        negotiated_intervals[half->conn.handle] = pending_intervals[half->conn.handle];
+        require(negotiated_intervals[half->conn.handle] == 6,
+                "late mixed-mode completion must not strand a pair at slow intervals across clock wrap");
+    }
+    process_configuration_timer(&g_configuration_timer);
+    defer_interval_updates = false;
+    reject_interval_updates = true;
+    platform_on_device_connected(&classic);
+    const unsigned attempts = interval_requests[left.conn.handle];
+    now_ms += 999;
+    process_configuration_timer(&g_configuration_timer);
+    require(interval_requests[left.conn.handle] == attempts,
+            "rejected negotiation must not flood the HCI command queue");
+    reject_interval_updates = false;
+    ++now_ms;
+    process_configuration_timer(&g_configuration_timer);
+    require(negotiated_intervals[left.conn.handle] == 24 &&
+                negotiated_intervals[right.conn.handle] == 24,
+            "transiently rejected negotiation must recover without reconnect or pairing");
+}
+
+void test_switch2_mate_reconnect() {
+    start_backend();
+    auto right = switch2_device(0, UNI_SW2_JOYCON_R_PID);
+    auto left = switch2_device(1, UNI_SW2_JOYCON_L_PID);
+    left.conn.btaddr[0] = 0xc1;
+    left.switch2_identity_address_type = BD_ADDR_TYPE_LE_RANDOM;
+    remember_switch2(right);
+    remember_switch2(left);
+    register_lookup_device(&right);
+    register_lookup_device(&left);
+    ready_switch2(right);
+    require(scanning_enabled && background_scan_parameters &&
+                !classic_scanning_enabled && incoming_connections &&
+                !bondable && accepted_stk_methods == 0 &&
+                !switch_pico_switch2_pairing_allowed(),
+            "first remembered half must seek its mate with low-duty BLE and authentication closed");
+    dispatch_pairing_event(HCI_EVENT_USER_CONFIRMATION_REQUEST);
+    dispatch_pairing_event(HCI_EVENT_USER_PASSKEY_REQUEST);
+    require(confirmation_accepts == 0 && passkey_accepts == 0 &&
+                confirmation_rejections == 1 && passkey_rejections == 1,
+            "mate scanning must not authorize new Classic authentication");
+
+    bd_addr_t missing = {1, 2, 3, 4, 5, 6};
+    require(platform_on_device_discovered(missing, "Joy-Con 2 (L)", 0, 0) ==
+                UNI_ERROR_IGNORE_DEVICE,
+            "a device name without a prepared parser candidate cannot authorize passive discovery");
+    const auto reject_left = [&]() {
+        require(platform_on_device_discovered(left.conn.btaddr, "Joy-Con 2 (L)", 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE &&
+                    scanning_enabled && !classic_scanning_enabled &&
+                    !switch_pico_switch2_pairing_allowed(),
+                "rejected mate candidates must leave the bounded passive policy unchanged");
+    };
+    ++left.conn.btaddr[5];
+    reject_left();
+    --left.conn.btaddr[5];
+    left.product_id = UNI_SW2_JOYCON_R_PID;
+    reject_left();
+    left.product_id = UNI_SW2_PRO_PID;
+    reject_left();
+    left.product_id = UNI_SW2_JOYCON_L_PID;
+    left.conn.protocol = UNI_BT_CONN_PROTOCOL_BR_EDR;
+    reject_left();
+    left.conn.protocol = UNI_BT_CONN_PROTOCOL_BLE;
+    ++left.vendor_id;
+    reject_left();
+    --left.vendor_id;
+    left.switch2_identity_valid = false;
+    reject_left();
+    left.switch2_identity_valid = true;
+    left.switch2_identity_address_type = BD_ADDR_TYPE_LE_PUBLIC;
+    reject_left();
+    left.switch2_identity_address_type = BD_ADDR_TYPE_LE_RANDOM;
+    require(platform_on_device_discovered(left.conn.btaddr, nullptr, 0, 0) ==
+                UNI_ERROR_SUCCESS,
+            "remembered opposite static-random half must be admitted outside the pairing window");
+
+    // The parser stops GAP scan before it has a backend slot to reserve.
+    uni_bt_le_scan_stop();
+    platform_on_device_connected(&left);
+    require(!scanning_enabled && !classic_scanning_enabled,
+            "remembered mate setup must pause scan even when GAP already stopped it");
+    platform_on_device_disconnected(&left);
+    require(scanning_enabled && background_scan_parameters && !classic_scanning_enabled,
+            "failed setup must resume remembered mate scanning");
+    uni_bt_le_scan_stop();
+    platform_on_device_connected(&left);
+    require(!scanning_enabled && !classic_scanning_enabled && incoming_connections,
+            "mate setup must pause background scanning while reserving physical capacity");
+    require(platform_on_device_ready(&left) == UNI_ERROR_SUCCESS &&
+                slot_snapshot(0).active && !slot_snapshot(1).active &&
+                controller_identity_equal(slot_snapshot(0).identity, identity_for_device(&left)) &&
+                !scanning_enabled && !classic_scanning_enabled,
+            "ready remembered mate must merge without a pairing window and stop background scanning");
+    auto ordinary = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    platform_on_device_connected(&ordinary);
+    require(platform_on_device_ready(&ordinary) == UNI_ERROR_SUCCESS &&
+                !scanning_enabled && !classic_scanning_enabled,
+            "a complete pair plus incoming Classic controller must not keep LE scanning");
+    platform_on_device_disconnected(&left);
+    require(scanning_enabled && background_scan_parameters &&
+                !classic_scanning_enabled && slot_snapshot(2).active,
+            "losing a half must resume its mate scan without disturbing an ordinary controller");
+}
+
+void test_switch2_mate_pending() {
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(3, UNI_SW2_JOYCON_R_PID);
+    remember_switch2(left);
+    remember_switch2(right);
+    register_lookup_device(&right);
+    ready_switch2(left);
+    auto first = device(1, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    auto second = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    auto third = device(3, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    platform_on_device_connected(&first);
+    platform_on_device_connected(&second);
+    require(!scanning_enabled && !classic_scanning_enabled && incoming_connections &&
+                platform_on_device_discovered(right.conn.btaddr, nullptr, 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE,
+            "any pending setup must pause scanning and reject otherwise valid mates");
+    require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS &&
+                !scanning_enabled,
+            "one resolved setup must not resume mate scanning while another is pending");
+    platform_on_device_disconnected(&second);
+    require(scanning_enabled && background_scan_parameters &&
+                !classic_scanning_enabled &&
+                platform_on_device_discovered(right.conn.btaddr, nullptr, 0, 0) ==
+                    UNI_ERROR_SUCCESS,
+            "last pending setup failure must resume passive mate discovery and admission");
+    platform_on_device_connected(&second);
+    require(!scanning_enabled &&
+                platform_on_device_ready(&second) == UNI_ERROR_SUCCESS &&
+                scanning_enabled && !classic_scanning_enabled,
+            "last pending setup becoming ready must resume the unmatched half scan");
+    platform_on_device_connected(&third);
+    require(platform_on_device_ready(&third) == UNI_ERROR_SUCCESS &&
+                !scanning_enabled && !classic_scanning_enabled && !incoming_connections &&
+                platform_on_device_discovered(right.conn.btaddr, nullptr, 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE,
+            "four physical controllers must stop mate scanning even with an unmatched half");
+    platform_on_device_disconnected(&third);
+    require(scanning_enabled && background_scan_parameters && incoming_connections,
+            "free physical capacity must restore the waiting half scan");
+
+    switch2_clear_succeeds = false;
+    bluepad32_input_backend_clear_pairings();
+    process_rumble_timer(&g_rumble_timer);
+    require(!scanning_enabled && !classic_scanning_enabled && !incoming_connections,
+            "failed trust deletion must explicitly stop a direct background LE scan");
+    platform_on_device_disconnected(&right);
+    platform_on_device_disconnected(&left);
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
+    require(!scanning_enabled && !classic_scanning_enabled && !incoming_connections &&
+                !switch_pico_switch2_pairing_allowed() &&
+                platform_on_device_discovered(right.conn.btaddr, nullptr, 0, 0) ==
+                    UNI_ERROR_IGNORE_DEVICE,
+            "late disconnects and pairing requests must not clear the failed-closed latch");
+}
+
+void test_switch2_mate_pairing_window() {
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    ready_switch2(left);
+    require(scanning_enabled && background_scan_parameters && !classic_scanning_enabled,
+            "solo half must enter background discovery before opening pairing");
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
+    require(scanning_enabled && !background_scan_parameters && classic_scanning_enabled &&
+                bondable && accepted_stk_methods == kAllBlePairingMethods,
+            "explicit pairing must restore full discovery timing and the existing authentication window");
+    now_ms = g_pairing_window_deadline_ms;
+    process_rumble_timer(&g_rumble_timer);
+    require(scanning_enabled && background_scan_parameters && !classic_scanning_enabled &&
+                !bondable && accepted_stk_methods == 0 &&
+                !switch_pico_switch2_pairing_allowed(),
+            "pairing expiry must restore low-duty mate discovery without extending authentication");
+    platform_on_device_disconnected(&left);
+    require(scanning_enabled && !background_scan_parameters && classic_scanning_enabled &&
+                !bondable && accepted_stk_methods == 0,
+            "last controller loss must restore idle discovery defaults without opening pairing");
+}
+
 void test_switch2_pairing_inventory() {
     start_pairing_backend();
     switch2_pairing_count = 2;
@@ -1630,23 +1937,21 @@ void test_ready_order(bool reverse) {
         }
 
         if (position + 1 < kSlotCount) {
-            require(scan_stops == 0,
-                    "scanning must continue while any slot remains free");
+            require(scanning_enabled && classic_scanning_enabled,
+                    "pairing-window discovery must continue while a physical slot remains free");
             require(incoming_connections,
                     "incoming connections must remain enabled before all slots are ready");
         }
     }
 
-    require(scan_stops == 1,
-            "scanning must stop exactly when all four slots are ready");
+    require(!scanning_enabled && !classic_scanning_enabled,
+            "discovery must stop when all four physical slots are full");
     require(!incoming_connections,
             "incoming connections must be disabled only when all slots are full");
 
     for (int slot = 0; slot < kSlotCount; ++slot) {
-        const int starts_before_disconnect = scan_starts;
         platform_on_device_disconnected(&devices[slot]);
-        require(scan_starts == starts_before_disconnect + 1 &&
-                    scanning_enabled && incoming_connections,
+        require(scanning_enabled && classic_scanning_enabled && incoming_connections,
                 "disconnecting any slot must resume connection policy");
 
         for (int candidate = 0; candidate < kSlotCount; ++candidate) {
@@ -1768,12 +2073,6 @@ void test_independent_lifecycle() {
     require(g_slots[0].device == &aborted && !g_slots[0].active,
             "connected device must remain identifiable while becoming ready");
 
-    const int starts_before_aborted_disconnect = scan_starts;
-    const int classic_starts_before_aborted_disconnect =
-        classic_scan_starts;
-    const int stops_before_aborted_disconnect = scan_stops;
-    const int classic_stops_before_aborted_disconnect =
-        classic_scan_stops;
     platform_on_device_disconnected(&aborted);
     require(g_slots[0].device == nullptr && !g_slots[0].active,
             "pre-ready disconnect must clear its pending slot identity");
@@ -1781,13 +2080,7 @@ void test_independent_lifecycle() {
             "pre-ready disconnect must invalidate its connection generation");
     require(g_connection_status == ConnectionStatus::Scanning &&
                 scanning_enabled && classic_scanning_enabled &&
-                incoming_connections &&
-                scan_starts == starts_before_aborted_disconnect + 1 &&
-                classic_scan_starts ==
-                    classic_starts_before_aborted_disconnect + 1 &&
-                scan_stops == stops_before_aborted_disconnect + 1 &&
-                classic_scan_stops ==
-                    classic_stops_before_aborted_disconnect + 1,
+                incoming_connections,
             "pre-ready disconnect must restart Classic and BLE scans");
 
     uni_hid_device_t devices[kSlotCount] = {
@@ -1850,7 +2143,6 @@ void test_independent_lifecycle() {
 
     const uint32_t first_pending_generation =
         g_slots[0].connection_generation;
-    const int starts_before_first_pending_disconnect = scan_starts;
     platform_on_device_disconnected(&devices[0]);
     require(g_slots[0].device == nullptr && !g_slots[0].active,
             "pre-ready disconnect must clear only its own pending identity");
@@ -1864,8 +2156,7 @@ void test_independent_lifecycle() {
             "pending disconnect beside peers must invalidate its generation");
     require(g_connection_status == ConnectionStatus::Connecting &&
                 scanning_enabled && classic_scanning_enabled &&
-                incoming_connections &&
-                scan_starts == starts_before_first_pending_disconnect + 1,
+                incoming_connections,
             "open pairing slot must preserve pending peers and resume scanning");
 
     for (int slot = 1; slot < kSlotCount; ++slot) {
@@ -2025,10 +2316,8 @@ void test_independent_lifecycle() {
     bluepad32_input_backend_queue_rumble(3, ControllerRumbleOutput{55, 66});
     const uint32_t disconnected_generation =
         baseline_connection_generations[3];
-    const int starts_before_slot_three_disconnect = scan_starts;
     platform_on_device_disconnected(&devices[3]);
-    require(scan_starts == starts_before_slot_three_disconnect + 1 &&
-                scanning_enabled && incoming_connections,
+    require(scanning_enabled && classic_scanning_enabled && incoming_connections,
             "slot 3 disconnect must resume scanning and incoming connections");
     require(!read_controller_state(3, &states[3]) &&
                 !states[3].button_north && states[3].left_stick_x == 0,
@@ -2162,10 +2451,8 @@ void test_independent_lifecycle() {
     uni_hid_device_t replacements[kSlotCount] = {
         device(0), device(1), device(2), device(3)};
     for (int slot = 0; slot < 3; ++slot) {
-        const int starts_before_disconnect = scan_starts;
         platform_on_device_disconnected(&devices[slot]);
-        require(scan_starts == starts_before_disconnect + 1 &&
-                    scanning_enabled && incoming_connections,
+        require(scanning_enabled && classic_scanning_enabled && incoming_connections,
                 "disconnecting slots 0-2 must resume connection policy");
         require(!read_controller_state(slot, &states[slot]) &&
                     states[slot].left_stick_x == 0,
@@ -3369,14 +3656,14 @@ void test_wake_identity_gates_connections() {
     require(switch2_wake_initializations == 1 &&
                 g_connection_policy_state ==
                     ConnectionPolicyState::Uninitialized &&
-                scan_starts == 0 && classic_scan_starts == 0 &&
+                !scanning_enabled && !classic_scanning_enabled &&
                 !incoming_connections,
             "controller discovery started before wake identity was ready");
 
     switch2_connections_ready = true;
     process_rumble_timer(&g_rumble_timer);
     require(g_connection_policy_state == ConnectionPolicyState::Open &&
-                scan_starts == 1 && classic_scan_starts == 1 &&
+                scanning_enabled && classic_scanning_enabled &&
                 incoming_connections,
             "controller discovery did not start after wake identity setup");
 }
@@ -3677,6 +3964,16 @@ int main(int argc, char** argv) {
         test_switch2_multiple_pairs();
     } else if (scenario == "switch2-admission") {
         test_switch2_admission();
+    } else if (scenario == "switch2-radio-policy") {
+        test_switch2_radio_policy();
+    } else if (scenario == "switch2-radio-settling") {
+        test_switch2_radio_settling();
+    } else if (scenario == "switch2-mate-reconnect") {
+        test_switch2_mate_reconnect();
+    } else if (scenario == "switch2-mate-pending") {
+        test_switch2_mate_pending();
+    } else if (scenario == "switch2-mate-pairing-window") {
+        test_switch2_mate_pairing_window();
     } else if (scenario == "switch2-pairing-inventory") {
         test_switch2_pairing_inventory();
     } else if (scenario == "ready-forward") {

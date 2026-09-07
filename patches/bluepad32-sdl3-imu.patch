@@ -58,6 +58,15 @@ diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/
  #include "uni_common.h"
  #include "uni_config.h"
  #include "uni_hid_device.h"
+@@ -93,7 +94,7 @@
+     gap_connect(addr, addr_type);
+ }
+ 
+-static void resume_scanning_hint(void) {
++void uni_bt_le_resume_scanning_if_enabled(void) {
+     // Resume scanning, only if it was scanning before connecting
+     if (is_scanning) {
+         gap_start_scan();
 @@ -107,7 +108,7 @@
      uni_hid_device_t* device;
  
@@ -67,6 +76,24 @@ diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/
          status = hids_client_disconnect(device->hids_cid);
          if (status != ERROR_CODE_SUCCESS) {
              loge("Failed to disconnect HIDS client for hids_cid=%d, status=%d\n", device->hids_cid, status);
+@@ -118,7 +119,7 @@
+     if (gap_get_connection_type(con_handle) != GAP_CONNECTION_INVALID)
+         gap_disconnect(con_handle);
+ 
+-    resume_scanning_hint();
++    uni_bt_le_resume_scanning_if_enabled();
+ }
+ 
+ static void get_advertisement_data(const uint8_t* adv_data, uint8_t adv_size, uint16_t* appearance, char* name) {
+@@ -297,7 +298,7 @@
+                     uni_hid_device_connect(device);
+                     uni_hid_device_set_ready(device);
+ 
+-                    resume_scanning_hint();
++                    uni_bt_le_resume_scanning_if_enabled();
+                     break;
+                 default:
+                     loge("HID service client connection failed, err 0x%02x.\n", status);
 @@ -560,10 +561,22 @@
      type = hci_event_packet_get_type(packet);
      switch (type) {
@@ -122,7 +149,7 @@ diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/
 +                hci_subevent_le_connection_complete_get_status(packet) != ERROR_CODE_SUCCESS) {
 +                // A failed event has no valid connection handle to disconnect.
 +                uni_hid_device_delete(device);
-+                resume_scanning_hint();
++                uni_bt_le_resume_scanning_if_enabled();
 +                break;
 +            }
              uni_hid_device_set_connection_handle(device, con_handle);
@@ -155,6 +182,36 @@ diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/
  
      gap_event_advertising_report_get_address(packet, addr);
      if (uni_hid_device_get_instance_for_address(addr)) {
+@@ -826,7 +866,7 @@
+     ARG_UNUSED(packet);
+     ARG_UNUSED(size);
+ 
+-    resume_scanning_hint();
++    uni_bt_le_resume_scanning_if_enabled();
+ }
+ 
+ void uni_bt_le_list_bonded_keys(void) {
+@@ -872,6 +912,11 @@
+         gap_delete_bonding((bd_addr_type_t)entry_address_type, entry_address);
+     }
+     logi(".\n");
++}
++
++void uni_bt_le_set_background_scan(bool enabled) {
++    gap_set_scan_parameters(0 /* type: passive */, enabled ? 160 : 48 /* interval */,
++                            enabled ? 16 : 48 /* window */);
+ }
+ 
+ void uni_bt_le_setup(void) {
+@@ -921,7 +966,7 @@
+     // scan_parameters_service_client_init();
+     device_information_service_client_init();
+ 
+-    gap_set_scan_parameters(0 /* type: passive */, 48 /* interval */, 48 /* window */);
++    uni_bt_le_set_background_scan(false);
+ }
+ 
+ void uni_bt_le_scan_start(void) {
 diff --git a/src/components/bluepad32/controller/uni_gamepad.c b/src/components/bluepad32/controller/uni_gamepad.c
 --- a/src/components/bluepad32/controller/uni_gamepad.c
 +++ b/src/components/bluepad32/controller/uni_gamepad.c
@@ -168,6 +225,18 @@ diff --git a/src/components/bluepad32/controller/uni_gamepad.c b/src/components/
      {CONTROLLER_TYPE_MobileTouch, "Mobile Touch"},
      {CONTROLLER_TYPE_XInputSwitchController, "XInput Switch"},
      {CONTROLLER_TYPE_PS5Controller, "DualSense"},
+diff --git a/src/components/bluepad32/include/bt/uni_bt_le.h b/src/components/bluepad32/include/bt/uni_bt_le.h
+--- a/src/components/bluepad32/include/bt/uni_bt_le.h
++++ b/src/components/bluepad32/include/bt/uni_bt_le.h
+@@ -25,6 +25,8 @@
+ 
+ void uni_bt_le_scan_start(void);
+ void uni_bt_le_scan_stop(void);
++void uni_bt_le_set_background_scan(bool enabled);
++void uni_bt_le_resume_scanning_if_enabled(void);
+ 
+ // Called from uni_hid_device_disconnect()
+ void uni_bt_le_disconnect(uni_hid_device_t* d);
 diff --git a/src/components/bluepad32/include/controller/uni_controller_list.h b/src/components/bluepad32/include/controller/uni_controller_list.h
 --- a/src/components/bluepad32/include/controller/uni_controller_list.h
 +++ b/src/components/bluepad32/include/controller/uni_controller_list.h

@@ -13,6 +13,7 @@
 
 #include <btstack.h>
 #include "bt/uni_bt_defines.h"
+#include "bt/uni_bt_le.h"
 #include "parser/uni_hid_parser_imu.h"
 #include "parser/uni_switch2_pairing.h"
 #include "sdkconfig.h"
@@ -251,7 +252,8 @@ static void sw2_subscribe(sw2_instance_t* ins, bool input) {
 }
 
 static bool sw2_transient_write_error(uint8_t status) {
-    return status == BTSTACK_ACL_BUFFERS_FULL || status == GATT_CLIENT_IN_WRONG_STATE;
+    return status == BTSTACK_ACL_BUFFERS_FULL || status == GATT_CLIENT_BUSY ||
+           status == GATT_CLIENT_IN_WRONG_STATE;
 }
 
 static void sw2_try_command(sw2_instance_t* ins) {
@@ -715,8 +717,6 @@ bool uni_bt_le_switch2_handle_advertisement(const uint8_t* packet, uint16_t size
         return true;
     uint8_t rssi = gap_event_advertising_report_get_rssi(packet);
     const uint16_t cod = UNI_BT_COD_MAJOR_PERIPHERAL | UNI_BT_COD_MINOR_GAMEPAD;
-    if (uni_hid_device_on_device_discovered(address, "Switch2", cod, rssi) != UNI_ERROR_SUCCESS)
-        return true;
     sw2_instance_t* ins = NULL;
     for (unsigned i = 0; i < CONFIG_BLUEPAD32_MAX_DEVICES; ++i) {
         if (sw2_instances[i].state == SW2_OFF &&
@@ -754,10 +754,18 @@ bool uni_bt_le_switch2_handle_advertisement(const uint8_t* packet, uint16_t size
     uni_hid_device_set_name(d, "Switch2");
     uni_bt_conn_set_state(&d->conn, UNI_BT_CONN_STATE_DEVICE_DISCOVERED);
     d->conn.rssi = rssi;
+    // Platform admission needs the validated transport and identity metadata.
+    // Keep generic allowlist/RSSI filtering authoritative before touching scan.
+    if (uni_hid_device_on_device_discovered(address, "Switch2", cod, rssi) != UNI_ERROR_SUCCESS) {
+        uni_hid_device_delete(d);
+        return true;
+    }
     gap_stop_scan(); // Existing BLE lifecycle owns resuming scan under policy.
     uint8_t status = gap_connect(address, address_type);
-    if (status != ERROR_CODE_SUCCESS)
+    if (status != ERROR_CODE_SUCCESS) {
         sw2_fail(ins, "BLE connection request failed", status);
+        uni_bt_le_resume_scanning_if_enabled();
+    }
     return true;
 }
 

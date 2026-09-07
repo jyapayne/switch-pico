@@ -160,6 +160,14 @@ including an additional 8BitDo Ultimate, require opening the BOOTSEL pairing
 window while another controller is active. Do not restore continuous inquiry
 as a convenience feature; it causes gameplay latency.
 
+A narrowly scoped exception now permits low-duty passive BLE discovery while
+a ready solo Joy-Con 2 awaits a remembered opposite half. It requires free
+physical capacity and no pending controller setup, accepts only remembered
+opposite-half candidates, and stops when the pair completes. It neither
+starts Classic inquiry nor opens new authentication. Lifecycle regressions
+cover setup failure, capacity exhaustion, pairing-window transitions and
+unrelated-controller isolation.
+
 ## Implementation principles
 
 ### Protocol-neutral state
@@ -523,8 +531,8 @@ Target hardware families:
 | DualShock 4 | input, Switch motion, rumble, lightbar |
 | Switch Pro | input, motion, rumble, player LED |
 | Joy-Con L/R | each half as the standalone controller exposed by Bluepad32 |
-| Switch 2 Pro | BLE setup, sticks/motion and C/GL/GR observed; rumble feel/reconnect still need qualification |
-| Joy-Con 2 L/R | solo and merged-pair software support; both-order/disconnect regressions pass; hardware qualification pending |
+| Switch 2 Pro | BLE setup, sticks/motion and C/GL/GR observed; native HD frequencies and timing physically measured; motion accuracy/endurance need wider qualification |
+| Joy-Con 2 L/R | paired stereo HD rumble physically confirmed; remembered reconnect and mixed-radio interval transitions exercised; long-duration qualification remains |
 | Wii Remote | buttons, accelerometer, rumble |
 | Wii Remote + Classic Controller | extension controls |
 | Wii U Pro | buttons, sticks, rumble |
@@ -728,8 +736,7 @@ Set B delivery evidence:
   The flashed real Switch 2 Pro delivered sticks, motion and independent
   C/GL/GR combinations; schema-7 extra mappings saved/read/restored.
   All 32 pre-existing profiles, metadata and active indices survived.
-  Joy-Con hardware, physical rumble feel, reconnect endurance and mixed-radio
-  qualification remain separate from those software results.
+  Subsequent native-rumble and mixed-radio measurements are summarized below.
 - Full operation and limitations: [README.md](README.md#switch-2-controller-input).
 
 Switch 2 native HD output now preserves decoded stereo frequency/amplitude
@@ -745,8 +752,24 @@ The final Pro-only native run sustained 512 changing one-subframe commands at
 recorded zero drops. Deliberate three-subframe saturation at 125.11 Hz
 discarded/superseded 69 output-stage commands out of 128 host updates and
 recovered to a clean stop. No mixed-radio lossless claim is made.
-Verification is now 289 passing tests and all five firmware builds; all
-40 stored profiles and metadata survived. See the
+Paired Joy-Con 2 stereo/subframe patterns produced 394 physical dispatches
+from 197 host requests without queue drops; the user confirmed both sides.
+Normal GATT-client busy responses now retain queued output instead of
+disconnecting the controller.
+
+Two Switch 2 BLE links plus Classic now select 30 ms Switch 2 connection
+intervals automatically; other topologies retain 7.5 ms. This trades Switch 2
+delivery latency for Classic airtime without changing HD encoding or bonds.
+Physical DualSense power-off/reconnect verified both interval transitions
+without losing the Joy-Con links. A 30-second production mixed-rumble run
+kept native DualSense streaming, with no send failures or ingress drops,
+14 Joy-Con output-stage discards and nine PCM skips. It is not lossless.
+
+Verification is now 289 passing tests and all five firmware builds. All
+40 pre-existing profiles, metadata and adapter configuration remain unchanged;
+the current inventory contains 56 profiles across seven identities. Temporary
+measurement hooks were removed, and the final production image passed another
+simultaneous-rumble exercise after normal controller reconnect. See the
 [native HD contract and measurements](README.md#switch-2-native-hd-rumble).
 
 ### Native Switch-family HD rumble — Implemented, qualification incomplete

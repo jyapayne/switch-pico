@@ -48,6 +48,10 @@ constexpr uint32_t kDefaultPairingWindowDurationMs =
 constexpr uint32_t kPairingResetFeedbackDurationMs = 2000;
 // Bluetooth Classic units are 0.625 ms: 0x1900 = 4 seconds.
 constexpr uint16_t kClassicLinkSupervisionTimeout = 0x1900;
+// LE units are 1.25 ms. Two fast Switch 2 links starve Classic native PCM.
+constexpr uint16_t kSwitch2FastInterval = 6;
+constexpr uint16_t kSwitch2MixedInterval = 24;
+constexpr uint32_t kSwitch2IntervalSettleMs = 1000;
 constexpr uint8_t kAllBlePairingMethods =
     SM_STK_GENERATION_METHOD_JUST_WORKS |
     SM_STK_GENERATION_METHOD_OOB |
@@ -229,6 +233,13 @@ btstack_packet_callback_registration_t g_pairing_event_callback{};
 btstack_packet_callback_registration_t g_identity_event_callback{};
 ConnectionPolicyState g_connection_policy_state =
     ConnectionPolicyState::Uninitialized;
+bool g_background_scan_active = false;
+struct Switch2IntervalRequest {
+    hci_con_handle_t handle = HCI_CON_HANDLE_INVALID;
+    uint16_t interval = 0;
+    uint32_t requested_ms = 0;
+};
+Switch2IntervalRequest g_switch2_interval_requests[kSlotCount]{};
 uint32_t g_pairing_window_deadline_ms = 0;
 uint32_t g_pairing_window_duration_ms =
     kDefaultPairingWindowDurationMs;
@@ -358,6 +369,84 @@ int joycon_side(const uni_hid_device_t* device) {
     }
     return device->product_id == UNI_SW2_JOYCON_R_PID ? 1 : 0;
 }
+
+bool waiting_for_joycon_mate(int side = 0) {
+    critical_section_enter_blocking(&g_state_lock);
+    unsigned physical_count = 0;
+    bool pending = false;
+    bool solo_mate = false;
+    for (const BackendSlot& slot : g_slots) {
+        physical_count += slot.device != nullptr;
+        physical_count += slot.companion != nullptr;
+        pending = pending || (slot.device != nullptr && !slot.active);
+        if (slot.active && slot.companion == nullptr) {
+            const int candidate_side = joycon_side(slot.device);
+            solo_mate = solo_mate ||
+                (candidate_side != 0 && (side == 0 || candidate_side == -side));
+        }
+    }
+    critical_section_exit(&g_state_lock);
+    return physical_count < kSlotCount && !pending && solo_mate;
+}
+
+void stop_background_scan() {
+    if (g_background_scan_active) {
+        // Direct LE scans do not update Bluepad32's aggregate scanning flag.
+        uni_bt_le_scan_stop();
+        g_background_scan_active = false;
+    }
+}
+// Core 1 only. Count physical links, including Classic setup, rather than
+// logical players: a merged Joy-Con pair still consumes two LE connections.
+void apply_radio_connection_policy() {
+    unsigned switch2_links = 0;
+    bool classic_link = false;
+    uni_hid_device_t* ready[kSlotCount]{};
+    for (const BackendSlot& slot : g_slots) {
+        uni_hid_device_t* targets[] = {slot.device, slot.companion};
+        for (uni_hid_device_t* target : targets) {
+            const int index = physical_index_for_device(target);
+            if (index < 0) continue;
+            const auto type = gap_get_connection_type(target->conn.handle);
+            if (type == GAP_CONNECTION_LE &&
+                uni_hid_parser_switch2_is_ble_device(target)) {
+                ++switch2_links;
+                // The parser requests its initial interval during setup.
+                // Do not race that request by changing a pending device here.
+                if (slot.active) ready[index] = target;
+            } else if (type == GAP_CONNECTION_ACL) {
+                classic_link = true;
+            }
+        }
+    }
+    const uint16_t desired = switch2_links >= 2 && classic_link
+                                 ? kSwitch2MixedInterval
+                                 : kSwitch2FastInterval;
+    const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        auto& request = g_switch2_interval_requests[index];
+        if (ready[index] == nullptr) {
+            request = {};
+            continue;
+        }
+        const auto handle = ready[index]->conn.handle;
+        if (request.handle != handle) request = {};
+        const uint16_t actual = gap_le_connection_interval(handle);
+        if (request.interval != 0 && actual != request.interval &&
+            now_ms - request.requested_ms < kSwitch2IntervalSettleMs) {
+            // Let an accepted asynchronous update settle before reversing it.
+            // API success alone does not prove that negotiation completed.
+            continue;
+        }
+        request.interval = 0;
+        if (actual == desired) continue;
+        gap_update_connection_parameters(handle, desired, desired, 0, 600);
+        // Reconcile negotiated state on the configuration timer. Rejected or
+        // incomplete requests are retried at most once per second per link.
+        request = {handle, desired, now_ms};
+    }
+}
+
 
 // Caller holds the cross-core state lock. Only Core 1 resets parser state.
 void clear_switch2_ingress(BackendSlot& slot) {
@@ -827,6 +916,7 @@ void publish_all_neutral() {
         mapping = {};
     }
     g_connection_status = ConnectionStatus::Initializing;
+    stop_background_scan();
     g_connection_policy_state = ConnectionPolicyState::FailedClosed;
     g_pairing_window_open = false;
     g_status_led_tick = 0;
@@ -1529,6 +1619,7 @@ void process_clear_pairings(uint32_t now_ms) {
     }
     refresh_pairing_snapshot();
     if (!proprietary_cleared) {
+        stop_background_scan();
         uni_bt_stop_scanning_unsafe();
         uni_bt_allow_incoming_connections(false);
         g_connection_policy_state = ConnectionPolicyState::FailedClosed;
@@ -1561,23 +1652,28 @@ void apply_connection_policy() {
     if (g_connection_policy_state == ConnectionPolicyState::FailedClosed) {
         return;
     }
+    apply_radio_connection_policy();
     const bool free_slot = has_free_slot();
     const bool active_controller = has_active_controller();
     const bool pairing_open =
         pairing_window_active_at(btstack_run_loop_get_time_ms());
     const bool active_scan =
         free_slot && (!active_controller || pairing_open);
+    const bool background_scan = free_slot && !active_scan &&
+        waiting_for_joycon_mate();
     const ConnectionPolicyState desired_state =
         !free_slot
             ? ConnectionPolicyState::Paused
             : (active_scan ? ConnectionPolicyState::Open
                            : ConnectionPolicyState::Passive);
-    if (g_connection_policy_state == desired_state) {
+    if (g_connection_policy_state == desired_state &&
+        g_background_scan_active == background_scan) {
         return;
     }
 
-    // Classic inquiry and BLE scanning consume radio time and measurably delay
-    // active controller HID traffic. Stop them before every policy transition.
+    // Leave low-duty LE explicitly before the aggregate stop, which otherwise
+    // does nothing when its own scanning flag is already clear.
+    stop_background_scan();
     uni_bt_stop_scanning_unsafe();
 
     if (!free_slot) {
@@ -1586,15 +1682,20 @@ void apply_connection_policy() {
         return;
     }
 
-    // Passive mode still accepts controller-initiated reconnects without
-    // running inquiry. Active discovery is reserved for zero-controller idle
-    // state and the explicit BOOTSEL pairing window.
+    // Passive mode permits incoming Classic reconnects, with LE discovery
+    // limited to a remembered opposite half for a ready solo Joy-Con2.
     uni_bt_allow_incoming_connections(true);
     if (active_scan) {
+        uni_bt_le_set_background_scan(false);
         uni_bt_start_scanning_and_autoconnect_unsafe();
         g_connection_policy_state = ConnectionPolicyState::Open;
     } else {
         g_connection_policy_state = ConnectionPolicyState::Passive;
+        if (background_scan) {
+            uni_bt_le_set_background_scan(true);
+            uni_bt_le_scan_start();
+            g_background_scan_active = true;
+        }
     }
 }
 
@@ -1673,6 +1774,7 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
     btstack_run_loop_set_timer(timer, kConfigurationPollIntervalMs);
     btstack_run_loop_add_timer(timer);
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    apply_radio_connection_policy();
     configuration_service_task_on_storage_core(now_ms);
     profile_service_task_on_storage_core(now_ms);
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
@@ -2062,7 +2164,6 @@ void platform_on_init_complete() {
     hci_add_event_handler(&g_pairing_event_callback);
     switch2_wake_initialize();
     refresh_pairing_snapshot();
-    // Keep Bluepad32 autoconnect active whenever at least one slot is free.
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
     btstack_run_loop_set_timer(&g_rumble_timer, kRumblePollIntervalMs);
     btstack_run_loop_add_timer(&g_rumble_timer);
@@ -2079,12 +2180,26 @@ void platform_on_init_complete() {
 
 uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name,
                                           uint16_t cod, uint8_t rssi) {
-    (void)addr;
     (void)name;
     (void)cod;
     (void)rssi;
-    return has_free_slot() &&
-                   g_connection_policy_state == ConnectionPolicyState::Open
+    if (!has_free_slot()) {
+        return UNI_ERROR_IGNORE_DEVICE;
+    }
+    if (g_connection_policy_state == ConnectionPolicyState::Open) {
+        return UNI_ERROR_SUCCESS;
+    }
+    if (g_connection_policy_state != ConnectionPolicyState::Passive) {
+        return UNI_ERROR_IGNORE_DEVICE;
+    }
+    const uni_hid_device_t* candidate =
+        uni_hid_device_get_instance_for_address(addr);
+    const int side = joycon_side(candidate);
+    uint8_t address_type = BD_ADDR_TYPE_UNKNOWN;
+    return side != 0 && waiting_for_joycon_mate(side) &&
+                   uni_hid_parser_switch2_identity_address_type(
+                       candidate, &address_type) &&
+                   uni_switch2_pairing_known(address_type, addr)
                ? UNI_ERROR_SUCCESS
                : UNI_ERROR_IGNORE_DEVICE;
 }
@@ -2103,6 +2218,7 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     const int physical_index = physical_index_for_device(device);
     if (physical_index >= 0) {
         g_retired_devices[physical_index] = nullptr;
+        g_switch2_interval_requests[physical_index] = {};
     }
     const int slot_index = reserve_device_slot(device);
     if (slot_index >= 0) {
@@ -2167,7 +2283,9 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
         }
     }
     // Losing a half frees transport capacity, not another logical player.
-    g_connection_policy_state = ConnectionPolicyState::Uninitialized;
+    if (g_connection_policy_state != ConnectionPolicyState::FailedClosed) {
+        g_connection_policy_state = ConnectionPolicyState::Uninitialized;
+    }
     recompute_connection_status();
 }
 
@@ -2246,6 +2364,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     connection_identity = current.identity;
     critical_section_exit(&g_state_lock);
     if (became_active) {
+        apply_radio_connection_policy();
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
         if (!paired) {
             switch_native_output_attach(static_cast<uint8_t>(slot_index),
@@ -2519,6 +2638,7 @@ void bluepad32_input_backend_init() {
     g_next_clear_pairings_request_token = 1;
     g_connection_status = ConnectionStatus::Initializing;
     g_connection_policy_state = ConnectionPolicyState::Uninitialized;
+    g_background_scan_active = false;
     g_pairing_window_deadline_ms = 0;
     g_pairing_window_duration_ms =
         kDefaultPairingWindowDurationMs;

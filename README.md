@@ -185,6 +185,8 @@ Pairing order determines the initial USB slot assignment. Up to four physical Bl
 
 With no active controller, the Pico runs Bluepad32 discovery and autoconnect. After any controller becomes active, active discovery pauses to protect input, motion, and rumble latency; bonded controllers may still initiate incoming reconnects. Pairing keys persist across Pico power cycles, so reconnect a previously paired controller by pressing its normal Home, PS, or Xbox power button. Hold BOOTSEL for the bounded pairing window before pairing a new controller or a controller that requires host-side discovery. Outside that window, BTstack remains non-bondable and rejects new Classic and BLE authentication.
 
+Exception: a ready solo Joy-Con 2 keeps a low-duty passive BLE scan running for a remembered opposite half while physical capacity remains and no controller setup is pending. This reconnect does not require BOOTSEL, start Classic inquiry, or enable fresh pairing. Scanning stops when the pair completes; an explicit pairing window restores normal discovery.
+
 To clear every stored Classic, BLE and proprietary Switch 2 pairing without a PC, hold BOOTSEL continuously for 10 seconds. The normal pairing window opens after two seconds; continuing to hold until the LED changes to a rapid blink clears remembered controllers, disconnects active controllers, publishes neutral state to every slot, and closes new authentication. Release BOOTSEL, open a new pairing window, and pair controllers again. A persistent-storage failure is reported rather than acknowledging a successful clear.
 
 
@@ -204,7 +206,7 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Reconnect a paired controller**: power it on normally with its Home, PS, or Xbox button.
 - **8BitDo Ultimate Bluetooth reconnect**: leave its selector in Bluetooth mode, press Home once, then shake it. After an abrupt controller power-off, the Pico can remain solid for up to four seconds while Bluetooth link supervision confirms the disconnect; scanning restarts immediately afterward.
 - **Pair a new controller**: hold BOOTSEL until the LED double-blinks, then put the controller into its explicit Bluetooth pairing mode.
-- **Pairing window expires**: new authentication and active discovery stop while a controller is active; remembered controllers may still initiate reconnects.
+- **Pairing window expires**: new authentication and full discovery stop while a controller is active; remembered controllers may still initiate reconnects, and a solo Joy-Con 2 resumes low-duty discovery of its remembered opposite half.
 - **Clear all pairings**: hold BOOTSEL continuously for 10 seconds, through the initial double blink, until the rapid confirmation blink starts. All controllers are disconnected and must be paired again.
 
 ### Managing configuration, profiles, and pairings from a PC
@@ -392,6 +394,8 @@ uses the current valid final sample, not a replay of masked history.
 Keepalives likewise send only the final sample with count 1. Pending ATT
 write-request buffers remain immutable; late completion cannot resurrect an
 old epoch after stop, reconnect or Joy-Con topology change.
+Normal GATT-client busy responses are treated as transient backpressure, not
+as controller disconnects.
 
 Final single-Pro hardware runs:
 
@@ -401,11 +405,42 @@ Final single-Pro hardware runs:
 | 512 changing one-subframe commands at 125.14 Hz | Zero ingress/output drops; clean stop |
 | 128 changing three-subframe commands at 125.11 Hz | Zero ingress drops; 69 output-stage commands discarded/superseded; clean stop and empty ingress |
 
+Paired Joy-Con 2 hardware runs exercised left-only, right-only, stereo and
+ordered-subframe effects: 197 host requests produced 394 physical dispatches
+with zero ingress/output drops. The user confirmed both sides vibrated as
+intended. Held one-subframe commands at 125 Hz, changing one-subframe commands
+at 62.5 Hz, and three-subframe commands at 50 Hz completed without drops.
+Higher changing workloads discarded output-stage commands, but the pair
+remained connected after the GATT backpressure fix.
+
 Three-subframe commands at 125 Hz exceed the native playback budget. These
-results do **not** establish lossless arbitrary workloads or mixed-controller
-radio performance. Joy-Con hardware and perceptual equivalence remain separate
-qualification items. All 40 profiles, names, active selections and adapter
+results do **not** establish lossless arbitrary workloads or perceptual
+equivalence. All 40 profiles, names, active selections and adapter
 configuration were preserved during this upgrade.
+
+**Automatic mixed-controller scheduling:** when at least two physical Switch 2
+BLE links coexist with a Classic Bluetooth link, the firmware requests a
+30 ms connection interval for the Switch 2 links. Otherwise it requests
+7.5 ms. A merged Joy-Con pair counts as two links. Unrelated BLE controllers
+are not retimed; bonds, profiles, HD encoding and the DualSense timeout stay
+unchanged. The policy runs during connection setup, before native DualSense
+attachment, and reconciles asynchronous negotiation and topology changes.
+
+This trades additional Switch 2 input, gyro and rumble delivery latency for
+Classic radio time. Multiple reports can travel per connection event, so
+30 ms does not impose a 33-report/s limit. Two Joy-Con 2 links at 7.5 ms caused
+native DualSense PCM timeouts in hardware testing. With the automatic policy,
+both negotiated 30 ms and DualSense started without manual re-arming.
+A production-firmware 30-second simultaneous rumble run retained all three
+connections and native streaming: zero ingress drops or send failures,
+14 Joy-Con output-stage discards and nine DualSense PCM skips. This is not
+a lossless or long-duration qualification. Lifecycle regressions cover
+Classic arrival/departure, a missing half, handle reuse, late negotiation
+completion, clock wrap and transient request rejection.
+In the physical power-off/reconnect check, both Joy-Cons negotiated 7.5 ms
+after DualSense shut down, then 30 ms after it reconnected with PS. Their
+Bluetooth handles stayed unchanged; native DualSense streaming restarted
+automatically and sent 1,715 packets without skips at the observation point.
 
 ### Rumble per controller
 

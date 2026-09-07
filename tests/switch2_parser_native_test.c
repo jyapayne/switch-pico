@@ -5,8 +5,9 @@
 #include "protocol_fixture.h"
 #include "parser/uni_hid_parser_switch2.h"
 #include "parser/uni_switch2_pairing.h"
+#include "sdkconfig.h"
 
-#define PEERS 4
+#define PEERS CONFIG_BLUEPAD32_MAX_DEVICES
 #define SERVICE_START 0x100
 #define INPUT_HANDLE 0x104
 #define RESPONSE_HANDLE 0x114
@@ -17,9 +18,14 @@ static struct fixture_peer peers[PEERS];
 static btstack_timer_source_t* timers[16];
 static unsigned timer_count, connected, ready, disconnected, emitted, remembered, listeners;
 static unsigned connected_events, disconnected_events;
+static unsigned scan_stops, discovery_calls;
+static uint16_t expected_discovery_pid;
+static uint8_t expected_discovery_address_type;
 static uint32_t now_ms;
 static bool pairing_allowed, trusted, storage_ok, request_writes, admit, reject_connected;
 static uint8_t next_write_error;
+static uint8_t next_connect_error;
+static bool scan_enabled, scan_running;
 static const bd_addr_t host_address = {0x10, 0x21, 0x32, 0x43, 0x54, 0x65};
 static const bd_addr_t controller_address = {0xc0, 0x22, 0x33, 0x44, 0x55, 0x66};
 static const uint8_t service_uuid[16] = {0xab,0x7d,0xe9,0xbe,0x89,0xfe,0x49,0xad,0x82,0x8f,0x11,0x8f,0x09,0xdf,0x7f,0xd0};
@@ -87,8 +93,14 @@ bool uni_switch2_pairing_remember(uint8_t type, const uint8_t address[6]) {
     return storage_ok;
 }
 void gap_local_bd_addr(bd_addr_t address) { memcpy(address, host_address, 6); }
-void gap_stop_scan(void) {}
-uint8_t gap_connect(const bd_addr_t address, bd_addr_type_t type) { (void)address; (void)type; ++connected; return 0; }
+void gap_stop_scan(void) { ++scan_stops; scan_running = false; }
+void uni_bt_le_resume_scanning_if_enabled(void) { if (scan_enabled) scan_running = true; }
+uint8_t gap_connect(const bd_addr_t address, bd_addr_type_t type) {
+    (void)address; (void)type; ++connected;
+    uint8_t status = next_connect_error;
+    next_connect_error = 0;
+    return status;
+}
 int gap_update_connection_parameters(hci_con_handle_t handle, uint16_t min, uint16_t max, uint16_t latency, uint16_t timeout) {
     (void)handle; (void)min; (void)max; (void)latency; (void)timeout; return 0;
 }
@@ -121,7 +133,17 @@ uni_hid_device_t* uni_hid_device_get_instance_for_connection_handle(hci_con_hand
     return peer ? &peer->device : NULL;
 }
 uni_error_t uni_hid_device_on_device_discovered(bd_addr_t address, const char* name, uint16_t cod, uint8_t rssi) {
-    (void)address; (void)name; (void)cod; (void)rssi;
+    ++discovery_calls;
+    uni_hid_device_t* d = uni_hid_device_get_instance_for_address(address);
+    uint8_t type = 0xff;
+    assert(d && uni_hid_parser_switch2_is_ble_device(d));
+    assert(uni_hid_parser_switch2_identity_address_type(d, &type));
+    (void)name;
+    assert(d->cod == cod && d->conn.rssi == rssi);
+    if (expected_discovery_pid) {
+        assert(d->product_id == expected_discovery_pid);
+        assert(type == expected_discovery_address_type);
+    }
     return admit ? UNI_ERROR_SUCCESS : (uni_error_t)1;
 }
 void uni_hid_device_set_vendor_id(uni_hid_device_t* d, uint16_t value) { d->vendor_id = value; }
@@ -419,8 +441,13 @@ static void reset(void) {
     memset(peers, 0, sizeof(peers));
     connected = ready = disconnected = emitted = remembered = 0;
     connected_events = disconnected_events = 0;
+    scan_stops = discovery_calls = 0;
+    expected_discovery_pid = 0;
+    expected_discovery_address_type = BD_ADDR_TYPE_LE_PUBLIC;
     now_ms = 0;
     next_write_error = 0;
+    next_connect_error = 0;
+    scan_enabled = scan_running = true;
     pairing_allowed = trusted = storage_ok = admit = true;
     request_writes = false;
     reject_connected = false;
@@ -457,6 +484,7 @@ static void test_advertisement_bounds_and_admission(void) {
     packet[3] = BD_ADDR_TYPE_LE_RANDOM;
     packet[9] = 0x40; // Resolving private address, not static identity.
     assert(uni_bt_le_switch2_handle_advertisement(packet, size) && connected == 0);
+    assert(discovery_calls == 0 && scan_stops == 0);
     advertisement(packet, UNI_SW2_PRO_PID, false);
     admit = false;
     assert(uni_bt_le_switch2_handle_advertisement(packet, size) && connected == 0);
@@ -464,6 +492,62 @@ static void test_advertisement_bounds_and_admission(void) {
     assert(uni_bt_le_switch2_handle_advertisement(packet, size) && connected == 1);
     uint8_t type = 0xff;
     assert(uni_hid_parser_switch2_identity_address_type(&peers[0].device, &type) && type == BD_ADDR_TYPE_LE_PUBLIC);
+}
+
+static void test_discovery_metadata_and_rejection_isolation(void) {
+    reset();
+    expected_discovery_pid = UNI_SW2_JOYCON_L_PID;
+    struct fixture_peer* mate = connect_peer(UNI_SW2_JOYCON_L_PID, false);
+    discover(mate);
+    subscribe_response(mate);
+    finish_setup(mate);
+    assert(ready == 1 && discovery_calls == 1);
+    const unsigned mate_timers = timer_count;
+    const unsigned mate_listeners = listeners;
+
+    uint8_t packet[64];
+    size_t size = advertisement(packet, UNI_SW2_JOYCON_R_PID, false);
+    packet[3] = BD_ADDR_TYPE_LE_RANDOM;
+    packet[4] ^= 1; // A different static identity from the active mate.
+    bd_addr_t candidate_address;
+    gap_event_advertising_report_get_address(packet, candidate_address);
+    expected_discovery_pid = UNI_SW2_JOYCON_R_PID;
+    expected_discovery_address_type = BD_ADDR_TYPE_LE_RANDOM;
+    admit = false;
+    // More rejections than slots must not exhaust either device or parser storage.
+    for (unsigned i = 0; i <= CONFIG_BLUEPAD32_MAX_DEVICES; ++i) {
+        assert(uni_bt_le_switch2_handle_advertisement(packet, size));
+        assert(discovery_calls == i + 2);
+        assert(!uni_hid_device_get_instance_for_address(candidate_address));
+        for (unsigned slot = 1; slot < PEERS; ++slot) {
+            uint8_t type;
+            assert(!peers[slot].used);
+            assert(!uni_hid_parser_switch2_identity_address_type(&peers[slot].device, &type));
+        }
+        assert(connected == 1 && scan_stops == 1 && disconnected == 0);
+        assert(timer_count == mate_timers && listeners == mate_listeners);
+        assert(mate->used && mate->link_alive && mate->device.conn.state == UNI_BT_CONN_STATE_DEVICE_READY);
+    }
+
+    // A rejected candidate must remain discoverable once policy permits it.
+    admit = true;
+    assert(uni_bt_le_switch2_handle_advertisement(packet, size));
+    assert(uni_hid_device_get_instance_for_address(candidate_address));
+    assert(connected == 2 && scan_stops == 2 && disconnected == 0);
+    unsigned admitted_calls = discovery_calls;
+    assert(uni_bt_le_switch2_handle_advertisement(packet, size));
+    assert(discovery_calls == admitted_calls && connected == 2 && scan_stops == 2);
+    assert(mate->used && mate->link_alive);
+
+    reset();
+    size = advertisement(packet, UNI_SW2_JOYCON_R_PID, false);
+    admit = false;
+    assert(uni_bt_le_switch2_handle_advertisement(packet, size));
+    advance(3000);
+    assert(discovery_calls == 1 && connected == 0 && scan_stops == 0 && disconnected == 0);
+    assert(timer_count == 0 && listeners == 0);
+    for (unsigned slot = 0; slot < PEERS; ++slot)
+        assert(!peers[slot].used);
 }
 
 static void test_missing_descriptor_and_setup_timeout(void) {
@@ -1024,9 +1108,52 @@ static void test_expired_history_does_not_starve_fresh_sequences(void) {
     assert(uni_hid_parser_switch2_haptics_dropped() == drops + 1);
 }
 
+static void test_gatt_busy_retries_without_disconnect_or_sequence_loss(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, false);
+    uni_switch2_haptics_frame_t frame = native_frame(3, 2, 24);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    next_write_error = GATT_CLIENT_BUSY;
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    advance(1);
+    assert(!disconnected && peer->rumbles == 0);
+    advance(13);
+    assert(!disconnected && peer->rumbles == 1);
+    assert((peer->rumble[1] & 15) == 0);
+    assert_block(peer, 0, &frame.sides[0]);
+    assert_block(peer, 1, &frame.sides[1]);
+
+    // The SDK uses the same busy status on command writes such as player LEDs.
+    next_write_error = GATT_CLIENT_BUSY;
+    uni_hid_parser_switch2_set_player_leds(&peer->device, 3);
+    assert(!disconnected);
+    advance(13);
+    assert(peer->command[0] == 0x09 && peer->command[8] == 3);
+    acknowledge(peer, false);
+    assert(!disconnected && uni_hid_parser_switch2_haptics_dropped() == drops);
+}
+
+static void test_immediate_connection_failure_preserves_reconnect_discovery(void) {
+    reset();
+    uint8_t packet[64];
+    size_t size = advertisement(packet, UNI_SW2_JOYCON_R_PID, false);
+    next_connect_error = ERROR_CODE_COMMAND_DISALLOWED;
+    assert(uni_bt_le_switch2_handle_advertisement(packet, size));
+    assert(scan_running && !peers[0].used && !timer_count && !listeners);
+    assert(uni_bt_le_switch2_handle_advertisement(packet, size));
+    assert(peers[0].used && connected == 2); // The same remembered peer can retry.
+
+    reset();
+    scan_enabled = scan_running = false;
+    next_connect_error = ERROR_CODE_COMMAND_DISALLOWED;
+    assert(uni_bt_le_switch2_handle_advertisement(packet, size));
+    assert(!scan_running && !peers[0].used); // Explicit stop must not be overridden.
+}
+
 int main(void) {
     test_connected_callback_rejection();
     test_advertisement_bounds_and_admission();
+    test_discovery_metadata_and_rejection_isolation();
+    test_immediate_connection_failure_preserves_reconnect_discovery();
     test_missing_descriptor_and_setup_timeout();
     test_pairing_gate_and_write_ack_order();
     test_calibration_physical_inputs_and_sensor_units();
@@ -1043,6 +1170,7 @@ int main(void) {
     test_identical_hold_coalescing_refreshes_borrowed_head();
     test_hold_coalescing_requires_identical_samples_and_side_masks();
     test_expired_history_does_not_starve_fresh_sequences();
+    test_gatt_busy_retries_without_disconnect_or_sequence_loss();
     reset();
     puts("Switch2 protocol boundaries, setup failure, pairing, calibration, physical input, motion and rumble passed");
     return 0;

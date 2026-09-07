@@ -34,6 +34,7 @@ struct btstack_link_key_iterator_t {
 
 enum {
     ERROR_CODE_SUCCESS = 0,
+    HCI_CON_HANDLE_INVALID = 0xffff,
     HCI_EVENT_PACKET = 4,
     HCI_EVENT_USER_CONFIRMATION_REQUEST = 0x33,
     HCI_EVENT_USER_PASSKEY_REQUEST = 0x34,
@@ -198,6 +199,7 @@ int uni_hid_device_get_idx_for_instance(const uni_hid_device_t* device);
 void uni_hid_device_disconnect(uni_hid_device_t* device);
 uni_hid_device_t* uni_hid_device_get_instance_for_connection_handle(
     hci_con_handle_t handle);
+uni_hid_device_t* uni_hid_device_get_instance_for_address(const bd_addr_t address);
 void uni_bt_allow_incoming_connections(bool enabled);
 void uni_bt_start_scanning_and_autoconnect_unsafe();
 void uni_bt_stop_scanning_unsafe();
@@ -205,9 +207,14 @@ void uni_bt_bredr_scan_start();
 void uni_bt_bredr_scan_stop();
 void uni_bt_le_scan_start();
 void uni_bt_le_scan_stop();
+void uni_bt_le_set_background_scan(bool enabled);
 void uni_bt_del_keys_unsafe();
 gap_connection_type_t gap_get_connection_type(
     hci_con_handle_t connection_handle);
+uint16_t gap_le_connection_interval(hci_con_handle_t handle);
+int gap_update_connection_parameters(hci_con_handle_t handle, uint16_t minimum,
+                                    uint16_t maximum, uint16_t latency,
+                                    uint16_t supervision_timeout);
 int gap_link_key_iterator_init(btstack_link_key_iterator_t* iterator);
 int gap_link_key_iterator_get_next(
     btstack_link_key_iterator_t* iterator, bd_addr_t address,

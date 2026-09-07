@@ -3,9 +3,14 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+
+from prepare_bluepad32 import prepare_bluepad32
 
 
 def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
@@ -25,6 +30,12 @@ def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
     )
     if btstack is None:
         pytest.skip("Pico SDK BTstack headers required; configure firmware or set PICO_SDK_PATH")
+    prepared = prepare_bluepad32(
+        root / "external" / "bluepad32",
+        root / "patches" / "bluepad32-sdl3-imu.patch",
+        tmp_path / "bluepad32-src",
+    )
+    component = prepared / "src" / "components" / "bluepad32"
     executable = tmp_path / "switch2_parser_native_test"
     subprocess.run(
         [
@@ -39,7 +50,7 @@ def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
             "-DENABLE_CLASSIC",
             f"-I{root / 'tests' / 'switch2_parser_native_stubs'}",
             f"-I{root / 'bluepad32_config'}",
-            f"-I{root / 'external' / 'bluepad32' / 'src' / 'components' / 'bluepad32' / 'include'}",
+            f"-I{component / 'include'}",
             f"-I{btstack}",
             f"-I{btstack.parent / '3rd-party' / 'bluedroid' / 'encoder' / 'include'}",
             f"-I{btstack.parent / '3rd-party' / 'bluedroid' / 'decoder' / 'include'}",
