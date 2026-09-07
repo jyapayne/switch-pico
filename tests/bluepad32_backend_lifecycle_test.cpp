@@ -9,6 +9,8 @@
 #endif
 
 #include <uni.h>
+#include "parser/uni_hid_parser_switch2.h"
+#include "parser/uni_switch2_pairing.h"
 #include "platform/pico/controller_color_config.h"
 #include "input/switch2_wake.h"
 
@@ -67,6 +69,11 @@ gap_connection_type_t gap_connection_types[256]{};
 uint8_t xbox_left_trigger = 0;
 uint8_t xbox_right_trigger = 0;
 unsigned xbox_quad_calls = 0;
+unsigned ordinary_smp_requests = 0;
+bd_addr_t switch2_pairings[UNI_SWITCH2_PAIRING_CAPACITY]{};
+uint8_t switch2_pairing_types[UNI_SWITCH2_PAIRING_CAPACITY]{};
+uint8_t switch2_pairing_count = 0;
+bool switch2_clear_succeeds = true;
 
 struct CoreStopped {};
 
@@ -145,6 +152,53 @@ void uni_hid_parser_xboxone_play_dual_rumble(
 }
 
 
+extern "C" void __real_sm_request_pairing(hci_con_handle_t) {
+    ++ordinary_smp_requests;
+}
+
+extern "C" bool uni_switch2_pairing_get(
+    uint8_t index, uint8_t* address_type, uint8_t address[6]) {
+    if (index >= switch2_pairing_count) {
+        return false;
+    }
+    *address_type = switch2_pairing_types[index];
+    memcpy(address, switch2_pairings[index], sizeof(bd_addr_t));
+    return true;
+}
+
+extern "C" bool uni_switch2_pairing_clear(void) {
+    if (!switch2_clear_succeeds) {
+        return false;
+    }
+    switch2_pairing_count = 0;
+    return true;
+}
+
+extern "C" bool uni_hid_parser_switch2_is_ble_device(
+    const uni_hid_device_t* device) {
+    return device != nullptr &&
+           device->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE &&
+           device->vendor_id == UNI_SW2_NINTENDO_VID &&
+           (device->product_id == UNI_SW2_PRO_PID ||
+            device->product_id == UNI_SW2_JOYCON_L_PID ||
+            device->product_id == UNI_SW2_JOYCON_R_PID);
+}
+
+extern "C" uint8_t uni_hid_parser_switch2_extra_buttons(
+    const uni_hid_device_t* device) {
+    return uni_hid_parser_switch2_is_ble_device(device)
+               ? device->switch2_extra_buttons : 0;
+}
+
+extern "C" bool uni_hid_parser_switch2_identity_address_type(
+    const uni_hid_device_t* device, uint8_t* output) {
+    if (!uni_hid_parser_switch2_is_ble_device(device) ||
+        !device->switch2_identity_valid || output == nullptr) {
+        return false;
+    }
+    *output = device->switch2_identity_address_type;
+    return true;
+}
 bool uni_hid_device_is_gamepad(const uni_hid_device_t* device) {
     return device != nullptr && device->gamepad;
 }
@@ -781,6 +835,377 @@ void tick_backend_timer(int ticks) {
     for (int tick = 0; tick < ticks; ++tick) {
         process_rumble_timer(&g_rumble_timer);
     }
+}
+
+uni_hid_device_t switch2_device(int index, uint16_t product) {
+    uni_hid_device_t result = device(index, true, UNI_BT_CONN_PROTOCOL_BLE);
+    result.vendor_id = UNI_SW2_NINTENDO_VID;
+    result.product_id = product;
+    result.switch2_identity_valid = true;
+    result.switch2_identity_address_type = BD_ADDR_TYPE_LE_PUBLIC;
+    result.report_parser.set_player_leds = set_player_leds;
+    return result;
+}
+
+void ready_switch2(uni_hid_device_t& controller) {
+    platform_on_device_connected(&controller);
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+            "Switch2 physical device must become ready");
+}
+
+Bluepad32SlotSnapshot slot_snapshot(uint8_t index) {
+    Bluepad32SlotSnapshot result{};
+    bluepad32_input_backend_snapshot(index, &result);
+    return result;
+}
+
+void test_switch2_pair_lifecycle(bool right_first) {
+    start_pairing_backend();
+    uni_hid_device_t left = switch2_device(
+        right_first ? 1 : 0, UNI_SW2_JOYCON_L_PID);
+    uni_hid_device_t right = switch2_device(
+        right_first ? 0 : 1, UNI_SW2_JOYCON_R_PID);
+    uni_hid_device_t& first = right_first ? right : left;
+    uni_hid_device_t& second = right_first ? left : right;
+    ready_switch2(first);
+
+    uni_controller_t left_data{};
+    left_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    left_data.gamepad.dpad = DPAD_UP;
+    left_data.gamepad.axis_x = -512;
+    left_data.gamepad.axis_y = 100;
+    left_data.gamepad.buttons = BUTTON_TRIGGER_L;
+    left_data.gamepad.accel[0] = 8192;
+    left.switch2_extra_buttons =
+        UNI_SW2_BUTTON_GL | UNI_SW2_BUTTON_LEFT_SL | UNI_SW2_BUTTON_LEFT_SR;
+    uni_controller_t right_data{};
+    right_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    right_data.gamepad.buttons = BUTTON_B | BUTTON_THUMB_R | BUTTON_TRIGGER_R;
+    right_data.gamepad.axis_rx = 200;
+    right_data.gamepad.axis_ry = -512;
+    right_data.gamepad.accel[2] = 8192;
+    right.switch2_extra_buttons =
+        UNI_SW2_BUTTON_C | UNI_SW2_BUTTON_GR |
+        UNI_SW2_BUTTON_RIGHT_SL | UNI_SW2_BUTTON_RIGHT_SR;
+    platform_on_controller_data(&first, right_first ? &right_data : &left_data);
+    const Bluepad32SlotSnapshot solo = slot_snapshot(0);
+    require(solo.active && solo.state.button_left_shoulder &&
+                solo.state.button_right_shoulder && solo.state.button_left_stick == right_first &&
+                solo.state.right_stick_x == 0 && solo.state.right_stick_y == 0 &&
+                (right_first ? solo.state.button_south : solo.state.button_west),
+            "solo JoyCon must rotate face controls, stick click and rail shoulders");
+    require(solo.state.left_stick_x ==
+                (right_first ? INT16_MAX : scale_axis(100)) &&
+                solo.state.left_stick_y ==
+                    (right_first ? scale_axis(200) : INT16_MAX),
+            "solo JoyCon stick must rotate with its physical sideways orientation");
+    require(bluepad32_input_backend_capture_start(
+                0, solo.connection_generation, CaptureOptions{}),
+            "solo capture must start on its logical generation");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{31, 41});
+    bluepad32_input_backend_queue_profile_feedback(
+        0, solo.connection_generation, 8,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    ready_switch2(second);
+
+    Bluepad32SlotSnapshot merged = slot_snapshot(0);
+    require(merged.active && !slot_snapshot(1).active &&
+                merged.connection_generation != solo.connection_generation &&
+                controller_identity_equal(merged.identity, identity_for_device(&left)),
+            "either connection order must merge into first output with left profile owner");
+    Bluepad32CaptureSnapshot capture{};
+    require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kDisconnected,
+            "solo recording must not silently cross into the merged generation");
+    require(!slot_snapshot(1).state.extra_buttons &&
+                !slot_snapshot(1).state.button_south &&
+                !slot_snapshot(1).state.button_west &&
+                left.last_rumble_duration_ms == 0 && right.last_rumble_duration_ms == 0,
+            "pair merge must neutralize ghost output and stop old feedback");
+    const int calls_after_merge = left.rumble_calls + right.rumble_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        0, solo.connection_generation, 8,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    process_rumble_timer(&g_rumble_timer);
+    require(left.rumble_calls + right.rumble_calls == calls_after_merge &&
+                left.player_leds == 1 && right.player_leds == 1,
+            "old-generation solo feedback must not reach the pair");
+    platform_on_controller_data(&left, &left_data);
+    platform_on_controller_data(&right, &right_data);
+    merged = slot_snapshot(0);
+    require(merged.state.dpad_up && merged.state.button_east &&
+                merged.state.button_right_stick && !merged.state.button_left_stick &&
+                !merged.state.button_left_shoulder && !merged.state.button_right_shoulder &&
+                merged.state.left_stick_x == INT16_MIN &&
+                merged.state.right_stick_x == scale_axis(200) &&
+                merged.state.left_trigger == UINT16_MAX &&
+                merged.state.right_trigger == UINT16_MAX &&
+                merged.state.extra_buttons == 0x7f &&
+                merged.state.motion_samples[0].accel_x == -4096 &&
+                merged.state.motion_samples[0].accel_y == 0,
+            "merged native controls and extras must combine with right-only aim motion");
+    bluepad32_input_backend_report_sent(0);
+    platform_on_controller_data(&left, &left_data);
+    require(slot_snapshot(0).state.motion_sample_count == 0,
+            "left reports must not replay the last right motion sample");
+
+    uni_hid_device_t ordinary = device(2);
+    platform_on_device_connected(&ordinary);
+    require(platform_on_device_ready(&ordinary) == UNI_ERROR_SUCCESS,
+            "ordinary device must coexist with a pair");
+    uni_controller_t ordinary_data{};
+    ordinary_data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    ordinary_data.gamepad.buttons = BUTTON_Y;
+    platform_on_controller_data(&ordinary, &ordinary_data);
+    const Bluepad32SlotSnapshot ordinary_before = slot_snapshot(2);
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{51, 61});
+    bluepad32_input_backend_queue_rumble(2, ControllerRumbleOutput{71, 81});
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_low == 51 && right.last_low == 51 &&
+                left.last_high == 61 && right.last_high == 61 &&
+                ordinary.last_low == 71 && ordinary.last_high == 81,
+            "pair feedback must fan out without reaching an ordinary player");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{});
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_rumble_duration_ms == 0 &&
+                right.last_rumble_duration_ms == 0 && ordinary.last_low == 71,
+            "pair stop must stop both physical motors only");
+    bluepad32_input_backend_queue_profile_feedback(
+        0, merged.connection_generation, 2,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    process_rumble_timer(&g_rumble_timer);
+    require(left.player_leds == 3 && right.player_leds == 3 &&
+                left.last_low == UINT8_MAX && right.last_low == UINT8_MAX,
+            "profile feedback must light and rumble both halves");
+    now_ms += 300;
+    process_rumble_timer(&g_rumble_timer);
+    require(left.player_leds == 1 && right.player_leds == 1,
+            "profile completion must restore both halves' player indication");
+
+    uni_hid_device_t& lost = right_first ? left : right;
+    uni_hid_device_t& survivor = right_first ? right : left;
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{91, 101});
+    platform_on_device_disconnected(&lost);
+    const Bluepad32SlotSnapshot detached = slot_snapshot(0);
+    require(detached.active && !slot_snapshot(1).active &&
+                detached.connection_generation != merged.connection_generation &&
+                controller_identity_equal(detached.identity, identity_for_device(&survivor)) &&
+                detached.state.extra_buttons == survivor.switch2_extra_buttons &&
+                detached.state.motion_sample_count == 0 &&
+                !detached.state.dpad_up && !detached.state.button_east &&
+                (right_first ? detached.state.button_south : detached.state.button_west),
+            "either half detach must immediately publish only the rotated survivor and own profile");
+    require(survivor.last_rumble_duration_ms == 0 &&
+                slot_snapshot(2).connection_generation == ordinary_before.connection_generation &&
+                slot_snapshot(2).state.button_north,
+            "detach must cancel survivor feedback without changing unrelated player state");
+    const int survivor_calls = survivor.rumble_calls;
+    platform_on_controller_data(&lost, right_first ? &left_data : &right_data);
+    require(platform_on_device_ready(&lost) == UNI_ERROR_NO_SLOTS,
+            "late ready for a detached half must not resurrect its old generation");
+    bluepad32_input_backend_queue_profile_feedback(
+        0, merged.connection_generation, 8,
+        ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    process_rumble_timer(&g_rumble_timer);
+    require(survivor.rumble_calls == survivor_calls &&
+                slot_snapshot(0).state.extra_buttons == survivor.switch2_extra_buttons,
+            "late detached input and generation-bound feedback must be ignored");
+    uni_hid_device_t replacement = switch2_device(lost.idx, lost.product_id);
+    ready_switch2(replacement);
+    platform_on_device_disconnected(&lost);
+    require(slot_snapshot(0).active && !slot_snapshot(1).active &&
+                slot_snapshot(0).state.extra_buttons == survivor.switch2_extra_buttons &&
+                slot_snapshot(0).connection_generation != detached.connection_generation,
+            "replacement must re-pair without stale presses or a late old disconnect");
+    const uint32_t clear_token = bluepad32_input_backend_clear_pairings();
+    process_rumble_timer(&g_rumble_timer);
+    Bluepad32PairingSnapshot cleared{};
+    bluepad32_input_backend_pairing_snapshot(&cleared);
+    require(bluepad32_input_backend_clear_pairings_completed(cleared, clear_token) &&
+                device_disconnect_calls == 3 &&
+                !slot_snapshot(0).active && !slot_snapshot(2).active &&
+                !switch_pico_switch2_pairing_allowed(),
+            "clear must disconnect every physical half and ordinary device, not just outputs");
+}
+
+void test_switch2_multiple_pairs() {
+    start_pairing_backend();
+    uni_hid_device_t right0 = switch2_device(0, UNI_SW2_JOYCON_R_PID);
+    uni_hid_device_t right1 = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    uni_hid_device_t left0 = switch2_device(2, UNI_SW2_JOYCON_L_PID);
+    uni_hid_device_t left1 = switch2_device(3, UNI_SW2_JOYCON_L_PID);
+    ready_switch2(right0);
+    ready_switch2(right1);
+    ready_switch2(left0);
+    ready_switch2(left1);
+    require(slot_snapshot(0).active && slot_snapshot(1).active &&
+                !slot_snapshot(2).active && !slot_snapshot(3).active &&
+                controller_identity_equal(slot_snapshot(0).identity, identity_for_device(&left0)) &&
+                controller_identity_equal(slot_snapshot(1).identity, identity_for_device(&left1)) &&
+                g_connection_policy_state == ConnectionPolicyState::Paused &&
+                !scanning_enabled && !incoming_connections,
+            "two deterministic pairs must consume four physical resources but only two outputs");
+    uni_controller_t data{};
+    data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    data.gamepad.buttons = BUTTON_A;
+    right0.switch2_extra_buttons = UNI_SW2_BUTTON_C;
+    platform_on_controller_data(&right0, &data);
+    data.gamepad.buttons = BUTTON_Y;
+    right1.switch2_extra_buttons = UNI_SW2_BUTTON_GR;
+    platform_on_controller_data(&right1, &data);
+    require(slot_snapshot(0).state.button_south && !slot_snapshot(0).state.button_north &&
+                slot_snapshot(0).state.extra_buttons == UNI_SW2_BUTTON_C &&
+                slot_snapshot(1).state.button_north && !slot_snapshot(1).state.button_south &&
+                slot_snapshot(1).state.extra_buttons == UNI_SW2_BUTTON_GR,
+            "two pairs must not cross-contaminate normal or extra source input");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{11, 21});
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{31, 41});
+    process_rumble_timer(&g_rumble_timer);
+    require(left0.last_low == 11 && right0.last_low == 11 &&
+                left1.last_low == 31 && right1.last_low == 31 &&
+                left0.player_leds == 1 && right0.player_leds == 1 &&
+                left1.player_leds == 2 && right1.player_leds == 2,
+            "multiple pairs must retain isolated rumble and player lighting");
+    const Bluepad32SlotSnapshot other_pair = slot_snapshot(1);
+    platform_on_device_disconnected(&right0);
+    uni_hid_device_t ordinary = device(0);
+    platform_on_device_connected(&ordinary);
+    require(platform_on_device_ready(&ordinary) == UNI_ERROR_SUCCESS &&
+                slot_snapshot(0).active && slot_snapshot(2).active &&
+                !slot_snapshot(3).active &&
+                controller_identity_equal(slot_snapshot(0).identity, identity_for_device(&left0)),
+            "reusing freed physical index must allocate a free output, not evict the surviving half");
+    data.gamepad.buttons = BUTTON_B;
+    platform_on_controller_data(&ordinary, &data);
+    bluepad32_input_backend_queue_rumble(2, ControllerRumbleOutput{91, 101});
+    process_rumble_timer(&g_rumble_timer);
+    require(slot_snapshot(2).state.button_east && !slot_snapshot(0).state.button_east &&
+                ordinary.last_low == 91 && left1.last_low == 31 && right1.last_low == 31 &&
+                slot_snapshot(1).connection_generation == other_pair.connection_generation &&
+                slot_snapshot(1).state.button_north,
+            "remapped ordinary physical index must isolate input and feedback from both pairs");
+}
+
+void test_switch2_admission() {
+    start_backend();
+    require(!switch_pico_switch2_pairing_allowed(),
+            "idle scanning must not grant fresh proprietary pairing");
+    bluepad32_input_backend_open_pairing_window();
+    require(!switch_pico_switch2_pairing_allowed(),
+            "pending Core0 request must not grant pairing before policy consumes it");
+    process_rumble_timer(&g_rumble_timer);
+    require(switch_pico_switch2_pairing_allowed(),
+            "consumed explicit pairing window must permit proprietary pairing");
+    now_ms = g_pairing_window_deadline_ms;
+    require(!switch_pico_switch2_pairing_allowed(),
+            "fresh pairing must close at its deadline even before timer processing");
+    uni_hid_device_t pro = switch2_device(0, UNI_SW2_PRO_PID);
+    uni_hid_device_t ordinary = device(1, true, UNI_BT_CONN_PROTOCOL_BLE);
+    register_lookup_device(&pro);
+    register_lookup_device(&ordinary);
+    __wrap_sm_request_pairing(pro.conn.handle);
+    require(device_disconnect_calls == 1 && last_disconnected_device == &pro &&
+                ordinary_smp_requests == 0 && delete_key_calls == 0,
+            "Switch2 GATT auth failure must disconnect without SMP or bond deletion");
+    __wrap_sm_request_pairing(ordinary.conn.handle);
+    __wrap_sm_request_pairing(0x99);
+    require(ordinary_smp_requests == 2 && device_disconnect_calls == 1,
+            "ordinary and unknown handles must preserve standard SMP behavior");
+    require(identity_for_device(&pro).stable &&
+                controller_identity_is_global(identity_for_device(&ordinary)),
+            "only parser-validated proprietary public identity may bypass SMP resolution");
+    pro.switch2_identity_address_type = BD_ADDR_TYPE_LE_RANDOM;
+    pro.conn.btaddr[0] = 0xc1;
+    require(identity_for_device(&pro).stable &&
+                identity_for_device(&pro).address_type == BD_ADDR_TYPE_LE_RANDOM,
+            "parser-validated static random identity must retain its address type");
+    pro.switch2_identity_valid = false;
+    pro.conn.btaddr[0] = 0x41;
+    require(controller_identity_is_global(identity_for_device(&pro)),
+            "unvalidated proprietary RPA must remain on the global profile");
+    pro.switch2_identity_valid = true;
+    pro.conn.btaddr[0] = 0xc1;
+    ready_switch2(pro);
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    input.gamepad.buttons = BUTTON_B;
+    input.gamepad.axis_x = 511;
+    input.gamepad.axis_ry = -512;
+    pro.switch2_extra_buttons =
+        UNI_SW2_BUTTON_C | UNI_SW2_BUTTON_GL | UNI_SW2_BUTTON_GR;
+    platform_on_controller_data(&pro, &input);
+    require(slot_snapshot(0).state.button_east &&
+                slot_snapshot(0).state.left_stick_x == INT16_MAX &&
+                slot_snapshot(0).state.right_stick_y == INT16_MIN &&
+                slot_snapshot(0).state.extra_buttons == 7,
+            "Pro2 must preserve vertical normal controls and ingest remappable extras");
+}
+
+void test_switch2_pairing_inventory() {
+    start_pairing_backend();
+    switch2_pairing_count = 2;
+    switch2_pairing_types[0] = BD_ADDR_TYPE_LE_PUBLIC;
+    switch2_pairing_types[1] = BD_ADDR_TYPE_LE_RANDOM;
+    switch2_pairings[0][5] = 1;
+    switch2_pairings[1][0] = 0xc1;
+    switch2_pairings[1][5] = 2;
+    bluepad32_input_backend_request_pairing_snapshot();
+    process_rumble_timer(&g_rumble_timer);
+    Bluepad32PairingSnapshot snapshot{};
+    bluepad32_input_backend_pairing_snapshot(&snapshot);
+    require(snapshot.record_count == 2 && !snapshot.overflow &&
+                snapshot.records[0].transport == Bluepad32PairingTransport::kBle &&
+                snapshot.records[0].address_type == BD_ADDR_TYPE_LE_PUBLIC &&
+                snapshot.records[0].address[5] == 1 &&
+                snapshot.records[1].address_type == BD_ADDR_TYPE_LE_RANDOM &&
+                snapshot.records[1].address[0] == 0xc1,
+            "pairing inventory must include proprietary trust records with real BLE address types");
+    switch2_pairing_count = UNI_SWITCH2_PAIRING_CAPACITY;
+    classic_bond_count = 1;
+    bluepad32_input_backend_request_pairing_snapshot();
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_pairing_snapshot(&snapshot);
+    require(snapshot.record_count == BLUEPAD32_PAIRING_RECORD_CAPACITY &&
+                snapshot.overflow,
+            "combined ordinary and proprietary inventory must preserve bounded overflow reporting");
+    const uint32_t successful_token = bluepad32_input_backend_clear_pairings();
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_pairing_snapshot(&snapshot);
+    require(snapshot.record_count == 0 && !snapshot.overflow &&
+                switch2_pairing_count == 0 &&
+                bluepad32_input_backend_clear_pairings_completed(snapshot, successful_token),
+            "clear completion must follow deletion of proprietary and ordinary pairing records");
+    switch2_pairing_count = 1;
+    switch2_clear_succeeds = false;
+    const uint32_t failed_token = bluepad32_input_backend_clear_pairings();
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_pairing_snapshot(&snapshot);
+    require(snapshot.status == Bluepad32PairingSnapshotStatus::kFailed &&
+                snapshot.completed_clear_pairings_token == successful_token &&
+                !bluepad32_input_backend_clear_pairings_completed(snapshot, failed_token) &&
+                !incoming_connections && !scanning_enabled &&
+                !switch_pico_switch2_pairing_allowed(),
+            "failed trust deletion must never acknowledge clear or admit reconnects");
+    bluepad32_input_backend_open_pairing_window();
+    bluepad32_input_backend_request_pairing_snapshot();
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_pairing_snapshot(&snapshot);
+    require(snapshot.status == Bluepad32PairingSnapshotStatus::kFailed &&
+                snapshot.completed_clear_pairings_token == successful_token &&
+                !switch_pico_switch2_pairing_allowed() &&
+                g_connection_policy_state == ConnectionPolicyState::FailedClosed,
+            "inventory refresh and pairing requests must not erase failed-clear state");
+    switch2_clear_succeeds = true;
+    const uint32_t retry_token = bluepad32_input_backend_clear_pairings();
+    require(retry_token != failed_token, "explicit retry must receive a fresh clear token");
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_pairing_snapshot(&snapshot);
+    require(snapshot.status == Bluepad32PairingSnapshotStatus::kReady &&
+                snapshot.record_count == 0 &&
+                bluepad32_input_backend_clear_pairings_completed(snapshot, retry_token) &&
+                incoming_connections && scanning_enabled &&
+                !switch_pico_switch2_pairing_allowed(),
+            "successful explicit retry must restore normal reconnect policy, not fresh pairing");
 }
 
 void test_ready_order(bool reverse) {
@@ -2837,7 +3262,17 @@ int main(int argc, char** argv) {
         return 0;
     }
 #endif
-    if (scenario == "ready-forward") {
+    if (scenario == "switch2-forward") {
+        test_switch2_pair_lifecycle(false);
+    } else if (scenario == "switch2-reverse") {
+        test_switch2_pair_lifecycle(true);
+    } else if (scenario == "switch2-multiple-pairs") {
+        test_switch2_multiple_pairs();
+    } else if (scenario == "switch2-admission") {
+        test_switch2_admission();
+    } else if (scenario == "switch2-pairing-inventory") {
+        test_switch2_pairing_inventory();
+    } else if (scenario == "ready-forward") {
         test_ready_order(false);
     } else if (scenario == "ready-reverse") {
         test_ready_order(true);

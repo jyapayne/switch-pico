@@ -332,7 +332,8 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
     ControllerProfileTransformResult result =
         controller_profile_transform(
             gated_input, profile,
-            context->shift_active ? profile.shift.button_map : nullptr);
+            context->shift_active ? profile.shift.button_map : nullptr,
+            context->shift_active ? profile.shift.extra_button_map : nullptr);
     if (context->macro_active &&
         context->macro_index < CONTROLLER_PROFILE_MACRO_COUNT) {
         const ControllerProfileMacro& macro =

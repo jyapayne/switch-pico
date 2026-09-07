@@ -136,6 +136,7 @@ class FakeDevice:
         self.playtest_connection_generation = 17
         self.playtest_state_generation = 93
         self.playtest_button_mask = 0x9001
+        self.playtest_extra_buttons = 0
         self.playtest_sticks = (-1234, 2345, -30000, 30000)
         self.playtest_triggers = (123, 65000)
         self.playtest_motion = (1, -2, 3, -4, 5, -6)
@@ -232,6 +233,7 @@ class FakeDevice:
         payload[38] = 1 if self.playtest_motion is not None else 0
         payload[39] = self.playtest_battery
         payload[40] = self.playtest_capabilities
+        payload[54] = self.playtest_extra_buttons
         if self.playtest_motion is not None:
             struct.pack_into("<hhhhhh", payload, 42, *self.playtest_motion)
         return bytes(payload), flags
@@ -370,7 +372,7 @@ class FakeDevice:
                     make_response(
                         request,
                         self.profiles[self.selected_profile],
-                        schema=config_manager.PROFILE_SCHEMA_VERSION,
+                        schema=struct.unpack_from("<H", self.profiles[self.selected_profile])[0],
                         generation=self.profile_generation,
                     )
                 )
@@ -1576,7 +1578,7 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     legacy_json_object = default_profile.to_json_object()
     legacy_json_object["schema_version"] = config_manager.PROFILE_LEGACY_SCHEMA_VERSION
     legacy_json_object["size"] = config_manager.PROFILE_LEGACY_SIZE
-    for field in ("shortcuts", "shift", "turbo_settings"):
+    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map"):
         del legacy_json_object[field]
     del legacy_json_object["motion_toggle_chord"]
     del legacy_json_object["triggers"]["left"]["output"]
@@ -1639,7 +1641,7 @@ def test_schema5_full_macro_stream_migrates_bytes_and_json(monkeypatch) -> None:
 
     obj["schema_version"] = 5
     obj["size"] = 256
-    for field in ("shortcuts", "shift", "turbo_settings"):
+    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map"):
         del obj[field]
     for macro in obj["macros"]:
         del macro["playback"]
@@ -1678,9 +1680,132 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     assert encoded[283:294] == bytes((30, 99, 255, 4, 128, 1, 1, 1, 23, 37, 17))
     assert encoded[294:336] == bytes(42)
     assert encoded[336:344] == bytes((3, 255, 0, 1, 1, 1, 2, 1))
-    assert encoded[344:] == bytes(40)
+    assert encoded[344:358] == bytes([255]) * 14
+    assert encoded[358:] == bytes(26)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
     assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
+
+    legacy_wire = bytearray(encoded)
+    struct.pack_into("<H", legacy_wire, 0, 6)
+    legacy_wire[344:] = bytes(40)
+    legacy_json = json.loads(profile.to_json())
+    legacy_json["schema_version"] = 6
+    del legacy_json["extra_button_map"]
+    del legacy_json["shift"]["extra_button_map"]
+    assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
+    assert config_manager.ControllerProfile.from_json_object(legacy_json) == profile
+    device = FakeDevice()
+    device.profiles[(device.stable_identity.to_bytes(), 1)] = bytes(legacy_wire)
+    assert config_manager.read_profile(device, device.stable_identity, 1) == profile
+    device.profile_aliases[device.stable_identity.to_bytes()] = "Custom controller"
+    old_listing = config_manager.parse_profile_list(config_manager.parse_response(
+        make_response(config_manager.OP_PROFILE_LIST, device._profile_list_payload(), schema=6),
+        config_manager.OP_PROFILE_LIST,
+    ))
+    assert old_listing[1] == config_manager.ProfileListEntry(device.stable_identity, 1, "Custom controller")
+
+
+def test_schema7_extra_controls_keep_output_channels_and_wire_layout() -> None:
+    obj = custom_profile().to_json_object()
+    obj["extra_button_map"] = dict(zip(
+        config_manager.EXTRA_BUTTONS,
+        ("south", "right_trigger", "left_trigger", None, "dpad_left", "start", "capture"),
+    ))
+    obj["shift"]["mode"] = "hold"
+    obj["shift"]["modifier"] = "gl"
+    obj["shift"]["extra_button_map"] = dict(zip(
+        config_manager.EXTRA_BUTTONS,
+        ("east", None, "west", "north", "system", "dpad_up", "dpad_right"),
+    ))
+    obj["shortcuts"]["modifier"] = "left_sr"
+    obj["shortcuts"]["profiles"][0] = "south"
+    obj["switching_chord"] = ["left_trigger", "c", "right_sr"]
+    obj["motion_toggle_chord"] = ["right_trigger", "gl", "left_sl"]
+    for index, names in enumerate((["c", "gl"], ["gr"], ["left_sl", "left_sr"], ["right_sl", "right_sr"])):
+        obj["macros"][index]["trigger"] = names
+        obj["macros"][index]["cancel"] = config_manager.EXTRA_BUTTONS[index + 3]
+    profile = config_manager.ControllerProfile.from_json_object(obj)
+    encoded = profile.to_bytes()
+    assert encoded[:4] == struct.pack("<HH", 7, 384)
+    assert encoded[344:351] == bytes((0, 17, 16, 255, 14, 7, 9))
+    assert encoded[351:358] == bytes((1, 255, 2, 3, 8, 12, 15))
+    assert encoded[358:364] == bytes((3, 4, 24, 96, 65, 10))
+    assert encoded[364:] == bytes(20)
+    assert config_manager.ControllerProfile.from_bytes(encoded) == profile
+    assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
+    assert len(profile.button_map) == len(profile.shift.button_map) == len(profile.turbo_modes) == 16
+
+
+@pytest.mark.parametrize("path", [
+    ("button_map", "south"),
+    ("extra_button_map", "c"),
+    ("triggers", "left", "output"),
+    ("shift", "extra_button_map", "c"),
+])
+def test_extra_controls_cannot_be_output_destinations(path: tuple[str, ...]) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    target = obj
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = "right_sr"
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+
+
+@pytest.mark.parametrize("offset,value", [
+    (98, 18 << 2), (256, 18), (266, 24), (344, 1), (358, 1), (363, 1),
+])
+def test_schema6_rejects_schema7_controls_in_old_fields(offset: int, value: int) -> None:
+    payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    struct.pack_into("<H", payload, 0, 6)
+    payload[344:] = bytes(40)
+    payload[offset] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize("offset,value", [
+    (344, 18), (351, 16), (358, 128), (362, 128), (363, 128), (364, 1),
+])
+def test_schema7_rejects_extra_map_and_mask_overflow(offset: int, value: int) -> None:
+    payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    payload[offset] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize("version", [3, 4])
+def test_legacy_control_profiles_preserve_custom_actions(version: int) -> None:
+    payload = legacy_profile_wire(version, macro_trigger=3, macro_cancel=2)
+    payload[4] = 17
+    payload[72:75] = bytes((71, 202, 1))
+    struct.pack_into("<H", payload, 76, 1 << 6)
+    struct.pack_into("<H", payload, 98, 1 << 5)
+    if version == 4:
+        payload[75] = 0x21
+        payload[81] = 17
+    profile = config_manager.ControllerProfile.from_bytes(payload)
+    assert profile.button_map[0] == 17
+    assert profile.weak_rumble_scale == 71
+    assert profile.strong_rumble_scale == 202
+    assert profile.confirmation_policy == 1
+    assert profile.switching_chord == (1 << 6) | ((1 << 16) if version == 4 else 0)
+    assert profile.motion_toggle_chord == (1 << 5) | ((1 << 17) if version == 4 else 0)
+    assert profile.macros[0].trigger_mask == 3
+    assert profile.macros[0].cancel_control == (17 if version == 4 else 2)
+    assert profile.extra_button_map == (255,) * 7
+    obj = profile.to_json_object()
+    obj["schema_version"] = version
+    obj["size"] = 256
+    macro = obj.pop("macros")[0]
+    macro.pop("playback")
+    macro.pop("repeat_count")
+    macro["steps"].append(config_manager.MacroStep.end().to_json_object())
+    obj["macro"] = macro
+    for key in ("shortcuts", "shift", "turbo_settings", "extra_button_map"):
+        del obj[key]
+    assert config_manager.ControllerProfile.from_json_object(obj) == profile
+    assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()) == profile
 
 
 @pytest.mark.parametrize(
@@ -1961,6 +2086,27 @@ def test_profile_playtest_decodes_raw_controller_state() -> None:
         match="invalid connected playtest payload",
     ):
         config_manager.parse_profile_playtest(envelope)
+
+
+def test_playtest_extra_inputs_and_legacy_firmware_are_distinct() -> None:
+    device = FakeDevice()
+    device.playtest_extra_buttons = 0x55
+    payload, flags = device._profile_playtest_payload()
+    def parse(data: bytes, schema: int) -> config_manager.ProfilePlaytest:
+        return config_manager.parse_profile_playtest(config_manager.parse_response(
+            make_response(config_manager.OP_PROFILE_PLAYTEST, data, flags=flags, schema=schema),
+            config_manager.OP_PROFILE_PLAYTEST,
+        ))
+    current = parse(payload, 3)
+    assert current.to_json_object()["extra_buttons"] == ["c", "gr", "left_sr", "right_sr"]
+    assert current.to_json_object()["buttons"] == ["south", "dpad_up", "dpad_right"]
+    legacy = parse(payload[:54], 2)
+    assert legacy == replace(current, extra_buttons=0)
+    assert legacy.to_json_object()["extra_buttons"] == []
+    with pytest.raises(config_manager.ConfigManagerError):
+        parse(payload[:54] + b"\x80", 3)
+    with pytest.raises(config_manager.ConfigManagerError):
+        parse(payload, 2)
 
 
 def test_profile_reset_and_activate_wait_for_correlated_transactions(

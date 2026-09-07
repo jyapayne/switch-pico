@@ -23,8 +23,8 @@ constexpr size_t kProfileListRowSize =
     16 + PROFILE_SERVICE_METADATA_MAX_BYTES + 1;
 constexpr size_t kProfileListPayloadSize =
     1 + PROFILE_SERVICE_LIST_CAPACITY * kProfileListRowSize;
-constexpr uint16_t kProfilePlaytestSchemaVersion = 2;
-constexpr size_t kProfilePlaytestPayloadSize = 54;
+constexpr uint16_t kProfilePlaytestSchemaVersion = 3;
+constexpr size_t kProfilePlaytestPayloadSize = 55;
 constexpr size_t kProfileMetadataPayloadSize =
     (CONTROLLER_PROFILE_COUNT + 1) *
     (PROFILE_SERVICE_METADATA_MAX_BYTES + 1);

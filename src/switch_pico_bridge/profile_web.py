@@ -86,6 +86,13 @@ _CONTROL_LABELS = {
         "system": "Home",
         "left_stick": "Left Stick",
         "right_stick": "Right Stick",
+        "c": "C",
+        "gl": "GL",
+        "gr": "GR",
+        "left_sl": "Left SL",
+        "left_sr": "Left SR",
+        "right_sl": "Right SL",
+        "right_sr": "Right SR",
     },
     "playstation": {
         "north": "Triangle",
@@ -114,6 +121,9 @@ def _controller_presentation(
 
     known = {
         (0x057E, 0x2009): ("Nintendo Switch Pro Controller", "switch"),
+        (0x057E, 0x2069): ("Nintendo Switch 2 Pro Controller", "switch"),
+        (0x057E, 0x2067): ("Nintendo Joy-Con 2 (L)", "switch"),
+        (0x057E, 0x2066): ("Nintendo Joy-Con 2 (R)", "switch"),
         (0x054C, 0x0CE6): ("Sony DualSense", "playstation"),
         (0x054C, 0x09CC): ("Sony DualShock 4", "playstation"),
     }
@@ -201,6 +211,8 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                 {
                     "buttons": list(config_manager.LOGICAL_BUTTONS),
                     "controls": list(config_manager.LOGICAL_CONTROLS),
+                    "output_controls": list(config_manager.OUTPUT_CONTROLS),
+                    "extra_buttons": list(config_manager.EXTRA_BUTTONS),
                     "default_switching_chord": [
                         "left_shoulder",
                         "right_shoulder",
@@ -445,9 +457,12 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                     "alias": entry.alias,
                     "modifier_controls": list(
                         config_manager.LOGICAL_CONTROLS
+                        if entry.identity.vendor_id == 0x057E
+                        and entry.identity.product_id in {0x2069, 0x2067, 0x2066}
+                        else config_manager.OUTPUT_CONTROLS
                         if _controller_presentation(entry.identity)["style"]
                         in {"xbox", "playstation"}
-                        else config_manager.LOGICAL_BUTTONS
+                        else config_manager.LOGICAL_BUTTONS + config_manager.EXTRA_BUTTONS
                     ),
                 }
                 for index, entry in enumerate(entries)

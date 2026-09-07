@@ -1160,6 +1160,61 @@ void test_shortcut_selector_rollover_without_modifier_release() {
             "swapping shortcut selectors while holding the modifier lost the new action");
 }
 
+void test_extra_hotkeys_consume_mappings_and_rearm() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.switching_chord = (1u << 18) | (1u << 24);
+    profile.motion_toggle_chord = (1u << 19) | (1u << 16);
+    profile.shortcuts.modifier = 20;
+    profile.shortcuts.selectors[7] = 0;
+    profile.extra_button_map[0] = 3;
+    profile.extra_button_map[1] = 1;
+    profile.extra_button_map[2] = 2;
+    profile.extra_button_map[6] = 17;
+    Bluepad32SlotSnapshot snapshot = make_snapshot(0, 9);
+    (void)runtime_transform(0, snapshot, 0);
+    snapshot.state.extra_buttons = 1;
+    auto output = runtime_transform(0, snapshot, 1);
+    require(activation_attempt_count == 0 && output.state.button_north,
+            "partial extra switching chord was swallowed or activated");
+    snapshot.state.extra_buttons = 0x41;
+    output = runtime_transform(0, snapshot, 2);
+    require(activation_attempt_count == 1 &&
+                activation_attempts[0].profile_index == 1 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.state.right_trigger == 0 && output.state.extra_buttons == 0,
+            "extra switching chord did not select the next profile and consume mappings");
+    (void)runtime_transform(0, snapshot, 3);
+    require(activation_attempt_count == 1, "held extra switching chord retriggered");
+    snapshot.state = controller_neutral_state();
+    (void)runtime_transform(0, snapshot, 4);
+    snapshot.state.extra_buttons = 2;
+    snapshot.state.left_trigger = UINT16_MAX;
+    output = runtime_transform(0, snapshot, 5);
+    require(motion_toggle_count == 1 && last_motion_toggle_slot == 0 &&
+                last_motion_toggle_connection_generation == 9 &&
+                !output.state.button_east && output.state.left_trigger == 0,
+            "extra/trigger motion chord lost its logical slot or leaked mapped inputs");
+    (void)runtime_transform(0, snapshot, 6);
+    require(motion_toggle_count == 1, "held extra motion chord retriggered");
+    snapshot.state = controller_neutral_state();
+    (void)runtime_transform(0, snapshot, 7);
+    apply_button_mask(1, &snapshot);
+    snapshot.state.extra_buttons = 4;
+    output = runtime_transform(0, snapshot, 8);
+    require(activation_attempt_count == 2 &&
+                activation_attempts[1].profile_index == 7 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "extra shortcut modifier failed to select profile eight or leaked inputs");
+    apply_button_mask(0, &snapshot);
+    (void)runtime_transform(0, snapshot, 9);
+    snapshot.state.extra_buttons = 0x41;
+    (void)runtime_transform(0, snapshot, 10);
+    require(activation_attempt_count == 3 &&
+                activation_attempts[2].profile_index == 1,
+            "released extra switching chord did not rearm");
+}
+
 }  // namespace
 
 bool bluepad32_input_backend_toggle_motion(
@@ -1232,5 +1287,6 @@ int main() {
     test_shift_slot_and_context_resets();
     test_held_synthetic_sources_and_disconnect_rearming();
     test_shortcut_selector_rollover_without_modifier_release();
+    test_extra_hotkeys_consume_mappings_and_rearm();
     return 0;
 }

@@ -23,6 +23,8 @@
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 #include <uni.h>
+#include "parser/uni_hid_parser_switch2.h"
+#include "parser/uni_switch2_pairing.h"
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
 #include "adapter/adapter_usb_mode.h"
 #endif
@@ -156,6 +158,13 @@ struct BackendSlot {
     ControllerIdentity identity;
     // Non-null with active=false is a connected device still becoming ready.
     uni_hid_device_t* device;
+    // A pair occupies one output/profile, but still consumes two of the four
+    // Bluepad32 physical device indices. The left half always owns identity.
+    uni_hid_device_t* companion;
+    uni_gamepad_t gamepad;
+    uni_gamepad_t companion_gamepad;
+    uint8_t extra_buttons;
+    uint8_t companion_extra_buttons;
     uint32_t state_generation;
     uint32_t connection_generation;
     bool active;
@@ -174,6 +183,7 @@ struct BackendSlot {
 };
 
 critical_section_t g_state_lock;
+uni_hid_device_t* g_retired_devices[kSlotCount]{};
 BackendSlot g_slots[kSlotCount];
 ControllerMacroCapture g_macro_capture;
 // Catalog migration/compaction needs more than the 4 KiB scratch bank.
@@ -239,12 +249,13 @@ bool valid_slot(uint8_t slot) {
 
 bool has_free_slot() {
     critical_section_enter_blocking(&g_state_lock);
-    bool free_slot = false;
+    unsigned physical_count = 0;
     for (const BackendSlot& slot : g_slots) {
-        free_slot = free_slot || slot.device == nullptr;
+        physical_count += slot.device != nullptr;
+        physical_count += slot.companion != nullptr;
     }
     critical_section_exit(&g_state_lock);
-    return free_slot;
+    return physical_count < kSlotCount;
 }
 
 bool has_active_controller() {
@@ -257,12 +268,68 @@ bool has_active_controller() {
     return active_controller;
 }
 
-int slot_for_device(const uni_hid_device_t* device) {
+int physical_index_for_device(const uni_hid_device_t* device) {
     if (device == nullptr) {
         return -1;
     }
-    const int slot = uni_hid_device_get_idx_for_instance(device);
-    return slot >= 0 && slot < kSlotCount ? slot : -1;
+    const int index = uni_hid_device_get_idx_for_instance(device);
+    return index >= 0 && index < kSlotCount ? index : -1;
+}
+
+int slot_for_device(const uni_hid_device_t* device) {
+    if (device != nullptr) {
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            if (g_slots[index].device == device ||
+                g_slots[index].companion == device) {
+                return index;
+            }
+        }
+    }
+    return -1;
+}
+
+// Called under the state lock. Bluepad32's index is a transport resource, not
+// an output index once two Joy-Cons merge. Never evict an unrelated output.
+int reserve_device_slot(uni_hid_device_t* device) {
+    const int physical_index = physical_index_for_device(device);
+    if (physical_index < 0) {
+        return -1;
+    }
+    const int tracked = slot_for_device(device);
+    if (g_retired_devices[physical_index] == device &&
+        uni_hid_parser_switch2_is_ble_device(device)) {
+        return -1;
+    }
+    if (tracked >= 0) {
+        return tracked;
+    }
+    for (const BackendSlot& slot : g_slots) {
+        if ((slot.device != nullptr &&
+             physical_index_for_device(slot.device) == physical_index) ||
+            (slot.companion != nullptr &&
+             physical_index_for_device(slot.companion) == physical_index)) {
+            return -1;
+        }
+    }
+    if (g_slots[physical_index].device == nullptr) {
+        return physical_index;
+    }
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        if (g_slots[index].device == nullptr) {
+            return index;
+        }
+    }
+    return -1;
+}
+
+int joycon_side(const uni_hid_device_t* device) {
+    if (!uni_hid_parser_switch2_is_ble_device(device)) {
+        return 0;
+    }
+    if (device->product_id == UNI_SW2_JOYCON_L_PID) {
+        return -1;
+    }
+    return device->product_id == UNI_SW2_JOYCON_R_PID ? 1 : 0;
 }
 
 bool addresses_equal(const bd_addr_t first, const bd_addr_t second) {
@@ -343,6 +410,15 @@ ControllerIdentity identity_for_device(const uni_hid_device_t* device) {
                 device->conn.handle, device->conn.btaddr);
             if (mapping != nullptr) {
                 return make_ble_identity(*mapping, device);
+            }
+            uint8_t address_type = BD_ADDR_TYPE_UNKNOWN;
+            if (uni_hid_parser_switch2_identity_address_type(
+                    device, &address_type)) {
+                BleIdentityMapping proprietary{};
+                proprietary.identity_address_type = address_type;
+                memcpy(proprietary.identity_address, device->conn.btaddr,
+                       sizeof(proprietary.identity_address));
+                return make_ble_identity(proprietary, device);
             }
             break;
         }
@@ -492,8 +568,10 @@ bool lighting_target_is_current(
     const uni_hid_device_t* device) {
     critical_section_enter_blocking(&g_state_lock);
     const bool current =
-        slot_index < kSlotCount && g_slots[slot_index].active &&
-        g_slots[slot_index].device == device &&
+        device != nullptr && slot_index < kSlotCount &&
+        g_slots[slot_index].active &&
+        (g_slots[slot_index].device == device ||
+         g_slots[slot_index].companion == device) &&
         g_slots[slot_index].connection_generation ==
             connection_generation;
     critical_section_exit(&g_state_lock);
@@ -506,14 +584,17 @@ ConnectionStatus compute_connection_status() {
     critical_section_enter_blocking(&g_state_lock);
     bool all_ready = true;
     bool any_connecting = false;
+    unsigned physical_count = 0;
     for (const BackendSlot& slot : g_slots) {
         const bool has_device = slot.device != nullptr;
-        all_ready = all_ready && slot.active && has_device;
+        physical_count += has_device;
+        physical_count += slot.companion != nullptr;
+        all_ready = all_ready && (!has_device || slot.active);
         any_connecting = any_connecting || (!slot.active && has_device);
     }
     critical_section_exit(&g_state_lock);
 
-    if (all_ready) {
+    if (all_ready && physical_count == kSlotCount) {
         return ConnectionStatus::Ready;
     }
     return any_connecting ? ConnectionStatus::Connecting
@@ -544,6 +625,11 @@ void publish_all_neutral() {
         slot.pre_hotkey_button_mask = 0;
         slot.identity = controller_identity_global();
         slot.device = nullptr;
+        slot.companion = nullptr;
+        slot.gamepad = {};
+        slot.companion_gamepad = {};
+        slot.extra_buttons = 0;
+        slot.companion_extra_buttons = 0;
         slot.active = false;
         slot.rumble_pending = false;
         slot.retained_host_rumble_valid = false;
@@ -837,6 +923,81 @@ ControllerState map_gamepad(const uni_gamepad_t& gamepad,
 
     return state;
 }
+int32_t negate_motion_axis(int32_t value) {
+    return value == INT32_MIN ? INT32_MAX : -value;
+}
+
+void rotate_solo_joycon(uni_gamepad_t& gamepad, int side,
+                         uint8_t extras) {
+    const uint32_t buttons = gamepad.buttons;
+    if (side < 0) {
+        const int32_t x = gamepad.axis_x;
+        gamepad.axis_x = clamp_axis(gamepad.axis_y);
+        gamepad.axis_y = clamp_axis(-clamp_axis(x));
+        gamepad.buttons &= ~(BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_Y);
+        gamepad.buttons |=
+            ((gamepad.dpad & DPAD_LEFT) ? uint32_t{BUTTON_A} : 0u) |
+            ((gamepad.dpad & DPAD_DOWN) ? uint32_t{BUTTON_B} : 0u) |
+            ((gamepad.dpad & DPAD_UP) ? uint32_t{BUTTON_X} : 0u) |
+            ((gamepad.dpad & DPAD_RIGHT) ? uint32_t{BUTTON_Y} : 0u) |
+            ((extras & UNI_SW2_BUTTON_LEFT_SL) ? uint32_t{BUTTON_SHOULDER_L} : 0u) |
+            ((extras & UNI_SW2_BUTTON_LEFT_SR) ? uint32_t{BUTTON_SHOULDER_R} : 0u);
+    } else {
+        gamepad.axis_x = clamp_axis(-clamp_axis(gamepad.axis_ry));
+        gamepad.axis_y = clamp_axis(gamepad.axis_rx);
+        gamepad.buttons &=
+            ~(BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_Y | BUTTON_THUMB_R);
+        gamepad.buttons |=
+            ((buttons & BUTTON_B) ? uint32_t{BUTTON_A} : 0u) |
+            ((buttons & BUTTON_Y) ? uint32_t{BUTTON_B} : 0u) |
+            ((buttons & BUTTON_A) ? uint32_t{BUTTON_X} : 0u) |
+            ((buttons & BUTTON_X) ? uint32_t{BUTTON_Y} : 0u) |
+            ((buttons & BUTTON_THUMB_R) ? uint32_t{BUTTON_THUMB_L} : 0u) |
+            ((extras & UNI_SW2_BUTTON_RIGHT_SL) ? uint32_t{BUTTON_SHOULDER_L} : 0u) |
+            ((extras & UNI_SW2_BUTTON_RIGHT_SR) ? uint32_t{BUTTON_SHOULDER_R} : 0u);
+    }
+    gamepad.dpad = 0;
+    gamepad.axis_rx = 0;
+    gamepad.axis_ry = 0;
+    int32_t* motion_axes[] = {gamepad.accel, gamepad.gyro};
+    for (int32_t* axes : motion_axes) {
+        const int32_t x = axes[0];
+        axes[0] = side < 0 ? negate_motion_axis(axes[1]) : axes[1];
+        axes[1] = side < 0 ? x : negate_motion_axis(x);
+    }
+}
+uni_gamepad_t logical_gamepad(const BackendSlot& slot) {
+    uni_gamepad_t gamepad = slot.gamepad;
+    if (slot.companion != nullptr) {
+        const uni_gamepad_t& right = slot.companion_gamepad;
+        gamepad.dpad |= right.dpad;
+        gamepad.buttons |= right.buttons;
+        gamepad.misc_buttons |= right.misc_buttons;
+        gamepad.axis_rx = right.axis_rx;
+        gamepad.axis_ry = right.axis_ry;
+        gamepad.throttle = right.throttle;
+        // The right half is the sole aim source. A left report must not
+        // republish an already consumed right-hand motion sample.
+        memcpy(gamepad.accel, right.accel, sizeof(gamepad.accel));
+        memcpy(gamepad.gyro, right.gyro, sizeof(gamepad.gyro));
+    } else {
+        const int side = joycon_side(slot.device);
+        if (side != 0) {
+            rotate_solo_joycon(gamepad, side, slot.extra_buttons);
+        }
+    }
+    return gamepad;
+}
+
+void refresh_topology_input(BackendSlot& slot) {
+    const uni_gamepad_t gamepad = logical_gamepad(slot);
+    slot.pre_hotkey_button_mask = logical_button_mask(gamepad);
+    // Topology changes release the lost half immediately; motion stays neutral
+    // until a fresh report from the newly selected source arrives.
+    slot.state = map_gamepad(gamepad, false, slot.pre_hotkey_button_mask);
+    slot.state.extra_buttons =
+        slot.extra_buttons | slot.companion_extra_buttons;
+}
 struct HotkeyDecision {
     bool motion_enabled;
 };
@@ -866,6 +1027,27 @@ void reset_slot_hotkeys(BackendSlot& slot) {
     slot.profile_feedback = {};
     slot.retained_host_rumble_valid = false;
     slot.retained_host_rumble = {};
+}
+
+void invalidate_slot(BackendSlot& slot) {
+    reset_slot_hotkeys(slot);
+    slot.rumble_pending = false;
+    slot.pending_rumble = {};
+    slot.state = make_neutral_state();
+    ++slot.state_generation;
+    ++slot.connection_generation;
+}
+
+void release_slot(BackendSlot& slot) {
+    invalidate_slot(slot);
+    slot.identity = controller_identity_global();
+    slot.device = nullptr;
+    slot.companion = nullptr;
+    slot.gamepad = {};
+    slot.companion_gamepad = {};
+    slot.extra_buttons = 0;
+    slot.companion_extra_buttons = 0;
+    slot.active = false;
 }
 
 
@@ -1010,6 +1192,9 @@ bool update_pairing_window(uint32_t now_ms) {
     const bool requested = g_pairing_window_requested;
     g_pairing_window_requested = false;
     critical_section_exit(&g_state_lock);
+    if (g_connection_policy_state == ConnectionPolicyState::FailedClosed) {
+        return false;
+    }
 
     if (requested) {
         ConfigurationServiceSnapshot configuration{};
@@ -1079,8 +1264,19 @@ void refresh_pairing_snapshot() {
             snapshot, Bluepad32PairingTransport::kBle,
             static_cast<uint8_t>(address_type), address);
     }
+    for (uint8_t index = 0; index < UNI_SWITCH2_PAIRING_CAPACITY; ++index) {
+        uint8_t address_type = BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t address{};
+        if (uni_switch2_pairing_get(index, &address_type, address)) {
+            append_pairing_record(
+                snapshot, Bluepad32PairingTransport::kBle, address_type, address);
+        }
+    }
 
     critical_section_enter_blocking(&g_state_lock);
+    if (g_pairing_snapshot.status == Bluepad32PairingSnapshotStatus::kFailed) {
+        snapshot.status = Bluepad32PairingSnapshotStatus::kFailed;
+    }
     snapshot.generation = g_pairing_snapshot.generation + 1;
     snapshot.completed_clear_pairings_token =
         g_pairing_snapshot.completed_clear_pairings_token;
@@ -1103,6 +1299,7 @@ void recompute_connection_status();
 
 void process_clear_pairings(uint32_t now_ms) {
     uni_hid_device_t* devices[kSlotCount]{};
+    uint8_t device_count = 0;
     critical_section_enter_blocking(&g_state_lock);
     const uint32_t request_token =
         g_clear_pairings_requested_token;
@@ -1114,17 +1311,17 @@ void process_clear_pairings(uint32_t now_ms) {
         g_pairing_window_requested = false;
         for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
             BackendSlot& slot = g_slots[slot_index];
-            devices[slot_index] = slot.device;
-            slot.state = make_neutral_state();
-            slot.identity = controller_identity_global();
-            slot.device = nullptr;
-            slot.active = false;
-            slot.rumble_pending = false;
-            slot.feedback_pending = false;
-            slot.feedback_until_ms = 0;
-            reset_slot_hotkeys(slot);
-            ++slot.state_generation;
-            ++slot.connection_generation;
+            if (slot.device != nullptr) {
+                g_retired_devices[physical_index_for_device(slot.device)] =
+                    slot.device;
+                devices[device_count++] = slot.device;
+            }
+            if (slot.companion != nullptr) {
+                g_retired_devices[physical_index_for_device(slot.companion)] =
+                    slot.companion;
+                devices[device_count++] = slot.companion;
+            }
+            release_slot(slot);
         }
     }
     critical_section_exit(&g_state_lock);
@@ -1138,18 +1335,40 @@ void process_clear_pairings(uint32_t now_ms) {
     g_pairing_window_open = false;
     gap_set_bondable_mode(false);
     sm_set_accepted_stk_generation_methods(0);
+    const bool proprietary_cleared = uni_switch2_pairing_clear();
     uni_bt_del_keys_unsafe();
     for (uni_hid_device_t* device : devices) {
         if (device != nullptr) {
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
+            switch_native_output_detach(device);
+#endif
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+            haptics_experiment_detach(device);
+#endif
             uni_hid_device_disconnect(device);
         }
     }
     refresh_pairing_snapshot();
+    if (!proprietary_cleared) {
+        uni_bt_stop_scanning_unsafe();
+        uni_bt_allow_incoming_connections(false);
+        g_connection_policy_state = ConnectionPolicyState::FailedClosed;
+        critical_section_enter_blocking(&g_state_lock);
+        g_pairing_snapshot.status = Bluepad32PairingSnapshotStatus::kFailed;
+        g_clear_pairings_in_progress_token = 0;
+        g_clear_pairings_requested_token = 0;
+        g_pairing_window_requested = false;
+        critical_section_exit(&g_state_lock);
+        return;
+    }
 
     g_connection_status = ConnectionStatus::Scanning;
     g_status_led_tick = 0;
     g_pairing_reset_feedback_deadline_ms =
         now_ms + kPairingResetFeedbackDurationMs;
+    if (g_connection_policy_state == ConnectionPolicyState::FailedClosed) {
+        g_connection_policy_state = ConnectionPolicyState::Uninitialized;
+    }
     apply_connection_policy();
     critical_section_enter_blocking(&g_state_lock);
     g_pairing_snapshot.completed_clear_pairings_token =
@@ -1160,6 +1379,9 @@ void process_clear_pairings(uint32_t now_ms) {
 
 
 void apply_connection_policy() {
+    if (g_connection_policy_state == ConnectionPolicyState::FailedClosed) {
+        return;
+    }
     const bool free_slot = has_free_slot();
     const bool active_controller = has_active_controller();
     const bool pairing_open =
@@ -1418,6 +1640,8 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         uni_hid_device_t* device = nullptr;
         uni_hid_device_t* profile_lighting_device = nullptr;
         uint32_t profile_lighting_generation = 0;
+        uni_hid_device_t* companion = nullptr;
+        uint32_t dispatch_generation = 0;
         bool profile_lighting_dispatch = false;
         bool profile_lighting_restore = false;
         bool profile_rumble_dispatch = false;
@@ -1571,6 +1795,8 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
                 device = slot.device;
             }
         }
+        companion = slot.companion;
+        dispatch_generation = slot.connection_generation;
         critical_section_exit(&g_state_lock);
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
         if (host_dispatch && switch_native_output_owns(device))
@@ -1585,39 +1811,45 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         }
 #endif
 
-        if (profile_lighting_restore &&
-            lighting_target_is_current(
-                slot_index, profile_lighting_generation,
-                profile_lighting_device)) {
-            apply_slot_lighting(slot_index,
-                                profile_lighting_device);
+        uni_hid_device_t* lighting_targets[] = {
+            profile_lighting_device, companion};
+        for (uni_hid_device_t* target : lighting_targets) {
+            if (!lighting_target_is_current(
+                    slot_index, profile_lighting_generation, target)) {
+                continue;
+            }
+            if (profile_lighting_restore) {
+                apply_slot_lighting(slot_index, target);
+            }
+            if (profile_lighting_dispatch) {
+                apply_profile_lighting(
+                    profile_feedback.active_profile_number, target);
+            }
         }
-        if (profile_lighting_dispatch &&
-            lighting_target_is_current(
-                slot_index, profile_lighting_generation,
-                profile_lighting_device)) {
-            apply_profile_lighting(
-                profile_feedback.active_profile_number,
-                profile_lighting_device);
-        }
-        if (profile_rumble_dispatch && device != nullptr &&
-            device->report_parser.play_dual_rumble != nullptr) {
-            __atomic_add_fetch(
-                &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
-            dispatch_rumble(
-                device, kProfileFeedbackPhaseDurationMs,
-                kProfileFeedbackWeakMagnitude, kProfileFeedbackStrongMagnitude);
-        } else if (feedback_dispatch) {
-            __atomic_add_fetch(
-                &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
-            dispatch_rumble(
-                device, feedback.duration_ms,
-                feedback.weak_magnitude, feedback.strong_magnitude);
-        } else if (host_dispatch &&
-                   device->report_parser.play_dual_rumble != nullptr) {
-            __atomic_add_fetch(
-                &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
-            dispatch_host_rumble(device, envelope.duration_ms, envelope.rumble);
+        uni_hid_device_t* rumble_targets[] = {device, companion};
+        for (uni_hid_device_t* target : rumble_targets) {
+            if (!lighting_target_is_current(
+                    slot_index, dispatch_generation, target) ||
+                target->report_parser.play_dual_rumble == nullptr) {
+                continue;
+            }
+            if (profile_rumble_dispatch) {
+                __atomic_add_fetch(
+                    &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
+                dispatch_rumble(
+                    target, kProfileFeedbackPhaseDurationMs,
+                    kProfileFeedbackWeakMagnitude, kProfileFeedbackStrongMagnitude);
+            } else if (feedback_dispatch) {
+                __atomic_add_fetch(
+                    &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
+                dispatch_rumble(
+                    target, feedback.duration_ms,
+                    feedback.weak_magnitude, feedback.strong_magnitude);
+            } else if (host_dispatch) {
+                __atomic_add_fetch(
+                    &g_rumble_dispatches, 1, __ATOMIC_RELAXED);
+                dispatch_host_rumble(target, envelope.duration_ms, envelope.rumble);
+            }
         }
     }
 
@@ -1686,117 +1918,165 @@ void platform_on_device_connected(uni_hid_device_t* device) {
         uni_hid_device_disconnect(device);
         return;
     }
-
-    const int slot_index = slot_for_device(device);
-    if (slot_index < 0) {
-        return;
-    }
-    const ControllerIdentity connection_identity =
-        identity_for_device(device);
-
-    bool tracked_connection = false;
+    const ControllerIdentity connection_identity = identity_for_device(device);
     critical_section_enter_blocking(&g_state_lock);
-    BackendSlot& slot = g_slots[slot_index];
-    if (!slot.active && slot.device == nullptr) {
-        slot.device = device;
-        slot.rumble_pending = false;
-        reset_slot_hotkeys(slot);
-        tracked_connection = true;
-    } else {
-        tracked_connection = slot.device == device;
+    const int physical_index = physical_index_for_device(device);
+    if (physical_index >= 0) {
+        g_retired_devices[physical_index] = nullptr;
     }
-    if (tracked_connection) {
-        slot.identity = connection_identity;
+    const int slot_index = reserve_device_slot(device);
+    if (slot_index >= 0) {
+        BackendSlot& slot = g_slots[slot_index];
+        if (slot.device == nullptr) {
+            slot.device = device;
+            slot.identity = connection_identity;
+            slot.rumble_pending = false;
+            reset_slot_hotkeys(slot);
+        }
     }
     critical_section_exit(&g_state_lock);
-
-    if (tracked_connection) {
+    if (slot_index >= 0) {
         recompute_connection_status();
+    } else {
+        uni_hid_device_disconnect(device);
     }
 }
 
 void platform_on_device_disconnected(uni_hid_device_t* device) {
+    const int slot_index = slot_for_device(device);
+    if (slot_index < 0) {
+        return;
+    }
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
     switch_native_output_detach(device);
 #endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     haptics_experiment_detach(device);
 #endif
-    const int slot_index = slot_for_device(device);
-    if (slot_index < 0) {
-        return;
-    }
-
-    bool disconnected_tracked_device = false;
+    uni_hid_device_t* survivor = nullptr;
+    ControllerIdentity survivor_identity{};
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
-    if (slot.device == device) {
-        slot.state = make_neutral_state();
-        slot.identity = controller_identity_global();
-        slot.device = nullptr;
-        slot.active = false;
-        slot.rumble_pending = false;
-        reset_slot_hotkeys(slot);
-        ++slot.state_generation;
-        ++slot.connection_generation;
-        disconnected_tracked_device = true;
+    g_retired_devices[physical_index_for_device(device)] = device;
+    if (slot.companion != nullptr) {
+        invalidate_slot(slot);
+        if (slot.device == device) {
+            slot.device = slot.companion;
+            slot.gamepad = slot.companion_gamepad;
+            slot.extra_buttons = slot.companion_extra_buttons;
+        }
+        slot.companion = nullptr;
+        slot.companion_gamepad = {};
+        slot.companion_extra_buttons = 0;
+        survivor = slot.device;
+        slot.identity = identity_for_device(survivor);
+        survivor_identity = slot.identity;
+        refresh_topology_input(slot);
+    } else {
+        release_slot(slot);
     }
     critical_section_exit(&g_state_lock);
     clear_ble_identity_for_device(device);
-
-    if (disconnected_tracked_device) {
-        // Re-evaluate from scratch: resume discovery only after the final
-        // active controller disconnects; otherwise keep passive incoming
-        // reconnect support without inquiry-induced latency.
-        g_connection_policy_state = ConnectionPolicyState::Uninitialized;
-        recompute_connection_status();
+    if (survivor != nullptr) {
+        if (survivor->report_parser.play_dual_rumble != nullptr) {
+            dispatch_rumble(survivor, 0, 0, 0);
+        }
+        apply_slot_lighting(static_cast<uint8_t>(slot_index), survivor);
+        if (survivor_identity.stable) {
+            profile_service_observe_identity_on_storage_core(survivor_identity);
+        }
     }
+    // Losing a half frees transport capacity, not another logical player.
+    g_connection_policy_state = ConnectionPolicyState::Uninitialized;
+    recompute_connection_status();
 }
 
 uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     if (device == nullptr || !uni_hid_device_is_gamepad(device)) {
         return UNI_ERROR_INVALID_CONTROLLER;
     }
-
-    const int slot_index = slot_for_device(device);
-    if (slot_index < 0) {
+    if (g_connection_policy_state == ConnectionPolicyState::FailedClosed) {
         return UNI_ERROR_NO_SLOTS;
     }
-    const ControllerIdentity connection_identity =
-        identity_for_device(device);
 
-    bool occupied_mismatch = false;
     bool became_active = false;
+    bool paired = false;
     uint32_t lighting_generation = 0;
+    uni_hid_device_t* owner = device;
+    uni_hid_device_t* companion = nullptr;
+    ControllerIdentity connection_identity = identity_for_device(device);
     critical_section_enter_blocking(&g_state_lock);
-    BackendSlot& slot = g_slots[slot_index];
-    occupied_mismatch = slot.device != nullptr && slot.device != device;
-    if (!occupied_mismatch) {
-        slot.identity = connection_identity;
-        slot.device = device;
-        if (!slot.active) {
-            slot.state = make_neutral_state();
-            slot.active = true;
-            slot.rumble_pending = false;
-            reset_slot_hotkeys(slot);
-            ++slot.state_generation;
-            became_active = true;
-            lighting_generation = slot.connection_generation;
-        }
-    }
-    critical_section_exit(&g_state_lock);
-
-    if (occupied_mismatch) {
+    int slot_index = reserve_device_slot(device);
+    if (slot_index < 0) {
+        critical_section_exit(&g_state_lock);
         return UNI_ERROR_NO_SLOTS;
     }
+    BackendSlot& pending = g_slots[slot_index];
+    if (!pending.active) {
+        const int side = joycon_side(device);
+        int partner_index = -1;
+        if (side != 0) {
+            for (uint8_t index = 0; index < kSlotCount; ++index) {
+                const BackendSlot& candidate = g_slots[index];
+                if (index != slot_index && candidate.active &&
+                    candidate.companion == nullptr &&
+                    joycon_side(candidate.device) == -side) {
+                    partner_index = index;
+                    break;
+                }
+            }
+        }
+        if (partner_index >= 0) {
+            BackendSlot& partner = g_slots[partner_index];
+            invalidate_slot(partner);
+            if (side < 0) {
+                partner.companion = partner.device;
+                partner.companion_gamepad = partner.gamepad;
+                partner.companion_extra_buttons = partner.extra_buttons;
+                partner.device = device;
+                partner.gamepad = {};
+                partner.extra_buttons = 0;
+            } else {
+                partner.companion = device;
+                partner.companion_gamepad = {};
+                partner.companion_extra_buttons = 0;
+            }
+            // Preserve the existing player's output index regardless of
+            // physical connection order, with the left identity as profile owner.
+            partner.identity = identity_for_device(partner.device);
+            refresh_topology_input(partner);
+            release_slot(pending);
+            slot_index = partner_index;
+            paired = true;
+        } else {
+            pending.identity = connection_identity;
+            pending.device = device;
+            pending.state = make_neutral_state();
+            pending.active = true;
+            pending.rumble_pending = false;
+            reset_slot_hotkeys(pending);
+            ++pending.state_generation;
+        }
+        became_active = true;
+    }
+    const BackendSlot& current = g_slots[slot_index];
+    owner = current.device;
+    companion = current.companion;
+    lighting_generation = current.connection_generation;
+    connection_identity = current.identity;
+    critical_section_exit(&g_state_lock);
     if (became_active) {
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
-        switch_native_output_attach(static_cast<uint8_t>(slot_index),
-                                    lighting_generation, device, connection_identity);
+        if (!paired) {
+            switch_native_output_attach(static_cast<uint8_t>(slot_index),
+                                        lighting_generation, device, connection_identity);
+        }
 #endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-        haptics_experiment_attach(
-            static_cast<uint8_t>(slot_index), lighting_generation, device);
+        if (!paired && !uni_hid_parser_switch2_is_ble_device(device)) {
+            haptics_experiment_attach(
+                static_cast<uint8_t>(slot_index), lighting_generation, device);
+        }
 #ifdef SWITCH_PICO_HD_RUMBLE
         if (connection_identity.vendor_id == 0x054c &&
             (connection_identity.product_id == 0x0ce6 ||
@@ -1805,11 +2085,20 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         }
 #endif
 #endif
+        if (paired) {
+            uni_hid_device_t* halves[] = {owner, companion};
+            for (uni_hid_device_t* half : halves) {
+                if (half->report_parser.play_dual_rumble != nullptr) {
+                    dispatch_rumble(half, 0, 0, 0);
+                }
+            }
+        }
         if (lighting_target_is_current(
-                static_cast<uint8_t>(slot_index),
-                lighting_generation, device)) {
-            apply_slot_lighting(
-                static_cast<uint8_t>(slot_index), device);
+                static_cast<uint8_t>(slot_index), lighting_generation, owner)) {
+            apply_slot_lighting(static_cast<uint8_t>(slot_index), owner);
+            if (companion != nullptr) {
+                apply_slot_lighting(static_cast<uint8_t>(slot_index), companion);
+            }
         }
         if (connection_identity.stable) {
             profile_service_observe_identity_on_storage_core(
@@ -1831,22 +2120,39 @@ void platform_on_controller_data(uni_hid_device_t* device,
     }
     __atomic_add_fetch(&g_controller_reports, 1, __ATOMIC_RELAXED);
 
-    uni_gamepad_t gamepad = controller->gamepad;
-    const uint16_t pre_hotkey_button_mask =
-        logical_button_mask(gamepad);
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (!slot.active) {
+        critical_section_exit(&g_state_lock);
+        return;
+    }
+    const uint8_t extras = uni_hid_parser_switch2_extra_buttons(device);
+    if (slot.companion == device) {
+        slot.companion_gamepad = controller->gamepad;
+        slot.companion_extra_buttons = extras;
+    } else {
+        slot.gamepad = controller->gamepad;
+        slot.extra_buttons = extras;
+    }
+    const uni_gamepad_t gamepad = logical_gamepad(slot);
+    uni_hid_device_t* owner = slot.device;
+    const bool fresh_motion =
+        slot.companion == nullptr || slot.companion == device;
+    const uint8_t merged_extras =
+        slot.extra_buttons | slot.companion_extra_buttons;
+    critical_section_exit(&g_state_lock);
+    const uint16_t pre_hotkey_button_mask = logical_button_mask(gamepad);
     if (wake_chord_rising_edge(
-            static_cast<uint8_t>(slot_index), device,
-            pre_hotkey_button_mask)) {
+            static_cast<uint8_t>(slot_index), owner, pre_hotkey_button_mask)) {
         switch2_wake_request();
     }
     const HotkeyDecision hotkeys = update_controller_hotkeys(
-        static_cast<uint8_t>(slot_index), device);
-    const uint16_t output_button_mask = pre_hotkey_button_mask;
+        static_cast<uint8_t>(slot_index), owner);
+    ControllerState state = map_gamepad(
+        gamepad, hotkeys.motion_enabled && fresh_motion, pre_hotkey_button_mask);
+    state.extra_buttons = merged_extras;
     publish_device_state(
-        static_cast<uint8_t>(slot_index), device,
-        pre_hotkey_button_mask,
-        map_gamepad(
-            gamepad, hotkeys.motion_enabled, output_button_mask));
+        static_cast<uint8_t>(slot_index), owner, pre_hotkey_button_mask, state);
 }
 
 const uni_property_t* platform_get_property(uni_property_idx_t index) {
@@ -1913,6 +2219,24 @@ uni_platform* get_platform() {
 }
 
 }  // namespace
+
+extern "C" bool switch_pico_switch2_pairing_allowed(void) {
+    return g_initialized &&
+           pairing_window_active_at(btstack_run_loop_get_time_ms());
+}
+
+extern "C" void __real_sm_request_pairing(hci_con_handle_t handle);
+extern "C" void __wrap_sm_request_pairing(hci_con_handle_t handle) {
+    uni_hid_device_t* device =
+        uni_hid_device_get_instance_for_connection_handle(handle);
+    if (uni_hid_parser_switch2_is_ble_device(device)) {
+        // GATT's implicit authentication retry must not enter standard SMP for
+        // this proprietary protocol. Retain storage until HCI teardown.
+        uni_hid_device_disconnect(device);
+        return;
+    }
+    __real_sm_request_pairing(handle);
+}
 
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
 extern "C" bool uni_platform_on_l2cap_can_send_now(
@@ -2088,8 +2412,9 @@ void bluepad32_input_backend_request_pairing_snapshot() {
 
     critical_section_enter_blocking(&g_state_lock);
     g_pairing_snapshot_requested = true;
-    g_pairing_snapshot.status =
-        Bluepad32PairingSnapshotStatus::kPending;
+    if (g_pairing_snapshot.status != Bluepad32PairingSnapshotStatus::kFailed) {
+        g_pairing_snapshot.status = Bluepad32PairingSnapshotStatus::kPending;
+    }
     critical_section_exit(&g_state_lock);
 }
 

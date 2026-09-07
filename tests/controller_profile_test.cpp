@@ -45,9 +45,9 @@ void test_profile_wire_schema() {
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)),
             "default profile did not encode");
-    require(encoded[0] == 6 && encoded[1] == 0 &&
+    require(encoded[0] == 7 && encoded[1] == 0 &&
                 encoded[2] == 0x80 && encoded[3] == 1,
-            "profile header is not little-endian v6/384");
+            "profile header is not little-endian v7/384");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
         require(encoded[4 + index] == index,
@@ -135,7 +135,7 @@ void test_profile_wire_schema() {
             "nonzero reserved profile byte was accepted");
 
     ControllerProfile invalid = profile;
-    invalid.button_map[0] = CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT;
+    invalid.button_map[0] = CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
     require(!controller_profile_validate(invalid),
             "invalid direct output was accepted");
     invalid = profile;
@@ -225,7 +225,7 @@ void test_legacy_profile_migration() {
                         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD >> 8) &&
                 encoded[60] == CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
                 encoded[70] == CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL,
-            "migrated default profile did not encode as v6");
+            "migrated default profile did not encode as the current schema");
 
     require(controller_profile_decode(
                 kLegacyNarrowRawRangeProfile,
@@ -300,7 +300,7 @@ void test_legacy_profile_migration() {
                     static_cast<uint8_t>(
                         ControllerProfileLogicalButton::kCapture) &&
                 migrated.motion_toggle_chord == 0,
-            "v2 profile controls did not migrate to v6");
+            "v2 profile controls did not migrate to the current schema");
     previous_encoded[80] = 2;
     previous_encoded[100] = 0;
     previous_encoded[101] = kControllerProfileOverrideButtons;
@@ -508,6 +508,101 @@ void test_legacy_database_strides() {
     }
 }
 
+void test_schema6_migration_preserves_every_setting() {
+    ControllerProfile profile{};
+    uint8_t upgraded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_decode(kLegacySchema6Profile,
+                                      sizeof(kLegacySchema6Profile), &profile) &&
+                controller_profile_encode(profile, upgraded, sizeof(upgraded)),
+            "schema6 profile could not upgrade");
+    require(memcmp(upgraded + 2, kLegacySchema6Profile + 2, 342) == 0,
+            "schema6 migration changed an existing encoded setting");
+    for (uint8_t index = 0; index < CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT; ++index) {
+        require(profile.extra_button_map[index] == CONTROLLER_PROFILE_NO_BUTTON &&
+                    profile.shift.extra_button_map[index] == CONTROLLER_PROFILE_NO_BUTTON,
+                "schema6 padding became an extra-button mapping");
+    }
+    ControllerProfile reloaded{};
+    uint8_t round_trip[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_decode(upgraded, sizeof(upgraded), &reloaded) &&
+                controller_profile_encode(reloaded, round_trip, sizeof(round_trip)) &&
+                memcmp(upgraded, round_trip, sizeof(upgraded)) == 0,
+            "upgraded schema6 profile was not stable after reload");
+
+    const uint16_t extra_field_offsets[] = {344, 351, 358, 362, 363};
+    for (uint16_t offset : extra_field_offsets) {
+        uint8_t invalid[sizeof(kLegacySchema6Profile)]{};
+        memcpy(invalid, kLegacySchema6Profile, sizeof(invalid));
+        invalid[offset] = 1;
+        require(!controller_profile_decode(invalid, sizeof(invalid), &reloaded),
+                "schema6 interpreted an extra-control field in reserved padding");
+    }
+    const uint16_t source_offsets[] = {256, 266};
+    for (uint16_t offset : source_offsets) {
+        uint8_t invalid[sizeof(kLegacySchema6Profile)]{};
+        memcpy(invalid, kLegacySchema6Profile, sizeof(invalid));
+        invalid[offset] = CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
+        require(!controller_profile_decode(invalid, sizeof(invalid), &reloaded),
+                "schema6 admitted an extra-control modifier");
+    }
+    uint8_t invalid[sizeof(kLegacySchema6Profile)]{};
+    memcpy(invalid, kLegacySchema6Profile, sizeof(invalid));
+    invalid[98] = (CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL << 2) | 1;
+    require(!controller_profile_decode(invalid, sizeof(invalid), &reloaded),
+            "schema6 admitted an extra-control macro cancellation");
+}
+
+void test_extra_control_schema_round_trip_and_output_limits() {
+    ControllerProfile profile{};
+    require(controller_profile_decode(kLegacySchema6Profile,
+                                      sizeof(kLegacySchema6Profile), &profile),
+            "extra-control fixture did not decode");
+    const uint8_t extra_map[] = {0, 16, 17, 12, 13, 14, 15};
+    const uint8_t shifted_map[] = {15, 14, 13, 12, 3, 2, 0xff};
+    memcpy(profile.extra_button_map, extra_map, sizeof(extra_map));
+    memcpy(profile.shift.extra_button_map, shifted_map, sizeof(shifted_map));
+    profile.shortcuts.modifier = 18;
+    profile.shift.modifier = 24;
+    profile.switching_chord |= 0x55u << 18;
+    profile.motion_toggle_chord |= 0x2au << 18;
+    for (uint8_t index = 0; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+        profile.macros[index].trigger_mask |= (1u << index) << 18;
+        profile.macros[index].cancel_control = 24 - index;
+    }
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    ControllerProfile decoded{};
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                controller_profile_decode(encoded, sizeof(encoded), &decoded),
+            "extra-control profile did not round-trip");
+    require(memcmp(encoded + 344, extra_map, sizeof(extra_map)) == 0 &&
+                memcmp(encoded + 351, shifted_map, sizeof(shifted_map)) == 0 &&
+                encoded[358] == 1 && encoded[359] == 2 &&
+                encoded[360] == 4 && encoded[361] == 8 &&
+                encoded[362] == 0x55 && encoded[363] == 0x2a,
+            "extra-control fields do not use the schema7 extension layout");
+    uint8_t round_trip[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_encode(decoded, round_trip, sizeof(round_trip)) &&
+                memcmp(encoded, round_trip, sizeof(encoded)) == 0,
+            "extra controls lost masks, mappings, or modifiers on reload");
+    for (uint16_t offset = 358; offset < 364; ++offset) {
+        encoded[offset] |= 0x80;
+        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "out-of-range extra-control mask was accepted");
+        encoded[offset] &= 0x7f;
+    }
+    profile.extra_button_map[0] = 18;
+    require(!controller_profile_validate(profile),
+            "extra input was accepted as a console output destination");
+    profile.extra_button_map[0] = 0;
+    profile.triggers[0].output = 18;
+    require(!controller_profile_validate(profile),
+            "analog trigger was allowed to route into a source-only control");
+    profile.triggers[0].output = 0;
+    profile.shift.extra_button_map[0] = 16;
+    require(!controller_profile_validate(profile),
+            "Shift extra mapping admitted an analog destination");
+}
+
 }  // namespace
 int main() {
     test_profile_wire_schema();
@@ -515,5 +610,7 @@ int main() {
     test_database_round_trip_and_capacity();
     test_set_b_sparse_extension_and_migration();
     test_legacy_database_strides();
+    test_schema6_migration_preserves_every_setting();
+    test_extra_control_schema_round_trip_and_output_limits();
     return 0;
 }

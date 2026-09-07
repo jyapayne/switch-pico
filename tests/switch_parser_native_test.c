@@ -5,6 +5,7 @@
 
 #include "bt/uni_bt_service.h"
 #include "parser/uni_hid_parser_switch.h"
+#include "parser/uni_hid_parser_switch2.h"
 #include "platform/uni_platform.h"
 #include "uni_hid_device.h"
 
@@ -21,6 +22,15 @@ static unsigned requests;
 static struct { uint16_t cid, len; uint8_t bytes[128]; } sent[256];
 static uint32_t now_ms;
 static struct { btstack_timer_source_t* timer; uint32_t deadline; bool active; } timers[32];
+
+bool uni_hid_parser_switch2_is_ble_device(const uni_hid_device_t* d) {
+    (void)d;
+    return false;  // This fixture exercises only Classic Switch devices.
+}
+void uni_hid_parser_switch2_teardown(uni_hid_device_t* d) {
+    (void)d;
+    assert(!"Switch 2 teardown reached a Classic Switch fixture");
+}
 
 static unsigned timer_index(btstack_timer_source_t* timer) {
     for (unsigned i = 0; i < 32; ++i) {

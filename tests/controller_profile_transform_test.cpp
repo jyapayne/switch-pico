@@ -36,6 +36,7 @@ bool states_equal(const ControllerState& left, const ControllerState& right) {
            left.button_capture == right.button_capture &&
            left.button_left_stick == right.button_left_stick &&
            left.button_right_stick == right.button_right_stick &&
+           left.extra_buttons == right.extra_buttons &&
            left.left_trigger == right.left_trigger &&
            left.right_trigger == right.right_trigger &&
            left.left_stick_x == right.left_stick_x &&
@@ -109,7 +110,7 @@ void test_button_masks_and_direct_mapping() {
             "disabled button mapping still produced output");
 
     ControllerProfile invalid = default_profile();
-    invalid.button_map[0] = CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT;
+    invalid.button_map[0] = CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
     require(!controller_profile_validate(invalid),
             "logical output 18 was accepted");
     invalid.button_map[0] = 0xfe;
@@ -432,6 +433,48 @@ void test_rumble_scaling_and_confirmation_policy() {
             "confirmation policy was not exposed unchanged");
 }
 
+void test_extra_sources_route_without_creating_output_channels() {
+    ControllerProfile profile = default_profile();
+    ControllerState input{};
+    input.extra_buttons = 0x7f;
+    require(states_equal(
+                controller_profile_transform(input, profile).state,
+                controller_neutral_state()),
+            "unmapped extra inputs leaked into console output");
+    require(controller_profile_extract_control_mask(input, profile) ==
+                (0x7fu << CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL),
+            "extra inputs were omitted or overlapped the trigger controls");
+    profile.extra_button_map[0] = 0;
+    profile.extra_button_map[1] = CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    profile.extra_button_map[2] = CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL;
+    profile.extra_button_map[3] = 12;
+    profile.extra_button_map[4] = 13;
+    profile.extra_button_map[5] = 14;
+    profile.extra_button_map[6] = 15;
+    input.button_south = true;
+    input.left_trigger = 12345;
+    auto output = controller_profile_transform(input, profile);
+    require(controller_profile_extract_button_mask(output.state) == 0xf001 &&
+                output.state.left_trigger == UINT16_MAX &&
+                output.state.right_trigger == UINT16_MAX &&
+                output.state.extra_buttons == 0,
+            "extra mappings lost rail buttons, trigger output, or shared contributors");
+    controller_profile_remove_control_mask(
+        (1u << 18) | (1u << 20) | (1u << 24) | (1u << 16), &input);
+    output = controller_profile_transform(input, profile);
+    require(controller_profile_extract_button_mask(output.state) == 0x7001 &&
+                output.state.left_trigger == UINT16_MAX &&
+                output.state.right_trigger == 0 &&
+                input.extra_buttons == 0x3a && input.left_trigger == 0,
+            "consumed extra sources leaked, removed a shared button, or lost another trigger source");
+    input.extra_buttons = 0x80;
+    input.button_south = false;
+    require(controller_profile_extract_control_mask(input, profile) == 0 &&
+                states_equal(controller_profile_transform(input, profile).state,
+                             controller_neutral_state()),
+            "reserved extra bit became a control or output");
+}
+
 }  // namespace
 
 int main() {
@@ -440,6 +483,7 @@ int main() {
     test_stick_curves_and_monotonicity();
     test_trigger_boundaries_curves_and_thresholds();
     test_trigger_and_button_cross_mapping();
+    test_extra_sources_route_without_creating_output_channels();
     test_default_whole_state_equivalence();
     test_rumble_scaling_and_confirmation_policy();
     return 0;

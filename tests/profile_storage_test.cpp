@@ -259,7 +259,9 @@ void install_catalog_record(uint16_t version, size_t offset, uint8_t type,
   record[7] = slot;
   write_u32(record + 8, generation);
   write_u16(record + 12, static_cast<uint16_t>(size));
-  write_u16(record + 14, type == 1 ? (version == 1 ? 5 : 6) : 0);
+  write_u16(record + 14, type == 1
+                            ? static_cast<uint16_t>(payload[0] | (payload[1] << 8))
+                            : 0);
   write_u32(record + 16, profile_storage_crc32(payload, size));
   require(controller_identity_encode(identity_value, record + 20,
                                      CONTROLLER_IDENTITY_ENCODED_SIZE),
@@ -284,6 +286,9 @@ void install_populated_catalog(uint16_t version, bool fill_arena = false) {
       } else {
         require(controller_profile_encode(profile, payload, sizeof(payload)),
                 "catalog2 fixture profile did not encode");
+        // Keep catalog2 fixtures on the deployed schema6 wire format.
+        write_u16(payload, CONTROLLER_PROFILE_EXPANDED_SCHEMA_VERSION);
+        memset(payload + 344, 0, sizeof(payload) - 344);
       }
       install_catalog_record(
           version, offset, 1, id, slot, ++generation, payload,
@@ -494,6 +499,8 @@ void test_compaction_preserves_latest_records() {
               storage.set_profile_name(global, 0, "Compacted", 9) ==
                   ProfileStorageResult::kOk,
           "compaction metadata did not append");
+  profile.extra_button_map[0] = 16;
+  profile.shift.extra_button_map[6] = 15;
   for (uint16_t write = 1; write <= 260; ++write) {
     profile.weak_rumble_scale = static_cast<uint8_t>(write);
     require(storage.set(global, 0, profile) == ProfileStorageResult::kOk,
@@ -508,6 +515,8 @@ void test_compaction_preserves_latest_records() {
               reloaded.get(global, 0, &recovered) ==
                   ProfileStorageResult::kOk &&
               recovered.weak_rumble_scale == static_cast<uint8_t>(260) &&
+              recovered.extra_button_map[0] == 16 &&
+              recovered.shift.extra_button_map[6] == 15 &&
               reloaded.get_alias(global, metadata, sizeof(metadata)) ==
                   ProfileStorageResult::kOk &&
               strcmp(metadata, "Fallback") == 0 &&
@@ -727,6 +736,49 @@ void test_legacy_high_generation_remains_mutable() {
           "high-generation update was lost after reload");
 }
 
+void test_schema6_read_migration_is_lazy_and_edit_preserves_metadata() {
+  erase_all();
+  install_populated_catalog(2);
+  ProfileStorage storage;
+  require(storage.initialize(fake_io()), "schema6 catalog did not load");
+  require_populated_catalog(storage, true);
+  require(flash.programs == 0 && flash.erases == 0,
+          "reading schema6 profiles rewrote the published flash arena");
+  const auto id = catalog_identity(7);
+  ControllerProfile profile{};
+  uint8_t before[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  require(storage.get(id, 7, &profile) == ProfileStorageResult::kOk &&
+              controller_profile_encode(profile, before, sizeof(before)) &&
+              storage.set(id, 7, profile) == ProfileStorageResult::kUnchanged &&
+              flash.programs == 0 && flash.erases == 0,
+          "unchanged migrated profile caused an unnecessary flash write");
+  profile.extra_button_map[0] = 16;
+  profile.extra_button_map[6] = 15;
+  profile.shift.extra_button_map[1] = 2;
+  require(storage.set(id, 7, profile) == ProfileStorageResult::kOk,
+          "schema6 profile could not add extra-control mappings");
+  ProfileStorage reloaded;
+  ControllerProfile recovered{};
+  uint8_t after[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  require(reloaded.initialize(fake_io()) &&
+              reloaded.get(id, 7, &recovered) == ProfileStorageResult::kOk &&
+              controller_profile_encode(recovered, after, sizeof(after)) &&
+              memcmp(before + 2, after + 2, 342) == 0 &&
+              recovered.extra_button_map[0] == 16 &&
+              recovered.extra_button_map[6] == 15 &&
+              recovered.shift.extra_button_map[1] == 2,
+          "editing migrated extras lost existing settings or the new mappings");
+  char metadata[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+  require(reloaded.find(id)->active_profile == 7 &&
+              reloaded.get_alias(id, metadata, sizeof(metadata)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(metadata, "H") == 0 &&
+              reloaded.get_profile_name(id, 7, metadata, sizeof(metadata)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(metadata, "H7") == 0,
+          "editing a schema6 profile lost its active index, alias, or name");
+}
+
 } // namespace
 
 int main() {
@@ -742,6 +794,7 @@ int main() {
   test_retired_bank_migration_power_loss();
   test_late_second_page_program_is_not_reused();
   test_unreadable_legacy_data_is_not_erased();
+  test_schema6_read_migration_is_lazy_and_edit_preserves_metadata();
   std::cout << "profile storage tests passed\n";
   return 0;
 }

@@ -43,6 +43,7 @@ const state = {
   previewInputConnected: false,
   playtestRequestActive: false,
   liveSample: null,
+  playtestShift: { key: "", held: false, active: false },
   playtestTimer: 0,
   libraryRequestActive: false,
   libraryTimer: 0,
@@ -70,6 +71,7 @@ const elements = {
   controllerModel: document.querySelector("#controllerModel"),
   controllerCredit: document.querySelector("#controllerCredit"),
   controllerHotspots: document.querySelector("#controllerHotspots"),
+  extraControls: document.querySelector("#extraControls"),
   selectedMapping: document.querySelector("#selectedMapping"),
   selectedControlGlyph: document.querySelector("#selectedControlGlyph"),
   selectedControlName: document.querySelector("#selectedControlName"),
@@ -120,6 +122,9 @@ const elements = {
   playtestTitle: document.querySelector("#playtestTitle"),
   playtestStatus: document.querySelector("#playtestStatus"),
   playtestHelp: document.querySelector("#playtestHelp"),
+  playtestExtraInputs: document.querySelector("#playtestExtraInputs"),
+  playtestMappedButtons: document.querySelector("#playtestMappedButtons"),
+  playtestMappingHelp: document.querySelector("#playtestMappingHelp"),
   playtestLeftValues: document.querySelector("#playtestLeftValues"),
   playtestRightValues: document.querySelector("#playtestRightValues"),
   playtestLeftTriggerLabel: document.querySelector("#playtestLeftTriggerLabel"),
@@ -162,6 +167,13 @@ const directionalLabels = {
   dpad_right: "D-pad Right",
   dpad_down: "D-pad Down",
   dpad_left: "D-pad Left",
+  c: "C",
+  gl: "GL",
+  gr: "GR",
+  left_sl: "Left SL",
+  left_sr: "Left SR",
+  right_sl: "Right SL",
+  right_sr: "Right SR",
 };
 
 function currentControllerStyle() {
@@ -245,6 +257,9 @@ function updateCurveMarker(group, side, input) {
 
 function clearPlaytest(message, stateName = "waiting") {
   state.liveSample = null;
+  state.playtestShift = { key: "", held: false, active: false };
+  elements.playtestExtraInputs.textContent = "None";
+  elements.playtestMappedButtons.textContent = "None";
   if (state.previewInputConnected) stopMacroPreview("Preview stopped: controller disconnected.");
   state.previewInputConnected = false;
   state.identifyAvailable = false;
@@ -255,7 +270,7 @@ function clearPlaytest(message, stateName = "waiting") {
   elements.playtestTitle.textContent =
     stateName === "error" ? "Live input unavailable" : "Waiting for controller input";
   elements.playtestHelp.textContent = message;
-  elements.controllerHotspots.querySelectorAll(".pressed")
+  elements.controllerCanvas.querySelectorAll(".pressed")
     .forEach((button) => button.classList.remove("pressed"));
   document.querySelectorAll(".curve-marker.visible")
     .forEach((marker) => marker.classList.remove("visible"));
@@ -271,16 +286,32 @@ function renderPlaytest(sample) {
     return;
   }
   state.previewInputConnected = true;
+  const shift = state.profile.shift;
+  const shiftKey = `${sample.identity_key}:${sample.connection_generation}:${shift.mode}:${shift.modifier}`;
+  if (state.playtestShift.key !== shiftKey) {
+    state.playtestShift = { key: shiftKey, held: false, active: false };
+  }
+  const controls = new Set([...sample.buttons, ...(sample.extra_buttons || [])]);
+  for (const side of ["left", "right"]) {
+    const value = transformTrigger(sample.triggers[side], state.profile.triggers[side]);
+    if (value >= state.profile.triggers[side].digital_threshold) {
+      controls.add(`${side}_trigger`);
+    }
+  }
+  const held = controls.has(shift.modifier);
+  if (shift.mode === "toggle" && held && !state.playtestShift.held) {
+    state.playtestShift.active = !state.playtestShift.active;
+  } else if (shift.mode !== "toggle") {
+    state.playtestShift.active = shift.mode === "hold" && held;
+  }
+  state.playtestShift.held = held;
+  const mapped = ProfilePlaytestMath.transformMappings(sample, state.profile, state.playtestShift.active);
   const rawLeft = sample.left_stick;
   const rawRight = sample.right_stick;
   const outputLeft = transformStick(rawLeft, state.profile.sticks.left);
   const outputRight = transformStick(rawRight, state.profile.sticks.right);
-  const outputLeftTrigger = transformTrigger(
-    sample.triggers.left, state.profile.triggers.left
-  );
-  const outputRightTrigger = transformTrigger(
-    sample.triggers.right, state.profile.triggers.right
-  );
+  const outputLeftTrigger = mapped.triggers.left;
+  const outputRightTrigger = mapped.triggers.right;
   updateStickPlaytest(
     "left", rawLeft, outputLeft, state.profile.sticks.left
   );
@@ -310,15 +341,21 @@ function renderPlaytest(sample) {
     controlLabel("left_trigger", style);
   elements.playtestRightTriggerLabel.textContent =
     controlLabel("right_trigger", style);
-  const pressed = new Set(sample.buttons);
+  const pressed = new Set([...sample.buttons, ...(sample.extra_buttons || [])]);
   if (sample.triggers.left > 512) pressed.add("left_trigger");
   if (sample.triggers.right > 512) pressed.add("right_trigger");
-  elements.controllerHotspots.querySelectorAll("[data-controller-button]")
+  elements.controllerCanvas.querySelectorAll("[data-controller-button]")
     .forEach((button) => {
       button.classList.toggle(
         "pressed", pressed.has(button.dataset.controllerButton)
       );
     });
+  elements.playtestExtraInputs.textContent =
+    (sample.extra_buttons || []).map((button) => controlLabel(button, style)).join(", ") || "None";
+  elements.playtestMappedButtons.textContent =
+    mapped.buttons.map((button) => controlLabel(button, style)).join(", ") || "None";
+  elements.playtestMappingHelp.textContent =
+    `${state.playtestShift.active ? "Shift" : "Base"} layer preview; shortcuts, macros and Turbo are not simulated.`;
   elements.playtestPanel.dataset.state = "live";
   elements.playtestStatus.textContent = "Live";
   const owner = currentOwner();
@@ -597,7 +634,7 @@ function renderProfileList() {
 function buttonOptions(
   selected,
   includeNone = true,
-  choices = state.schema.controls,
+  choices = state.schema.output_controls,
   style = currentControllerStyle()
 ) {
   const none = includeNone
@@ -628,7 +665,7 @@ function renderShortcuts() {
     <div class="control-card">
       <label for="shortcut-modifier">Shortcut modifier</label>
       <select class="select" id="shortcut-modifier" data-kind="shortcut-modifier" aria-describedby="shortcut-modifier-help">${modifierOptions(shortcuts.modifier, shortcuts.profiles)}</select>
-      <p class="field-help" id="shortcut-modifier-help">None clears every shortcut. Analog trigger modifiers require a known Xbox or PlayStation owner; unsupported choices remain unavailable.</p>
+      <p class="field-help" id="shortcut-modifier-help">None clears every shortcut. Switch 2 extra inputs can act as modifiers. Trigger modifiers are available for known Xbox, PlayStation and Switch 2 owners.</p>
     </div>`;
   elements.shortcuts.innerHTML = shortcuts.profiles.map((selector, index) => `
     <div class="control-card">
@@ -654,11 +691,14 @@ function renderShift() {
       <select class="select" id="shift-modifier" data-kind="shift-modifier"${shift.mode === "off" ? " disabled" : ""} aria-describedby="shift-modifier-help">${modifierOptions(shift.modifier)}</select>
       <p class="field-help" id="shift-modifier-help">Hold uses the alternate map while pressed. Toggle switches layers on each fresh press and resets when the profile or mode changes. Analog modifiers follow the same availability as shortcuts.</p>
     </div>`;
-  elements.shiftMap.innerHTML = state.schema.buttons.map((button) => `
+  elements.shiftMap.innerHTML = [...state.schema.buttons, ...state.schema.extra_buttons].map((button) => {
+    const map = state.schema.extra_buttons.includes(button) ? shift.extra_button_map : shift.button_map;
+    return `
     <div class="control-card">
       <label for="shift-map-${button}">${escapeHtml(controlLabel(button))} → alternate output</label>
-      <select class="select" id="shift-map-${button}" data-kind="shift-map" data-name="${button}"${shift.mode === "off" || shift.modifier === null ? " disabled" : ""}>${buttonOptions(shift.button_map[button], true, state.schema.buttons)}</select>
-    </div>`).join("");
+      <select class="select" id="shift-map-${button}" data-kind="shift-map" data-name="${button}"${shift.mode === "off" || shift.modifier === null ? " disabled" : ""}>${buttonOptions(map[button], true, state.schema.buttons)}</select>
+    </div>`;
+  }).join("");
   updateShiftValidity();
 }
 
@@ -725,6 +765,8 @@ const fixedControlGlyphs = {
   start: "+",
   capture: "▣",
   system: "⌂",
+  c: "C", gl: "GL", gr: "GR",
+  left_sl: "L SL", left_sr: "L SR", right_sl: "R SL", right_sr: "R SR",
 };
 
 function controlGlyph(button, style) {
@@ -734,6 +776,7 @@ function controlGlyph(button, style) {
 function getControlMapping(button) {
   if (button === "left_trigger") return state.profile.triggers.left.output;
   if (button === "right_trigger") return state.profile.triggers.right.output;
+  if (state.schema.extra_buttons.includes(button)) return state.profile.extra_button_map[button];
   return state.profile.button_map[button];
 }
 
@@ -752,6 +795,8 @@ function setControlMapping(button, output) {
       state.profile.triggers[otherSide].output = button;
     }
     state.profile.triggers[side].output = output;
+  } else if (state.schema.extra_buttons.includes(button)) {
+    state.profile.extra_button_map[button] = output;
   } else {
     state.profile.button_map[button] = output;
   }
@@ -772,10 +817,13 @@ function renderButtonMap() {
   elements.controllerCredit.href = "https://github.com/AL2009man/Gamepad-Asset-Pack";
   elements.controllerCredit.textContent = "Controller artwork by Al. Lopez · MIT";
 
-  elements.controllerHotspots.querySelectorAll("[data-controller-button]").forEach((hotspot) => {
+  elements.extraControls.innerHTML = state.schema.extra_buttons.map((button) =>
+    `<button type="button" data-controller-button="${button}">${escapeHtml(controlLabel(button, style))}</button>`
+  ).join("");
+  elements.controllerCanvas.querySelectorAll("[data-controller-button]").forEach((hotspot) => {
     const button = hotspot.dataset.controllerButton;
     const output = getControlMapping(button);
-    hotspot.textContent = controlGlyph(button, style);
+    hotspot.textContent = state.schema.extra_buttons.includes(button) ? controlLabel(button, style) : controlGlyph(button, style);
     hotspot.classList.toggle("selected", button === selected);
     hotspot.classList.toggle("disabled-map", output === null);
     hotspot.title = `${controlLabel(button, style)} → ${output === null ? "Disabled" : controlLabel(output, style)}`;
@@ -784,6 +832,7 @@ function renderButtonMap() {
       state.selectedButton = button;
       stopMacroPreview("Preview stopped: control selection changed.");
       renderButtonMap();
+      elements.controllerCanvas.querySelector(`[data-controller-button="${button}"]`).focus();
     };
   });
 
@@ -792,12 +841,13 @@ function renderButtonMap() {
   elements.selectedControlDescription.textContent = (
     `Physical ${controlLabel(selected, style)} currently produces ${mappedOutput === null ? "no output" : controlLabel(mappedOutput, style)}.`
   );
-  elements.selectedMapping.innerHTML = buttonOptions(mappedOutput, true, state.schema.controls, style);
+  elements.selectedMapping.innerHTML = buttonOptions(mappedOutput, true, state.schema.output_controls, style);
   elements.selectedMapping.onchange = () => {
     setControlMapping(selected, elements.selectedMapping.value || null);
     renderButtonMap();
     updateDirtyState();
   };
+  if (state.liveSample) renderPlaytest(state.liveSample);
 }
 
 const analogDefinitions = [
@@ -1756,6 +1806,7 @@ function renderMacroSteps() {
 }
 
 function renderEditor() {
+  state.playtestShift = { key: "", held: false, active: false };
   elements.profileTitle.textContent =
     state.profileNames[state.profileIndex] || `Profile ${state.profileIndex + 1}`;
   elements.activeBadge.hidden = !state.active;
@@ -1908,7 +1959,9 @@ function handleFormChange(event) {
     renderShift();
     elements.shift.querySelector(`#${kind}`).focus();
   } else if (kind === "shift-map") {
-    state.profile.shift.button_map[target.dataset.name] = target.value || null;
+    const map = state.schema.extra_buttons.includes(target.dataset.name)
+      ? state.profile.shift.extra_button_map : state.profile.shift.button_map;
+    map[target.dataset.name] = target.value || null;
   } else if (kind === "turbo") {
     state.profile.turbo[target.dataset.name] = target.value;
     renderTurbo();
@@ -1996,6 +2049,7 @@ function handleFormChange(event) {
     updateMacroBudgets();
   }
   updateDirtyState();
+  if (state.liveSample) renderPlaytest(state.liveSample);
 }
 
 elements.analog.addEventListener("click", (event) => {
@@ -2329,6 +2383,7 @@ document.querySelectorAll("[data-reset-section]").forEach((button) => {
     const section = button.dataset.resetSection;
     if (section === "mapping") {
       state.profile.button_map = clone(defaults.button_map);
+      state.profile.extra_button_map = clone(defaults.extra_button_map);
       state.profile.triggers.left.output = defaults.triggers.left.output;
       state.profile.triggers.right.output = defaults.triggers.right.output;
     } else if (section === "analog") {

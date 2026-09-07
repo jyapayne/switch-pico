@@ -187,7 +187,7 @@ void route_trigger_output(
         }
         return;
     }
-    if (output < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT) {
+    if (output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) {
         const uint8_t trigger_index = static_cast<uint8_t>(
             output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL);
         if (value > output_triggers[trigger_index]) {
@@ -255,6 +255,10 @@ uint16_t controller_profile_extract_button_mask(const ControllerState& state) {
 uint32_t controller_profile_extract_control_mask(
     const ControllerState& state, const ControllerProfile& profile) {
     uint32_t mask = controller_profile_extract_button_mask(state);
+    mask |= static_cast<uint32_t>(
+                state.extra_buttons &
+                ((1u << CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT) - 1u))
+            << CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
     const uint16_t trigger_values[2] = {
         transform_trigger(state.left_trigger, profile.triggers[0]),
         transform_trigger(state.right_trigger, profile.triggers[1]),
@@ -288,6 +292,8 @@ void controller_profile_remove_control_mask(
          (1u << CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL)) != 0) {
         state->right_trigger = 0;
     }
+    state->extra_buttons &= static_cast<uint8_t>(
+        ~(control_mask >> CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL));
 }
 
 void controller_profile_apply_button_mask(uint16_t button_mask,
@@ -354,11 +360,14 @@ uint16_t controller_profile_map_button_mask(
 
 ControllerProfileTransformResult controller_profile_transform(
     const ControllerState& input, const ControllerProfile& profile,
-    const uint8_t* button_map) {
+    const uint8_t* button_map, const uint8_t* extra_button_map) {
     const uint8_t* selected_map =
         button_map == nullptr ? profile.button_map : button_map;
+    const uint8_t* selected_extra_map =
+        extra_button_map == nullptr ? profile.extra_button_map : extra_button_map;
     ControllerProfileTransformResult result{};
     result.state = input;
+    result.state.extra_buttons = 0;
     const uint16_t input_button_mask =
         controller_profile_extract_button_mask(input);
     uint16_t output_button_mask =
@@ -379,10 +388,23 @@ ControllerProfileTransformResult controller_profile_transform(
         }
         const uint8_t output = selected_map[input_button];
         if (output >= CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
-            output < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT) {
+            output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) {
             output_triggers[
                 output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL] =
                 UINT16_MAX;
+        }
+    }
+    for (uint8_t extra = 0;
+         extra < CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT; ++extra) {
+        if ((input.extra_buttons & (1u << extra)) == 0) {
+            continue;
+        }
+        const uint8_t output = selected_extra_map[extra];
+        if (output < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT) {
+            output_button_mask |= static_cast<uint16_t>(1u << output);
+        } else if (output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) {
+            output_triggers[
+                output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL] = UINT16_MAX;
         }
     }
 

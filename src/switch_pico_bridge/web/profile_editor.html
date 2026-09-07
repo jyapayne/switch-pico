@@ -142,6 +142,9 @@
                 </div>
               </div>
               <p class="controller-hint">Select a highlighted control on the controller to remap it.</p>
+              <p class="field-label" id="extraControlsLabel">Switch 2 extra inputs</p>
+              <div class="extra-controls" id="extraControls" role="group" aria-labelledby="extraControlsLabel"></div>
+              <p class="field-help">C, back and rail buttons are source-only controls. Unmapped extra inputs produce no console output.</p>
               <p class="controller-credit">
                 Image:
                 <a id="controllerCredit" href="https://github.com/AL2009man/Gamepad-Asset-Pack" target="_blank" rel="noreferrer">Controller artwork by Al. Lopez · MIT</a>
@@ -260,6 +263,11 @@
                   <span><i class="legend-threshold"></i>Digital threshold</span>
                 </div>
               </article>
+            </div>
+            <div class="mapping-playtest">
+              <p><strong>Raw extra inputs:</strong> <span id="playtestExtraInputs">None</span></p>
+              <p><strong>Draft button output:</strong> <span id="playtestMappedButtons">None</span></p>
+              <p class="field-help" id="playtestMappingHelp">Base and Shift mapping preview only; shortcuts, macros and Turbo are not simulated.</p>
             </div>
           </div>
           <div class="analog-grid" id="analogFields"></div>

@@ -10,12 +10,15 @@ constexpr uint16_t CONTROLLER_PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2;
 constexpr uint16_t CONTROLLER_PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3;
 constexpr uint16_t CONTROLLER_PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4;
 constexpr uint16_t CONTROLLER_PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5;
-constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 6;
+constexpr uint16_t CONTROLLER_PROFILE_EXPANDED_SCHEMA_VERSION = 6;
+constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 7;
 constexpr size_t CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE = 256;
 constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 384;
 constexpr uint8_t CONTROLLER_PROFILE_COUNT = 8;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT = 16;
-constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT = 18;
+constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT = 25;
+constexpr uint8_t CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT = 7;
+constexpr uint8_t CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL = 18;
 constexpr uint8_t CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL = 16;
 constexpr uint8_t CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL = 17;
 constexpr uint8_t CONTROLLER_PROFILE_MACRO_COUNT = 4;
@@ -123,6 +126,8 @@ struct ControllerProfileShiftConfiguration {
     uint8_t modifier = CONTROLLER_PROFILE_NO_BUTTON;
     uint8_t button_map[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    uint8_t extra_button_map[CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT]{
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 };
 
 struct ControllerProfileTurboSettings {
@@ -184,6 +189,8 @@ struct ControllerProfileMacro {
 
 struct ControllerProfile {
     uint8_t button_map[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{};
+    uint8_t extra_button_map[CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT]{
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     ControllerProfileStickConfiguration sticks[2]{};
     ControllerProfileTriggerConfiguration triggers[2]{};
     uint8_t weak_rumble_scale = UINT8_MAX;

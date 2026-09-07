@@ -308,6 +308,13 @@ h4 { font-size: 1rem; }
 .controller-canvas[data-style="switch"] .controller-photo-wrap { aspect-ratio: 1.38; }
 .controller-canvas[data-style="playstation"] .controller-photo-wrap { aspect-ratio: 1.8; }
 .controller-photo { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; user-select: none; filter: drop-shadow(0 22px 28px rgba(0, 0, 0, 0.46)); }
+.extra-controls { display: flex; flex-wrap: wrap; gap: 9px; margin: 10px 0; }
+.extra-controls button { min-width: 48px; padding: 9px 12px; color: var(--ink); border: 1px solid var(--sky); border-radius: 9px; background: var(--surface-2); font-size: 0.72rem; font-weight: 800; cursor: pointer; }
+.extra-controls button.disabled-map { color: var(--muted); border-color: var(--control-line); }
+.extra-controls button.selected, .extra-controls button:focus-visible { outline: 2px solid var(--sky); outline-offset: 3px; }
+.extra-controls button.pressed { color: #090f1d; background: var(--amber); border-color: var(--amber); }
+.mapping-playtest { margin-top: 14px; font-size: 0.76rem; }
+.mapping-playtest > p { margin: 6px 0; }
 .controller-hotspots { position: absolute; inset: 0; }
 .controller-hotspots button {
   --x: 50%;

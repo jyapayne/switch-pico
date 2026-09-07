@@ -20,6 +20,7 @@ enum class Bluepad32PairingTransport : uint8_t {
 enum class Bluepad32PairingSnapshotStatus : uint8_t {
     kReady = 0,
     kPending = 1,
+    kFailed = 2,
 };
 
 struct Bluepad32PairingRecord {
@@ -95,6 +96,9 @@ struct Bluepad32BackendDiagnostics {
 void bluepad32_input_backend_init();
 void bluepad32_input_backend_start();
 void bluepad32_input_backend_open_pairing_window();
+// Core 1 parser admission gate for fresh proprietary Switch 2 pairing; this
+// never opens a pairing window or changes the bounded connection policy.
+extern "C" bool switch_pico_switch2_pairing_allowed(void);
 // Repeated calls coalesce until Core 1 completes the operation and return the
 // same nonzero token.
 uint32_t bluepad32_input_backend_clear_pairings();

@@ -176,15 +176,16 @@ exact pre-capture firmware and persistent state.
    - DualSense: hold Create + PS.
    - DualShock 4: hold Share + PS.
    - Switch Pro: press its sync button.
+   - Switch 2 Pro / Joy-Con 2: hold SYNC while the Pico pairing window is open; do not pair through the PC's Bluetooth settings.
    - Xbox Bluetooth controller: hold its pair button.
    - 8BitDo: use a Bluetooth mode supported by Bluepad32; use Switch/S mode when motion is required.
 5. Wait for the controller's player light to settle. Repeat step 4 for additional controllers while the window remains open. Holding BOOTSEL again extends the deadline by 60 seconds from that point.
 
-Pairing order determines the initial USB slot assignment. Up to four controllers map 1:1 to the four emulated Switch Pro Controller interfaces.
+Pairing order determines the initial USB slot assignment. Up to four physical Bluetooth controllers are supported. Ordinary controllers each occupy one emulated Switch Pro interface; a merged Joy-Con 2 pair consumes two Bluetooth connections but occupies one USB player slot.
 
 With no active controller, the Pico runs Bluepad32 discovery and autoconnect. After any controller becomes active, active discovery pauses to protect input, motion, and rumble latency; bonded controllers may still initiate incoming reconnects. Pairing keys persist across Pico power cycles, so reconnect a previously paired controller by pressing its normal Home, PS, or Xbox power button. Hold BOOTSEL for the bounded pairing window before pairing a new controller or a controller that requires host-side discovery. Outside that window, BTstack remains non-bondable and rejects new Classic and BLE authentication.
 
-To clear every stored Classic and BLE pairing without a PC, hold BOOTSEL continuously for 10 seconds. The normal pairing window opens after two seconds; continuing to hold until the LED changes to a rapid blink clears all bonds, disconnects active controllers, publishes neutral state to every slot, and closes new authentication. Release BOOTSEL, open a new pairing window, and pair controllers again.
+To clear every stored Classic, BLE and proprietary Switch 2 pairing without a PC, hold BOOTSEL continuously for 10 seconds. The normal pairing window opens after two seconds; continuing to hold until the LED changes to a rapid blink clears remembered controllers, disconnects active controllers, publishes neutral state to every slot, and closes new authentication. Release BOOTSEL, open a new pairing window, and pair controllers again. A persistent-storage failure is reported rather than acknowledging a successful clear.
 
 
 ### LED meanings and device state
@@ -240,10 +241,12 @@ Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `
 
 `profiles edit` starts a local-only browser editor at `http://127.0.0.1:8765/`. It exposes every profile field: all 16 buttons plus the L2/R2 analog triggers can be remapped to any button or trigger output; both sticks and triggers retain independent deadzone/saturation/curve settings; and rumble, confirmation, Turbo/Auto Burst, built-in action chords, and four custom macro sequences are editable. Its live playtest compares current raw stick and trigger input with the unsaved draft, shows deadzone/saturation boundaries and digital thresholds, and highlights pressed physical controls. Select a controller identity and one of its eight profile slots, use **Start from defaults** for a new draft, then **Save to Pico**. The backend validates the complete profile before using the existing chunked atomic transaction; invalid drafts never reach flash. Use `profiles edit --no-browser` for a printed URL or `profiles edit --port PORT` to choose another local port.
 
+Switch 2's **C, GL, GR, Left SL/SR and Right SL/SR** are additional source-only controls. Map each to a normal button or trigger, assign a button-only alternate Shift mapping, or use it in action/macro chords, cancellation and modifiers. Extra mappings default to disabled. The live playtest shows raw extras separately; they are not fictitious output channels on the emulated Switch Pro/XInput controller.
+
 The editor selects Switch Pro, DualSense, or Xbox artwork from the connected controller's USB VID/PID and places each remappable control directly over the matching physical button. Controller artwork is from [AL2009man/Gamepad-Asset-Pack](https://github.com/AL2009man/Gamepad-Asset-Pack) under its MIT license; the bundled license and source revision are recorded beside the assets.
 
 Profile names and controller aliases are stored as independently checksummed
-catalog metadata. Runtime profiles use schema 6 and 384-byte records; names remain separate. The
+catalog metadata. Runtime profiles use schema 7 and unchanged 384-byte records; schemas 1–6 migrate with extra inputs unmapped and existing settings preserved. Names remain separate. The
 editor can rename and copy profiles across controllers and slots, import or
 export JSON backups, and reset one section without discarding the rest of the
 draft. Its response-curve cards provide named presets, exact Q8.8 fine
@@ -254,7 +257,7 @@ rumble/light pulse only to the selected live controller.
 
 `profiles list` prints identity index `0` for the global fallback plus each stable Bluetooth identity observed by the firmware. Each identity owns eight persistent profiles and one active index. The JSON export/import commands remain available for version-controlled or scripted profiles. Profile numbers shown to users are `1` through `8`; `--identity` uses the zero-based index from `profiles list`.
 
-`pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses. `pairings clear --yes` deletes all bonds, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
+`pairings list` refreshes and prints stored Bluetooth Classic and BLE addresses, including Switch 2's application-level authorizations. `pairings clear --yes` forgets them all, disconnects active controllers, closes new authentication, and resumes discovery because no controllers remain. Destructive commands require `--yes`. If multiple compatible Picos are attached, select one with `--bus N --address N`; the error lists their locations. USB access errors require permission to the matching `/dev/bus/usb` device.
 
 `diagnostics` reports Bluetooth initialization stage, real BTstack timer
 callbacks, controller report traffic, host/local rumble requests and
@@ -266,7 +269,7 @@ adds transport timings, clock/voltage settings and packet-size diagnostics.
 
 ### Per-controller profiles
 
-The profile editor lists **Cycle active profile**, **Toggle motion**, and **Run custom macro** as separate editable actions. Every action chord can contain any combination of the 16 buttons and the L2/R2 analog triggers. The default profile-switching chord is **L + R + Select + Start**; on DualSense, use **L1 + R1 + Create + Options**. A stored empty chord selects that default.
+The profile editor lists **Cycle active profile**, **Toggle motion**, and **Run custom macro** as separate editable actions. Every action chord can contain any combination of the 16 buttons, L2/R2 analog triggers and seven Switch 2 extra inputs. The default profile-switching chord is **L + R + Select + Start**; on DualSense, use **L1 + R1 + Create + Options**. A stored empty chord selects that default.
 
 - The chord cycles persistent profiles `1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 1`.
 - Chord buttons are consumed locally and are not forwarded to the host.
@@ -314,12 +317,30 @@ When a controller becomes ready, RGB-capable devices such as DualSense and DualS
 |---|---:|---:|---:|
 | DualSense / DualShock 4 | Yes | Yes | Yes |
 | Switch Pro / Joy-Con | Yes | Yes | Yes |
+| Switch 2 Pro | Yes, including remappable C/GL/GR | Yes, amplitude translation | Yes |
+| Joy-Con 2 solo / merged pair | Implemented; hardware qualification pending | Implemented | Implemented |
 | PS Move ZCM1/ZCM2 | Buttons/trigger | Yes | Yes, after calibration |
 | Wii Remote | Mode-dependent | Yes | Accelerometer |
 | 8BitDo in Switch-compatible Bluetooth mode | Yes | Model-dependent | Yes when the mode exposes IMU |
 | Xbox Bluetooth controller | Yes | Grip + impulse-trigger motors (Microsoft Xbox parser) | No hardware IMU |
 
 Motion-producing Bluepad32 parsers normalize to 1024 units per degree/second and 8192 units per g in SDL-oriented axes before conversion to Nintendo samples. PS Move motion remains neutral until all model-specific calibration blocks have been received and validated; buttons and rumble remain available while calibration is pending or unavailable. The latest normalized sample is duplicated across the report's three nominal 5 ms slots and remains pending until a regular `0x30` USB report successfully consumes it.
+
+### Switch 2 controller input
+
+The AIO firmware implements the proprietary BLE protocol for Nintendo `057E:2069` (Pro), `057E:2067` (left Joy-Con 2), and `057E:2066` (right Joy-Con 2). This is controller **input** support, distinct from the existing Switch 2 console-wake feature and from emulating a native Switch 2 USB controller.
+
+- **Pairing:** fresh SYNC pairing requires the existing bounded pairing window. A directed reconnect must target this adapter's Bluetooth address and match its persistent application-level authorization. These links are unencrypted and are **not authenticated SMP bonds**. No global Bluetooth security downgrade is made; automatic SMP requests for these devices fail closed while other controllers retain their existing policy. Public/static addresses can own profiles; transient private addresses are not promoted to persistent identities.
+- **Joy-Con ownership:** an opposite ready half automatically joins a solo half. Either connection order works; the first-ready player slot is retained, with the left controller's identity/profile owning the pair. The right half supplies motion. A disconnected half's inputs and pending effects are removed immediately; the surviving half returns to sideways solo operation and its own profile identity. A lone half has rotated controls and SL/SR shoulders. Two pairs exhaust the four physical Bluetooth connections. Pairing does not reopen discovery outside the existing connection policy.
+- **Protocol:** service, characteristic and CCCD UUIDs are discovered rather than trusting fixed ATT handles. Setup requires matching acknowledgements, reads user/factory stick calibration and gyro bias, and rejects malformed/failed transactions. Motion is normalized to the existing SDL-oriented units; sensor clock/range classification and physical axis accuracy still need wider model qualification.
+- **Rumble:** strong/weak amplitudes feed fixed low/high carriers, repeated in three-frame HOLD packets on an approximately 13 ms cadence. Keepalives retain active effects instead of silencing them; finite effects expire, XInput held effects persist until replaced/stopped, and teardown cancels output. Pro output mirrors the same two-band effect to both actuators. This does **not** preserve Nintendo HD substeps or independent left/right HD effects and does not use the original Switch-native opt-in backend.
+- **Not implemented:** Joy-Con mouse output, native GameChat signaling, NFC/IR and Switch 2 NSO GameCube support. C and back/rail inputs can instead be remapped to controls the selected USB mode supports.
+
+This is a scoped reimplementation informed by [Bluepad32 PR #219](https://github.com/ricardoquesada/bluepad32/pull/219), reviewed at `9c95e43a87d3bd8a68565da0836d8a758bd8d8af`, not a wholesale fork import. Protocol references: [ndeadly's research](https://github.com/ndeadly/switch2_controller_research), [Nadeflore](https://github.com/Nadeflore/switch2-controllers), [Switch2Connect](https://github.com/TommyWabg/Switch2Connect), and [SDL's Switch 2 sensor implementation](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_switch2.c).
+
+**Verification:** 287 tests passed; AIO, XInput/feasibility, HD-rumble, haptics and UART firmware variants built. Native protocol tests use the SDK's real BTstack types/accessors and cover discovery, acknowledgement ordering, calibration, persistence, output deadlines and teardown. Lifecycle tests cover both Joy-Con connection orders, multiple pairs, detach/replacement and pairing-policy isolation. The editor's extra/Shift mappings were exercised in Chromium.
+
+On the flashed Pico, a real Switch 2 Pro (`3C:A9:AB:65:73:12`) completed setup, appeared in persistent pairing/profile inventories, and delivered live sticks, accelerometer, gyro and independent C/GL/GR presses. A 100-report USB rumble exercise retained its connection while 3,033 controller reports arrived. Schema-7 extra mappings were written/read and restored on hardware; all 32 pre-existing profiles, metadata and active selections were compared against a pre-flash backup and preserved, with adapter configuration generation 13 / CRC `3af5ee18` unchanged. Physical rumble feel, Joy-Con 2 pair behavior, long-duration reconnect and mixed-controller transport remain hardware qualification items. Use schema-7-capable firmware after saving expanded profiles.
 
 ### Rumble per controller
 
@@ -784,15 +805,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 787,824 bytes | 4 MiB |
+| Executable flash image | 806,872 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
-| BTstack bonds | 8 KiB | 4 MiB flash |
+| BTstack bonds and Switch 2 application authorizations | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 139,616 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 141,984 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,070,448 bytes of flash,
-leaving 3,123,856 bytes. Allocated SRAM sections leave 392,864 bytes of link-time
+The executable plus persistent reservations consume 1,089,496 bytes of flash,
+leaving 3,104,808 bytes. Allocated SRAM sections leave 390,496 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.

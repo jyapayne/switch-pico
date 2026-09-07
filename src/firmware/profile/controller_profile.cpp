@@ -53,8 +53,13 @@ bool valid_button(uint8_t button) {
 }
 
 bool valid_control_output(uint8_t output) {
-    return output < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT ||
+    return output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL ||
            output == CONTROLLER_PROFILE_NO_BUTTON;
+}
+
+bool valid_source_control(uint8_t control) {
+    return control < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT ||
+           control == CONTROLLER_PROFILE_NO_BUTTON;
 }
 
 bool valid_turbo_settings(const ControllerProfileTurboSettings& settings) {
@@ -285,8 +290,13 @@ bool controller_profile_validate(const ControllerProfile& profile) {
             return false;
         }
     }
-    if (!valid_control_output(profile.shortcuts.modifier) ||
-        !valid_control_output(profile.shift.modifier) ||
+    for (uint8_t output : profile.extra_button_map) {
+        if (!valid_control_output(output)) {
+            return false;
+        }
+    }
+    if (!valid_source_control(profile.shortcuts.modifier) ||
+        !valid_source_control(profile.shift.modifier) ||
         static_cast<uint8_t>(profile.shift.mode) >
             static_cast<uint8_t>(ControllerProfileShiftMode::kToggle) ||
         (profile.shift.mode != ControllerProfileShiftMode::kOff &&
@@ -308,6 +318,11 @@ bool controller_profile_validate(const ControllerProfile& profile) {
         selectors |= static_cast<uint16_t>(1u << selector);
     }
     for (uint8_t output : profile.shift.button_map) {
+        if (!valid_button(output)) {
+            return false;
+        }
+    }
+    for (uint8_t output : profile.shift.extra_button_map) {
         if (!valid_button(output)) {
             return false;
         }
@@ -359,7 +374,7 @@ bool controller_profile_validate(const ControllerProfile& profile) {
         const ControllerProfileMacro& macro =
             profile.macros[macro_index];
         if ((macro.trigger_mask & ~kLogicalControlMask) != 0 ||
-            !valid_control_output(macro.cancel_control) ||
+            !valid_source_control(macro.cancel_control) ||
             static_cast<uint8_t>(macro.mode) >
                 static_cast<uint8_t>(ControllerProfileMacroMode::kRepeat) ||
             macro.repeat_count == 0 ||
@@ -503,6 +518,8 @@ bool controller_profile_encode(const ControllerProfile& profile,
             static_cast<uint8_t>(stream_offset - macro_start);
         output[336 + macro_index * 2] = static_cast<uint8_t>(macro.mode);
         output[337 + macro_index * 2] = macro.repeat_count;
+        output[358 + macro_index] = static_cast<uint8_t>(
+            macro.trigger_mask >> CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL);
     }
     output[256] = profile.shortcuts.modifier;
     memcpy(&output[257], profile.shortcuts.selectors,
@@ -526,6 +543,14 @@ bool controller_profile_encode(const ControllerProfile& profile,
             output[settings_offset++] = settings.burst_count;
         }
     }
+    memcpy(&output[344], profile.extra_button_map,
+           CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT);
+    memcpy(&output[351], profile.shift.extra_button_map,
+           CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT);
+    output[362] = static_cast<uint8_t>(
+        profile.switching_chord >> CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL);
+    output[363] = static_cast<uint8_t>(
+        profile.motion_toggle_chord >> CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL);
     return stream_offset <= CONTROLLER_PROFILE_MACRO_STREAM_SIZE;
 }
 
@@ -538,7 +563,7 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     }
     const uint16_t schema_version = profile_read_u16(&input[0]);
     const size_t expected_size =
-        schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION
+        schema_version >= CONTROLLER_PROFILE_EXPANDED_SCHEMA_VERSION
             ? CONTROLLER_PROFILE_ENCODED_SIZE
             : CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE;
     if (schema_version < CONTROLLER_PROFILE_LEGACY_SCHEMA_VERSION ||
@@ -555,6 +580,10 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
         schema_version >= CONTROLLER_PROFILE_ACTION_CONTROL_SCHEMA_VERSION;
     const bool sparse_macros =
         schema_version >= CONTROLLER_PROFILE_SPARSE_MACRO_SCHEMA_VERSION;
+    const bool has_expanded_settings =
+        schema_version >= CONTROLLER_PROFILE_EXPANDED_SCHEMA_VERSION;
+    const bool has_extra_controls =
+        schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION;
     if ((has_control_mapping
              ? input[61] != 0 || input[71] != 0
              : !profile_bytes_are_zero(&input[60], 2) ||
@@ -649,7 +678,9 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                 (static_cast<uint32_t>(descriptor[2] & 0x03u) << 16);
             const uint8_t cancel =
                 static_cast<uint8_t>((descriptor[2] >> 2) & 0x1fu);
-            if (cancel > CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL &&
+            if (cancel >= (has_extra_controls
+                               ? CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT
+                               : CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) &&
                 cancel != 0x1fu) {
                 return false;
             }
@@ -657,7 +688,7 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                 cancel == 0x1fu ? CONTROLLER_PROFILE_NO_BUTTON : cancel;
             macro.first_step = decoded_step_count;
             macro.step_count = descriptor[4];
-            if (schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION) {
+            if (has_expanded_settings) {
                 macro.mode = static_cast<ControllerProfileMacroMode>(
                     input[336 + macro_index * 2]);
                 macro.repeat_count = input[337 + macro_index * 2];
@@ -762,7 +793,7 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                 static_cast<ControllerProfileTurboMode>(input[82 + index]);
         }
     }
-    if (schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION) {
+    if (has_expanded_settings) {
         profile.shortcuts.modifier = input[256];
         memcpy(profile.shortcuts.selectors, &input[257],
                CONTROLLER_PROFILE_COUNT);
@@ -783,14 +814,48 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
             }
         }
         if (!profile_bytes_are_zero(
-                &input[settings_offset], 336 - settings_offset) ||
-            !profile_bytes_are_zero(&input[344], 40)) {
+                &input[settings_offset], 336 - settings_offset)) {
+            return false;
+        }
+        if (!has_extra_controls &&
+            (!profile_bytes_are_zero(&input[344], 40) ||
+             !valid_control_output(profile.shortcuts.modifier) ||
+             !valid_control_output(profile.shift.modifier))) {
             return false;
         }
     } else {
         for (ControllerProfileTurboMode mode : profile.turbo_modes) {
             if (static_cast<uint8_t>(mode) >
                 static_cast<uint8_t>(ControllerProfileTurboMode::kAutoBurst)) {
+                return false;
+            }
+        }
+    }
+    if (has_extra_controls) {
+        memcpy(profile.extra_button_map, &input[344],
+               CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT);
+        memcpy(profile.shift.extra_button_map, &input[351],
+               CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT);
+        for (size_t index = 358; index < 364; ++index) {
+            if ((input[index] & 0x80u) != 0) {
+                return false;
+            }
+        }
+        if (!profile_bytes_are_zero(&input[364], 20)) {
+            return false;
+        }
+        for (uint8_t index = 0; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+            profile.macros[index].trigger_mask |=
+                static_cast<uint32_t>(input[358 + index])
+                << CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
+        }
+        profile.switching_chord |= static_cast<uint32_t>(input[362])
+                                   << CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
+        profile.motion_toggle_chord |= static_cast<uint32_t>(input[363])
+                                       << CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
+    } else {
+        for (const ControllerProfileMacro& macro : profile.macros) {
+            if (!valid_control_output(macro.cancel_control)) {
                 return false;
             }
         }

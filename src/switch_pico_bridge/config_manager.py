@@ -137,7 +137,8 @@ PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2
 PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3
 PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4
 PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5
-PROFILE_SCHEMA_VERSION = 6
+PROFILE_EXPANDED_SCHEMA_VERSION = 6
+PROFILE_SCHEMA_VERSION = 7
 PROFILE_LEGACY_SIZE = 256
 PROFILE_SIZE = 384
 PROFILE_CAPACITY = 8
@@ -163,8 +164,10 @@ PROFILE_TURBO_BURST_MIN = 1
 PROFILE_TURBO_BURST_MAX = 255
 PROFILE_MACRO_REPEAT_MIN = 1
 PROFILE_MACRO_REPEAT_MAX = 255
-PROFILE_PLAYTEST_SCHEMA_VERSION = 2
-PROFILE_PLAYTEST_SIZE = 54
+PROFILE_PLAYTEST_LEGACY_SCHEMA_VERSION = 2
+PROFILE_PLAYTEST_LEGACY_SIZE = 54
+PROFILE_PLAYTEST_SCHEMA_VERSION = 3
+PROFILE_PLAYTEST_SIZE = 55
 PROFILE_PLAYTEST_SLOT_COUNT = 4
 PROFILE_METADATA_SCHEMA_VERSION = 1
 PROFILE_METADATA_MAX_BYTES = 31
@@ -276,7 +279,9 @@ LOGICAL_BUTTONS = (
     "dpad_left",
     "dpad_right",
 )
-LOGICAL_CONTROLS = LOGICAL_BUTTONS + ("left_trigger", "right_trigger")
+OUTPUT_CONTROLS = LOGICAL_BUTTONS + ("left_trigger", "right_trigger")
+EXTRA_BUTTONS = ("c", "gl", "gr", "left_sl", "left_sr", "right_sl", "right_sr")
+LOGICAL_CONTROLS = OUTPUT_CONTROLS + EXTRA_BUTTONS
 PROFILE_LOGICAL_CONTROL_MASK = (1 << len(LOGICAL_CONTROLS)) - 1
 RUMBLE_POLICIES = ("none", "rumble", "led", "rumble_and_led")
 TURBO_MODES = ("off", "turbo", "auto_burst", "burst")
@@ -684,13 +689,16 @@ def _button_name(value: int) -> str | None:
     return LOGICAL_BUTTONS[value]
 
 
-def _control_index(value: Any, name: str) -> int:
+def _control_index(
+    value: Any, name: str, *, schema_version: int = PROFILE_SCHEMA_VERSION
+) -> int:
     if value is None:
         return PROFILE_NONE_BUTTON
-    if type(value) is not str or value not in LOGICAL_CONTROLS:
-        choices = ", ".join(LOGICAL_CONTROLS)
+    controls = LOGICAL_CONTROLS if schema_version >= PROFILE_SCHEMA_VERSION else OUTPUT_CONTROLS
+    if type(value) is not str or value not in controls:
+        choices = ", ".join(controls)
         raise ConfigManagerError(f"{name} must be null or one of: {choices}")
-    return LOGICAL_CONTROLS.index(value)
+    return controls.index(value)
 
 
 def _control_name(value: int) -> str | None:
@@ -714,12 +722,14 @@ def _button_mask_from_json(value: Any, name: str) -> int:
     return mask
 
 
-def _control_mask_from_json(value: Any, name: str) -> int:
+def _control_mask_from_json(
+    value: Any, name: str, *, schema_version: int = PROFILE_SCHEMA_VERSION
+) -> int:
     if type(value) is not list:
         raise ConfigManagerError(f"{name} must be a JSON array")
     mask = 0
     for entry in value:
-        index = _control_index(entry, name)
+        index = _control_index(entry, name, schema_version=schema_version)
         if index == PROFILE_NONE_BUTTON:
             raise ConfigManagerError(f"{name} cannot contain null")
         bit = 1 << index
@@ -887,6 +897,7 @@ class ProfilePlaytest:
     battery: int
     capabilities: int
     motion: tuple[int, int, int, int, int, int] | None
+    extra_buttons: int = 0
 
     def to_json_object(self) -> dict[str, Any]:
         return {
@@ -905,6 +916,10 @@ class ProfilePlaytest:
                 else None
             ),
             "buttons": _button_mask_to_json(self.button_mask),
+            "extra_buttons": [
+                name for index, name in enumerate(EXTRA_BUTTONS)
+                if self.extra_buttons & (1 << index)
+            ],
             "left_stick": {
                 "x": self.left_stick[0],
                 "y": self.left_stick[1],
@@ -1056,7 +1071,7 @@ class TriggerConfig:
         if (
             type(self.output) is not int
             or self.output != PROFILE_NONE_BUTTON
-            and not 0 <= self.output < len(LOGICAL_CONTROLS)
+            and not 0 <= self.output < len(OUTPUT_CONTROLS)
         ):
             raise ConfigManagerError("invalid trigger output mapping")
 
@@ -1430,12 +1445,14 @@ class ProfileShortcuts:
         }
 
     @classmethod
-    def from_json_object(cls, value: Any) -> ProfileShortcuts:
+    def from_json_object(
+        cls, value: Any, *, schema_version: int = PROFILE_SCHEMA_VERSION
+    ) -> ProfileShortcuts:
         obj = _require_object(value, ("modifier", "profiles"), "profile.shortcuts")
         if type(obj["profiles"]) is not list:
             raise ConfigManagerError("profile.shortcuts.profiles must be an array")
         return cls(
-            _control_index(obj["modifier"], "profile.shortcuts.modifier"),
+            _control_index(obj["modifier"], "profile.shortcuts.modifier", schema_version=schema_version),
             tuple(
                 _button_index(selector, f"profile.shortcuts.profiles[{index}]")
                 for index, selector in enumerate(obj["profiles"])
@@ -1448,6 +1465,7 @@ class ProfileShift:
     mode: int = 0
     modifier: int = PROFILE_NONE_BUTTON
     button_map: tuple[int, ...] = tuple(range(len(LOGICAL_BUTTONS)))
+    extra_button_map: tuple[int, ...] = (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS)
 
     def __post_init__(self) -> None:
         _require_int(self.mode, "Shift mode", 0, len(SHIFT_MODES) - 1)
@@ -1462,7 +1480,9 @@ class ProfileShift:
             LOGICAL_BUTTONS
         ):
             raise ConfigManagerError("Shift button map must contain 16 mappings")
-        for output in self.button_map:
+        if type(self.extra_button_map) is not tuple or len(self.extra_button_map) != len(EXTRA_BUTTONS):
+            raise ConfigManagerError("Shift extra button map must contain seven mappings")
+        for output in (*self.button_map, *self.extra_button_map):
             if type(output) is not int or (
                 output != PROFILE_NONE_BUTTON and not 0 <= output < len(LOGICAL_BUTTONS)
             ):
@@ -1476,22 +1496,37 @@ class ProfileShift:
                 name: _button_name(self.button_map[index])
                 for index, name in enumerate(LOGICAL_BUTTONS)
             },
+            "extra_button_map": {
+                name: _button_name(self.extra_button_map[index])
+                for index, name in enumerate(EXTRA_BUTTONS)
+            },
         }
 
     @classmethod
-    def from_json_object(cls, value: Any) -> ProfileShift:
-        obj = _require_object(
-            value, ("mode", "modifier", "button_map"), "profile.shift"
-        )
+    def from_json_object(
+        cls, value: Any, *, schema_version: int = PROFILE_SCHEMA_VERSION
+    ) -> ProfileShift:
+        fields = ["mode", "modifier", "button_map"]
+        if schema_version >= PROFILE_SCHEMA_VERSION:
+            fields.append("extra_button_map")
+        obj = _require_object(value, fields, "profile.shift")
         mappings = _require_object(
             obj["button_map"], LOGICAL_BUTTONS, "profile.shift.button_map"
         )
+        extras = (
+            _require_object(obj["extra_button_map"], EXTRA_BUTTONS, "profile.shift.extra_button_map")
+            if schema_version >= PROFILE_SCHEMA_VERSION else dict.fromkeys(EXTRA_BUTTONS)
+        )
         return cls(
             _require_enum(obj["mode"], SHIFT_MODES, "profile.shift.mode"),
-            _control_index(obj["modifier"], "profile.shift.modifier"),
+            _control_index(obj["modifier"], "profile.shift.modifier", schema_version=schema_version),
             tuple(
                 _button_index(mappings[name], f"profile.shift.button_map.{name}")
                 for name in LOGICAL_BUTTONS
+            ),
+            tuple(
+                _button_index(extras[name], f"profile.shift.extra_button_map.{name}")
+                for name in EXTRA_BUTTONS
             ),
         )
 
@@ -1594,25 +1629,25 @@ class ControllerMacro:
         cls, value: Any, name: str, *, schema_version: int = PROFILE_SCHEMA_VERSION
     ) -> ControllerMacro:
         fields = ["trigger", "cancel", "steps"]
-        if schema_version >= PROFILE_SCHEMA_VERSION:
+        if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION:
             fields.extend(("playback", "repeat_count"))
         obj = _require_object(value, fields, name)
         steps = obj["steps"]
         if type(steps) is not list or len(steps) > PROFILE_MACRO_STEPS_PER_MACRO:
             raise ConfigManagerError(f"{name}.steps must contain zero to eight steps")
         return cls(
-            _control_mask_from_json(obj["trigger"], f"{name}.trigger"),
-            _control_index(obj["cancel"], f"{name}.cancel"),
+            _control_mask_from_json(obj["trigger"], f"{name}.trigger", schema_version=schema_version),
+            _control_index(obj["cancel"], f"{name}.cancel", schema_version=schema_version),
             tuple(
                 MacroStep.from_json_object(step, f"{name}.steps[{index}]")
                 for index, step in enumerate(steps)
             ),
             (
                 _require_enum(obj["playback"], MACRO_PLAYBACK_MODES, f"{name}.playback")
-                if schema_version >= PROFILE_SCHEMA_VERSION
+                if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION
                 else 0
             ),
-            obj["repeat_count"] if schema_version >= PROFILE_SCHEMA_VERSION else 1,
+            obj["repeat_count"] if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION else 1,
         )
 
 
@@ -1634,16 +1669,19 @@ class ControllerProfile:
     shift: ProfileShift = ProfileShift()
     turbo_defaults: TurboSettings = TurboSettings()
     turbo_overrides: tuple[TurboSettings | None, ...] = (None,) * len(LOGICAL_BUTTONS)
+    extra_button_map: tuple[int, ...] = (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS)
 
     def __post_init__(self) -> None:
         if type(self.button_map) is not tuple or len(self.button_map) != len(
             LOGICAL_BUTTONS
         ):
             raise ConfigManagerError("button map must contain 16 logical mappings")
-        for mapping in self.button_map:
+        if type(self.extra_button_map) is not tuple or len(self.extra_button_map) != len(EXTRA_BUTTONS):
+            raise ConfigManagerError("extra button map must contain seven mappings")
+        for mapping in (*self.button_map, *self.extra_button_map):
             if type(mapping) is not int or (
                 mapping != PROFILE_NONE_BUTTON
-                and not 0 <= mapping < len(LOGICAL_CONTROLS)
+                and not 0 <= mapping < len(OUTPUT_CONTROLS)
             ):
                 raise ConfigManagerError("invalid logical control mapping")
         if not isinstance(self.left_stick, StickConfig) or not isinstance(
@@ -1657,7 +1695,7 @@ class ControllerProfile:
         routed_triggers = [
             trigger.output
             for trigger in (self.left_trigger, self.right_trigger)
-            if len(LOGICAL_BUTTONS) <= trigger.output < len(LOGICAL_CONTROLS)
+            if len(LOGICAL_BUTTONS) <= trigger.output < len(OUTPUT_CONTROLS)
         ]
         if len(routed_triggers) != len(set(routed_triggers)):
             raise ConfigManagerError(
@@ -1767,7 +1805,7 @@ class ControllerProfile:
             raise ConfigManagerError("invalid profile size")
         version, size = struct.unpack_from("<HH", payload)
         expected_size = (
-            PROFILE_SIZE if version >= PROFILE_SCHEMA_VERSION else PROFILE_LEGACY_SIZE
+            PROFILE_SIZE if version >= PROFILE_EXPANDED_SCHEMA_VERSION else PROFILE_LEGACY_SIZE
         )
         if (
             version < PROFILE_LEGACY_SCHEMA_VERSION
@@ -1779,6 +1817,8 @@ class ControllerProfile:
         has_control_mapping = version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
         has_action_controls = version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
         sparse_macros = version >= PROFILE_SPARSE_MACRO_SCHEMA_VERSION
+        has_extra_buttons = version >= PROFILE_SCHEMA_VERSION
+        control_count = len(LOGICAL_CONTROLS) if has_extra_buttons else len(OUTPUT_CONTROLS)
         if sparse_macros:
             if payload[75] & 0xCC:
                 raise ConfigManagerError("profile action flags are invalid")
@@ -1811,6 +1851,11 @@ class ControllerProfile:
             motion_toggle_chord = struct.unpack_from("<H", payload, 78)[0] | (
                 ((payload[75] >> 4) & 0x03) << 16
             )
+            if has_extra_buttons:
+                if any(value & 0x80 for value in payload[358:364]):
+                    raise ConfigManagerError("invalid extra control mask")
+                switching_chord |= payload[362] << 18
+                motion_toggle_chord |= payload[363] << 18
             turbo_modes = tuple(payload[80:96])
             macros: list[ControllerMacro] = []
             stream_offset = 0
@@ -1823,8 +1868,10 @@ class ControllerProfile:
                 trigger_mask = struct.unpack_from("<H", descriptor)[0] | (
                     (descriptor[2] & 0x03) << 16
                 )
+                if has_extra_buttons:
+                    trigger_mask |= payload[358 + macro_index] << 18
                 cancel = (descriptor[2] >> 2) & 0x1F
-                if cancel > len(LOGICAL_CONTROLS) - 1 and cancel != 0x1F:
+                if cancel >= control_count and cancel != 0x1F:
                     raise ConfigManagerError("invalid sparse macro cancel control")
                 step_count = descriptor[4]
                 encoded_size = descriptor[5]
@@ -1855,10 +1902,10 @@ class ControllerProfile:
                         PROFILE_NONE_BUTTON if cancel == 0x1F else cancel,
                         tuple(steps),
                         payload[336 + macro_index * 2]
-                        if version >= PROFILE_SCHEMA_VERSION
+                        if version >= PROFILE_EXPANDED_SCHEMA_VERSION
                         else 0,
                         payload[337 + macro_index * 2]
-                        if version >= PROFILE_SCHEMA_VERSION
+                        if version >= PROFILE_EXPANDED_SCHEMA_VERSION
                         else 1,
                     )
                 )
@@ -1886,6 +1933,8 @@ class ControllerProfile:
                     0 if legacy_trigger == PROFILE_NONE_BUTTON else 1 << legacy_trigger
                 )
                 cancel_control = payload[79]
+            if cancel_control != PROFILE_NONE_BUTTON and cancel_control >= control_count:
+                raise ConfigManagerError("invalid legacy macro cancel control")
             if has_action_controls:
                 switching_chord |= (payload[75] & 0x03) << 16
                 trigger_mask |= ((payload[75] >> 2) & 0x03) << 16
@@ -1918,9 +1967,14 @@ class ControllerProfile:
         shift = ProfileShift()
         turbo_defaults = TurboSettings()
         turbo_overrides: list[TurboSettings | None] = [None] * len(LOGICAL_BUTTONS)
-        if version >= PROFILE_SCHEMA_VERSION:
+        if version >= PROFILE_EXPANDED_SCHEMA_VERSION:
+            if any(value != PROFILE_NONE_BUTTON and value >= control_count for value in (payload[256], payload[266])):
+                raise ConfigManagerError("invalid profile modifier")
             shortcuts = ProfileShortcuts(payload[256], tuple(payload[257:265]))
-            shift = ProfileShift(payload[265], payload[266], tuple(payload[267:283]))
+            shift = ProfileShift(
+                payload[265], payload[266], tuple(payload[267:283]),
+                tuple(payload[351:358]) if has_extra_buttons else (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS),
+            )
             turbo_defaults = TurboSettings(*payload[283:286])
             override_mask = struct.unpack_from("<H", payload, 286)[0]
             settings_offset = 288
@@ -1932,7 +1986,8 @@ class ControllerProfile:
                     settings_offset += 3
             if payload[settings_offset:336] != bytes(336 - settings_offset):
                 raise ConfigManagerError("nonzero Turbo override padding")
-            if payload[344:] != bytes(40):
+            reserved_offset = 364 if has_extra_buttons else 344
+            if any(payload[reserved_offset:]):
                 raise ConfigManagerError("profile reserved fields must be zero")
         elif any(mode > 2 for mode in turbo_modes):
             raise ConfigManagerError("invalid legacy Turbo mode")
@@ -1954,6 +2009,7 @@ class ControllerProfile:
             shift=shift,
             turbo_defaults=turbo_defaults,
             turbo_overrides=tuple(turbo_overrides),
+            extra_button_map=tuple(payload[344:351]) if has_extra_buttons else (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS),
         )
 
     def to_bytes(self) -> bytes:
@@ -1999,6 +2055,7 @@ class ControllerProfile:
             stream.extend(encoded_steps)
             payload[336 + macro_index * 2] = macro.playback
             payload[337 + macro_index * 2] = macro.repeat_count
+            payload[358 + macro_index] = (macro.trigger_mask >> 18) & 0x7F
         if len(stream) > PROFILE_MACRO_STREAM_SIZE:
             raise ConfigManagerError("profile macros exceed the 136-byte sparse stream")
         payload[120 : 120 + len(stream)] = stream
@@ -2028,6 +2085,10 @@ class ControllerProfile:
                 )
                 settings_offset += 3
         struct.pack_into("<H", payload, 286, override_mask)
+        payload[344:351] = bytes(self.extra_button_map)
+        payload[351:358] = bytes(self.shift.extra_button_map)
+        payload[362] = (self.switching_chord >> 18) & 0x7F
+        payload[363] = (self.motion_toggle_chord >> 18) & 0x7F
         return bytes(payload)
 
     def to_json_object(self) -> dict[str, Any]:
@@ -2037,6 +2098,10 @@ class ControllerProfile:
             "button_map": {
                 name: _control_name(self.button_map[index])
                 for index, name in enumerate(LOGICAL_BUTTONS)
+            },
+            "extra_button_map": {
+                name: _control_name(self.extra_button_map[index])
+                for index, name in enumerate(EXTRA_BUTTONS)
             },
             "sticks": {
                 "left": self.left_stick.to_json_object(),
@@ -2105,18 +2170,24 @@ class ControllerProfile:
             if schema_version >= PROFILE_SPARSE_MACRO_SCHEMA_VERSION
             else "macro"
         )
-        if schema_version >= PROFILE_SCHEMA_VERSION:
+        if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION:
             fields.extend(("shortcuts", "shift", "turbo_settings"))
+        if schema_version >= PROFILE_SCHEMA_VERSION:
+            fields.append("extra_button_map")
         obj = _require_object(value, fields, "profile")
         expected_size = (
             PROFILE_SIZE
-            if schema_version >= PROFILE_SCHEMA_VERSION
+            if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION
             else PROFILE_LEGACY_SIZE
         )
         if _require_int(obj["size"], "profile.size", 0, 0xFFFF) != expected_size:
             raise ConfigManagerError("unsupported profile schema")
         button_map = _require_object(
             obj["button_map"], LOGICAL_BUTTONS, "profile.button_map"
+        )
+        extras = (
+            _require_object(obj["extra_button_map"], EXTRA_BUTTONS, "profile.extra_button_map")
+            if schema_version >= PROFILE_SCHEMA_VERSION else dict.fromkeys(EXTRA_BUTTONS)
         )
         sticks = _require_object(obj["sticks"], ("left", "right"), "profile.sticks")
         triggers = _require_object(
@@ -2145,7 +2216,7 @@ class ControllerProfile:
             right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
 
         mask_parser = (
-            _control_mask_from_json
+            (lambda value, name: _control_mask_from_json(value, name, schema_version=schema_version))
             if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
             else _button_mask_from_json
         )
@@ -2195,7 +2266,7 @@ class ControllerProfile:
             if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
                 trigger_mask = mask_parser(macro["trigger"], "profile.macro.trigger")
                 cancel_control = (
-                    _control_index(macro["cancel"], "profile.macro.cancel")
+                    _control_index(macro["cancel"], "profile.macro.cancel", schema_version=schema_version)
                     if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
                     else _button_index(macro["cancel"], "profile.macro.cancel")
                 )
@@ -2212,9 +2283,9 @@ class ControllerProfile:
         shift = ProfileShift()
         turbo_defaults = TurboSettings()
         turbo_overrides: list[TurboSettings | None] = [None] * len(LOGICAL_BUTTONS)
-        if schema_version >= PROFILE_SCHEMA_VERSION:
-            shortcuts = ProfileShortcuts.from_json_object(obj["shortcuts"])
-            shift = ProfileShift.from_json_object(obj["shift"])
+        if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION:
+            shortcuts = ProfileShortcuts.from_json_object(obj["shortcuts"], schema_version=schema_version)
+            shift = ProfileShift.from_json_object(obj["shift"], schema_version=schema_version)
             settings = _require_object(
                 obj["turbo_settings"],
                 ("defaults", "overrides"),
@@ -2272,7 +2343,7 @@ class ControllerProfile:
                 _require_enum(
                     turbo[name],
                     TURBO_MODES
-                    if schema_version >= PROFILE_SCHEMA_VERSION
+                    if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION
                     else TURBO_MODES[:3],
                     f"profile.turbo.{name}",
                 )
@@ -2282,6 +2353,10 @@ class ControllerProfile:
             shift=shift,
             turbo_defaults=turbo_defaults,
             turbo_overrides=tuple(turbo_overrides),
+            extra_button_map=tuple(
+                _control_index(extras[name], f"profile.extra_button_map.{name}")
+                for name in EXTRA_BUTTONS
+            ),
         )
 
     @classmethod
@@ -3367,6 +3442,7 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
         PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
         PROFILE_ACTION_CONTROL_SCHEMA_VERSION,
         PROFILE_SPARSE_MACRO_SCHEMA_VERSION,
+        PROFILE_EXPANDED_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile-list schema")
@@ -3444,6 +3520,7 @@ def read_selected_profile(device: UsbDevice) -> ControllerProfile:
         PROFILE_CONTROL_MAPPING_SCHEMA_VERSION,
         PROFILE_ACTION_CONTROL_SCHEMA_VERSION,
         PROFILE_SPARSE_MACRO_SCHEMA_VERSION,
+        PROFILE_EXPANDED_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile schema")
@@ -3541,12 +3618,16 @@ def identify_controller(device: UsbDevice, identity: ControllerIdentity) -> None
 
 def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
     _raise_status(envelope)
-    if (
-        envelope.schema_version != PROFILE_PLAYTEST_SCHEMA_VERSION
-        or len(envelope.payload) != PROFILE_PLAYTEST_SIZE
-    ):
+    expected_size = {
+        PROFILE_PLAYTEST_LEGACY_SCHEMA_VERSION: PROFILE_PLAYTEST_LEGACY_SIZE,
+        PROFILE_PLAYTEST_SCHEMA_VERSION: PROFILE_PLAYTEST_SIZE,
+    }.get(envelope.schema_version)
+    if len(envelope.payload) != expected_size:
         raise ConfigManagerError("invalid profile playtest payload")
     payload = envelope.payload
+    extra_buttons = payload[54] if envelope.schema_version == PROFILE_PLAYTEST_SCHEMA_VERSION else 0
+    if extra_buttons & ~0x7F:
+        raise ConfigManagerError("invalid playtest extra buttons")
     flags = payload[0]
     if flags & ~0x03 or flags != envelope.flags or payload[41] != 0:
         raise ConfigManagerError("invalid profile playtest flags")
@@ -3596,6 +3677,7 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
         battery=payload[39],
         capabilities=payload[40],
         motion=motion_values if has_motion else None,
+        extra_buttons=extra_buttons,
     )
 
 

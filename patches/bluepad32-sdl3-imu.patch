@@ -1,8 +1,34 @@
+diff --git a/src/components/bluepad32/bt/uni_bt.c b/src/components/bluepad32/bt/uni_bt.c
+--- a/src/components/bluepad32/bt/uni_bt.c
++++ b/src/components/bluepad32/bt/uni_bt.c
+@@ -73,6 +73,12 @@
+ #include "uni_log.h"
+ #include "uni_property.h"
+ 
++#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
++// The opt-in PCM sender owns its CAN_SEND_NOW event, not the generic HID FIFO.
++extern bool uni_platform_on_l2cap_can_send_now(uni_hid_device_t* device,
++                                              uint16_t local_cid);
++#endif
++
+ // globals
+ bd_addr_t uni_local_bd_addr;
+ 
+@@ -473,6 +479,10 @@
+                     if (device == NULL) {
+                         loge("--->>> CANNOT FIND DEVICE");
+                     } else {
++#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
++                        if (uni_platform_on_l2cap_can_send_now(device, local_cid))
++                            break;
++#endif
+                         uni_hid_device_send_queued_reports(device);
+                     }
+                     break;
 diff --git a/src/components/bluepad32/bt/uni_bt_bredr.c b/src/components/bluepad32/bt/uni_bt_bredr.c
-index 955cc6f..4013cc1 100644
 --- a/src/components/bluepad32/bt/uni_bt_bredr.c
 +++ b/src/components/bluepad32/bt/uni_bt_bredr.c
-@@ -423,13 +423,14 @@ void uni_bt_bredr_on_l2cap_channel_opened(uint16_t channel, const uint8_t* packe
+@@ -423,13 +423,14 @@
      status = l2cap_event_channel_opened_get_status(packet);
      if (status) {
          logi("L2CAP Connection failed: 0x%02x.\n", status);
@@ -21,8 +47,164 @@ index 955cc6f..4013cc1 100644
          uni_hid_device_disconnect(device);
          uni_hid_device_delete(device);
          /* 'device' is destroyed, don't use */
+diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/bt/uni_bt_le.c
+--- a/src/components/bluepad32/bt/uni_bt_le.c
++++ b/src/components/bluepad32/bt/uni_bt_le.c
+@@ -68,6 +68,7 @@
+ #include "bt/uni_bt_conn.h"
+ #include "bt/uni_bt_defines.h"
+ #include "parser/uni_hid_parser.h"
++#include "parser/uni_hid_parser_switch2.h"
+ #include "uni_common.h"
+ #include "uni_config.h"
+ #include "uni_hid_device.h"
+@@ -107,7 +108,7 @@
+     uni_hid_device_t* device;
+ 
+     device = uni_hid_device_get_instance_for_connection_handle(con_handle);
+-    if (device) {
++    if (device && !uni_hid_parser_switch2_is_ble_device(device)) {
+         status = hids_client_disconnect(device->hids_cid);
+         if (status != ERROR_CODE_SUCCESS) {
+             loge("Failed to disconnect HIDS client for hids_cid=%d, status=%d\n", device->hids_cid, status);
+@@ -560,10 +561,22 @@
+     type = hci_event_packet_get_type(packet);
+     switch (type) {
+         case SM_EVENT_JUST_WORKS_REQUEST:
++            con_handle = sm_event_just_works_request_get_handle(packet);
++            device = uni_hid_device_get_instance_for_connection_handle(con_handle);
++            if (uni_hid_parser_switch2_is_ble_device(device)) {
++                hog_disconnect(con_handle);
++                break;
++            }
+             logi("Just works requested\n");
+             sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
+             break;
+         case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
++            con_handle = sm_event_numeric_comparison_request_get_handle(packet);
++            device = uni_hid_device_get_instance_for_connection_handle(con_handle);
++            if (uni_hid_parser_switch2_is_ble_device(device)) {
++                hog_disconnect(con_handle);
++                break;
++            }
+             logi("Confirming numeric comparison: %" PRIu32 "\n",
+                  sm_event_numeric_comparison_request_get_passkey(packet));
+             sm_numeric_comparison_confirm(sm_event_passkey_display_number_get_handle(packet));
+@@ -598,6 +611,12 @@
+             break;
+         case SM_EVENT_REENCRYPTION_COMPLETE:
+             con_handle = sm_event_reencryption_complete_get_handle(packet);
++            device = uni_hid_device_get_instance_for_connection_handle(con_handle);
++            if (uni_hid_parser_switch2_is_ble_device(device)) {
++                // Proprietary Switch 2 GATT must never enter HOGP or re-pair SMP.
++                hog_disconnect(con_handle);
++                break;
++            }
+             switch (sm_event_reencryption_complete_get_status(packet)) {
+                 case ERROR_CODE_SUCCESS:
+                     logi("Re-encryption complete, success\n");
+@@ -630,6 +649,10 @@
+             con_handle = sm_event_pairing_complete_get_handle(packet);
+             if (!device) {
+                 loge("SM_EVENT_PAIRING_COMPLETE: Invalid device for addr %s\n", bd_addr_to_str(addr));
++                hog_disconnect(con_handle);
++                break;
++            }
++            if (uni_hid_parser_switch2_is_ble_device(device)) {
+                 hog_disconnect(con_handle);
+                 break;
+             }
+@@ -700,7 +723,18 @@
+             con_handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
+             logi("Using con_handle: %#x\n", con_handle);
+ 
++            if (uni_hid_parser_switch2_is_ble_device(device) &&
++                hci_subevent_le_connection_complete_get_status(packet) != ERROR_CODE_SUCCESS) {
++                // A failed event has no valid connection handle to disconnect.
++                uni_hid_device_delete(device);
++                resume_scanning_hint();
++                break;
++            }
+             uni_hid_device_set_connection_handle(device, con_handle);
++            if (uni_hid_parser_switch2_is_ble_device(device)) {
++                uni_hid_parser_switch2_on_le_connected(device);
++                break;
++            }
+             sm_request_pairing(con_handle);
+ 
+             // Resume scanning
+@@ -739,6 +773,8 @@
+     if (device->conn.protocol != UNI_BT_CONN_PROTOCOL_BLE)
+         // Abort on non BLE connections
+         return;
++    if (uni_hid_parser_switch2_is_ble_device(device))
++        return;  // Switch 2 uses its own application-level pairing and GATT setup.
+ 
+     logi("Connection encrypted: %u\n", hci_event_encryption_change_get_encryption_enabled(packet));
+     if (hci_event_encryption_change_get_encryption_enabled(packet) == 0) {
+@@ -758,7 +794,11 @@
+     appearance = 0;
+     name[0] = 0;
+ 
+-    ARG_UNUSED(size);
++    if (packet == NULL || size < 12 ||
++        (uint16_t)gap_event_advertising_report_get_data_length(packet) > size - 12u)
++        return;
++    if (uni_bt_le_switch2_handle_advertisement(packet, size))
++        return;
+ 
+     gap_event_advertising_report_get_address(packet, addr);
+     if (uni_hid_device_get_instance_for_address(addr)) {
+diff --git a/src/components/bluepad32/controller/uni_gamepad.c b/src/components/bluepad32/controller/uni_gamepad.c
+--- a/src/components/bluepad32/controller/uni_gamepad.c
++++ b/src/components/bluepad32/controller/uni_gamepad.c
+@@ -35,6 +35,9 @@
+     {CONTROLLER_TYPE_SwitchJoyConRight, "Switch JoyCon Right"},
+     {CONTROLLER_TYPE_SwitchJoyConPair, "Switch JoyCon Pair"},
+     {CONTROLLER_TYPE_SwitchInputOnlyController, "Switch Input Only"},
++    {CONTROLLER_TYPE_Switch2ProController, "Switch 2 Pro"},
++    {CONTROLLER_TYPE_Switch2JoyConLeft, "Joy-Con 2 Left"},
++    {CONTROLLER_TYPE_Switch2JoyConRight, "Joy-Con 2 Right"},
+     {CONTROLLER_TYPE_MobileTouch, "Mobile Touch"},
+     {CONTROLLER_TYPE_XInputSwitchController, "XInput Switch"},
+     {CONTROLLER_TYPE_PS5Controller, "DualSense"},
+diff --git a/src/components/bluepad32/include/controller/uni_controller_list.h b/src/components/bluepad32/include/controller/uni_controller_list.h
+--- a/src/components/bluepad32/include/controller/uni_controller_list.h
++++ b/src/components/bluepad32/include/controller/uni_controller_list.h
+@@ -568,6 +568,9 @@
+     // * ZhiXu Gamepad Wireless
+     // * Sunwaytek Wireless Motion Controller for Nintendo Switch
+ 	{ MAKE_CONTROLLER_ID( 0x057e, 0x2009 ), k_eControllerType_SwitchProController, NULL },        // Nintendo Switch Pro Controller
++    { MAKE_CONTROLLER_ID( 0x057e, 0x2069 ), k_eControllerType_Switch2ProController, NULL },
++    { MAKE_CONTROLLER_ID( 0x057e, 0x2067 ), k_eControllerType_Switch2JoyConLeft, NULL },
++    { MAKE_CONTROLLER_ID( 0x057e, 0x2066 ), k_eControllerType_Switch2JoyConRight, NULL },
+     //{ MAKE_CONTROLLER_ID( 0x057e, 0x2017 ), k_eControllerType_SwitchProController, NULL },        // Nintendo Online SNES Controller
+     //{ MAKE_CONTROLLER_ID( 0x057e, 0x2019 ), k_eControllerType_SwitchProController, NULL },        // Nintendo Online N64 Controller
+     //{ MAKE_CONTROLLER_ID( 0x057e, 0x201e ), k_eControllerType_SwitchProController, NULL },        // Nintendo Online SEGA Genesis Controller
+diff --git a/src/components/bluepad32/include/controller/uni_controller_type.h b/src/components/bluepad32/include/controller/uni_controller_type.h
+--- a/src/components/bluepad32/include/controller/uni_controller_type.h
++++ b/src/components/bluepad32/include/controller/uni_controller_type.h
+@@ -70,6 +70,9 @@
+     k_eControllerType_OUYAController = 55,           // (Bluepad32)
+     k_eControllerType_PSMoveController = 56,         // (Bluepad32)
+     k_eControllerType_AtariJoystick = 57,            // (Bluepad32)
++    k_eControllerType_Switch2ProController = 58,
++    k_eControllerType_Switch2JoyConLeft = 59,
++    k_eControllerType_Switch2JoyConRight = 60,
+ 
+     k_eControllerType_LastController,  // Don't add game controllers below this enumeration - this enumeration can
+     // change value
+@@ -120,6 +123,9 @@
+ #define CONTROLLER_TYPE_OUYAController k_eControllerType_OUYAController
+ #define CONTROLLER_TYPE_PSMoveController k_eControllerType_PSMoveController
+ #define CONTROLLER_TYPE_AtariJoystick k_eControllerType_AtariJoystick
++#define CONTROLLER_TYPE_Switch2ProController k_eControllerType_Switch2ProController
++#define CONTROLLER_TYPE_Switch2JoyConLeft k_eControllerType_Switch2JoyConLeft
++#define CONTROLLER_TYPE_Switch2JoyConRight k_eControllerType_Switch2JoyConRight
+ #define CONTROLLER_TYPE_LastController k_eControllerType_LastController
+ #define CONTROLLER_TYPE_GenericKeyboard k_eControllertype_GenericKeyboard
+ #define CONTROLLER_TYPE_GenericMouse k_eControllertype_GenericMouse
 diff --git a/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h b/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h
-index 6af4969..0aebb0a 100644
 --- a/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h
 +++ b/src/components/bluepad32/include/parser/uni_hid_parser_psmove.h
 @@ -14,6 +14,8 @@
@@ -34,11 +216,47 @@ index 6af4969..0aebb0a 100644
  void uni_hid_parser_psmove_set_lightbar_color(struct uni_hid_device_s* d, uint8_t r, uint8_t g, uint8_t b);
  void uni_hid_parser_psmove_play_dual_rumble(struct uni_hid_device_s* d,
                                              uint16_t start_delay_ms,
+diff --git a/src/components/bluepad32/include/parser/uni_hid_parser_switch.h b/src/components/bluepad32/include/parser/uni_hid_parser_switch.h
+--- a/src/components/bluepad32/include/parser/uni_hid_parser_switch.h
++++ b/src/components/bluepad32/include/parser/uni_hid_parser_switch.h
+@@ -23,4 +23,22 @@
+ bool uni_hid_parser_switch_does_name_match(struct uni_hid_device_s* d, const char* name);
+ void uni_hid_parser_switch_device_dump(struct uni_hid_device_s* d);
+ 
++// BTstack-thread-only native owner. Qualification belongs to the caller:
++// type and firmware are unverified bytes from a successful device-info reply.
++bool uni_hid_parser_switch_native_info(struct uni_hid_device_s* d,
++                                       uint8_t* type, uint8_t* firmware_hi,
++                                       uint8_t* firmware_lo);
++bool uni_hid_parser_switch_native_acquire(struct uni_hid_device_s* d);
++// Retires compatibility timers and requests neutral; no audio is queued.
++void uni_hid_parser_switch_native_release(struct uni_hid_device_s* d);
++// Exactly 11 bytes on interrupt L2CAP. False means NOT submitted, never queued.
++// Caller must retry/resynchronize; true is transport acceptance, not playback.
++bool uni_hid_parser_switch_native_send(struct uni_hid_device_s* d, const uint8_t rumble[8]);
++
++// Internal device-send/lifecycle hooks, including queued subcommand retries.
++// Returns the L2CAP status, or success when discarding an obsolete writer.
++int uni_hid_parser_switch_send_report(struct uni_hid_device_s* d, uint16_t cid,
++                                     const uint8_t* report, uint16_t len);
++void uni_hid_parser_switch_teardown(struct uni_hid_device_s* d);
++
+ #endif  // UNI_HID_PARSER_SWITCH_H
+diff --git a/src/components/bluepad32/include/uni.h b/src/components/bluepad32/include/uni.h
+--- a/src/components/bluepad32/include/uni.h
++++ b/src/components/bluepad32/include/uni.h
+@@ -34,6 +34,7 @@
+ #include "parser/uni_hid_parser_ds5.h"
+ #include "parser/uni_hid_parser_keyboard.h"
+ #include "parser/uni_hid_parser_mouse.h"
++#include "parser/uni_hid_parser_switch2.h"
+ #include "parser/uni_hid_parser_xboxone.h"
+ #include "platform/uni_platform.h"
+ #include "uni_circular_buffer.h"
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds4.c b/src/components/bluepad32/parser/uni_hid_parser_ds4.c
-index ea063b8..7670caf 100644
 --- a/src/components/bluepad32/parser/uni_hid_parser_ds4.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_ds4.c
-@@ -297,17 +297,17 @@ void uni_hid_parser_ds4_parse_feature_report(uni_hid_device_t* d, const uint8_t*
+@@ -297,17 +297,17 @@
              // Set gyroscope calibration and normalization parameters.
              // Data values will be normalized to 1/DS_GYRO_RES_PER_DEG_S degree/s.
              speed_2x = r->gyro_speed_plus + r->gyro_speed_minus;
@@ -59,7 +277,7 @@ index ea063b8..7670caf 100644
              ins->gyro_calib_data[2].sens_numer = speed_2x * DS4_GYRO_RES_PER_DEG_S;
              ins->gyro_calib_data[2].sens_denom =
                  abs(r->gyro_roll_plus - r->gyro_roll_bias) + abs(r->gyro_roll_minus - r->gyro_roll_bias);
-@@ -476,7 +476,7 @@ static void ds4_parse_input_report_11(uni_hid_device_t* d, const ds4_input_repor
+@@ -476,7 +476,7 @@
  
      // Gyro
      for (size_t i = 0; i < ARRAY_SIZE(r->gyro); i++) {
@@ -68,7 +286,7 @@ index ea063b8..7670caf 100644
          int32_t calib_data =
              mult_frac(ins->gyro_calib_data[i].sens_numer, raw_data, ins->gyro_calib_data[i].sens_denom);
          ctl->gamepad.gyro[i] = calib_data;
-@@ -484,7 +484,7 @@ static void ds4_parse_input_report_11(uni_hid_device_t* d, const ds4_input_repor
+@@ -484,7 +484,7 @@
  
      // Accel
      for (size_t i = 0; i < ARRAY_SIZE(r->accel); i++) {
@@ -78,10 +296,9 @@ index ea063b8..7670caf 100644
              mult_frac(ins->accel_calib_data[i].sens_numer, raw_data, ins->accel_calib_data[i].sens_denom);
          ctl->gamepad.accel[i] = calib_data;
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds5.c b/src/components/bluepad32/parser/uni_hid_parser_ds5.c
-index a22ef26..3d5ecef 100644
 --- a/src/components/bluepad32/parser/uni_hid_parser_ds5.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_ds5.c
-@@ -487,17 +487,17 @@ void uni_hid_parser_ds5_parse_feature_report(uni_hid_device_t* d, const uint8_t*
+@@ -487,17 +487,17 @@
              // Set gyroscope calibration and normalization parameters.
              // Data values will be normalized to 1/DS_GYRO_RES_PER_DEG_S degree/s.
              speed_2x = r->gyro_speed_plus + r->gyro_speed_minus;
@@ -102,7 +319,8 @@ index a22ef26..3d5ecef 100644
              ins->gyro_calib_data[2].sens_numer = speed_2x * DS5_GYRO_RES_PER_DEG_S;
              ins->gyro_calib_data[2].sens_denom =
                  abs(r->gyro_roll_plus - r->gyro_roll_bias) + abs(r->gyro_roll_minus - r->gyro_roll_bias);
-@@ -618,11 +618,11 @@ void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+@@ -617,12 +617,12 @@
+         ctl->gamepad.buttons |= BUTTON_THUMB_R;  // Thumb R
      if (r->buttons[2] & 0x01)
          ctl->gamepad.misc_buttons |= MISC_BUTTON_SYSTEM;  // PS
 -    if (r->buttons[2] & 0x04)
@@ -117,7 +335,7 @@ index a22ef26..3d5ecef 100644
          int32_t calib_data =
              mult_frac(ins->gyro_calib_data[i].sens_numer, raw_data, ins->gyro_calib_data[i].sens_denom);
          ctl->gamepad.gyro[i] = calib_data;
-@@ -630,7 +630,7 @@ void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t* d, const uint8_t* r
+@@ -630,7 +630,7 @@
  
      // Accel
      for (size_t i = 0; i < ARRAY_SIZE(r->accel); i++) {
@@ -127,7 +345,6 @@ index a22ef26..3d5ecef 100644
              mult_frac(ins->accel_calib_data[i].sens_numer, raw_data, ins->accel_calib_data[i].sens_denom);
          ctl->gamepad.accel[i] = calib_data;
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_psmove.c b/src/components/bluepad32/parser/uni_hid_parser_psmove.c
-index 0265f93..5c0f2bb 100644
 --- a/src/components/bluepad32/parser/uni_hid_parser_psmove.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_psmove.c
 @@ -8,6 +8,7 @@
@@ -138,7 +355,7 @@ index 0265f93..5c0f2bb 100644
  
  #include <string.h>
  
-@@ -27,11 +28,6 @@ typedef enum psmove_fsm {
+@@ -27,11 +28,6 @@
      PSMOVE_FSM_LED_UPDATED,          // LED updated
  } psmove_fsm_t;
  
@@ -150,7 +367,7 @@ index 0265f93..5c0f2bb 100644
  
  typedef enum {
      PSMOVE_STATE_RUMBLE_DISABLED,
-@@ -41,9 +37,10 @@ typedef enum {
+@@ -41,9 +37,10 @@
  
  // psmove_instance_t represents data used by the psmove driver instance.
  typedef struct psmove_instance_s {
@@ -162,7 +379,7 @@ index 0265f93..5c0f2bb 100644
  
      btstack_timer_source_t rumble_timer_duration;
      btstack_timer_source_t rumble_timer_delayed_start;
-@@ -127,6 +124,7 @@ static void psmove_send_output_report(uni_hid_device_t* d, psmove_output_report_
+@@ -127,6 +124,7 @@
  static void on_psmove_set_rumble_on(btstack_timer_source_t* ts);
  static void on_psmove_set_rumble_off(btstack_timer_source_t* ts);
  static void psmove_play_dual_rumble_now(uni_hid_device_t* d, uint16_t duration_ms, uint8_t magnitude);
@@ -170,7 +387,7 @@ index 0265f93..5c0f2bb 100644
  
  void uni_hid_parser_psmove_init_report(uni_hid_device_t* d) {
      uni_controller_t* ctl = &d->controller;
-@@ -154,6 +152,7 @@ void uni_hid_parser_psmove_parse_input_report(uni_hid_device_t* d, const uint8_t
+@@ -154,6 +152,7 @@
      }
  
      uni_controller_t* ctl = &d->controller;
@@ -178,7 +395,7 @@ index 0265f93..5c0f2bb 100644
  
      // Buttons
      if (r->buttons[0] & 0x01)
-@@ -187,18 +186,39 @@ void uni_hid_parser_psmove_parse_input_report(uni_hid_device_t* d, const uint8_t
+@@ -187,16 +186,37 @@
  
      ctl->gamepad.throttle = r->trigger * 4;
  
@@ -205,8 +422,8 @@ index 0265f93..5c0f2bb 100644
  
      if (r->battery <= 5)
          ctl->battery = r->battery * 51;
- }
- 
++}
++
 +void uni_hid_parser_psmove_parse_feature_report(
 +    uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
 +    psmove_instance_t* ins = get_psmove_instance(d);
@@ -220,12 +437,10 @@ index 0265f93..5c0f2bb 100644
 +    } else if (result == UNI_PSMOVE_CALIBRATION_INVALID) {
 +        loge("psmove: invalid IMU calibration; motion disabled\n");
 +    }
-+}
-+
+ }
+ 
  void uni_hid_parser_psmove_play_dual_rumble(struct uni_hid_device_s* d,
-                                             uint16_t start_delay_ms,
-                                             uint16_t duration_ms,
-@@ -261,25 +281,34 @@ void uni_hid_parser_psmove_setup(struct uni_hid_device_s* d) {
+@@ -261,25 +281,34 @@
  
      switch (d->product_id) {
          case ZCM1_PID:
@@ -241,11 +456,14 @@ index 0265f93..5c0f2bb 100644
          default:
 -            loge("psmove: Unknown PSMove PID = %#x, assuming ZCM1\n", ins->model);
 -            ins->model = PSMOVE_MODEL_ZCM1;
+-            break;
+-    }
+-
 +            loge("psmove: Unknown PSMove PID = %#x, assuming ZCM1\n", d->product_id);
 +            ins->model = UNI_PSMOVE_IMU_MODEL_ZCM1;
-             break;
-     }
- 
++            break;
++    }
++
 +    psmove_request_calibration_report(d);
      uni_hid_device_set_ready_complete(d);
  }
@@ -816,7 +1034,6 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_switch.c b/src/compo
      process_fsm(d);
  }
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/components/bluepad32/parser/uni_hid_parser_wii.c
-index be2103e..4819639 100644
 --- a/src/components/bluepad32/parser/uni_hid_parser_wii.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_wii.c
 @@ -19,6 +19,7 @@
@@ -827,7 +1044,7 @@ index be2103e..4819639 100644
  
  #include "controller/uni_controller.h"
  #include "hid_usage.h"
-@@ -585,9 +586,7 @@ static void process_drm_ka(uni_hid_device_t* d, const uint8_t* report, uint16_t
+@@ -585,9 +586,7 @@
  
      uni_controller_t* ctl = &d->controller;
  
@@ -841,27 +1058,39 @@ index be2103e..4819639 100644
 diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad32/uni_hid_device.c
 --- a/src/components/bluepad32/uni_hid_device.c
 +++ b/src/components/bluepad32/uni_hid_device.c
-@@ -447,6 +447,9 @@
+@@ -32,6 +32,7 @@
+ #include "parser/uni_hid_parser_stadia.h"
+ #include "parser/uni_hid_parser_steam.h"
+ #include "parser/uni_hid_parser_switch.h"
++#include "parser/uni_hid_parser_switch2.h"
+ #include "parser/uni_hid_parser_wii.h"
+ #include "parser/uni_hid_parser_xboxone.h"
+ #include "platform/uni_platform.h"
+@@ -447,6 +448,11 @@
          return;
      }
  
 +    if (d->report_parser.setup == uni_hid_parser_switch_setup)
 +        uni_hid_parser_switch_teardown(d);
++    if (uni_hid_parser_switch2_is_ble_device(d))
++        uni_hid_parser_switch2_teardown(d);
 +
      // Disconnect child first
      if (d->child)
          uni_hid_device_disconnect(d->child);
-@@ -490,6 +493,9 @@
+@@ -490,6 +496,11 @@
          loge("uni_hid_device_delete: invalid hid device: NULL\n");
          return;
      }
 +    if (d->report_parser.setup == uni_hid_parser_switch_setup)
 +        uni_hid_parser_switch_teardown(d);
++    if (uni_hid_parser_switch2_is_ble_device(d))
++        uni_hid_parser_switch2_teardown(d);
 +
  
      // Delete child first
      if (d->child)
-@@ -655,6 +661,7 @@
+@@ -655,6 +666,7 @@
              d->report_parser.setup = uni_hid_parser_psmove_setup;
              d->report_parser.init_report = uni_hid_parser_psmove_init_report;
              d->report_parser.parse_input_report = uni_hid_parser_psmove_parse_input_report;
@@ -869,7 +1098,23 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
              d->report_parser.set_lightbar_color = uni_hid_parser_psmove_set_lightbar_color;
              d->report_parser.play_dual_rumble = uni_hid_parser_psmove_play_dual_rumble;
              logi("Device detected as PS Move: 0x%02x\n", type);
-@@ -809,7 +816,11 @@
+@@ -718,6 +730,15 @@
+             d->report_parser.device_dump = uni_hid_parser_switch_device_dump;
+             logi("Device detected as Nintendo Switch Pro controller: 0x%02x\n", type);
+             break;
++        case CONTROLLER_TYPE_Switch2ProController:
++        case CONTROLLER_TYPE_Switch2JoyConLeft:
++        case CONTROLLER_TYPE_Switch2JoyConRight:
++            d->report_parser.setup = uni_hid_parser_switch2_setup;
++            d->report_parser.init_report = uni_hid_parser_switch2_init_report;
++            d->report_parser.parse_input_report = uni_hid_parser_switch2_parse_input_report;
++            d->report_parser.set_player_leds = uni_hid_parser_switch2_set_player_leds;
++            d->report_parser.play_dual_rumble = uni_hid_parser_switch2_play_dual_rumble;
++            break;
+         case CONTROLLER_TYPE_SteamController:
+             d->report_parser.setup = uni_hid_parser_steam_setup;
+             d->report_parser.init_report = uni_hid_parser_steam_init_report;
+@@ -809,7 +830,11 @@
          return;
      }
  
@@ -882,56 +1127,3 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
      if (err != 0) {
          logd("Could not send report (error=0x%04x). Adding it to queue\n", err);
          if (uni_circular_buffer_put(&d->outgoing_buffer, cid, report, len) != 0) {
-diff --git a/src/components/bluepad32/bt/uni_bt.c b/src/components/bluepad32/bt/uni_bt.c
---- a/src/components/bluepad32/bt/uni_bt.c
-+++ b/src/components/bluepad32/bt/uni_bt.c
-@@ -73,6 +73,12 @@
- #include "uni_log.h"
- #include "uni_property.h"
- 
-+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-+// The opt-in PCM sender owns its CAN_SEND_NOW event, not the generic HID FIFO.
-+extern bool uni_platform_on_l2cap_can_send_now(uni_hid_device_t* device,
-+                                              uint16_t local_cid);
-+#endif
-+
- // globals
- bd_addr_t uni_local_bd_addr;
- 
-@@ -473,6 +479,10 @@ void uni_bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* pack
-                     if (device == NULL) {
-                         loge("--->>> CANNOT FIND DEVICE");
-                     } else {
-+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-+                        if (uni_platform_on_l2cap_can_send_now(device, local_cid))
-+                            break;
-+#endif
-                         uni_hid_device_send_queued_reports(device);
-                     }
-                     break;
-diff --git a/src/components/bluepad32/include/parser/uni_hid_parser_switch.h b/src/components/bluepad32/include/parser/uni_hid_parser_switch.h
---- a/src/components/bluepad32/include/parser/uni_hid_parser_switch.h
-+++ b/src/components/bluepad32/include/parser/uni_hid_parser_switch.h
-@@ -23,4 +23,22 @@
- bool uni_hid_parser_switch_does_name_match(struct uni_hid_device_s* d, const char* name);
- void uni_hid_parser_switch_device_dump(struct uni_hid_device_s* d);
- 
-+// BTstack-thread-only native owner. Qualification belongs to the caller:
-+// type and firmware are unverified bytes from a successful device-info reply.
-+bool uni_hid_parser_switch_native_info(struct uni_hid_device_s* d,
-+                                       uint8_t* type, uint8_t* firmware_hi,
-+                                       uint8_t* firmware_lo);
-+bool uni_hid_parser_switch_native_acquire(struct uni_hid_device_s* d);
-+// Retires compatibility timers and requests neutral; no audio is queued.
-+void uni_hid_parser_switch_native_release(struct uni_hid_device_s* d);
-+// Exactly 11 bytes on interrupt L2CAP. False means NOT submitted, never queued.
-+// Caller must retry/resynchronize; true is transport acceptance, not playback.
-+bool uni_hid_parser_switch_native_send(struct uni_hid_device_s* d, const uint8_t rumble[8]);
-+
-+// Internal device-send/lifecycle hooks, including queued subcommand retries.
-+// Returns the L2CAP status, or success when discarding an obsolete writer.
-+int uni_hid_parser_switch_send_report(struct uni_hid_device_s* d, uint16_t cid,
-+                                     const uint8_t* report, uint16_t len);
-+void uni_hid_parser_switch_teardown(struct uni_hid_device_s* d);
-+
- #endif  // UNI_HID_PARSER_SWITCH_H

@@ -44,6 +44,9 @@ struct ControllerState {
     bool button_left_stick;
     bool button_right_stick;
 
+    // Source-only controls: C, GL, GR, left SL/SR, right SL/SR.
+    uint8_t extra_buttons = 0;
+
     uint16_t left_trigger;
     uint16_t right_trigger;
 

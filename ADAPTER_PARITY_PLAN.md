@@ -523,6 +523,8 @@ Target hardware families:
 | DualShock 4 | input, Switch motion, rumble, lightbar |
 | Switch Pro | input, motion, rumble, player LED |
 | Joy-Con L/R | each half as the standalone controller exposed by Bluepad32 |
+| Switch 2 Pro | BLE setup, sticks/motion and C/GL/GR observed; rumble feel/reconnect still need qualification |
+| Joy-Con 2 L/R | solo and merged-pair software support; both-order/disconnect regressions pass; hardware qualification pending |
 | Wii Remote | buttons, accelerometer, rumble |
 | Wii Remote + Classic Controller | extension controls |
 | Wii U Pro | buttons, sticks, rumble |
@@ -703,6 +705,33 @@ Set B delivery evidence:
   firmware-timestamped input, explicit start/stop/run identity and visible
   capacity/time/disconnect termination. It does not write profiles until Save.
 
+### Switch 2 controller input — Expanded support implemented
+
+- Scoped proprietary BLE implementation informed by Bluepad32 PR219 at
+  `9c95e43a87d3bd8a68565da0836d8a758bd8d8af`; no unrelated Steam/Xbox/Sony
+  fork changes. Dynamic GATT discovery, matched acknowledgements, calibration,
+  normalized motion and retained finite/stateful rumble replace the unsafe
+  fixed-handle/timeout-advance behavior in that proposal.
+- Joy-Con 2 pairs retain the first-ready USB slot and left profile identity;
+  either connection order works. Right-half motion, both-half feedback,
+  sideways solo operation and neutral detach transitions are implemented.
+  A pair still consumes two of the four physical Bluetooth connections.
+- Seven source-only inputs (C, GL/GR and four rail buttons) are editable in
+  Profile Studio, including Shift mappings and action/macro modifiers.
+  Profile schema 7 uses reserved bytes in the unchanged 384-byte payload;
+  schemas 1–6 retain their prior settings and initialize extras unmapped.
+- Application pairing has its own bounded persistent authorization list.
+  Fresh pairing remains window-gated; Clear pairings forgets the list and
+  reports storage failure instead of falsely acknowledging a clear.
+  These proprietary BLE links are unencrypted, not authenticated SMP bonds.
+- Verification: 287 tests passed and all five firmware variants built.
+  The flashed real Switch 2 Pro delivered sticks, motion and independent
+  C/GL/GR combinations; schema-7 extra mappings saved/read/restored.
+  All 32 pre-existing profiles, metadata and active indices survived.
+  Joy-Con hardware, physical rumble feel, reconnect endurance and mixed-radio
+  qualification remain separate from those software results.
+- Full operation and limitations: [README.md](README.md#switch-2-controller-input).
+
 ### Native Switch-family HD rumble — Implemented, qualification incomplete
 
 Standalone agent handoff: [SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md).
@@ -732,9 +761,9 @@ Current constraints:
   precedence, earliest deadlines, rotating ties, periodic credit reservations,
   and generation-bound grant completion. Radio power policy is unchanged.
 - Adapter configuration schema 3 persists up to 16 explicit physical approvals.
-  Existing profile schema 6/catalog 2, bonds and wake identity are unchanged.
-- Joy-Cons are currently separate, horizontally mapped controllers in
-  Bluepad32. A paired two-Joy-Con logical controller is not implemented.
+  Profile schema 7/catalog 2 preserves prior settings; bonds and wake identity are unchanged.
+- Original Switch Joy-Cons remain separate, horizontally mapped controllers.
+  Joy-Con 2 logical pairing is a distinct BLE implementation described above.
 
 Delivery order:
 

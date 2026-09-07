@@ -88,6 +88,41 @@
     );
   }
 
+  function transformMappings(sample, profile, shiftActive = false) {
+    const buttons = new Set();
+    const triggers = { left: 0, right: 0 };
+    const consumed = profile.shift.mode !== "off" ? profile.shift.modifier : null;
+    const map = shiftActive ? profile.shift : profile;
+    const route = (output, value = 65535) => {
+      if (output === "left_trigger" || output === "right_trigger") {
+        const side = output === "left_trigger" ? "left" : "right";
+        triggers[side] = Math.max(triggers[side], value);
+      } else if (output && Object.hasOwn(profile.button_map, output)) {
+        buttons.add(output);
+      }
+    };
+    for (const source of sample.buttons) {
+      if (source !== consumed) route(map.button_map[source]);
+    }
+    for (const source of sample.extra_buttons || []) {
+      if (source !== consumed) route(map.extra_button_map[source]);
+    }
+    for (const side of ["left", "right"]) {
+      if (`${side}_trigger` === consumed) continue;
+      const config = profile.triggers[side];
+      const value = transformTrigger(sample.triggers[side], config);
+      if (config.output === "left_trigger" || config.output === "right_trigger") {
+        route(config.output, value);
+      } else if (value >= config.digital_threshold) {
+        route(config.output);
+      }
+    }
+    return {
+      buttons: Object.keys(profile.button_map).filter((button) => buttons.has(button)),
+      triggers,
+    };
+  }
+
   function stickPosition(value) {
     return Math.max(3, Math.min(97, 50 + value / 32768 * 47));
   }
@@ -106,6 +141,7 @@
   root.ProfilePlaytestMath = Object.freeze({
     transformStick,
     transformTrigger,
+    transformMappings,
     stickCoordinates,
     triggerPercent,
   });

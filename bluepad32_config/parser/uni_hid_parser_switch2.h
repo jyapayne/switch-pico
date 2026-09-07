@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct uni_hid_device_s;
+
+#define UNI_SW2_NINTENDO_VID 0x057e
+#define UNI_SW2_PRO_PID 0x2069
+#define UNI_SW2_JOYCON_L_PID 0x2067
+#define UNI_SW2_JOYCON_R_PID 0x2066
+
+enum {
+    UNI_SW2_BUTTON_C = 1u << 0,
+    UNI_SW2_BUTTON_GL = 1u << 1,
+    UNI_SW2_BUTTON_GR = 1u << 2,
+    UNI_SW2_BUTTON_LEFT_SL = 1u << 3,
+    UNI_SW2_BUTTON_LEFT_SR = 1u << 4,
+    UNI_SW2_BUTTON_RIGHT_SL = 1u << 5,
+    UNI_SW2_BUTTON_RIGHT_SR = 1u << 6,
+};
+
+// Supplied by the platform's existing bounded pairing-window policy.
+bool switch_pico_switch2_pairing_allowed(void);
+
+bool uni_bt_le_switch2_handle_advertisement(const uint8_t* packet, uint16_t size);
+bool uni_hid_parser_switch2_is_ble_device(const struct uni_hid_device_s* d);
+void uni_hid_parser_switch2_on_le_connected(struct uni_hid_device_s* d);
+void uni_hid_parser_switch2_setup(struct uni_hid_device_s* d);
+void uni_hid_parser_switch2_teardown(struct uni_hid_device_s* d);
+void uni_hid_parser_switch2_init_report(struct uni_hid_device_s* d);
+void uni_hid_parser_switch2_parse_input_report(struct uni_hid_device_s* d, const uint8_t* report, uint16_t len);
+void uni_hid_parser_switch2_set_player_leds(struct uni_hid_device_s* d, uint8_t leds);
+void uni_hid_parser_switch2_play_dual_rumble(struct uni_hid_device_s* d, uint16_t delay_ms, uint16_t duration_ms,
+                                          uint8_t weak, uint8_t strong);
+uint8_t uni_hid_parser_switch2_extra_buttons(const struct uni_hid_device_s* d);
+// Validated public/static-random advertisement address, never an RPA or SMP identity.
+bool uni_hid_parser_switch2_identity_address_type(const struct uni_hid_device_s* d, uint8_t* out);
+
+#ifdef __cplusplus
+}
+#endif

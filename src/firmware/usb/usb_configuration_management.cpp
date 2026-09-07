@@ -465,7 +465,9 @@ size_t encode_pairing_snapshot(const Bluepad32PairingSnapshot& snapshot,
         Operation::kPairingRead,
         snapshot.status == Bluepad32PairingSnapshotStatus::kReady
             ? Status::kOk
-            : Status::kPending,
+            : snapshot.status == Bluepad32PairingSnapshotStatus::kFailed
+                  ? Status::kStorageError
+                  : Status::kPending,
         snapshot.overflow ? 1 : 0, 0, snapshot.generation,
         payload, offset, output, output_size);
 }
@@ -511,7 +513,8 @@ size_t encode_profile_playtest(
                 snapshot.identity, &payload[12],
                 CONTROLLER_IDENTITY_ENCODED_SIZE) ||
             snapshot.state.motion_sample_count >
-                CONTROLLER_MOTION_SAMPLE_CAPACITY) {
+                CONTROLLER_MOTION_SAMPLE_CAPACITY ||
+            (snapshot.state.extra_buttons & 0x80u) != 0) {
             return 0;
         }
         payload[0] = 1;
@@ -532,6 +535,7 @@ size_t encode_profile_playtest(
         payload[38] = snapshot.state.motion_sample_count;
         payload[39] = snapshot.battery;
         payload[40] = snapshot.capabilities;
+        payload[54] = snapshot.state.extra_buttons;
         if (snapshot.state.motion_sample_count != 0) {
             payload[0] |= 2;
             const ControllerMotionSample& motion =

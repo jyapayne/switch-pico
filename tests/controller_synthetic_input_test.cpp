@@ -738,6 +738,81 @@ void test_macro_playback_modes_and_bounded_cycle_skips() {
             "configured cancel did not kill looping macro output");
 }
 
+void test_extra_shift_and_macro_sources_are_consumed() {
+    ControllerProfile profile =
+        controller_profile_default(controller_identity_global(), 0);
+    profile.shift.mode = ControllerProfileShiftMode::kHold;
+    profile.shift.modifier = 18;
+    profile.extra_button_map[0] = 3;
+    profile.shift.extra_button_map[0] = 3;
+    profile.extra_button_map[1] = CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    profile.shift.extra_button_map[1] = 1;
+    ControllerSyntheticInputContext context{};
+    ControllerState input{};
+    input.extra_buttons = 3;
+    auto output = controller_synthetic_input_apply(&context, input, profile, 0);
+    require(output.state.button_east && !output.state.button_north &&
+                output.state.left_trigger == 0 && output.state.extra_buttons == 0,
+            "extra Shift modifier leaked or failed to select the extra mapping layer");
+    input.extra_buttons = 2;
+    output = controller_synthetic_input_apply(&context, input, profile, 1);
+    require(!output.state.button_east && output.state.left_trigger == UINT16_MAX,
+            "extra hold-Shift release did not restore the base mapping");
+    profile.shift.mode = ControllerProfileShiftMode::kToggle;
+    context = {};
+    input.extra_buttons = 3;
+    (void)controller_synthetic_input_apply(&context, input, profile, 2);
+    input.extra_buttons = 2;
+    output = controller_synthetic_input_apply(&context, input, profile, 3);
+    require(output.state.button_east && output.state.left_trigger == 0,
+            "extra toggle-Shift did not latch after modifier release");
+    input.extra_buttons = 3;
+    output = controller_synthetic_input_apply(&context, input, profile, 4);
+    require(!output.state.button_east && !output.state.button_north &&
+                output.state.left_trigger == UINT16_MAX,
+            "inactive toggle layer leaked its extra modifier");
+
+    profile.shift.mode = ControllerProfileShiftMode::kOff;
+    profile.macros[0] = {(1u << 19) | (1u << 24), 20, 0, 1,
+                         ControllerProfileMacroMode::kWhileHeld, 1};
+    profile.macro_step_count = 1;
+    profile.macro_steps[0] = {kControllerProfileOverrideRightTrigger, 100,
+                            0, 0, 0, 0, 0, 0, 45000};
+    for (uint8_t index = 1; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+        profile.macros[index].first_step = 1;
+    }
+    profile.extra_button_map[2] = 3;
+    profile.extra_button_map[6] = 0;
+    context = {};
+    input.extra_buttons = 2;
+    output = controller_synthetic_input_apply(&context, input, profile, 5);
+    require(output.state.left_trigger == UINT16_MAX && output.state.right_trigger == 0,
+            "partial extra macro chord activated");
+    input.extra_buttons = 0x42;
+    output = controller_synthetic_input_apply(&context, input, profile, 6);
+    require(output.state.left_trigger == 0 && output.state.right_trigger == 45000 &&
+                !output.state.button_south && output.state.extra_buttons == 0,
+            "extra macro trigger chord leaked its mapped outputs");
+    input.extra_buttons = 0x46;
+    output = controller_synthetic_input_apply(&context, input, profile, 7);
+    require(output.state.right_trigger == 0 && !output.state.button_north,
+            "extra macro cancellation did not win or leaked its mapped output");
+    input.extra_buttons = 0x42;
+    output = controller_synthetic_input_apply(&context, input, profile, 8);
+    require(output.state.right_trigger == 0,
+            "cancel release retriggered an already-held extra macro chord");
+    input.extra_buttons = 0;
+    (void)controller_synthetic_input_apply(&context, input, profile, 9);
+    input.extra_buttons = 0x42;
+    output = controller_synthetic_input_apply(&context, input, profile, 10);
+    require(output.state.right_trigger == 45000,
+            "extra macro trigger did not rearm after release");
+    input.extra_buttons = 2;
+    output = controller_synthetic_input_apply(&context, input, profile, 11);
+    require(output.state.right_trigger == 0,
+            "while-held macro survived release of an extra trigger source");
+}
+
 }  // namespace
 
 int main() {
@@ -753,5 +828,6 @@ int main() {
     test_parameterized_turbo_and_finite_burst();
     test_shift_maps_consumption_and_physical_bindings();
     test_macro_playback_modes_and_bounded_cycle_skips();
+    test_extra_shift_and_macro_sources_are_consumed();
     return 0;
 }

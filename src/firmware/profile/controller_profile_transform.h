@@ -27,7 +27,8 @@ uint16_t controller_profile_map_button_mask(
 
 ControllerProfileTransformResult controller_profile_transform(
     const ControllerState& input, const ControllerProfile& profile,
-    const uint8_t* button_map = nullptr);
+    const uint8_t* button_map = nullptr,
+    const uint8_t* extra_button_map = nullptr);
 
 uint8_t controller_profile_scale_rumble_magnitude(uint8_t magnitude,
                                                   uint8_t scale);

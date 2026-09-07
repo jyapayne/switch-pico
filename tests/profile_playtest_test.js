@@ -63,3 +63,53 @@ assert.ok(triggerPercent(65000) > 99,
           "nonzero trigger input must produce a visible bar");
 assert.equal(triggerPercent(0), 0);
 assert.equal(triggerPercent(65535), 100);
+
+const { transformMappings } = globalThis.ProfilePlaytestMath;
+const buttons = [
+  "south", "east", "west", "north", "left_shoulder", "right_shoulder",
+  "select", "start", "system", "capture", "left_stick", "right_stick",
+  "dpad_up", "dpad_down", "dpad_left", "dpad_right",
+];
+const extras = ["c", "gl", "gr", "left_sl", "left_sr", "right_sl", "right_sr"];
+const profile = {
+  button_map: Object.fromEntries(buttons.map((button) => [button, button])),
+  extra_button_map: Object.fromEntries(extras.map((button) => [button, null])),
+  shift: {
+    mode: "off", modifier: null,
+    button_map: Object.fromEntries(buttons.map((button) => [button, button])),
+    extra_button_map: Object.fromEntries(extras.map((button) => [button, null])),
+  },
+  triggers: {
+    left: { ...defaultTrigger, output: "left_trigger", digital_threshold: 22934 },
+    right: { ...defaultTrigger, output: "right_trigger", digital_threshold: 22934 },
+  },
+};
+const sample = { buttons: ["south"], extra_buttons: extras, triggers: { left: 123, right: 50000 } };
+assert.deepEqual(transformMappings(sample, profile), {
+  buttons: ["south"], triggers: { left: 123, right: 50000 },
+});
+for (const [index, extra] of extras.entries()) {
+  profile.extra_button_map[extra] = buttons[index + 1];
+}
+assert.deepEqual(transformMappings(sample, profile).buttons, buttons.slice(0, 8));
+profile.extra_button_map.c = "left_trigger";
+profile.extra_button_map.gl = "south";
+assert.deepEqual(transformMappings(sample, profile), {
+  buttons: ["south", ...buttons.slice(3, 8)],
+  triggers: { left: 65535, right: 50000 },
+});
+profile.shift.mode = "hold";
+profile.shift.modifier = "c";
+profile.shift.extra_button_map.gr = "system";
+assert.deepEqual(transformMappings(sample, profile, true), {
+  buttons: ["south", "system"], triggers: { left: 123, right: 50000 },
+});
+assert.equal(transformMappings(sample, profile, false).triggers.left, 123,
+             "the Shift modifier is consumed even on the base layer");
+assert.deepEqual(transformMappings({ ...sample, extra_buttons: [] }, profile), {
+  buttons: ["south"], triggers: { left: 123, right: 50000 },
+});
+profile.shift.mode = "off";
+profile.triggers.right.output = "north";
+assert.deepEqual(transformMappings({ ...sample, buttons: [], extra_buttons: [], triggers: { left: 0, right: 22933 } }, profile).buttons, []);
+assert.deepEqual(transformMappings({ ...sample, buttons: [], extra_buttons: [], triggers: { left: 0, right: 22934 } }, profile).buttons, ["north"]);

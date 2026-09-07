@@ -277,7 +277,7 @@ void test_profile_bounds_and_transaction_namespace() {
           "transaction namespaces were not enforced");
 }
 
-void test_schema6_validation_and_atomic_selection() {
+void test_schema7_validation_and_atomic_selection() {
   const ControllerIdentity id = stable_identity();
   require(profile_service_select(id, 6) ==
               ConfigurationTransactionStatus::kCommitted,
@@ -285,10 +285,13 @@ void test_schema6_validation_and_atomic_selection() {
   ProfileServiceSelectedSnapshot old_selection{};
   profile_service_selected_snapshot(&old_selection);
   ControllerProfile updated = old_selection.profile;
-  updated.shortcuts.modifier = 5;
+  updated.shortcuts.modifier = 18;
   updated.shortcuts.selectors[6] = 14;
   updated.turbo_defaults = {30, 1, 255};
-  updated.macros[0].trigger_mask = 1u << 10;
+  updated.extra_button_map[6] = 16;
+  updated.shift.extra_button_map[0] = 3;
+  updated.macros[0].trigger_mask = 1u << 24;
+  updated.macros[0].cancel_control = 19;
   updated.macros[0].step_count = 1;
   updated.macros[0].mode = ControllerProfileMacroMode::kRepeat;
   updated.macros[0].repeat_count = 255;
@@ -299,25 +302,25 @@ void test_schema6_validation_and_atomic_selection() {
   uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
   require(controller_profile_encode(updated, encoded, sizeof(encoded)),
           "extended service profile did not encode");
-  require(profile_service_begin(20, id, 6, 5, 256, 0) ==
+  require(profile_service_begin(20, id, 6, 6, 384, 0) ==
               ConfigurationTransactionStatus::kUnsupportedSchema &&
-              profile_service_begin(21, id, 6, 6, 256, 0) ==
+              profile_service_begin(21, id, 6, 7, 256, 0) ==
                   ConfigurationTransactionStatus::kMalformed &&
-              profile_service_begin(22, id, 6, 6, 385, 0) ==
+              profile_service_begin(22, id, 6, 7, 385, 0) ==
                   ConfigurationTransactionStatus::kTooLarge,
           "service admitted old-schema or incorrectly-sized writes");
 
   // A valid transport CRC cannot authorize an invalid extension.
   encoded[283] = 0;
   require(profile_service_begin(
-              23, id, 6, 6, sizeof(encoded),
+              23, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
               profile_storage_crc32(encoded, sizeof(encoded))) ==
               ConfigurationTransactionStatus::kReceiving &&
               profile_service_append(23, 0, encoded, sizeof(encoded)) ==
                   ConfigurationTransactionStatus::kReceiving &&
               profile_service_commit(23) ==
                   ConfigurationTransactionStatus::kMalformed,
-          "service admitted invalid schema6 turbo settings");
+          "service admitted invalid turbo settings");
   ProfileServiceSelectedSnapshot selected{};
   profile_service_selected_snapshot(&selected);
   require(selected.valid &&
@@ -329,7 +332,7 @@ void test_schema6_validation_and_atomic_selection() {
   require(controller_profile_encode(updated, encoded, sizeof(encoded)),
           "valid replacement did not encode");
   require(profile_service_begin(
-              24, id, 6, 6, sizeof(encoded),
+              24, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
               profile_storage_crc32(encoded, sizeof(encoded))) ==
               ConfigurationTransactionStatus::kReceiving &&
               profile_service_append(24, 0, encoded, 256) ==
@@ -338,7 +341,7 @@ void test_schema6_validation_and_atomic_selection() {
                   ConfigurationTransactionStatus::kReceiving &&
               profile_service_commit(24) ==
                   ConfigurationTransactionStatus::kPending,
-          "service did not receive both parts of the schema6 payload");
+          "service did not receive both parts of the profile payload");
   profile_service_selected_snapshot(&selected);
   require(selected.metadata.generation == old_selection.metadata.generation &&
               active_snapshot(id).profile.turbo_defaults.rate_hz ==
@@ -350,8 +353,12 @@ void test_schema6_validation_and_atomic_selection() {
               ConfigurationTransactionStatus::kCommitted &&
               selected.valid && selected.profile.shortcuts.selectors[6] == 14 &&
               selected.profile.macros[0].repeat_count == 255 &&
+              selected.profile.extra_button_map[6] == 16 &&
+              selected.profile.shift.extra_button_map[0] == 3 &&
+              active_snapshot(id).profile.macros[0].trigger_mask == (1u << 24) &&
+              active_snapshot(id).profile.macros[0].cancel_control == 19 &&
               active_snapshot(id).profile.turbo_defaults.rate_hz == 30,
-          "committed schema6 profile did not atomically refresh snapshots");
+          "committed schema7 profile did not atomically refresh snapshots");
 }
 
 void test_catalog1_selected_and_active_snapshots_migrate() {
@@ -426,7 +433,7 @@ ProfileStorageIo pico_profile_storage_io() { return fake_io(); }
 int main() {
   test_eight_profile_transactions_and_active_cache();
   test_profile_bounds_and_transaction_namespace();
-  test_schema6_validation_and_atomic_selection();
+  test_schema7_validation_and_atomic_selection();
   test_catalog1_selected_and_active_snapshots_migrate();
   std::cout << "profile service tests passed\n";
   return 0;

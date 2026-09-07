@@ -81,6 +81,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             [
                 f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
                 f"-I{root / 'src' / 'firmware'}",
+                f"-I{root / 'bluepad32_config'}",
                 str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
                 str(
                     root / "src" / "firmware" / "input" / "controller_macro_capture.cpp"
@@ -91,6 +92,14 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         )
         subprocess.run(command, check=True, cwd=root)
         subprocess.run([str(executable), "xbox-rumble"], check=True, cwd=root)
+        for scenario in (
+            "switch2-forward",
+            "switch2-reverse",
+            "switch2-multiple-pairs",
+            "switch2-admission",
+            "switch2-pairing-inventory",
+        ):
+            subprocess.run([str(executable), scenario], check=True, cwd=root)
         if native:
             subprocess.run([str(executable), "native-stateful"], check=True, cwd=root)
             subprocess.run(

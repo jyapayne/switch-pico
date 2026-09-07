@@ -188,6 +188,10 @@ void test_pairing_encoding() {
                 memcmp(&payload[kResponseHeaderSize + 6],
                        classic_address, 6) == 0,
             "pairings were not migrated into the versioned envelope");
+    snapshot.status = Bluepad32PairingSnapshotStatus::kFailed;
+    require(encode_pairing_snapshot(snapshot, payload, sizeof(payload)) == size &&
+                payload[6] == static_cast<uint8_t>(Status::kStorageError),
+            "failed persistent pairing clear must report storage failure, not success or pending");
 }
 
 void perform_out(UsbConfigurationManagement::Operation operation,
@@ -511,6 +515,7 @@ void test_profile_vendor_requests() {
     current_playtest[2].state_generation = 0x55667788;
     current_playtest[2].identity = expected_identity;
     current_playtest[2].physical_button_mask = 0x8001;
+    current_playtest[2].state.extra_buttons = 0x7f;
     current_playtest[2].state.left_stick_x = -1234;
     current_playtest[2].state.left_stick_y = 2345;
     current_playtest[2].state.right_stick_x = INT16_MIN;
@@ -550,13 +555,15 @@ void test_profile_vendor_requests() {
                 static_cast<int16_t>(read_u16(
                     control_payload, kResponseHeaderSize + 52)) == -6 &&
                 control_payload[kResponseHeaderSize + 39] == 201 &&
-                control_payload[kResponseHeaderSize + 40] == 0x0f,
+                control_payload[kResponseHeaderSize + 40] == 0x0f &&
+                control_payload[kResponseHeaderSize + 54] == 0x7f,
             "profile playtest response lost live controller state");
     current_playtest[2].active = false;
     require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload[kResponseHeaderSize] == 0 &&
-                control_payload[kResponseHeaderSize + 1] == 0xff,
+                control_payload[kResponseHeaderSize + 1] == 0xff &&
+                control_payload[kResponseHeaderSize + 54] == 0,
             "disconnected profile playtest was not encoded");
     current_profile_metadata = {};
     current_profile_metadata.metadata.state = ProfileServiceState::kReady;

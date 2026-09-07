@@ -163,6 +163,9 @@ struct uni_hid_device_s {
     int player_led_calls;
     uint8_t player_leds;
     uni_circular_buffer_t outgoing_buffer;
+    uint8_t switch2_extra_buttons;
+    bool switch2_identity_valid;
+    uint8_t switch2_identity_address_type;
 };
 
 void uni_hid_parser_xboxone_play_dual_rumble(

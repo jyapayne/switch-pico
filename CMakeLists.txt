@@ -225,6 +225,9 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${BLUEPAD32_ROOT}/src/components/bluepad32
             ${CMAKE_CURRENT_BINARY_DIR}/libbluepad32
     )
+    target_sources(bluepad32 PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_hid_parser_switch2.c
+        ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_switch2_pairing.c)
 endif()
 
 # Firmware sources live under one include root and are grouped by responsibility.
@@ -287,6 +290,9 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT=$<IF:$<BOOL:${SWITCH_PICO_HAPTICS_EXPERIMENT}>,1,16>
             SWITCH2_WAKE_CONFIGURED=${SWITCH2_WAKE_CONFIGURED_VALUE}
     )
+    # GATT's automatic SMP retry is incompatible with Switch 2's proprietary
+    # pairing. Reject only those links; retain normal SMP for every other pad.
+    target_link_options(switch-pico PRIVATE "LINKER:--wrap=sm_request_pairing")
     if(SWITCH_PICO_CYW43_PACKET_READ)
         target_sources(switch-pico PRIVATE
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/cyw43_packet_transport.c)
