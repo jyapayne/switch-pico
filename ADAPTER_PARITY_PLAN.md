@@ -732,6 +732,23 @@ Set B delivery evidence:
   qualification remain separate from those software results.
 - Full operation and limitations: [README.md](README.md#switch-2-controller-input).
 
+Switch 2 native HD output now preserves decoded stereo frequency/amplitude
+and up to three subframes, using microphone-verified 10-bit frequency fields
+and `0x50/0x60/0x70` sample-count headers. A 90-packet timing run measured
+approximately 5.3 ms per frame; the sender guards 6/11/16 ms for complete
+batches. Two bounded queue stages retain receipt timestamps; obsolete work
+is counted and discarded rather than replayed or allowed to starve fresh work.
+Keepalives/feedback resumption retain only the current final sample.
+
+The final Pro-only native run sustained 512 changing one-subframe commands at
+125.14 Hz with zero queue drops. Stereo/sweep/three-subframe patterns also
+recorded zero drops. Deliberate three-subframe saturation at 125.11 Hz
+discarded/superseded 69 output-stage commands out of 128 host updates and
+recovered to a clean stop. No mixed-radio lossless claim is made.
+Verification is now 289 passing tests and all five firmware builds; all
+40 stored profiles and metadata survived. See the
+[native HD contract and measurements](README.md#switch-2-native-hd-rumble).
+
 ### Native Switch-family HD rumble — Implemented, qualification incomplete
 
 Standalone agent handoff: [SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md).

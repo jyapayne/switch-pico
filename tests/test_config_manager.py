@@ -311,7 +311,8 @@ class FakeDevice:
             if request == config_manager.OP_RUNTIME_DIAGNOSTICS:
                 return make_response(
                     request,
-                    struct.pack("<7I4B", 6, 1200, 120, 5000, 8, 2, 10, 2, 2, 1, 1),
+                    struct.pack("<7I4B", 6, 1200, 120, 5000, 8, 2, 10, 2, 2, 1, 1)
+                    + getattr(self, "runtime_diagnostics_tail", b""),
                 )
             if request == config_manager.OP_NATIVE_SWITCH_RUMBLE:
                 return make_response(
@@ -1397,6 +1398,20 @@ def test_reenumeration_reports_missing_disappearance_and_return(
     with pytest.raises(config_manager.ConfigManagerError, match="did not re-enumerate"):
         snapshot = config_manager._capture_reenumeration_snapshot(device)
         config_manager._wait_for_reenumeration(snapshot, 0)
+
+
+def test_runtime_diagnostics_distinguishes_unreported_from_zero_drops() -> None:
+    device = FakeDevice()
+    legacy = config_manager.read_runtime_diagnostics(device)
+    assert legacy.switch2_ingress_drops is None
+    assert legacy.switch2_output_drops is None
+    device.runtime_diagnostics_tail = struct.pack("<II", 0, 0xFFFFFFFF)
+    current = config_manager.read_runtime_diagnostics(device)
+    assert current.switch2_ingress_drops == 0
+    assert current.switch2_output_drops == 0xFFFFFFFF
+    device.runtime_diagnostics_tail = bytes(4)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_runtime_diagnostics(device)
 
 
 def test_requested_and_active_mode_response_validation() -> None:

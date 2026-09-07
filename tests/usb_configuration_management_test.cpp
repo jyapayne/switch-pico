@@ -228,7 +228,7 @@ void test_vendor_requests() {
             "pairing read did not use the versioned envelope");
 
     current_diagnostics = {
-        6, 1200, 120, 5000, 8, 2, 10, 2, 2, 1, 1,
+        6, 1200, 120, 5000, 8, 2, 10, 2, 2, 1, 1, 3, UINT32_MAX,
     };
     request = setup_request(
         Operation::kRuntimeDiagnostics, TUSB_DIR_IN,
@@ -241,7 +241,9 @@ void test_vendor_requests() {
             read_u32(control_payload, kResponseHeaderSize) == 6 &&
             read_u32(control_payload, kResponseHeaderSize + 4) == 1200 &&
             control_payload[kResponseHeaderSize + 28] == 2 &&
-            control_payload[kResponseHeaderSize + 31] == 1,
+            control_payload[kResponseHeaderSize + 31] == 1 &&
+            read_u32(control_payload, kResponseHeaderSize + 32) == 3 &&
+            read_u32(control_payload, kResponseHeaderSize + 36) == UINT32_MAX,
         "runtime diagnostics did not expose backend counters");
 
     perform_out(Operation::kPairingRefresh, {});

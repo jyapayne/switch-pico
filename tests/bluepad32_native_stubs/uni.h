@@ -166,6 +166,9 @@ struct uni_hid_device_s {
     uint8_t switch2_extra_buttons;
     bool switch2_identity_valid;
     uint8_t switch2_identity_address_type;
+    bool switch2_host_blocked;
+    unsigned switch2_host_calls;
+    unsigned switch2_haptics_resets;
 };
 
 void uni_hid_parser_xboxone_play_dual_rumble(

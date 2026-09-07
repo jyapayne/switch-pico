@@ -220,6 +220,9 @@ static uint8_t capture_write(hci_con_handle_t handle, uint16_t value_handle, uin
         assert(value_handle == RUMBLE_HANDLE && length <= sizeof(peer->rumble));
         memcpy(peer->rumble, value, length);
         peer->rumble_length = length;
+        unsigned slot = peer->rumbles % FIXTURE_RUMBLE_HISTORY;
+        memcpy(peer->rumble_history[slot], value, length);
+        peer->rumble_times[slot] = now_ms;
         ++peer->rumbles;
     }
     return 0;
@@ -235,6 +238,7 @@ uint8_t gatt_client_write_value_of_characteristic(btstack_packet_handler_t callb
     struct fixture_peer* peer = peer_for_handle(handle);
     peer->pending_write = value;
     peer->pending_length = length;
+    memcpy(peer->pending_snapshot, value, length);
     return begin_query(callback, handle, QUERY_WRITE);
 }
 
@@ -269,6 +273,8 @@ static void query_done(struct fixture_peer* peer, uint8_t status) {
     uint8_t data[9] = {GATT_EVENT_QUERY_COMPLETE};
     if (peer->query == QUERY_CCCD)
         assert(peer->pending_length == 2 && peer->pending_write[0] == 1 && peer->pending_write[1] == 0);
+    if (peer->query == QUERY_WRITE)
+        assert(memcmp(peer->pending_write, peer->pending_snapshot, peer->pending_length) == 0);
     peer->query = QUERY_NONE;
     data[8] = status;
     event(peer, data, sizeof(data));
@@ -617,7 +623,7 @@ static void test_rumble_delay_expiry_retry_and_teardown(void) {
     advance(24);
     assert(!rumble_active(peer));
     uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, UINT16_MAX, 12, 34);
-    advance(70000); // Stateful host rumble does not expire at 65.535 seconds.
+    advance(70000); // Held local feedback does not expire at65.535 seconds.
     assert(((rumble_frame(peer) >> 10) & 1023) == 136 && ((rumble_frame(peer) >> 30) & 1023) == 48);
     uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, 100, 255, 255);
     advance(1);
@@ -664,6 +670,360 @@ static void test_write_request_buffers_and_failed_completion(void) {
     assert(peer->rumbles == writes);
 }
 
+static struct fixture_peer* ready_peer(uint16_t pid, bool requests) {
+    reset();
+    request_writes = requests;
+    struct fixture_peer* peer = connect_peer(pid, false);
+    discover(peer);
+    subscribe_response(peer);
+    finish_setup(peer);
+    return peer;
+}
+
+static uni_switch2_haptics_frame_t native_frame(unsigned left, unsigned right, unsigned seed) {
+    uni_switch2_haptics_frame_t frame = {0};
+    frame.sides[0].count = left;
+    frame.sides[1].count = right;
+    for (unsigned side = 0; side < 2; ++side) {
+        for (unsigned i = 0; i < frame.sides[side].count; ++i) {
+            uni_switch2_haptics_encode_sample(frame.sides[side].samples[i],
+                10 + seed + 5 * i + side, 80 + seed + i + side,
+                1000 + seed * 100 + i * 200 + side * 3000,
+                5000 + seed * 100 + i * 700 + side * 500);
+        }
+    }
+    return frame;
+}
+
+static uni_switch2_haptics_side_t final_hold(const uni_switch2_haptics_side_t* source) {
+    uni_switch2_haptics_side_t side = {.count = 1};
+    memcpy(side.samples[0], source->samples[source->count - 1], 5);
+    return side;
+}
+
+static void assert_block(const struct fixture_peer* peer, unsigned side,
+                         const uni_switch2_haptics_side_t* expected) {
+    assert(peer->rumble_length >= 17 + side * 16);
+    const uint8_t* block = peer->rumble + 1 + side * 16;
+    assert((block[0] & 0xf0) == (0x40 | (expected->count << 4)));
+    assert(memcmp(block + 1, expected->samples, 5 * expected->count) == 0);
+    for (unsigned i = 1 + 5 * expected->count; i < 16; ++i)
+        assert(block[i] == 0);
+}
+
+static void assert_silent(const struct fixture_peer* peer, unsigned side) {
+    const uint8_t* block = peer->rumble + 1 + side * 16;
+    assert((block[0] & 0xf0) == 0x50);
+    assert(!(block[2] & 0xfc) && !(block[3] & 0x0f) && !(block[4] & 0xc0) && !block[5]);
+    for (unsigned i = 6; i < 16; ++i)
+        assert(block[i] == 0);
+}
+
+static void test_native_fifo_stereo_counts_and_retry(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, false);
+    uni_switch2_haptics_frame_t a = native_frame(3, 2, 1);
+    uni_switch2_haptics_frame_t b = native_frame(2, 0, 2);
+    uni_switch2_haptics_frame_t c = native_frame(1, 3, 3);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &b, now_ms));
+    next_write_error = BTSTACK_ACL_BUFFERS_FULL;
+    advance(1);
+    assert(peer->rumbles == 0);
+    advance(13);
+    assert(peer->rumbles == 1 && peer->rumble_length == 33);
+    assert(peer->rumble[1] == 0x70 && peer->rumble[17] == 0x60);
+    assert_block(peer, 0, &a.sides[0]);
+    assert_block(peer, 1, &a.sides[1]);
+    // C arrives while A plays, with enough source lifetime for all three frames.
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &c, now_ms));
+    advance(15);
+    assert(peer->rumbles == 1); // Three samples cannot be interrupted at13ms.
+    advance(1);
+    assert(peer->rumbles == 2 && peer->rumble[1] == 0x61);
+    assert_block(peer, 0, &b.sides[0]);
+    uni_switch2_haptics_side_t right = final_hold(&a.sides[1]);
+    assert_block(peer, 1, &right);
+    advance(10);
+    assert(peer->rumbles == 2);
+    advance(1);
+    assert(peer->rumbles == 3 && peer->rumble[1] == 0x52 && peer->rumble[17] == 0x72);
+    assert_block(peer, 0, &c.sides[0]);
+    assert_block(peer, 1, &c.sides[1]);
+    assert(peer->rumble_times[1] - peer->rumble_times[0] == 16);
+    assert(peer->rumble_times[2] - peer->rumble_times[1] == 11);
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops);
+    advance(23); // C expires at receipt14 +50, not transmission41 +50.
+    assert_silent(peer, 0);
+    assert_silent(peer, 1);
+}
+
+static void test_native_hold_and_absent_side_watchdogs(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, false);
+    uni_switch2_haptics_frame_t a = native_frame(3, 2, 4);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    advance(1);
+    assert_block(peer, 0, &a.sides[0]);
+    advance(15);
+    assert(peer->rumbles == 1);
+    advance(1);
+    uni_switch2_haptics_side_t left = final_hold(&a.sides[0]);
+    uni_switch2_haptics_side_t right = final_hold(&a.sides[1]);
+    assert(peer->rumbles == 2);
+    assert_block(peer, 0, &left);
+    assert_block(peer, 1, &right);
+    advance(3); // t20; only the left actuator receives a fresh source update.
+    uni_switch2_haptics_frame_t b = native_frame(1, 0, 5);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &b, now_ms));
+    advance(3); // Last count1 hold guarded until t23.
+    assert_block(peer, 0, &b.sides[0]);
+    assert_block(peer, 1, &right);
+    advance(27);
+    assert_block(peer, 0, &b.sides[0]);
+    assert_silent(peer, 1); // Absent side must not gain a new50ms watchdog.
+    advance(20);
+    assert_silent(peer, 0);
+    assert_silent(peer, 1);
+}
+
+static void test_feedback_advances_host_and_resumes_only_final_samples(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, false);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    uni_switch2_haptics_frame_t a = native_frame(2, 3, 6);
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, 40, 20, 30);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    advance(1);
+    assert(((rumble_frame(peer) >> 10) & 1023) == 120);
+    assert((peer->rumble[1] & 0xf0) == 0x50);
+    advance(9);
+    uni_switch2_haptics_frame_t b = native_frame(3, 0, 7);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &b, now_ms));
+    advance(1);
+    assert(((rumble_frame(peer) >> 10) & 1023) == 120);
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, 0, 0, 0);
+    advance(1);
+    uni_switch2_haptics_side_t left = final_hold(&b.sides[0]);
+    uni_switch2_haptics_side_t right = final_hold(&a.sides[1]);
+    assert_block(peer, 0, &left);
+    assert_block(peer, 1, &right);
+    for (unsigned i = 0; i < peer->rumbles; ++i) {
+        assert((peer->rumble_history[i][1] & 0xf0) == 0x50);
+        assert((peer->rumble_history[i][17] & 0xf0) == 0x50);
+    }
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, 100, 50, 60);
+    advance(48); // Both original host watchdogs elapse under feedback.
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, 0, 0, 0);
+    advance(1);
+    assert_silent(peer, 0);
+    assert_silent(peer, 1);
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops);
+}
+
+static void test_full_fifo_stop_barrier_and_async_completion(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_JOYCON_R_PID, true);
+    uni_switch2_haptics_frame_t a = native_frame(3, 0, 8);
+    uni_switch2_haptics_frame_t b = native_frame(2, 0, 9);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    advance(1);
+    assert(peer->query == QUERY_WRITE && peer->rumble_length == 17);
+    const uint8_t* borrowed = peer->pending_write;
+    uint8_t snapshot[17];
+    memcpy(snapshot, borrowed, sizeof(snapshot));
+    for (unsigned i = 1; i < 16; ++i)
+        assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    assert(!uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops);
+    uni_switch2_haptics_frame_t stop;
+    uni_switch2_haptics_silence(&stop);
+    stop.sides[1].count = 0; // Physical Joy-Con stop is not a logical stereo stop.
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &stop, now_ms - 100));
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops + 16);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &b, now_ms));
+    advance(1);
+    assert(memcmp(snapshot, borrowed, sizeof(snapshot)) == 0);
+    query_done(peer, 0); // Completion of old epoch must not consume b/the stop.
+    advance(1);
+    assert(peer->rumbles == 2 && peer->rumble[1] == 0x51);
+    assert_silent(peer, 0);
+    query_done(peer, 0);
+    advance(6);
+    assert(peer->rumbles == 3 && peer->rumble[1] == 0x62);
+    assert_block(peer, 0, &b.sides[0]);
+    query_done(peer, 0);
+    advance(11);
+    uni_switch2_haptics_side_t hold = final_hold(&b.sides[0]);
+    assert_block(peer, 0, &hold);
+    query_done(peer, 0);
+}
+
+static void test_async_expiry_and_topology_reset_do_not_revive_state(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, true);
+    uni_switch2_haptics_frame_t a = native_frame(3, 2, 10);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    advance(1);
+    advance(49); // Write request is still borrowing the original batch.
+    assert(peer->rumbles == 1 && uni_hid_parser_switch2_haptics_dropped() == drops + 1);
+    query_done(peer, 0);
+    advance(1);
+    assert_silent(peer, 0);
+    assert_silent(peer, 1);
+    query_done(peer, 0);
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, UINT16_MAX, 40, 50);
+    advance(6);
+    assert(rumble_active(peer) && peer->query == QUERY_WRITE);
+    uni_switch2_haptics_frame_t b = native_frame(2, 1, 11);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    uni_hid_parser_switch2_reset_haptics(&peer->device);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &b, now_ms));
+    advance(1);
+    query_done(peer, 0); // Old local overlay must not clear the reset neutral.
+    advance(1);
+    assert_silent(peer, 0);
+    assert_silent(peer, 1);
+    query_done(peer, 0);
+    advance(6);
+    assert_block(peer, 0, &b.sides[0]);
+    assert_block(peer, 1, &b.sides[1]);
+    query_done(peer, 0);
+}
+
+static void test_host_stop_does_not_cancel_local_feedback(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, false);
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, UINT16_MAX, 100, 200);
+    uni_switch2_haptics_frame_t a = native_frame(3, 3, 12);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    advance(1);
+    assert(uni_hid_parser_switch2_queue_rumble(&peer->device, 0, 0, 0, now_ms));
+    advance(1);
+    assert(((rumble_frame(peer) >> 10) & 1023) == 800);
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, 0, 0, 0);
+    advance(1);
+    assert_silent(peer, 0);
+    assert_silent(peer, 1);
+}
+
+static void test_conventional_host_lifetimes_and_invalid_native_input(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_JOYCON_L_PID, false);
+    assert(uni_hid_parser_switch2_queue_rumble(&peer->device, 255, 200, UINT16_MAX, now_ms));
+    advance(70000);
+    assert((rumble_frame(peer) & 1023) == 0xe1);
+    assert(((rumble_frame(peer) >> 20) & 1023) == 0x1e1);
+    assert(((rumble_frame(peer) >> 10) & 1023) == 800);
+    assert(((rumble_frame(peer) >> 30) & 1023) == 1020);
+    assert((peer->rumble[1] & 0xf0) == 0x50);
+    for (unsigned i = 7; i < 17; ++i)
+        assert(peer->rumble[i] == 0);
+    assert(uni_hid_parser_switch2_queue_rumble(&peer->device, 1, 2, 20, now_ms - 10));
+    advance(9);
+    assert(((rumble_frame(peer) >> 10) & 1023) == 8);
+    advance(1);
+    assert_silent(peer, 0);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    uni_switch2_haptics_frame_t invalid = native_frame(1, 0, 13);
+    invalid.sides[0].count = 4;
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &invalid, now_ms));
+    uni_switch2_haptics_frame_t stale = native_frame(1, 0, 14);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &stale, now_ms - 50));
+    assert(uni_hid_parser_switch2_queue_rumble(&peer->device, 10, 20, 100, now_ms - 50));
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops + 3);
+    advance(13);
+    assert_silent(peer, 0);
+}
+
+static void test_native_watchdog_clock_wrap(void) {
+    reset();
+    now_ms = UINT32_MAX - 20;
+    struct fixture_peer* peer = connect_peer(UNI_SW2_JOYCON_L_PID, false);
+    discover(peer);
+    subscribe_response(peer);
+    finish_setup(peer);
+    uni_switch2_haptics_frame_t frame = native_frame(1, 0, 15);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    advance(49);
+    assert_block(peer, 0, &frame.sides[0]);
+    advance(1);
+    assert_silent(peer, 0);
+}
+
+static void test_identical_hold_coalescing_refreshes_borrowed_head(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_JOYCON_L_PID, true);
+    uni_switch2_haptics_frame_t frame = native_frame(1, 0, 16);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    advance(1);
+    const uint8_t* borrowed = peer->pending_write;
+    uint8_t snapshot[17];
+    memcpy(snapshot, borrowed, sizeof(snapshot));
+    advance(39);
+    for (unsigned i = 0; i < 32; ++i)
+        assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    assert(memcmp(snapshot, borrowed, sizeof(snapshot)) == 0);
+    advance(10); // The original t0 hold would expire now without source refresh.
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops);
+    query_done(peer, 0);
+    advance(39);
+    assert_block(peer, 0, &frame.sides[0]);
+    query_done(peer, 0);
+    advance(1); // Refreshed deadline remains t40+50, not ATT completion+50.
+    assert_silent(peer, 0);
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops);
+    query_done(peer, 0);
+}
+
+static void test_hold_coalescing_requires_identical_samples_and_side_masks(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, true);
+    uni_switch2_haptics_frame_t frame;
+    for (unsigned i = 0; i < 16; ++i) {
+        frame = native_frame(1, 1, i + 1);
+        assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    }
+    // An identical tail hold can refresh even at capacity. A partial-side update
+    // is a different command, as is a changed sample; neither may erase history.
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    frame.sides[1].count = 0;
+    assert(!uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    frame = native_frame(1, 1, 17);
+    assert(!uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    advance(1);
+    uni_switch2_haptics_frame_t first = native_frame(1, 1, 1);
+    assert_block(peer, 0, &first.sides[0]);
+    assert_block(peer, 1, &first.sides[1]);
+}
+
+static void test_expired_history_does_not_starve_fresh_sequences(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_PRO_PID, false);
+    uni_switch2_haptics_frame_t a = native_frame(3, 3, 20);
+    uni_switch2_haptics_frame_t stale = native_frame(3, 3, 21);
+    uni_switch2_haptics_frame_t fresh = native_frame(3, 3, 22);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms));
+    advance(1);
+    unsigned sent = peer->rumbles;
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &stale, now_ms - 40));
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &fresh, now_ms));
+    advance(10);
+    assert(peer->rumbles == sent); // Unplayed stale history must not interrupt A.
+    advance(6);
+    assert_block(peer, 0, &fresh.sides[0]);
+    assert_block(peer, 1, &fresh.sides[1]);
+
+    peer = ready_peer(UNI_SW2_PRO_PID, false);
+    a = native_frame(1, 1, 23);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &a, now_ms - 43));
+    advance(1);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &fresh, now_ms));
+    advance(6); // A's source watchdog expires as its playback guard ends.
+    assert_block(peer, 0, &fresh.sides[0]); // No unnecessary silent/HOLD packet.
+
+    peer = ready_peer(UNI_SW2_PRO_PID, false);
+    uint32_t drops = uni_hid_parser_switch2_haptics_dropped();
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &fresh, now_ms - 40));
+    advance(1);
+    assert_silent(peer, 0); // Nine ms cannot contain a complete three-frame batch.
+    assert(uni_hid_parser_switch2_haptics_dropped() == drops + 1);
+}
+
 int main(void) {
     test_connected_callback_rejection();
     test_advertisement_bounds_and_admission();
@@ -672,6 +1032,17 @@ int main(void) {
     test_calibration_physical_inputs_and_sensor_units();
     test_rumble_delay_expiry_retry_and_teardown();
     test_write_request_buffers_and_failed_completion();
+    test_native_fifo_stereo_counts_and_retry();
+    test_native_hold_and_absent_side_watchdogs();
+    test_feedback_advances_host_and_resumes_only_final_samples();
+    test_full_fifo_stop_barrier_and_async_completion();
+    test_async_expiry_and_topology_reset_do_not_revive_state();
+    test_host_stop_does_not_cancel_local_feedback();
+    test_conventional_host_lifetimes_and_invalid_native_input();
+    test_native_watchdog_clock_wrap();
+    test_identical_hold_coalescing_refreshes_borrowed_head();
+    test_hold_coalescing_requires_identical_samples_and_side_masks();
+    test_expired_history_does_not_starve_fresh_sequences();
     reset();
     puts("Switch2 protocol boundaries, setup failure, pairing, calibration, physical input, motion and rumble passed");
     return 0;

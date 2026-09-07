@@ -2,14 +2,15 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 #include <algorithm>
 #include <array>
-#include <vector>
 #endif
 
 #include <uni.h>
 #include "parser/uni_hid_parser_switch2.h"
+#include "parser/uni_switch2_haptics.h"
 #include "parser/uni_switch2_pairing.h"
 #include "platform/pico/controller_color_config.h"
 #include "input/switch2_wake.h"
@@ -74,6 +75,18 @@ bd_addr_t switch2_pairings[UNI_SWITCH2_PAIRING_CAPACITY]{};
 uint8_t switch2_pairing_types[UNI_SWITCH2_PAIRING_CAPACITY]{};
 uint8_t switch2_pairing_count = 0;
 bool switch2_clear_succeeds = true;
+
+struct Switch2HostEvent {
+    uni_hid_device_t* device;
+    uni_switch2_haptics_frame_t frame;
+    uint32_t received_ms;
+    uint16_t duration_ms;
+    uint8_t weak;
+    uint8_t strong;
+    bool hd;
+};
+std::vector<Switch2HostEvent> switch2_host_events;
+uint32_t switch2_output_drops = 0;
 
 struct CoreStopped {};
 
@@ -182,6 +195,45 @@ extern "C" bool uni_hid_parser_switch2_is_ble_device(
            (device->product_id == UNI_SW2_PRO_PID ||
             device->product_id == UNI_SW2_JOYCON_L_PID ||
             device->product_id == UNI_SW2_JOYCON_R_PID);
+}
+
+extern "C" bool uni_hid_parser_switch2_queue_haptics(
+    uni_hid_device_t* device, const uni_switch2_haptics_frame_t* frame,
+    uint32_t received_ms) {
+    require(uni_switch2_haptics_valid(frame), "backend emitted invalid physical HD frame");
+    const bool stop = device->product_id == UNI_SW2_PRO_PID ?
+        uni_switch2_haptics_is_stop(frame) : [&]() {
+            uni_switch2_haptics_frame_t stereo = *frame;
+            stereo.sides[1] = stereo.sides[0];
+            return uni_switch2_haptics_is_stop(&stereo);
+        }();
+    if (device->switch2_host_blocked && !stop) return false;
+    ++device->switch2_host_calls;
+    switch2_host_events.push_back({device, *frame, received_ms, 0, 0, 0, true});
+    return true;
+}
+
+extern "C" bool uni_hid_parser_switch2_queue_rumble(
+    uni_hid_device_t* device, uint8_t weak, uint8_t strong,
+    uint16_t duration_ms, uint32_t received_ms) {
+    if (device->switch2_host_blocked && (weak | strong) != 0) return false;
+    ++device->switch2_host_calls;
+    device->last_high = weak;
+    device->last_low = strong;
+    device->last_rumble_duration_ms = duration_ms;
+    switch2_host_events.push_back({device, {}, received_ms, duration_ms, weak, strong, false});
+    return true;
+}
+
+extern "C" void uni_hid_parser_switch2_reset_haptics(uni_hid_device_t* device) {
+    ++device->switch2_haptics_resets;
+    device->last_high = 0;
+    device->last_low = 0;
+    device->last_rumble_duration_ms = 0;
+}
+
+extern "C" uint32_t uni_hid_parser_switch2_haptics_dropped(void) {
+    return switch2_output_drops;
 }
 
 extern "C" uint8_t uni_hid_parser_switch2_extra_buttons(
@@ -857,6 +909,347 @@ Bluepad32SlotSnapshot slot_snapshot(uint8_t index) {
     Bluepad32SlotSnapshot result{};
     bluepad32_input_backend_snapshot(index, &result);
     return result;
+}
+
+ControllerRumbleOutput ordered_switch2_hd(uint8_t frequency = 40) {
+    ControllerRumbleOutput rumble{17, 29};
+    rumble.hd.actuators[0].sample_count = 3;
+    rumble.hd.actuators[1].sample_count = 2;
+    rumble.hd.actuators[0].samples[0] = {frequency, 61, 24000, 4000};
+    rumble.hd.actuators[0].samples[1] = {41, 62, 5000, 25000};
+    rumble.hd.actuators[0].samples[2] = {42, 63, 20000, 14000};
+    rumble.hd.actuators[1].samples[0] = {81, 91, 3000, 21000};
+    rumble.hd.actuators[1].samples[1] = {82, 92, 23000, 7000};
+    return rumble;
+}
+
+void require_switch2_sample(const uint8_t encoded[5],
+                            const SwitchHapticsSample& source) {
+    uint64_t bits = 0;
+    for (unsigned index = 0; index < 5; ++index) {
+        bits |= uint64_t{encoded[index]} << (index * 8);
+    }
+    require((bits & 1023u) == 193u + 3u * source.low_frequency_index &&
+                ((bits >> 20) & 1023u) == 289u + 3u * source.high_frequency_index &&
+                ((bits >> 10) & 1023u) ==
+                    ((uint32_t{source.low_amplitude_q15} * 29000u / 32767u) >> 6) &&
+                ((bits >> 30) & 1023u) ==
+                    ((uint32_t{source.high_amplitude_q15} * 29000u / 32767u) >> 6),
+            "native physical sample lost its measured frequency or independent band amplitude");
+}
+
+void test_switch2_hd_pro() {
+    start_pairing_backend();
+    auto pro = switch2_device(0, UNI_SW2_PRO_PID);
+    ready_switch2(pro);
+    now_ms = 100;
+    const auto first = ordered_switch2_hd(40);
+    const auto second = ordered_switch2_hd(50);
+    bluepad32_input_backend_queue_rumble(0, first);
+    now_ms = 101;
+    bluepad32_input_backend_queue_rumble(0, second);
+    now_ms = 105;
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 2 && pro.rumble_calls == 0 &&
+                switch2_host_events[0].received_ms == 100 &&
+                switch2_host_events[1].received_ms == 101,
+            "rapid HD commands must bypass the compatibility mailbox in original order and time");
+    for (unsigned event = 0; event < 2; ++event) {
+        const auto& input = event == 0 ? first : second;
+        const auto& output = switch2_host_events[event].frame;
+        require(output.sides[0].count == 3 && output.sides[1].count == 2,
+                "Pro output must preserve both native side counts");
+        for (unsigned side = 0; side < 2; ++side) {
+            for (unsigned step = 0; step < output.sides[side].count; ++step) {
+                require_switch2_sample(output.sides[side].samples[step],
+                                       input.hd.actuators[side].samples[step]);
+            }
+        }
+    }
+    ControllerRumbleOutput partial{};
+    partial.hd.actuators[0].sample_count = 1;
+    bluepad32_input_backend_queue_rumble(0, first);
+    bluepad32_input_backend_queue_rumble(0, partial);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 4 &&
+                switch2_host_events.back().frame.sides[1].count == 0,
+            "a silent partial update must neither flush older commands nor invent a right stop");
+
+    pro.switch2_host_blocked = true;
+    bluepad32_input_backend_queue_rumble(0, first);
+    ControllerRumbleOutput stop{};
+    stop.hd.actuators[0].sample_count = 1;
+    stop.hd.actuators[1].sample_count = 1;
+    bluepad32_input_backend_queue_rumble(0, stop);
+    now_ms += 100;
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 5 &&
+                uni_switch2_haptics_is_stop(&switch2_host_events.back().frame),
+            "explicit native stop must clear older ingress and bypass age/full barriers");
+    pro.switch2_host_blocked = false;
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{19, 23});
+    process_rumble_timer(&g_rumble_timer);
+    require(!switch2_host_events.back().hd && switch2_host_events.back().strong == 19 &&
+                switch2_host_events.back().weak == 23 && pro.rumble_calls == 0,
+            "both empty HD sides must use the dedicated conventional host API");
+}
+
+void test_switch2_hd_solo(bool right) {
+    start_pairing_backend();
+    auto solo = switch2_device(0, right ? UNI_SW2_JOYCON_R_PID : UNI_SW2_JOYCON_L_PID);
+    ready_switch2(solo);
+    const auto input = ordered_switch2_hd();
+    bluepad32_input_backend_queue_rumble(0, input);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 1 &&
+                switch2_host_events[0].frame.sides[0].count == 3 &&
+                switch2_host_events[0].frame.sides[1].count == 0,
+            "either solo half must receive a mono sequence in physical side zero");
+    const SwitchHapticsSample expected[] = {
+        {40, 91, 24000, 21000}, {82, 62, 23000, 25000}, {82, 63, 23000, 14000}};
+    for (unsigned index = 0; index < 3; ++index) {
+        require_switch2_sample(switch2_host_events[0].frame.sides[0].samples[index],
+                               expected[index]);
+    }
+    auto tie = input;
+    tie.hd.actuators[0].sample_count = 1;
+    tie.hd.actuators[1].sample_count = 1;
+    tie.hd.actuators[1].samples[0].low_amplitude_q15 = 24000;
+    tie.hd.actuators[1].samples[0].high_amplitude_q15 = 4000;
+    bluepad32_input_backend_queue_rumble(0, tie);
+    process_rumble_timer(&g_rumble_timer);
+    require_switch2_sample(switch2_host_events.back().frame.sides[0].samples[0],
+                           tie.hd.actuators[0].samples[0]);
+    auto one_side = input;
+    one_side.hd.actuators[0].sample_count = 0;
+    bluepad32_input_backend_queue_rumble(0, one_side);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.back().frame.sides[0].count == 2,
+            "solo absent source side must not fabricate substeps");
+    require_switch2_sample(switch2_host_events.back().frame.sides[0].samples[1],
+                           one_side.hd.actuators[1].samples[1]);
+}
+
+void test_switch2_hd_pair() {
+    start_pairing_backend();
+    auto right = switch2_device(0, UNI_SW2_JOYCON_R_PID);
+    auto left = switch2_device(1, UNI_SW2_JOYCON_L_PID);
+    ready_switch2(right);
+    ready_switch2(left);
+    right.switch2_host_blocked = true;
+    now_ms = 10;
+    const auto input = ordered_switch2_hd();
+    bluepad32_input_backend_queue_rumble(0, input);
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 15;
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 1 && switch2_host_events[0].device == &left,
+            "one blocked half must not duplicate acceptance on its ready partner");
+    right.switch2_host_blocked = false;
+    now_ms = 20;
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 2 && switch2_host_events[1].device == &right &&
+                switch2_host_events[1].received_ms == 10,
+            "paired retry must retain the source timestamp and original missing half");
+    for (unsigned half = 0; half < 2; ++half) {
+        const auto& output = switch2_host_events[half].frame;
+        require(output.sides[0].count == (half == 0 ? 3 : 2) && output.sides[1].count == 0,
+                "pair stereo must map selected source side onto each physical side zero");
+        for (unsigned step = 0; step < output.sides[0].count; ++step) {
+            require_switch2_sample(output.sides[0].samples[step],
+                                   input.hd.actuators[half].samples[step]);
+        }
+    }
+    auto right_only = input;
+    right_only.hd.actuators[0].sample_count = 0;
+    bluepad32_input_backend_queue_rumble(0, right_only);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 3 && switch2_host_events.back().device == &right,
+            "count zero on one paired half must not submit an invented neutral update");
+    right.switch2_host_blocked = true;
+    bluepad32_input_backend_queue_rumble(0, input);
+    process_rumble_timer(&g_rumble_timer);
+    now_ms += 50;
+    right.switch2_host_blocked = false;
+    process_rumble_timer(&g_rumble_timer);
+    Bluepad32BackendDiagnostics diagnostics{};
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    require(switch2_host_events.size() == 4 && diagnostics.switch2_ingress_drops == 1,
+            "an expired partly accepted pair must drop visibly without late or duplicate delivery");
+    right.switch2_host_blocked = true;
+    bluepad32_input_backend_queue_rumble(0, input);
+    process_rumble_timer(&g_rumble_timer);
+    ControllerRumbleOutput stop{};
+    stop.hd.actuators[0].sample_count = 1;
+    stop.hd.actuators[1].sample_count = 1;
+    bluepad32_input_backend_queue_rumble(0, stop);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 7 &&
+                switch2_host_events[5].device == &left &&
+                switch2_host_events[6].device == &right &&
+                switch2_host_events[5].frame.sides[0].count == 1 &&
+                switch2_host_events[6].frame.sides[0].count == 1,
+            "paired explicit stop must reach both halves even after partial acceptance and backpressure");
+}
+
+void test_switch2_hd_overflow() {
+    start_pairing_backend();
+    auto pro = switch2_device(0, UNI_SW2_PRO_PID);
+    ready_switch2(pro);
+    now_ms = 100;
+    for (uint8_t command = 0; command < 17; ++command) {
+        bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd(40 + command));
+    }
+    Bluepad32BackendDiagnostics diagnostics{};
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    require(diagnostics.switch2_ingress_drops == 1 && diagnostics.rumble_pending_slots == 1,
+            "bounded ingress overflow must expose one oldest-command drop");
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 16,
+            "one drain must preserve all sixteen surviving commands, not a latest-value mailbox");
+    for (uint8_t index = 0; index < 16; ++index) {
+        const auto input = ordered_switch2_hd(41 + index);
+        require_switch2_sample(switch2_host_events[index].frame.sides[0].samples[0],
+                               input.hd.actuators[0].samples[0]);
+    }
+    pro.switch2_host_blocked = true;
+    now_ms = UINT32_MAX - 20;
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    now_ms = 28;  // 49ms across wrap.
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    require(diagnostics.rumble_pending_slots == 1 && diagnostics.switch2_ingress_drops == 1,
+            "backpressure must retain an unexpired command across clock wrap");
+    now_ms = 29;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    require(diagnostics.rumble_pending_slots == 0 && diagnostics.switch2_ingress_drops == 2 &&
+                switch2_host_events.size() == 16,
+            "original 50ms age must release a backpressured ingress head exactly at expiry");
+    pro.switch2_host_blocked = false;
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    auto& stale = g_slots[0].switch2_ingress;
+    --stale.commands[stale.head].envelope.connection_generation;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    require(switch2_host_events.size() == 16 && diagnostics.switch2_ingress_drops == 3,
+            "stale logical generation must be rejected before physical submission");
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    --stale.commands[stale.head].generation;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    require(switch2_host_events.size() == 16 && diagnostics.switch2_ingress_drops == 4,
+            "stale haptics epoch must not survive a same-connection mode reset");
+    switch2_output_drops = 7;
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    require(diagnostics.switch2_output_drops == 7,
+            "physical output loss must remain visible separately from ingress loss");
+}
+
+void test_switch2_hd_epochs() {
+    start_pairing_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    ready_switch2(left);
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    process_rumble_timer(&g_rumble_timer);
+    const unsigned left_resets = left.switch2_haptics_resets;
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    ready_switch2(right);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 1 && left.switch2_haptics_resets > left_resets &&
+                right.switch2_haptics_resets != 0,
+            "merge must reset accepted physical output and drop queued solo commands");
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    process_rumble_timer(&g_rumble_timer);
+    const unsigned pair_resets = left.switch2_haptics_resets;
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    platform_on_device_disconnected(&right);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 3 && left.switch2_haptics_resets > pair_resets,
+            "survivor transition must flush both physical and ingress pair state");
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    platform_on_device_disconnected(&left);
+    auto replacement = switch2_device(0, UNI_SW2_PRO_PID);
+    ready_switch2(replacement);
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 3,
+            "reconnect must not inherit a former logical generation's host output");
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{27, 35});
+    process_rumble_timer(&g_rumble_timer);
+    const unsigned mode_resets = replacement.switch2_haptics_resets;
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    test_adapter_mode = AdapterUsbMode::kSwitchProbe;
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 4 && replacement.switch2_haptics_resets > mode_resets,
+            "mode boundary without new input must neutralize held output and queued old-mode HD");
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd(50));
+    test_adapter_mode = AdapterUsbMode::kXInput;
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{45, 55});
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 5 && !switch2_host_events.back().hd &&
+                switch2_host_events.back().duration_ms == UINT16_MAX &&
+                switch2_host_events.back().strong == 45,
+            "producer-side mode transition must discard old epoch before accepting new host state");
+#endif
+}
+
+void test_switch2_hd_feedback() {
+    start_pairing_backend();
+    auto pro = switch2_device(0, UNI_SW2_PRO_PID);
+    ready_switch2(pro);
+    bluepad32_input_backend_queue_profile_feedback(
+        0, slot_snapshot(0).connection_generation, 2,
+        ControllerProfileConfirmationPolicy::kRumble);
+    process_rumble_timer(&g_rumble_timer);
+    require(pro.rumble_calls == 1, "profile confirmation must retain local-feedback ownership");
+    now_ms = 10;
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd());
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 20;
+    bluepad32_input_backend_queue_rumble(0, ordered_switch2_hd(50));
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 2 && pro.rumble_calls == 1 &&
+                switch2_host_events[0].received_ms == 10 &&
+                switch2_host_events[1].received_ms == 20,
+            "host substeps must advance during feedback without compatibility dispatch or fresh timestamps");
+    now_ms = 300;
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 2,
+            "feedback completion must not replay historical host substeps");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{33, 44});
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 3 && !switch2_host_events.back().hd &&
+                switch2_host_events.back().duration_ms == host_rumble_duration_ms(),
+            "conventional host vibration must share the bounded host queue, not local feedback");
+    now_ms += 1000;
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 3,
+            "stateful host output must not require backend periodic resubmission");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{});
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_host_events.size() == 4 && switch2_host_events.back().duration_ms == 0 &&
+                switch2_host_events.back().weak == 0 && switch2_host_events.back().strong == 0,
+            "conventional all-zero host command must explicitly stop retained state");
+    pro.switch2_host_blocked = true;
+    const uint32_t received_ms = now_ms;
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{65, 75});
+    now_ms += 1000;
+    process_rumble_timer(&g_rumble_timer);
+    pro.switch2_host_blocked = false;
+    process_rumble_timer(&g_rumble_timer);
+    if (host_rumble_duration_ms() == UINT16_MAX) {
+        require(switch2_host_events.size() == 5 &&
+                    switch2_host_events.back().received_ms == received_ms &&
+                    switch2_host_events.back().strong == 65,
+                "held XInput host state must survive backpressure without retimestamping");
+    } else {
+        Bluepad32BackendDiagnostics diagnostics{};
+        bluepad32_input_backend_diagnostics(&diagnostics);
+        require(switch2_host_events.size() == 4 && diagnostics.switch2_ingress_drops == 1,
+                "finite conventional host state must expire under feedback/backpressure, not revive");
+    }
 }
 
 void test_switch2_pair_lifecycle(bool right_first) {
@@ -3262,7 +3655,21 @@ int main(int argc, char** argv) {
         return 0;
     }
 #endif
-    if (scenario == "switch2-forward") {
+    if (scenario == "switch2-hd-pro") {
+        test_switch2_hd_pro();
+    } else if (scenario == "switch2-hd-solo-left") {
+        test_switch2_hd_solo(false);
+    } else if (scenario == "switch2-hd-solo-right") {
+        test_switch2_hd_solo(true);
+    } else if (scenario == "switch2-hd-pair") {
+        test_switch2_hd_pair();
+    } else if (scenario == "switch2-hd-overflow") {
+        test_switch2_hd_overflow();
+    } else if (scenario == "switch2-hd-epochs") {
+        test_switch2_hd_epochs();
+    } else if (scenario == "switch2-hd-feedback") {
+        test_switch2_hd_feedback();
+    } else if (scenario == "switch2-forward") {
         test_switch2_pair_lifecycle(false);
     } else if (scenario == "switch2-reverse") {
         test_switch2_pair_lifecycle(true);

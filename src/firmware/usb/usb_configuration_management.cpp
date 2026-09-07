@@ -193,7 +193,7 @@ size_t encode_info(uint8_t* output, size_t output_size) {
 size_t encode_runtime_diagnostics(uint8_t* output, size_t output_size) {
     Bluepad32BackendDiagnostics diagnostics{};
     bluepad32_input_backend_diagnostics(&diagnostics);
-    uint8_t payload[32]{};
+    uint8_t payload[40]{};
     write_u32(&payload[0], diagnostics.initialization_stage);
     write_u32(&payload[4], diagnostics.rumble_timer_ticks);
     write_u32(&payload[8], diagnostics.configuration_timer_ticks);
@@ -205,6 +205,8 @@ size_t encode_runtime_diagnostics(uint8_t* output, size_t output_size) {
     payload[29] = diagnostics.rumble_capable_slots;
     payload[30] = diagnostics.feedback_pending_slots;
     payload[31] = diagnostics.rumble_pending_slots;
+    write_u32(&payload[32], diagnostics.switch2_ingress_drops);
+    write_u32(&payload[36], diagnostics.switch2_output_drops);
     return encode_response(Operation::kRuntimeDiagnostics, Status::kOk,
                            0, 0, 0, payload, sizeof(payload), output,
                            output_size);

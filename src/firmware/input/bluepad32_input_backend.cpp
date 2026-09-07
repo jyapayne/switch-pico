@@ -24,6 +24,7 @@
 #include <pico/stdlib.h>
 #include <uni.h>
 #include "parser/uni_hid_parser_switch2.h"
+#include "parser/uni_switch2_haptics.h"
 #include "parser/uni_switch2_pairing.h"
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
 #include "adapter/adapter_usb_mode.h"
@@ -112,9 +113,25 @@ struct RumbleEnvelope {
     uint32_t connection_generation;
     ControllerRumbleOutput rumble;
     uint16_t duration_ms;
+    uint32_t received_ms = 0;
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
     uint64_t received_us = 0;
 #endif
+};
+
+constexpr uint8_t kSwitch2IngressCapacity = 16;
+struct Switch2HostCommand {
+    RumbleEnvelope envelope;
+    uint32_t generation;
+    uint8_t accepted_halves;
+};
+struct Switch2Ingress {
+    Switch2HostCommand commands[kSwitch2IngressCapacity];
+    uint32_t generation;
+    uint8_t host_mode;
+    uint8_t head;
+    uint8_t count;
+    bool reset_pending;
 };
 struct FeedbackEnvelope {
     uint32_t connection_generation;
@@ -176,6 +193,7 @@ struct BackendSlot {
     RumbleEnvelope pending_rumble;
     bool retained_host_rumble_valid;
     RumbleEnvelope retained_host_rumble;
+    Switch2Ingress switch2_ingress;
     FeedbackEnvelope pending_feedback;
     ProfileFeedbackEnvelope
         pending_profile_feedback[kProfileFeedbackQueueCapacity];
@@ -226,6 +244,7 @@ uint32_t g_controller_reports = 0;
 uint32_t g_host_rumble_requests = 0;
 uint32_t g_local_feedback_requests = 0;
 uint32_t g_rumble_dispatches = 0;
+uint32_t g_switch2_ingress_drops = 0;
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 uint32_t g_seeded_native_run_id = 0;
 #endif
@@ -237,6 +256,14 @@ uint16_t host_rumble_duration_ms() {
     }
 #endif
     return kSwitchHostRumbleDurationMs;
+}
+
+uint8_t switch2_host_mode() {
+#ifdef SWITCH_PICO_USB_OUTPUT_MODES
+    return static_cast<uint8_t>(adapter_host_probe_mode());
+#else
+    return 0;
+#endif
 }
 
 ControllerState make_neutral_state() {
@@ -330,6 +357,154 @@ int joycon_side(const uni_hid_device_t* device) {
         return -1;
     }
     return device->product_id == UNI_SW2_JOYCON_R_PID ? 1 : 0;
+}
+
+// Caller holds the cross-core state lock. Only Core 1 resets parser state.
+void clear_switch2_ingress(BackendSlot& slot) {
+    Switch2Ingress& ingress = slot.switch2_ingress;
+    __atomic_add_fetch(&g_switch2_ingress_drops, ingress.count, __ATOMIC_RELAXED);
+    ingress.head = 0;
+    ingress.count = 0;
+    ++ingress.generation;
+    ingress.reset_pending = true;
+}
+
+void reset_switch2_outputs(BackendSlot& slot) {
+    uni_hid_device_t* targets[] = {slot.device, slot.companion};
+    for (uni_hid_device_t* target : targets) {
+        if (uni_hid_parser_switch2_is_ble_device(target)) {
+            uni_hid_parser_switch2_reset_haptics(target);
+        }
+    }
+    slot.switch2_ingress.reset_pending = false;
+}
+
+bool switch2_has_hd(const ControllerRumbleOutput& rumble) {
+    return rumble.hd.actuators[0].sample_count != 0 ||
+           rumble.hd.actuators[1].sample_count != 0;
+}
+
+bool switch2_host_stop(const ControllerRumbleOutput& rumble) {
+    if (!switch2_has_hd(rumble)) {
+        return (rumble.low_frequency_magnitude | rumble.high_frequency_magnitude) == 0;
+    }
+    for (const SwitchHapticsActuatorFrame& side : rumble.hd.actuators) {
+        if (side.sample_count == 0 || side.sample_count > 3) return false;
+        for (uint8_t index = 0; index < side.sample_count; ++index) {
+            if (side.samples[index].low_amplitude_q15 != 0 ||
+                side.samples[index].high_amplitude_q15 != 0) return false;
+        }
+    }
+    return true;
+}
+
+void encode_switch2_side(uni_switch2_haptics_side_t& output,
+                         const SwitchHapticsActuatorFrame& input) {
+    output.count = input.sample_count;
+    for (uint8_t index = 0; index < input.sample_count; ++index) {
+        const SwitchHapticsSample& sample = input.samples[index];
+        uni_switch2_haptics_encode_sample(
+            output.samples[index], sample.low_frequency_index,
+            sample.high_frequency_index, sample.low_amplitude_q15,
+            sample.high_amplitude_q15);
+    }
+}
+
+uni_switch2_haptics_frame_t switch2_physical_frame(
+    const ControllerRumbleOutput& rumble, const uni_hid_device_t* target,
+    bool paired) {
+    uni_switch2_haptics_frame_t frame{};
+    const SwitchHapticsActuatorFrame& left = rumble.hd.actuators[0];
+    const SwitchHapticsActuatorFrame& right = rumble.hd.actuators[1];
+    const int side = joycon_side(target);
+    if (side == 0) {
+        encode_switch2_side(frame.sides[0], left);
+        encode_switch2_side(frame.sides[1], right);
+    } else if (paired) {
+        encode_switch2_side(frame.sides[0], side < 0 ? left : right);
+    } else {
+        // Mono chooses each band's louder source independently. A short side
+        // holds its final substep; an absent side contributes no update.
+        frame.sides[0].count =
+            left.sample_count > right.sample_count ? left.sample_count : right.sample_count;
+        for (uint8_t index = 0; index < frame.sides[0].count; ++index) {
+            const SwitchHapticsSample* l = left.sample_count == 0 ? nullptr :
+                &left.samples[index < left.sample_count ? index : left.sample_count - 1];
+            const SwitchHapticsSample* r = right.sample_count == 0 ? nullptr :
+                &right.samples[index < right.sample_count ? index : right.sample_count - 1];
+            const SwitchHapticsSample* low = !r || (l && l->low_amplitude_q15 >= r->low_amplitude_q15) ? l : r;
+            const SwitchHapticsSample* high = !r || (l && l->high_amplitude_q15 >= r->high_amplitude_q15) ? l : r;
+            uni_switch2_haptics_encode_sample(
+                frame.sides[0].samples[index], low->low_frequency_index,
+                high->high_frequency_index, low->low_amplitude_q15,
+                high->high_amplitude_q15);
+        }
+    }
+    return frame;
+}
+
+void drain_switch2_ingress(uint8_t slot_index, uint32_t now_ms) {
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (!slot.active || !uni_hid_parser_switch2_is_ble_device(slot.device)) {
+        critical_section_exit(&g_state_lock);
+        return;
+    }
+    Switch2Ingress& ingress = slot.switch2_ingress;
+    const uint16_t duration_ms = host_rumble_duration_ms();
+    const uint8_t host_mode = switch2_host_mode();
+    if (ingress.host_mode != host_mode) {
+        clear_switch2_ingress(slot);
+        ingress.host_mode = host_mode;
+    }
+    if (ingress.reset_pending) reset_switch2_outputs(slot);
+    for (uint8_t budget = 0; budget < kSwitch2IngressCapacity && ingress.count != 0; ++budget) {
+        Switch2HostCommand& command = ingress.commands[ingress.head];
+        const RumbleEnvelope& envelope = command.envelope;
+        const bool hd = switch2_has_hd(envelope.rumble);
+        const bool stop = switch2_host_stop(envelope.rumble);
+        const bool stale = command.generation != ingress.generation ||
+            envelope.connection_generation != slot.connection_generation ||
+            envelope.duration_ms != duration_ms ||
+            (!stop && (hd || duration_ms != kXInputHostRumbleDurationMs) &&
+             static_cast<uint32_t>(now_ms - envelope.received_ms) >= UNI_SWITCH2_HAPTICS_WATCHDOG_MS);
+        const bool invalid = envelope.rumble.hd.actuators[0].sample_count > 3 ||
+                             envelope.rumble.hd.actuators[1].sample_count > 3;
+        if (stale || invalid) {
+            __atomic_add_fetch(&g_switch2_ingress_drops, 1, __ATOMIC_RELAXED);
+        } else {
+            uni_hid_device_t* targets[] = {slot.device, slot.companion};
+            const uint8_t target_mask = slot.companion == nullptr ? 1 : 3;
+            for (uint8_t half = 0; half < 2; ++half) {
+                const uint8_t bit = 1u << half;
+                if (!(target_mask & bit) || (command.accepted_halves & bit)) continue;
+                bool accepted;
+                if (hd) {
+                    const uni_switch2_haptics_frame_t frame =
+                        switch2_physical_frame(envelope.rumble, targets[half], slot.companion != nullptr);
+                    if (frame.sides[0].count == 0 && frame.sides[1].count == 0) {
+                        command.accepted_halves |= bit;
+                        continue;
+                    }
+                    accepted = uni_hid_parser_switch2_queue_haptics(
+                        targets[half], &frame, envelope.received_ms);
+                } else {
+                    accepted = uni_hid_parser_switch2_queue_rumble(
+                        targets[half], envelope.rumble.high_frequency_magnitude,
+                        envelope.rumble.low_frequency_magnitude,
+                        stop ? 0 : envelope.duration_ms, envelope.received_ms);
+                }
+                if (accepted) {
+                    command.accepted_halves |= bit;
+                    __atomic_add_fetch(&g_rumble_dispatches, 1, __ATOMIC_RELAXED);
+                }
+            }
+            if (command.accepted_halves != target_mask) break;
+        }
+        ingress.head = (ingress.head + 1u) % kSwitch2IngressCapacity;
+        --ingress.count;
+    }
+    critical_section_exit(&g_state_lock);
 }
 
 bool addresses_equal(const bd_addr_t first, const bd_addr_t second) {
@@ -621,6 +796,8 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
 void publish_all_neutral() {
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
+        clear_switch2_ingress(slot);
+        reset_switch2_outputs(slot);
         slot.state = make_neutral_state();
         slot.pre_hotkey_button_mask = 0;
         slot.identity = controller_identity_global();
@@ -1030,6 +1207,8 @@ void reset_slot_hotkeys(BackendSlot& slot) {
 }
 
 void invalidate_slot(BackendSlot& slot) {
+    clear_switch2_ingress(slot);
+    reset_switch2_outputs(slot);
     reset_slot_hotkeys(slot);
     slot.rumble_pending = false;
     slot.pending_rumble = {};
@@ -1634,6 +1813,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 #endif
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
+        drain_switch2_ingress(slot_index, now_ms);
         RumbleEnvelope envelope{};
         FeedbackEnvelope feedback{};
         ProfileFeedbackEnvelope profile_feedback{};
@@ -2453,6 +2633,9 @@ void bluepad32_input_backend_diagnostics(
         __atomic_load_n(&g_local_feedback_requests, __ATOMIC_RELAXED);
     out->rumble_dispatches =
         __atomic_load_n(&g_rumble_dispatches, __ATOMIC_RELAXED);
+    out->switch2_ingress_drops =
+        __atomic_load_n(&g_switch2_ingress_drops, __ATOMIC_RELAXED);
+    out->switch2_output_drops = uni_hid_parser_switch2_haptics_dropped();
 
     critical_section_enter_blocking(&g_state_lock);
     for (const BackendSlot& slot : g_slots) {
@@ -2467,7 +2650,7 @@ void bluepad32_input_backend_diagnostics(
             slot.pending_profile_feedback_count != 0) {
             ++out->feedback_pending_slots;
         }
-        if (slot.rumble_pending) {
+        if (slot.rumble_pending || slot.switch2_ingress.count != 0) {
             ++out->rumble_pending_slots;
         }
     }
@@ -2577,16 +2760,47 @@ void bluepad32_input_backend_queue_rumble(
     bool native_candidate = false;
 #endif
     const uint16_t duration_ms = host_rumble_duration_ms();
+    const uint32_t received_ms = btstack_run_loop_get_time_ms();
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device != nullptr) {
+        if (uni_hid_parser_switch2_is_ble_device(slot.device)) {
+            Switch2Ingress& ingress = slot.switch2_ingress;
+            const uint8_t host_mode = switch2_host_mode();
+            if (ingress.host_mode != host_mode) {
+                clear_switch2_ingress(slot);
+                ingress.host_mode = host_mode;
+            }
+            if (switch2_host_stop(rumble)) {
+                // Host stop is a barrier, not a local-feedback cancellation.
+                ingress.head = 0;
+                ingress.count = 0;
+            } else if (ingress.count == kSwitch2IngressCapacity) {
+                ingress.head = (ingress.head + 1u) % kSwitch2IngressCapacity;
+                --ingress.count;
+                __atomic_add_fetch(&g_switch2_ingress_drops, 1, __ATOMIC_RELAXED);
+            }
+            Switch2HostCommand& command =
+                ingress.commands[(ingress.head + ingress.count) % kSwitch2IngressCapacity];
+            command = {};
+            command.envelope.slot = slot_index;
+            command.envelope.connection_generation = slot.connection_generation;
+            command.envelope.rumble = rumble;
+            command.envelope.duration_ms = duration_ms;
+            command.envelope.received_ms = received_ms;
+            command.generation = ingress.generation;
+            ++ingress.count;
+            __atomic_add_fetch(&g_host_rumble_requests, 1, __ATOMIC_RELAXED);
+            critical_section_exit(&g_state_lock);
+            return;
+        }
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
         native_generation = slot.connection_generation;
         native_candidate = true;
 #endif
         const RumbleEnvelope envelope{
             slot_index, slot.connection_generation, rumble,
-            duration_ms
+            duration_ms, received_ms
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
             , received_us
 #endif

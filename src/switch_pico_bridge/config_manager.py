@@ -374,6 +374,8 @@ class RuntimeDiagnostics:
     rumble_capable_slots: int
     feedback_pending_slots: int
     rumble_pending_slots: int
+    switch2_ingress_drops: int | None = None
+    switch2_output_drops: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2701,15 +2703,22 @@ def capture_macro_steps(page: MacroCapturePage) -> tuple[MacroStep, ...]:
 def read_runtime_diagnostics(device: UsbDevice) -> RuntimeDiagnostics:
     envelope = _control_in(device, OP_RUNTIME_DIAGNOSTICS)
     _raise_status(envelope)
-    if len(envelope.payload) != 32:
+    if len(envelope.payload) not in (32, 40):
         raise ConfigManagerError("invalid runtime-diagnostics payload")
     counters = struct.unpack_from("<7I", envelope.payload)
+    ingress_drops, output_drops = (
+        struct.unpack_from("<2I", envelope.payload, 32)
+        if len(envelope.payload) == 40
+        else (None, None)
+    )
     return RuntimeDiagnostics(
         *counters,
         active_slots=envelope.payload[28],
         rumble_capable_slots=envelope.payload[29],
         feedback_pending_slots=envelope.payload[30],
         rumble_pending_slots=envelope.payload[31],
+        switch2_ingress_drops=ingress_drops,
+        switch2_output_drops=output_drops,
     )
 
 
@@ -4466,6 +4475,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Rumble-capable slots: {diagnostics.rumble_capable_slots}")
             print(f"Feedback-pending slots: {diagnostics.feedback_pending_slots}")
             print(f"Rumble-pending slots: {diagnostics.rumble_pending_slots}")
+            if diagnostics.switch2_ingress_drops is not None:
+                print(f"Switch 2 ingress drops: {diagnostics.switch2_ingress_drops}")
+                print(f"Switch 2 output drops: {diagnostics.switch2_output_drops}")
         elif args.command == "haptics-experiment":
             _run_haptics_experiment_command(device, args)
         elif args.command == "reboot":

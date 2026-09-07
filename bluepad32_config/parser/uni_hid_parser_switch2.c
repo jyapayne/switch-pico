@@ -8,6 +8,7 @@
 #include "parser/uni_hid_parser_switch2.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include <btstack.h>
@@ -20,6 +21,7 @@
 
 #define SW2_TIMEOUT_MS 2000
 #define SW2_OUTPUT_INTERVAL_MS 13
+#define SW2_HAPTICS_CAPACITY 16
 #define SW2_REPORT_SIZE 63
 #define SW2_ACK 0x78
 #define SW2_CCCD_UUID 0x2902
@@ -62,6 +64,16 @@ typedef struct {
     uint16_t negative[2];
 } sw2_stick_t;
 typedef struct {
+    uni_switch2_haptics_frame_t frame;
+    uint32_t expires, serial;
+    bool held, native;
+} sw2_host_command_t;
+typedef struct {
+    uint8_t sample[5];
+    uint32_t expires;
+    bool valid, held;
+} sw2_host_side_t;
+typedef struct {
     uni_hid_device_t* device;
     bd_addr_t address;
     hci_con_handle_t handle;
@@ -92,6 +104,15 @@ typedef struct {
     uint8_t rumble_id, weak, strong;
     bool rumble_scheduled, rumble_held;
     uint32_t rumble_start, rumble_end;
+    sw2_host_command_t host_queue[SW2_HAPTICS_CAPACITY];
+    sw2_host_side_t host_sides[2];
+    uint8_t host_head, host_count;
+    uint32_t host_serial, haptics_epoch, output_revision;
+    uint32_t pending_serial, pending_epoch, pending_revision;
+    uint32_t playback_until;
+    uint8_t pending_guard_ms;
+    bool pending_host, pending_barrier, barrier_pending, output_urgent;
+    bool feedback_active, playback_guard;
     uint32_t sensor_start, sensor_host_start, sensor_last;
     uint8_t sensor_warmup;
     int32_t gyro_full_scale;
@@ -100,11 +121,14 @@ typedef struct {
 // Separate bounded storage: never squeeze transport resources into parser_data
 // (256 bytes). Retired buffers are not reused until their old BLE link is gone.
 static sw2_instance_t sw2_instances[CONFIG_BLUEPAD32_MAX_DEVICES];
+static atomic_uint_least32_t sw2_haptics_drops;
 
 static void sw2_gatt_handler(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size);
 static void sw2_output_tick(btstack_timer_source_t* timer);
 static void sw2_continue(sw2_instance_t* ins);
 static void sw2_complete_command(sw2_instance_t* ins);
+static void sw2_rumble_complete(sw2_instance_t* ins);
+static void sw2_discard_host(sw2_instance_t* ins);
 
 static bool sw2_product(uint16_t pid) {
     return pid == UNI_SW2_PRO_PID || pid == UNI_SW2_JOYCON_L_PID || pid == UNI_SW2_JOYCON_R_PID;
@@ -149,6 +173,8 @@ void uni_hid_parser_switch2_teardown(uni_hid_device_t* d) {
     if (ins->input_listening)
         gatt_client_stop_listening_for_characteristic_value_updates(&ins->input_listener);
     ins->response_listening = ins->input_listening = false;
+    sw2_discard_host(ins);
+    ++ins->haptics_epoch;
     ins->command_pending = ins->rumble_scheduled = false;
     ins->extra_buttons = 0;
     ins->state = SW2_OFF;
@@ -470,11 +496,13 @@ static void sw2_query_complete(sw2_instance_t* ins, uint8_t status) {
         return;
     }
     if (query == SW2_QUERY_RUMBLE) {
-        ++ins->rumble_id;
+        sw2_rumble_complete(ins);
         // A command queued behind this write has its own timeout already.
         if (!ins->command_pending)
             sw2_disarm_timeout(ins);
         sw2_try_command(ins);
+        if (sw2_live(ins))
+            sw2_schedule_output(ins, 1);
         return;
     }
     sw2_disarm_timeout(ins);
@@ -881,37 +909,301 @@ void uni_hid_parser_switch2_set_player_leds(uni_hid_device_t* d, uint8_t leds) {
         sw2_continue(ins);
 }
 
-static void sw2_rumble_block(uint8_t* out, uint8_t id, uint8_t weak, uint8_t strong) {
-    // Three consecutive equal frames form a safe sustained HOLD. Weak controls
-    // the high-frequency amplitude, strong the low-frequency amplitude.
-    uint64_t frame = 0x0e1u | ((uint64_t)strong * 4 << 10) | ((uint64_t)0x1e1 << 20) |
-                     ((uint64_t)weak * 4 << 30);
-    out[0] = 0x50 | (id & 15);
-    for (unsigned i = 0; i < 5; ++i)
-        out[1 + i] = (uint8_t)(frame >> (8 * i));
-    memcpy(out + 6, out + 1, 5);
-    memcpy(out + 11, out + 1, 5);
+uint32_t uni_hid_parser_switch2_haptics_dropped(void) {
+    return atomic_load_explicit(&sw2_haptics_drops, memory_order_relaxed);
 }
 
-static void sw2_send_rumble(sw2_instance_t* ins, uint32_t now) {
-    if (ins->query != SW2_QUERY_NONE || ins->command_pending)
-        return;
-    uint8_t weak = 0, strong = 0;
-    if (ins->rumble_scheduled) {
-        if (!ins->rumble_held && (int32_t)(now - ins->rumble_end) >= 0)
-            ins->rumble_scheduled = false;
-        else if ((int32_t)(now - ins->rumble_start) >= 0) {
-            weak = ins->weak;
-            strong = ins->strong;
+static void sw2_count_drops(unsigned count) {
+    atomic_fetch_add_explicit(&sw2_haptics_drops, count, memory_order_relaxed);
+}
+
+static bool sw2_due(uint32_t now, uint32_t deadline) {
+    return (int32_t)(now - deadline) >= 0;
+}
+
+static unsigned sw2_output_sides(const sw2_instance_t* ins) {
+    return ins->device->product_id == UNI_SW2_PRO_PID ? 2 : 1;
+}
+
+static void sw2_pop_host(sw2_instance_t* ins) {
+    ins->host_head = (ins->host_head + 1) % SW2_HAPTICS_CAPACITY;
+    --ins->host_count;
+}
+
+static void sw2_discard_host(sw2_instance_t* ins) {
+    sw2_count_drops(ins->host_count);
+    ins->host_head = ins->host_count = 0;
+    memset(ins->host_sides, 0, sizeof(ins->host_sides));
+}
+
+static void sw2_retain_host(sw2_instance_t* ins, const sw2_host_command_t* command) {
+    for (unsigned i = 0; i < sw2_output_sides(ins); ++i) {
+        const uni_switch2_haptics_side_t* side = &command->frame.sides[i];
+        if (!side->count)
+            continue;
+        sw2_host_side_t* retained = &ins->host_sides[i];
+        memcpy(retained->sample, side->samples[side->count - 1], sizeof(retained->sample));
+        retained->expires = command->expires;
+        retained->held = command->held;
+        retained->valid = true;
+    }
+}
+
+static bool sw2_local_active(const sw2_instance_t* ins, uint32_t now) {
+    return ins->rumble_scheduled && sw2_due(now, ins->rumble_start) &&
+           (ins->rumble_held || !sw2_due(now, ins->rumble_end));
+}
+
+// Logical host time keeps advancing even when ATT or the local overlay owns
+// the physical output. Masked sequences become final holds, never a replay log.
+static void sw2_update_haptics(sw2_instance_t* ins, uint32_t now) {
+    bool active = sw2_local_active(ins, now);
+    bool masked = active || ins->feedback_active;
+    while (ins->host_count) {
+        sw2_host_command_t* command = &ins->host_queue[ins->host_head];
+        if (!command->held && sw2_due(now, command->expires)) {
+            sw2_count_drops(1);
+            sw2_pop_host(ins);
+            // Unplayed history is not a reason to interrupt the current packet.
+            // A matching in-flight packet can still complete after its expiry.
+            if (!active && ins->pending_host &&
+                ins->pending_epoch == ins->haptics_epoch &&
+                ins->pending_serial == command->serial) {
+                ins->output_urgent = true;
+                ++ins->output_revision;
+            }
+        } else if (masked) {
+            sw2_retain_host(ins, command);
+            sw2_pop_host(ins);
+        } else {
+            break;
         }
     }
-    ins->rumble_data[0] = 0;
-    sw2_rumble_block(ins->rumble_data + 1, ins->rumble_id, weak, strong);
-    uint16_t length = 17;
-    if (ins->device->product_id == UNI_SW2_PRO_PID) {
-        memcpy(ins->rumble_data + 17, ins->rumble_data + 1, 16);
-        length = 33;
+    if (masked)
+        ins->barrier_pending = false;
+    for (unsigned i = 0; i < sw2_output_sides(ins); ++i) {
+        sw2_host_side_t* side = &ins->host_sides[i];
+        if (side->valid && !side->held && sw2_due(now, side->expires)) {
+            side->valid = false;
+            if (!active) {
+                ins->output_urgent = true;
+                ++ins->output_revision;
+            }
+        }
     }
+    if (ins->feedback_active != active) {
+        if (!active)
+            ins->output_urgent = true; // Resume only the current per-side hold.
+        ++ins->output_revision;
+    }
+    ins->feedback_active = active;
+    if (ins->rumble_scheduled && !ins->rumble_held && sw2_due(now, ins->rumble_end))
+        ins->rumble_scheduled = false;
+}
+
+static void sw2_compat_side(uni_switch2_haptics_side_t* side, uint8_t weak, uint8_t strong) {
+    // Preserve conventional/local frequency and strength, but advertise exactly
+    // one sample. The other ten bytes are padding, not repeated substeps.
+    uint64_t frame = 0x0e1u | ((uint64_t)strong * 4 << 10) | ((uint64_t)0x1e1 << 20) |
+                     ((uint64_t)weak * 4 << 30);
+    memset(side, 0, sizeof(*side));
+    side->count = 1;
+    for (unsigned i = 0; i < 5; ++i)
+        side->samples[0][i] = (uint8_t)(frame >> (8 * i));
+}
+
+static void sw2_host_hold(const sw2_instance_t* ins, uni_switch2_haptics_frame_t* frame) {
+    uni_switch2_haptics_silence(frame);
+    for (unsigned i = 0; i < sw2_output_sides(ins); ++i) {
+        if (ins->host_sides[i].valid)
+            memcpy(frame->sides[i].samples[0], ins->host_sides[i].sample, 5);
+    }
+}
+
+static void sw2_host_stop(sw2_instance_t* ins) {
+    sw2_update_haptics(ins, btstack_run_loop_get_time_ms());
+    sw2_discard_host(ins);
+    ++ins->haptics_epoch;
+    ++ins->output_revision;
+    ins->barrier_pending = true;
+    ins->output_urgent = true;
+    sw2_schedule_output(ins, 1);
+}
+
+static bool sw2_physical_stop(const sw2_instance_t* ins, const uni_switch2_haptics_frame_t* frame) {
+    for (unsigned i = 0; i < sw2_output_sides(ins); ++i) {
+        const uni_switch2_haptics_side_t* side = &frame->sides[i];
+        if (!side->count)
+            return false;
+        for (unsigned j = 0; j < side->count; ++j) {
+            const uint8_t* sample = side->samples[j];
+            // Amplitudes occupy bits10..19 and30..39 of each 40-bit sample.
+            if ((sample[1] & 0xfc) || (sample[2] & 0x0f) || (sample[3] & 0xc0) || sample[4])
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool sw2_same_hold(const uni_switch2_haptics_frame_t* a, const uni_switch2_haptics_frame_t* b) {
+    for (unsigned i = 0; i < 2; ++i) {
+        if (a->sides[i].count > 1 || a->sides[i].count != b->sides[i].count)
+            return false;
+        if (a->sides[i].count && memcmp(a->sides[i].samples[0], b->sides[i].samples[0], 5) != 0)
+            return false;
+    }
+    return true;
+}
+
+static bool sw2_queue_host(sw2_instance_t* ins, const uni_switch2_haptics_frame_t* frame,
+                            uint32_t received_ms, uint16_t duration_ms, bool native) {
+    uint32_t now = btstack_run_loop_get_time_ms();
+    sw2_update_haptics(ins, now);
+    bool held = duration_ms == UINT16_MAX;
+    uint32_t lifetime = duration_ms < UNI_SWITCH2_HAPTICS_WATCHDOG_MS ?
+                            duration_ms : UNI_SWITCH2_HAPTICS_WATCHDOG_MS;
+    uint32_t expires = received_ms + lifetime;
+    if (!held && sw2_due(now, expires)) {
+        sw2_count_drops(1);
+        return true;
+    }
+    if (ins->host_count) {
+        unsigned previous = (ins->host_head + ins->host_count - 1) % SW2_HAPTICS_CAPACITY;
+        sw2_host_command_t* command = &ins->host_queue[previous];
+        if (command->native == native && sw2_same_hold(&command->frame, frame)) {
+            // Same ordered hold, new source lifetime. Keep its serial and wire
+            // bytes intact even when ATT is still borrowing this queue head.
+            command->expires = expires;
+            command->held = held;
+            sw2_schedule_output(ins, 1);
+            return true;
+        }
+    }
+    if (ins->host_count == SW2_HAPTICS_CAPACITY)
+        return false;
+    unsigned tail = (ins->host_head + ins->host_count) % SW2_HAPTICS_CAPACITY;
+    ins->host_queue[tail] = (sw2_host_command_t){
+        .frame = *frame, .expires = expires, .serial = ++ins->host_serial, .held = held, .native = native,
+    };
+    ++ins->host_count;
+    sw2_schedule_output(ins, 1);
+    return true;
+}
+
+bool uni_hid_parser_switch2_queue_haptics(uni_hid_device_t* d,
+                                         const uni_switch2_haptics_frame_t* frame, uint32_t received_ms) {
+    sw2_instance_t* ins = sw2_instance(d);
+    if (!ins || ins->state != SW2_READY)
+        return false;
+    if (!uni_switch2_haptics_valid(frame) ||
+        (sw2_output_sides(ins) == 1 && !frame->sides[0].count)) {
+        sw2_count_drops(1);
+        return true;
+    }
+    if (sw2_physical_stop(ins, frame)) {
+        sw2_host_stop(ins); // A stop is a barrier, including when full or stale.
+        return true;
+    }
+    return sw2_queue_host(ins, frame, received_ms, UNI_SWITCH2_HAPTICS_WATCHDOG_MS, true);
+}
+
+bool uni_hid_parser_switch2_queue_rumble(uni_hid_device_t* d, uint8_t weak, uint8_t strong,
+                                        uint16_t duration_ms, uint32_t received_ms) {
+    sw2_instance_t* ins = sw2_instance(d);
+    if (!ins || ins->state != SW2_READY)
+        return false;
+    if ((!weak && !strong) || !duration_ms) {
+        sw2_host_stop(ins);
+        return true;
+    }
+    uni_switch2_haptics_frame_t frame;
+    sw2_compat_side(&frame.sides[0], weak, strong);
+    frame.sides[1] = frame.sides[0];
+    return sw2_queue_host(ins, &frame, received_ms, duration_ms, false);
+}
+
+void uni_hid_parser_switch2_reset_haptics(uni_hid_device_t* d) {
+    sw2_instance_t* ins = sw2_instance(d);
+    if (!ins)
+        return;
+    sw2_discard_host(ins);
+    ++ins->haptics_epoch;
+    ++ins->output_revision;
+    ins->rumble_scheduled = ins->feedback_active = false;
+    ins->barrier_pending = ins->output_urgent = true;
+    // Do not touch rumble_data or pending metadata: ATT can still borrow them.
+    if (ins->state == SW2_READY)
+        sw2_schedule_output(ins, 1);
+}
+
+static void sw2_rumble_complete(sw2_instance_t* ins) {
+    uint32_t now = btstack_run_loop_get_time_ms();
+    ++ins->rumble_id; // Only a successful write consumes the physical sequence.
+    ins->playback_until = now + ins->pending_guard_ms;
+    ins->playback_guard = true;
+    sw2_update_haptics(ins, now);
+    if (ins->pending_epoch != ins->haptics_epoch)
+        return;
+    if (ins->pending_host && ins->host_count) {
+        sw2_host_command_t* command = &ins->host_queue[ins->host_head];
+        if (command->serial == ins->pending_serial) {
+            sw2_retain_host(ins, command);
+            sw2_pop_host(ins);
+        }
+    }
+    if (ins->pending_barrier)
+        ins->barrier_pending = false;
+    if (ins->pending_revision == ins->output_revision)
+        ins->output_urgent = false;
+}
+
+static bool sw2_send_rumble(sw2_instance_t* ins, uint32_t now) {
+    // Never overwrite the persistent packet while a write request borrows it.
+    if (ins->query != SW2_QUERY_NONE || ins->command_pending)
+        return false;
+    if (ins->playback_guard && !sw2_due(now, ins->playback_until) && !ins->output_urgent)
+        return false;
+    uni_switch2_haptics_frame_t frame;
+    ins->pending_host = false;
+    ins->pending_guard_ms = 6;
+    unsigned sides = sw2_output_sides(ins);
+    if (ins->feedback_active) {
+        sw2_compat_side(&frame.sides[0], ins->weak, ins->strong);
+        frame.sides[1] = frame.sides[0];
+    } else {
+        sw2_host_hold(ins, &frame);
+        while (!ins->barrier_pending && ins->host_count) {
+            const sw2_host_command_t* command = &ins->host_queue[ins->host_head];
+            unsigned count = 1;
+            for (unsigned i = 0; i < sides; ++i)
+                if (command->frame.sides[i].count > count) count = command->frame.sides[i].count;
+            uint8_t guard_ms = (count * 16 + 2) / 3;
+            // Do not begin a native sequence that its original watchdog would
+            // cut off halfway through. Skip it and keep servicing fresh work.
+            if (command->native && !command->held &&
+                (int32_t)(command->expires - now) < guard_ms) {
+                sw2_count_drops(1);
+                sw2_pop_host(ins);
+                continue;
+            }
+            for (unsigned i = 0; i < sides; ++i) {
+                if (command->frame.sides[i].count)
+                    frame.sides[i] = command->frame.sides[i];
+            }
+            ins->pending_guard_ms = guard_ms;
+            ins->pending_host = true;
+            ins->pending_serial = command->serial;
+            break;
+        }
+    }
+    ins->pending_epoch = ins->haptics_epoch;
+    ins->pending_revision = ins->output_revision;
+    ins->pending_barrier = ins->barrier_pending;
+    ins->rumble_data[0] = 0;
+    for (unsigned i = 0; i < sides; ++i) {
+        uni_switch2_haptics_write_block(ins->rumble_data + 1 + 16 * i, &frame.sides[i], ins->rumble_id);
+    }
+    uint16_t length = 1 + 16 * sides;
     bool no_response = (ins->rumble.properties & ATT_PROPERTY_WRITE_WITHOUT_RESPONSE) != 0;
     uint8_t status;
     if (no_response) {
@@ -919,21 +1211,26 @@ static void sw2_send_rumble(sw2_instance_t* ins, uint32_t now) {
                                                                           length, ins->rumble_data);
     } else {
         ins->query = SW2_QUERY_RUMBLE;
-        if (!ins->command_pending)
-            sw2_arm_timeout(ins);
+        sw2_arm_timeout(ins);
         status = gatt_client_write_value_of_characteristic(sw2_gatt_handler, ins->handle, ins->rumble.value_handle,
                                                           length, ins->rumble_data);
     }
     if (status == ERROR_CODE_SUCCESS) {
         if (no_response)
-            ++ins->rumble_id;
-    } else {
-        ins->query = SW2_QUERY_NONE;
-        if (!ins->command_pending)
-            sw2_disarm_timeout(ins);
-        if (!sw2_transient_write_error(status))
-            sw2_fail(ins, "rumble write failed", status);
+            sw2_rumble_complete(ins);
+        return true;
     }
+    ins->query = SW2_QUERY_NONE;
+    if (!ins->command_pending)
+        sw2_disarm_timeout(ins);
+    if (!sw2_transient_write_error(status))
+        sw2_fail(ins, "rumble write failed", status);
+    return false;
+}
+
+static void sw2_next_boundary(uint32_t now, uint32_t boundary, uint32_t* next) {
+    if (!sw2_due(now, boundary) && boundary - now < *next)
+        *next = boundary - now;
 }
 
 static void sw2_output_tick(btstack_timer_source_t* timer) {
@@ -947,15 +1244,24 @@ static void sw2_output_tick(btstack_timer_source_t* timer) {
     if (ins->state != SW2_READY)
         return; // A blocked setup command rescheduled itself, or awaits its ACK.
     uint32_t now = btstack_run_loop_get_time_ms();
-    sw2_send_rumble(ins, now);
+    sw2_update_haptics(ins, now);
+    bool sent = sw2_send_rumble(ins, now);
     if (!ins->device)
         return;
     uint32_t next = SW2_OUTPUT_INTERVAL_MS;
-    if (ins->rumble_scheduled && (!ins->rumble_held || (int32_t)(now - ins->rumble_start) < 0)) {
-        uint32_t boundary = (int32_t)(now - ins->rumble_start) < 0 ? ins->rumble_start : ins->rumble_end;
-        if ((int32_t)(boundary - now) > 0 && boundary - now < next)
-            next = boundary - now;
+    if (ins->playback_guard && (ins->host_count || !sent))
+        sw2_next_boundary(now, ins->playback_until, &next);
+    if (ins->rumble_scheduled) {
+        sw2_next_boundary(now, ins->rumble_start, &next);
+        if (!ins->rumble_held)
+            sw2_next_boundary(now, ins->rumble_end, &next);
     }
+    for (unsigned i = 0; i < sw2_output_sides(ins); ++i) {
+        if (ins->host_sides[i].valid && !ins->host_sides[i].held)
+            sw2_next_boundary(now, ins->host_sides[i].expires, &next);
+    }
+    if (ins->host_count && !ins->host_queue[ins->host_head].held)
+        sw2_next_boundary(now, ins->host_queue[ins->host_head].expires, &next);
     sw2_schedule_output(ins, next);
 }
 
@@ -965,13 +1271,14 @@ void uni_hid_parser_switch2_play_dual_rumble(uni_hid_device_t* d, uint16_t delay
     if (!ins || ins->state != SW2_READY)
         return;
     uint32_t now = btstack_run_loop_get_time_ms();
+    sw2_update_haptics(ins, now);
     ins->weak = weak;
     ins->strong = strong;
     ins->rumble_start = now + delay_ms;
     ins->rumble_end = ins->rumble_start + duration_ms;
     ins->rumble_held = duration_ms == UINT16_MAX;
     ins->rumble_scheduled = duration_ms != 0 && (weak != 0 || strong != 0);
-    // UINT16_MAX is the host's stateful/held sentinel; every other duration is
-    // finite. Keepalive preserves either effect until replacement or stop.
+    ++ins->output_revision;
+    sw2_update_haptics(ins, now);
     sw2_schedule_output(ins, 1);
 }

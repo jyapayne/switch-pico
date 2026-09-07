@@ -89,6 +89,8 @@ struct Bluepad32BackendDiagnostics {
     uint8_t rumble_capable_slots;
     uint8_t feedback_pending_slots;
     uint8_t rumble_pending_slots;
+    uint32_t switch2_ingress_drops;
+    uint32_t switch2_output_drops;
 };
 
 

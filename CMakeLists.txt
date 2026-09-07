@@ -227,7 +227,8 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     )
     target_sources(bluepad32 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_hid_parser_switch2.c
-        ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_switch2_pairing.c)
+        ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_switch2_pairing.c
+        ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_switch2_haptics.c)
 endif()
 
 # Firmware sources live under one include root and are grouped by responsibility.

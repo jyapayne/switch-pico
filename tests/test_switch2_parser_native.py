@@ -46,6 +46,7 @@ def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
             f"-I{btstack.parent / '3rd-party' / 'yxml'}",
             str(root / "tests" / "switch2_parser_native_test.c"),
             str(root / "bluepad32_config" / "parser" / "uni_hid_parser_switch2.c"),
+            str(root / "bluepad32_config" / "parser" / "uni_switch2_haptics.c"),
             str(btstack / "btstack_util.c"),
             "-Wl,--gc-sections",
             "-o",

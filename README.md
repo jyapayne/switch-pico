@@ -266,6 +266,12 @@ build services one CYW43 packet per poll and explicitly reschedules remaining
 input. Packet-level ring reads and bounded incoming-credit batching reduce
 bus work without disabling flow control. `haptics-experiment profile --json`
 adds transport timings, clock/voltage settings and packet-size diagnostics.
+Switch 2 native output adds separate ingress and output-stage drop counters.
+The management response extends from 32 to 40 bytes; the updated host tool
+still reads older 32-byte responses and treats their missing counters as
+unreported, not zero. These count firmware queue discards/rejections, not
+physical actuator-delivery receipts.
+
 
 ### Per-controller profiles
 
@@ -333,14 +339,73 @@ The AIO firmware implements the proprietary BLE protocol for Nintendo `057E:2069
 - **Pairing:** fresh SYNC pairing requires the existing bounded pairing window. A directed reconnect must target this adapter's Bluetooth address and match its persistent application-level authorization. These links are unencrypted and are **not authenticated SMP bonds**. No global Bluetooth security downgrade is made; automatic SMP requests for these devices fail closed while other controllers retain their existing policy. Public/static addresses can own profiles; transient private addresses are not promoted to persistent identities.
 - **Joy-Con ownership:** an opposite ready half automatically joins a solo half. Either connection order works; the first-ready player slot is retained, with the left controller's identity/profile owning the pair. The right half supplies motion. A disconnected half's inputs and pending effects are removed immediately; the surviving half returns to sideways solo operation and its own profile identity. A lone half has rotated controls and SL/SR shoulders. Two pairs exhaust the four physical Bluetooth connections. Pairing does not reopen discovery outside the existing connection policy.
 - **Protocol:** service, characteristic and CCCD UUIDs are discovered rather than trusting fixed ATT handles. Setup requires matching acknowledgements, reads user/factory stick calibration and gyro bias, and rejects malformed/failed transactions. Motion is normalized to the existing SDL-oriented units; sensor clock/range classification and physical axis accuracy still need wider model qualification.
-- **Rumble:** strong/weak amplitudes feed fixed low/high carriers, repeated in three-frame HOLD packets on an approximately 13 ms cadence. Keepalives retain active effects instead of silencing them; finite effects expire, XInput held effects persist until replaced/stopped, and teardown cancels output. Pro output mirrors the same two-band effect to both actuators. This does **not** preserve Nintendo HD substeps or independent left/right HD effects and does not use the original Switch-native opt-in backend.
+- **Rumble:** Switch HD commands now retain independent left/right frequency/amplitude fields and up to three ordered subframes through the native Switch 2 encoder and bounded queues described below. XInput and local feedback retain their conventional fixed-carrier behavior. This is separate from the original Switch-native opt-in backend.
 - **Not implemented:** Joy-Con mouse output, native GameChat signaling, NFC/IR and Switch 2 NSO GameCube support. C and back/rail inputs can instead be remapped to controls the selected USB mode supports.
 
 This is a scoped reimplementation informed by [Bluepad32 PR #219](https://github.com/ricardoquesada/bluepad32/pull/219), reviewed at `9c95e43a87d3bd8a68565da0836d8a758bd8d8af`, not a wholesale fork import. Protocol references: [ndeadly's research](https://github.com/ndeadly/switch2_controller_research), [Nadeflore](https://github.com/Nadeflore/switch2-controllers), [Switch2Connect](https://github.com/TommyWabg/Switch2Connect), and [SDL's Switch 2 sensor implementation](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_switch2.c).
 
-**Verification:** 287 tests passed; AIO, XInput/feasibility, HD-rumble, haptics and UART firmware variants built. Native protocol tests use the SDK's real BTstack types/accessors and cover discovery, acknowledgement ordering, calibration, persistence, output deadlines and teardown. Lifecycle tests cover both Joy-Con connection orders, multiple pairs, detach/replacement and pairing-policy isolation. The editor's extra/Shift mappings were exercised in Chromium.
+**Verification:** 289 tests passed; AIO, XInput/feasibility, HD-rumble, haptics and UART firmware variants built. Native protocol tests use the SDK's real BTstack types/accessors and cover discovery, acknowledgement ordering, calibration, persistence, output deadlines and teardown. Lifecycle tests cover both Joy-Con connection orders, multiple pairs, detach/replacement and pairing-policy isolation. The editor's extra/Shift mappings were exercised in Chromium.
 
 On the flashed Pico, a real Switch 2 Pro (`3C:A9:AB:65:73:12`) completed setup, appeared in persistent pairing/profile inventories, and delivered live sticks, accelerometer, gyro and independent C/GL/GR presses. A 100-report USB rumble exercise retained its connection while 3,033 controller reports arrived. Schema-7 extra mappings were written/read and restored on hardware; all 32 pre-existing profiles, metadata and active selections were compared against a pre-flash backup and preserved, with adapter configuration generation 13 / CRC `3af5ee18` unchanged. Physical rumble feel, Joy-Con 2 pair behavior, long-duration reconnect and mixed-controller transport remain hardware qualification items. Use schema-7-capable firmware after saving expanded profiles.
+
+### Switch 2 native HD rumble
+
+Switch-mode host commands use decoded HD parameters, not the compatibility
+strong/weak peak values. Pro output preserves two independent actuators;
+paired Joy-Con 2 output routes each source side to its physical half.
+A solo Joy-Con uses the louder source independently for each band, retaining
+that band's frequency, with left winning ties and shorter sequences holding
+their final sample. Profiles scale amplitudes before this conversion.
+
+Physical microphone characterization on the Pro Controller established:
+
+- Each five-byte sample contains two **10-bit frequency + 10-bit amplitude**
+  fields. The measured frequency model is
+  `Hz ~= 10 * 2^((code - 1) / 96)`.
+  Original low/high indices map to `193 + 3*index` / `289 + 3*index`;
+  index 64 therefore produces codes 385/481 (160/320 Hz).
+- Block headers `0x50`, `0x60`, `0x70`, plus the four-bit sequence counter,
+  select **one, two or three** valid samples. Unused slots are zeroed.
+  Filling three slots under `0x50` does not play the later slots.
+- A randomized 90-packet run using the other actuator as an acoustic timing
+  reference measured **5.27 ms/frame, ±0.16 ms statistical 95% interval**.
+  Acoustic/threshold systematic error is not included. The sender uses
+  conservative **6/11/16 ms** submission guards, not a claim of exact onset.
+
+Linear Q0.15 amplitudes use SDL's conservative `29000/65535` envelope, producing
+native codes 0–453. This preserves a linear input curve but is not calibrated
+physical-force equivalence; it can feel different from compatibility rumble.
+Source frequency indices are bounded to 1–127.
+
+Each logical slot has a 16-command cross-core ingress FIFO; each physical
+Switch 2 controller has a 16-command transport FIFO. Commands keep their
+original receipt time and connection/output generation. Native commands expire
+after 50 ms; a batch that cannot fit its complete playback guard before that
+deadline is discarded rather than started halfway stale. Expiring unplayed
+history does not interrupt current playback or force a useless HOLD ahead of
+fresh work. Consecutive identical one-sample holds may refresh a pending
+command; multi-sample sequences are never coalesced.
+
+Stops flush older host work, including under backpressure. Local feedback owns
+a separate bounded override while host state advances underneath it; resuming
+uses the current valid final sample, not a replay of masked history.
+Keepalives likewise send only the final sample with count 1. Pending ATT
+write-request buffers remain immutable; late completion cannot resurrect an
+old epoch after stop, reconnect or Joy-Con topology change.
+
+Final single-Pro hardware runs:
+
+| Workload | Result |
+|---|---|
+| Stereo, frequency sweep, and three-subframe patterns (195 USB reports) | Zero ingress/output drops; 1,193 input reports continued |
+| 512 changing one-subframe commands at 125.14 Hz | Zero ingress/output drops; clean stop |
+| 128 changing three-subframe commands at 125.11 Hz | Zero ingress drops; 69 output-stage commands discarded/superseded; clean stop and empty ingress |
+
+Three-subframe commands at 125 Hz exceed the native playback budget. These
+results do **not** establish lossless arbitrary workloads or mixed-controller
+radio performance. Joy-Con hardware and perceptual equivalence remain separate
+qualification items. All 40 profiles, names, active selections and adapter
+configuration were preserved during this upgrade.
 
 ### Rumble per controller
 
@@ -805,15 +870,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 806,872 bytes | 4 MiB |
+| Executable flash image | 815,192 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds and Switch 2 application authorizations | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 141,984 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 150,824 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,089,496 bytes of flash,
-leaving 3,104,808 bytes. Allocated SRAM sections leave 390,496 bytes of link-time
+The executable plus persistent reservations consume 1,097,816 bytes of flash,
+leaving 3,096,488 bytes. Allocated SRAM sections leave 381,656 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.
