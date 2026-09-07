@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1232" height="884" viewBox="-16 160 1232 884" role="img" aria-labelledby="title description">
+  <title id="title">Nintendo Switch 2 Pro Controller — lightweight transparent illustration</title>
+  <desc id="description">A simplified graphite and ivory Nintendo Switch 2 Pro Controller on a transparent background. Five simple gradients and solid vector shapes; no filters, textures, masks, shadows, fonts, or external assets.</desc>
+  <metadata>Reference: https://www.nintendo.com/us/store/products/nintendo-switch-2-pro-controller-123674/ . Original vector illustration; no embedded photographs or external assets.</metadata>
+  <defs>
+    <linearGradient id="shell" x1=".1" y1="0" x2=".85" y2="1" gradientUnits="objectBoundingBox">
+      <stop offset="0" stop-color="#3b4348" />
+      <stop offset="1" stop-color="#20262b" />
+    </linearGradient>
+    <radialGradient id="face" cx="43%" cy="-18%" r="114%" gradientTransform="translate(0 -.06) scale(1 1.06)">
+      <stop offset="0" stop-color="#4b555a" />
+      <stop offset="1" stop-color="#293137" />
+    </radialGradient>
+    <linearGradient id="ivory" x1="0" y1="0" x2=".15" y2="1">
+      <stop offset="0" stop-color="#e6e8e4" />
+      <stop offset="1" stop-color="#b5bec2" />
+    </linearGradient>
+    <linearGradient id="buttonTop" x1=".3" y1="0" x2=".6" y2="1">
+      <stop offset="0" stop-color="#505b62" />
+      <stop offset="1" stop-color="#303a41" />
+    </linearGradient>
+    <radialGradient id="stickDish" cx="49%" cy="95%" r="107%">
+      <stop offset="0" stop-color="#283239" />
+      <stop offset="1" stop-color="#424f58" />
+    </radialGradient>
+    <path id="bodyShape" d="M132 278 C153 234 219 211 319 205 C470 188 730 188 881 205 C981 211 1047 234 1068 278 C1102 312 1118 395 1133 477 C1158 613 1180 743 1195 846 C1209 940 1180 1004 1115 1023 C1061 1041 1022 1006 992 957 C958 902 933 838 907 800 C898 786 888 778 862 778 L338 778 C312 778 302 786 293 800 C267 838 242 902 208 957 C178 1006 139 1041 85 1023 C20 1004 -9 940 5 846 C20 743 42 613 67 477 C82 395 98 312 132 278 Z" />
+    <path id="faceShape" d="M133 282 C211 216 336 202 600 202 C864 202 989 216 1067 282 C1080 327 1089 386 1082 451 C1077 536 1036 618 977 696 C950 733 914 748 858 749 L342 749 C286 748 250 733 223 696 C164 618 123 536 118 451 C111 386 120 327 133 282 Z" />
+    <g id="actionButton">
+      <circle cy="2" r="49.5" fill="#14191c" stroke="#51585b" stroke-opacity=".38" stroke-width="1.5" />
+      <circle cy="1" r="46.5" fill="#1b242a" />
+      <circle cy="-2" r="44.5" fill="url(#buttonTop)" stroke="#687278" stroke-width="1.8" />
+      <path d="M-36-27 A44 44 0 0 1 29-35" fill="none" stroke="#b1b8b9" stroke-width="1.15" opacity=".22" stroke-linecap="round" />
+    </g>
+    <g id="smallButton">
+      <circle cy="1" r="31" fill="#0c1114" stroke="#62696a" stroke-opacity=".3" stroke-width="1.5" />
+      <circle cy="1" r="28" fill="#1b242a" />
+      <circle cy="-2" r="26.5" fill="url(#buttonTop)" stroke="#687278" stroke-width="1.7" />
+    </g>
+    <g id="analogStick">
+      <circle r="106" fill="#3f484d" />
+      <circle r="96" cy="2" fill="#222a2f" />
+      <circle r="78" cy="1" fill="#131c22" />
+      <circle r="72" cy="-5" fill="#68747b" stroke="#8d989c" stroke-width="2" />
+      <circle r="60" cy="-5" fill="url(#stickDish)" stroke="#172127" stroke-width="3" />
+    </g>
+  </defs>
+  <g id="controller">
+    <g id="shoulder-buttons">
+      <path d="M127 289 C139 226 207 185 342 177 C366 174 377 177 398 187 L443 209 L244 270 Z" fill="url(#ivory)" stroke="#a3aaab" stroke-width="1.6" />
+      <path d="M1073 289 C1061 226 993 185 858 177 C834 174 823 177 802 187 L757 209 L956 270 Z" fill="url(#ivory)" stroke="#a3aaab" stroke-width="1.6" />
+      <path d="M141 258 C170 210 240 186 342 180 C365 177 379 181 395 189" fill="none" stroke="#eceeeb" stroke-width="2" />
+      <path d="M1059 258 C1030 210 960 186 858 180 C835 177 821 181 805 189" fill="none" stroke="#eceeeb" stroke-width="2" />
+      <path d="M416 201 Q600 185 784 201 L806 222 H394Z" fill="#a5acae" stroke="#cbd0d0" stroke-width="1.5" />
+      <path d="M448 198 Q600 190 752 198" stroke="#eff0ed" stroke-opacity=".65" stroke-width="2" fill="none" />
+    </g>
+    <use xlink:href="#bodyShape" fill="url(#shell)" stroke="#171c20" stroke-width="2" />
+    <use xlink:href="#faceShape" fill="url(#face)" stroke="#101619" stroke-width="2.4" />
+    <path d="M134 279 C222 218 365 202 600 202 C835 202 978 218 1066 279" stroke="#687275" stroke-width="2.2" fill="none" />
+    <path d="M124 322 C105 459 138 574 225 694 C251 730 287 746 342 747 H858 C913 746 949 730 975 694" fill="none" stroke="#778083" stroke-opacity=".1" stroke-width="1.2" />
+    <path d="M339 779 H861" stroke="#737e81" stroke-opacity=".23" stroke-width="1.6" />
+    <g id="console-mark" transform="translate(520 242)" fill="#151e23">
+      <path d="M36 0H22C9 0 0 10 0 23V59C0 72 9 82 22 82H36ZM29 7V75H22C13 75 7 69 7 59V23C7 13 13 7 22 7Z" fill-rule="evenodd" />
+      <circle cx="21" cy="25" r="7.8" />
+      <path d="M46 0H61C74 0 82 10 82 23V59C82 72 74 82 61 82H46ZM64 37A8 8 0 1 0 64 53A8 8 0 1 0 64 37Z" fill-rule="evenodd" />
+      <path d="M94 17 C103 4 113-3 127-3 C147-3 158 8 158 25 C158 42 146 52 119 66 H159 V82 H94 V68 C136 35 139 32 138 24 C138 17 133 14 127 14 C119 14 112 19 106 27Z" />
+      <g>
+        <path aria-label="NINTENDO" d="M26.371 111 21.274 101.994Q21.424 103.305 21.424 104.102V111H19.249V99.304H22.046L27.218 108.385Q27.068 107.132 27.068 106.103V99.304H29.243V111ZM36.526 111V99.304H38.974V111ZM53.371 111 48.274 101.994Q48.424 103.305 48.424 104.102V111H46.249V99.304H49.046L54.218 108.385Q54.068 107.132 54.068 106.103V99.304H56.243V111ZM68.805 101.197V111H66.356V101.197H62.579V99.304H72.59V101.197ZM78.91 111V99.304H88.107V101.197H81.359V104.135H87.601V106.028H81.359V109.107H88.448V111ZM102.371 111 97.274 101.994Q97.424 103.305 97.424 104.102V111H95.249V99.304H98.046L103.218 108.385Q103.068 107.132 103.068 106.103V99.304H105.243V111ZM122.951 105.065Q122.951 106.875 122.242 108.223Q121.532 109.572 120.233 110.286Q118.934 111 117.257 111H112.526V99.304H116.759Q119.714 99.304 121.333 100.794Q122.951 102.284 122.951 105.065ZM120.486 105.065Q120.486 103.181 119.507 102.189Q118.527 101.197 116.709 101.197H114.974V109.107H117.05Q118.627 109.107 119.556 108.02Q120.486 106.933 120.486 105.065ZM141.175 105.098Q141.175 106.924 140.452 108.311Q139.73 109.697 138.385 110.431Q137.041 111.166 135.248 111.166Q132.492 111.166 130.927 109.543Q129.363 107.92 129.363 105.098Q129.363 102.284 130.923 100.707Q132.484 99.13 135.264 99.13Q138.045 99.13 139.61 100.724Q141.175 102.317 141.175 105.098ZM138.676 105.098Q138.676 103.206 137.78 102.131Q136.883 101.056 135.264 101.056Q133.621 101.056 132.724 102.122Q131.828 103.189 131.828 105.098Q131.828 107.024 132.745 108.132Q133.662 109.24 135.248 109.24Q136.891 109.24 137.784 108.161Q138.676 107.082 138.676 105.098Z" />
+        <path aria-label="SWITCH" d="M33.054 135.26Q33.054 138.696 30.506 140.514Q27.958 142.332 23.027 142.332Q18.528 142.332 15.971 140.738Q13.415 139.145 12.684 135.907L17.416 135.127Q17.897 136.986 19.292 137.825Q20.686 138.663 23.16 138.663Q28.29 138.663 28.29 135.542Q28.29 134.546 27.7 133.898Q27.111 133.251 26.04 132.819Q24.969 132.388 21.931 131.773Q19.308 131.159 18.279 130.786Q17.25 130.412 16.419 129.906Q15.589 129.399 15.008 128.686Q14.427 127.972 14.104 127.009Q13.78 126.046 13.78 124.801Q13.78 121.63 16.162 119.945Q18.544 118.26 23.093 118.26Q27.443 118.26 29.626 119.621Q31.809 120.982 32.44 124.12L27.692 124.768Q27.327 123.257 26.206 122.493Q25.085 121.729 22.994 121.729Q18.544 121.729 18.544 124.519Q18.544 125.432 19.018 126.013Q19.491 126.594 20.42 127Q21.35 127.407 24.189 128.021Q27.559 128.735 29.012 129.341Q30.464 129.947 31.311 130.752Q32.158 131.558 32.606 132.678Q33.054 133.799 33.054 135.26ZM60.897 142H55.086L51.916 128.47Q51.334 126.079 50.936 123.473Q50.538 125.647 50.289 126.785Q50.04 127.922 46.752 142H40.942L34.916 118.608H39.879L43.266 133.716L44.03 137.368Q44.495 135.061 44.935 132.96Q45.375 130.86 48.247 118.608H53.725L56.68 131.06Q57.029 132.454 57.859 137.368L58.274 135.442L59.154 131.624L61.976 118.608H66.94ZM69.748 142V118.608H74.645V142ZM90.252 122.394V142H85.355V122.394H77.801V118.608H97.823V122.394ZM111.886 138.48Q116.319 138.48 118.045 134.031L122.312 135.642Q120.934 139.028 118.27 140.68Q115.605 142.332 111.886 142.332Q106.242 142.332 103.162 139.136Q100.083 135.94 100.083 130.196Q100.083 124.436 103.054 121.348Q106.026 118.26 111.67 118.26Q115.788 118.26 118.377 119.912Q120.967 121.563 122.013 124.768L117.697 125.946Q117.149 124.187 115.547 123.149Q113.945 122.111 111.77 122.111Q108.45 122.111 106.731 124.17Q105.013 126.229 105.013 130.196Q105.013 134.23 106.781 136.355Q108.549 138.48 111.886 138.48ZM141.107 142V131.973H130.914V142H126.016V118.608H130.914V127.922H141.107V118.608H146.004V142Z" />
+      </g>
+    </g>
+    <g id="minus-button" transform="translate(454 341)">
+      <use xlink:href="#smallButton" />
+      <path d="M-13-4H13V2H-13Z" fill="#141b20" />
+      <path d="M-13 3H13" stroke="#778186" stroke-opacity=".45" />
+    </g>
+    <g id="plus-button" transform="translate(743 341)">
+      <use xlink:href="#smallButton" />
+      <path d="M-3-16H3V-5H14V1H3V12H-3V1H-14V-5H-3Z" fill="#11191e" />
+      <path d="M-14 2H-4V13H3 M4 2H14" stroke="#7a8589" stroke-opacity=".35" fill="none" />
+    </g>
+    <g id="left-stick" transform="translate(272 436)">
+      <use xlink:href="#analogStick" />
+    </g>
+    <g id="right-stick" transform="translate(746 607)">
+      <use xlink:href="#analogStick" />
+    </g>
+    <g id="action-buttons">
+      <g transform="translate(909 351)">
+        <use xlink:href="#actionButton" />
+        <path d="M-11-17L11 13M11-17L-11 13" fill="none" stroke="#bac0c1" stroke-width="3" stroke-linecap="square" />
+      </g>
+      <g transform="translate(813 434)">
+        <use xlink:href="#actionButton" />
+        <path d="M-11-17L0 0L11-17M0 0V13" fill="none" stroke="#bac0c1" stroke-width="3" stroke-linecap="square" stroke-linejoin="round" />
+      </g>
+      <g transform="translate(1005 434)">
+        <use xlink:href="#actionButton" />
+        <path d="M-13 13L-1-17H1L13 13M-8 3H8" fill="none" stroke="#bac0c1" stroke-width="3" stroke-linejoin="round" stroke-linecap="square" />
+      </g>
+      <g transform="translate(909 518)">
+        <use xlink:href="#actionButton" />
+        <path d="M-9-17V13H2C17 13 17-3 3-3H-9M-9-17H1C14-17 15-3 3-3" fill="none" stroke="#bac0c1" stroke-width="3" stroke-linejoin="round" />
+      </g>
+    </g>
+    <g id="capture-button" transform="translate(526 434)">
+      <rect x="-28" y="-28" width="56" height="56" rx="9" fill="#11171b" stroke="#667073" stroke-opacity=".24" stroke-width="1.3" />
+      <rect x="-24.5" y="-25" width="49" height="49" rx="6" fill="url(#buttonTop)" stroke="#687278" stroke-width="1.8" />
+      <circle cy="-1" r="17" fill="none" stroke="#101b21" stroke-width="2" />
+      <path d="M-16 5A17 17 0 0 0 16 5" fill="none" stroke="#7a858a" stroke-opacity=".6" stroke-width="1.5" />
+    </g>
+    <g id="home-button" transform="translate(672 435)">
+      <use xlink:href="#smallButton" />
+      <path d="M-18-5L0-20L18-5H12V11H-12V-5ZM-4-3V5H4V-3Z" fill="#11191e" fill-rule="evenodd" />
+      <path d="M-12 12H12 M-4-2H4" fill="none" stroke="#929a9d" stroke-opacity=".35" />
+    </g>
+    <g id="directional-pad" transform="translate(424 602)">
+      <path d="M-22-99H23Q36-99 36-86V-36H85Q99-36 99-22V23Q99 37 85 37H36V86Q36 99 23 99H-23Q-36 99-36 86V37H-85Q-99 37-99 23V-22Q-99-36-85-36H-36V-86Q-36-99-22-99Z" fill="#11171b" stroke="#50595c" stroke-opacity=".3" stroke-width="1.5" />
+      <path d="M-21-91H22Q29-91 29-83V-30H83Q91-30 91-22V22Q91 30 83 30H29V83Q29 91 21 91H-21Q-29 91-29 83V30H-83Q-91 30-91 22V-22Q-91-30-83-30H-29V-83Q-29-91-21-91Z" fill="#141d23" />
+      <path d="M-20-88H20Q27-88 27-81V-30Q27-27 31-27H81Q88-27 88-20V19Q88 26 81 26H31Q27 26 27 30V80Q27 87 20 87H-20Q-27 87-27 80V30Q-27 26-31 26H-81Q-88 26-88 19V-20Q-88-27-81-27H-31Q-27-27-27-30V-81Q-27-88-20-88Z" fill="#657178" />
+      <path d="M-18-81H18Q21-81 21-77V-31Q21-20 32-20H77Q81-20 81-17V16Q81 19 77 19H32Q21 19 21 30V76Q21 80 18 80H-18Q-21 80-21 76V30Q-21 19-32 19H-77Q-81 19-81 16V-17Q-81-20-77-20H-32Q-21-20-21-31V-77Q-21-81-18-81Z" fill="url(#buttonTop)" />
+      <path d="M-21-84H19 M-84-21H-33Q-23-21-23-32V-78 M31-22H80" stroke="#adb5b7" stroke-opacity=".4" stroke-width="1.6" fill="none" stroke-linecap="round" />
+      <path d="M-6-53L0-65L7-53Z M-6 56L0 68L7 56Z M-54-6L-66 1L-54 8Z M55-6L67 1L55 8Z" fill="#b0b8ba" opacity=".78" />
+      <circle cy="-1" r="15" fill="#202a31" opacity=".13" />
+    </g>
+    <g id="chat-button" transform="translate(599 694)">
+      <rect x="-27" y="-27" width="54" height="54" rx="8" fill="#0c1216" stroke="#717b7e" stroke-opacity=".3" stroke-width="1.5" />
+      <rect x="-23.5" y="-24" width="47" height="47" rx="5" fill="url(#buttonTop)" stroke="#687278" stroke-width="1.4" />
+      <path d="M10-10C-7-20-19-6-10 7C-5 14 4 14 11 8" fill="none" stroke="#10181d" stroke-width="5.5" stroke-linecap="square" />
+      <path d="M-10 9C-5 15 5 16 12 10" fill="none" stroke="#8b9599" stroke-opacity=".35" stroke-width="1" />
+    </g>
+  </g>
+</svg>

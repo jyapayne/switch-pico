@@ -43,6 +43,10 @@ const state = {
   previewInputConnected: false,
   playtestRequestActive: false,
   liveSample: null,
+  layoutPreview: "auto",
+  presentation: null,
+  presentationKey: "",
+  diagramKey: "",
   playtestShift: { key: "", held: false, active: false },
   playtestTimer: 0,
   libraryRequestActive: false,
@@ -69,7 +73,13 @@ const elements = {
   controllerCanvas: document.querySelector("#controllerCanvas"),
   controllerImage: document.querySelector("#controllerImage"),
   controllerModel: document.querySelector("#controllerModel"),
-  controllerCredit: document.querySelector("#controllerCredit"),
+  controllerLayoutStatus: document.querySelector("#controllerLayoutStatus"),
+  controllerLayoutPreview: document.querySelector("#controllerLayoutPreview"),
+  controllerLayoutHelp: document.querySelector("#controllerLayoutHelp"),
+  controllerLayoutNote: document.querySelector("#controllerLayoutNote"),
+  controllerPhotoWrap: document.querySelector("#controllerPhotoWrap"),
+  controllerStage: document.querySelector("#controllerStage"),
+  selectedSource: document.querySelector("#selectedSource"),
   controllerHotspots: document.querySelector("#controllerHotspots"),
   extraControls: document.querySelector("#extraControls"),
   selectedMapping: document.querySelector("#selectedMapping"),
@@ -176,11 +186,62 @@ const directionalLabels = {
   right_sr: "Right SR",
 };
 
+function matchingLiveSample(sample = state.liveSample) {
+  const owner = currentOwner();
+  return Boolean(sample?.connected && owner && sample.owner_key === owner.key &&
+    (owner.index === 0 || sample.identity_key === owner.key));
+}
+
 function currentControllerStyle() {
-  return state.identities[state.identityIndex]?.controller?.style || "generic";
+  const style = state.presentation?.style || currentOwner()?.controller?.style || "generic";
+  return style === "wii" ? "switch" : style;
+}
+
+function sourceLabel(control) {
+  return (!state.presentation?.layout.generic && state.presentation?.layout.controls[control]?.label) || controlLabel(control);
+}
+
+function sourceGlyph(control) {
+  return (!state.presentation?.layout.generic && state.presentation?.layout.controls[control]?.glyph) || controlGlyph(control, currentControllerStyle());
+}
+
+function sourceAvailable(control) {
+  return state.presentation?.sources.includes(control) ?? true;
+}
+
+function sourceChoices(choices, stored = []) {
+  return choices.filter(control => sourceAvailable(control) || stored.includes(control));
+}
+
+function sourceOptions(selected, choices = state.schema.controls, excluded = []) {
+  const available = sourceChoices(choices);
+  if (selected && !available.includes(selected)) available.push(selected);
+  return `<option value=""${selected === null ? " selected" : ""}>None</option>` +
+    available.map(control => `<option value="${escapeHtml(control)}"${selected === control ? " selected" : ""}${excluded.includes(control) && control !== selected ? " disabled" : ""}>${escapeHtml(sourceLabel(control))}${sourceAvailable(control) ? "" : " (stored / unavailable)"}</option>`).join("");
+}
+
+function syncControllerPresentation() {
+  const owner = currentOwner();
+  const live = matchingLiveSample() ? state.liveSample : null;
+  const controller = live?.controller || owner?.controller || {};
+  const preview = state.layoutPreview !== "auto";
+  const layoutId = preview ? state.layoutPreview : controller.layout || "generic";
+  const layout = ControllerLayouts[layoutId] || ControllerLayouts.generic;
+  const reported = live?.source_controls || owner?.source_controls || state.schema.controls;
+  const sources = preview ? Object.keys(layout.controls) : reported.filter(control =>
+    layout.generic || Object.hasOwn(layout.controls, control));
+  const topologyKnown = !layoutId.startsWith("joycon2-") || live?.layout === layoutId;
+  const liveDiagram = Boolean(live && !preview && topologyKnown && layoutId !== "wii-remote" && !layout.generic);
+  const style = preview ? layout.style : controller.style || layout.style;
+  const key = [owner?.key, layoutId, style, preview, liveDiagram, Boolean(live), live?.identity_key, controller.model, sources.join(",")].join("|");
+  if (state.presentationKey === key) return false;
+  state.presentationKey = key;
+  state.presentation = { layoutId, layout, sources, preview, liveDiagram, live, style, topologyKnown };
+  return true;
 }
 
 function controlLabel(control, style = currentControllerStyle()) {
+  if (style === "wii") style = "switch";
   return state.schema.control_labels?.[style]?.[control] ||
     directionalLabels[control] ||
     label(control);
@@ -274,16 +335,25 @@ function clearPlaytest(message, stateName = "waiting") {
     .forEach((button) => button.classList.remove("pressed"));
   document.querySelectorAll(".curve-marker.visible")
     .forEach((marker) => marker.classList.remove("visible"));
+  if (state.schema && state.profile && syncControllerPresentation()) {
+    renderButtonMap();
+    refreshSourceControls();
+  }
   renderCapture();
 }
 
 function renderPlaytest(sample) {
   state.liveSample = sample;
-  if (!sample.connected) {
+  if (!matchingLiveSample(sample)) {
     clearPlaytest(
-      "Connect or move a controller to compare its raw input with this draft."
+      sample.connected ? "Live input belongs to another profile owner; this draft and its layout are unchanged." :
+        "Connect or move the selected controller to compare its raw input with this draft."
     );
     return;
+  }
+  if (syncControllerPresentation()) {
+    renderButtonMap();
+    refreshSourceControls();
   }
   state.previewInputConnected = true;
   const shift = state.profile.shift;
@@ -336,7 +406,7 @@ function renderPlaytest(sample) {
   );
   updateCurveMarker("triggers", "left", sample.triggers.left / 65535);
   updateCurveMarker("triggers", "right", sample.triggers.right / 65535);
-  const style = sample.controller?.style || currentControllerStyle();
+  const style = currentControllerStyle();
   elements.playtestLeftTriggerLabel.textContent =
     controlLabel("left_trigger", style);
   elements.playtestRightTriggerLabel.textContent =
@@ -347,15 +417,15 @@ function renderPlaytest(sample) {
   elements.controllerCanvas.querySelectorAll("[data-controller-button]")
     .forEach((button) => {
       button.classList.toggle(
-        "pressed", pressed.has(button.dataset.controllerButton)
+        "pressed", state.presentation.liveDiagram && pressed.has(button.dataset.controllerButton)
       );
     });
   elements.playtestExtraInputs.textContent =
-    (sample.extra_buttons || []).map((button) => controlLabel(button, style)).join(", ") || "None";
+    (sample.extra_buttons || []).map(button => sourceLabel(button)).join(", ") || "None";
   elements.playtestMappedButtons.textContent =
     mapped.buttons.map((button) => controlLabel(button, style)).join(", ") || "None";
   elements.playtestMappingHelp.textContent =
-    `${state.playtestShift.active ? "Shift" : "Base"} layer preview; shortcuts, macros and Turbo are not simulated.`;
+    `${state.playtestShift.active ? "Shift" : "Base"} layer preview; shortcuts, macros and Turbo are not simulated.${state.presentation.liveDiagram ? "" : " Diagram is a reference/preview; physical highlighting is off."}`;
   elements.playtestPanel.dataset.state = "live";
   elements.playtestStatus.textContent = "Live";
   const owner = currentOwner();
@@ -532,7 +602,7 @@ function persistOwnerKey(key) {
 function identitySignature(identities) {
   return identities.map((entry) => (
     `${entry.index}:${entry.key}:${entry.label}:` +
-    `${entry.controller.model}:${entry.controller.style}`
+    `${entry.controller.model}:${entry.controller.style}:${entry.controller.layout}:${entry.source_controls?.join(",")}`
   )).join("|");
 }
 
@@ -571,6 +641,10 @@ function syncLibraryMetadata(identities, restoreStoredOwner = false) {
     elements.activeBadge.hidden = !state.active;
     elements.activate.disabled =
       !state.adapterConnected || state.busy || state.active;
+    if (state.schema && syncControllerPresentation()) {
+      renderButtonMap();
+      refreshSourceControls();
+    }
   }
   return ownerChanged;
 }
@@ -652,11 +726,7 @@ function modeOptions(modes, selected) {
 }
 
 function modifierOptions(selected, excluded = []) {
-  const available = currentOwner()?.modifier_controls || state.schema.buttons;
-  return `<option value=""${selected === null ? " selected" : ""}>None</option>` +
-    state.schema.controls.map((control) =>
-      `<option value="${control}"${selected === control ? " selected" : ""}${available.includes(control) && !excluded.includes(control) ? "" : " disabled"}>${escapeHtml(controlLabel(control))}${available.includes(control) ? "" : " (unavailable)"}</option>`
-    ).join("");
+  return sourceOptions(selected, state.schema.controls, excluded);
 }
 
 function renderShortcuts() {
@@ -671,10 +741,8 @@ function renderShortcuts() {
     <div class="control-card">
       <label for="shortcut-${index}">Profile ${index + 1}${state.profileNames[index] ? ` · ${escapeHtml(state.profileNames[index])}` : ""}</label>
       <select class="select" id="shortcut-${index}" data-kind="shortcut-selector" data-index="${index}"${shortcuts.modifier === null ? " disabled" : ""}>
-        <option value=""${selector === null ? " selected" : ""}>None</option>
-        ${state.schema.shortcut_selectors.map((button) =>
-          `<option value="${button}"${selector === button ? " selected" : ""}${button === shortcuts.modifier || shortcuts.profiles.some((item, other) => other !== index && item === button) ? " disabled" : ""}>${escapeHtml(controlLabel(button))}</option>`
-        ).join("")}
+        ${sourceOptions(selector, state.schema.shortcut_selectors,
+          [shortcuts.modifier, ...shortcuts.profiles.filter((_, other) => other !== index)])}
       </select>
     </div>`).join("");
 }
@@ -694,8 +762,8 @@ function renderShift() {
   elements.shiftMap.innerHTML = [...state.schema.buttons, ...state.schema.extra_buttons].map((button) => {
     const map = state.schema.extra_buttons.includes(button) ? shift.extra_button_map : shift.button_map;
     return `
-    <div class="control-card">
-      <label for="shift-map-${button}">${escapeHtml(controlLabel(button))} → alternate output</label>
+    <div class="control-card" data-source-card="${button}"${sourceAvailable(button) ? "" : " hidden"}>
+      <label for="shift-map-${button}"><span data-source-label="${button}">${escapeHtml(sourceLabel(button))}</span> → alternate output</label>
       <select class="select" id="shift-map-${button}" data-kind="shift-map" data-name="${button}"${shift.mode === "off" || shift.modifier === null ? " disabled" : ""}>${buttonOptions(map[button], true, state.schema.buttons)}</select>
     </div>`;
   }).join("");
@@ -708,24 +776,6 @@ function updateShiftValidity() {
     ? "Choose a modifier for Hold or Toggle, or turn Shift off." : "");
 }
 
-const controllerArtwork = {
-  generic: {
-    source: "/assets/controller-xbox.svg",
-    alt: "Generic Xbox-layout controller artwork",
-  },
-  xbox: {
-    source: "/assets/controller-xbox.svg",
-    alt: "Xbox controller artwork",
-  },
-  switch: {
-    source: "/assets/controller-switch-pro.svg",
-    alt: "Nintendo Switch Pro Controller artwork",
-  },
-  playstation: {
-    source: "/assets/controller-dualsense.svg",
-    alt: "Sony DualSense controller artwork",
-  },
-};
 
 const controllerGlyphs = {
   generic: {
@@ -804,51 +854,168 @@ function setControlMapping(button, output) {
 
 
 function renderButtonMap() {
-  const owner = state.identities[state.identityIndex];
-  const style = owner?.controller?.style || "generic";
-  const artwork = controllerArtwork[style] || controllerArtwork.generic;
+  syncControllerPresentation();
+  const { layout, layoutId, sources, preview, liveDiagram, live, topologyKnown } = state.presentation;
+  const style = currentControllerStyle();
   const selected = state.selectedButton;
   const mappedOutput = getControlMapping(selected);
-
   elements.controllerCanvas.dataset.style = style;
-  elements.controllerImage.src = artwork.source;
-  elements.controllerImage.alt = artwork.alt;
-  elements.controllerModel.textContent = owner?.controller?.model || "Generic controller";
-  elements.controllerCredit.href = "https://github.com/AL2009man/Gamepad-Asset-Pack";
-  elements.controllerCredit.textContent = "Controller artwork by Al. Lopez · MIT";
-
-  elements.extraControls.innerHTML = state.schema.extra_buttons.map((button) =>
-    `<button type="button" data-controller-button="${button}">${escapeHtml(controlLabel(button, style))}</button>`
-  ).join("");
-  elements.controllerCanvas.querySelectorAll("[data-controller-button]").forEach((hotspot) => {
+  elements.controllerCanvas.dataset.layout = layoutId;
+  elements.controllerLayoutStatus.dataset.state = liveDiagram ? "live" : "preview";
+  elements.controllerLayoutStatus.textContent = preview ? "Manual layout preview" :
+    liveDiagram ? "Live · matching owner" : live ? "Live input · reference diagram" : "Offline · owner reference";
+  elements.controllerModel.textContent = layout.name;
+  elements.controllerLayoutHelp.textContent = preview
+    ? `Manual preview only${live ? `; connected input is ${live.controller.model}` : ""}. No topology or saved mapping is changed. Physical highlighting is off.`
+    : live && !topologyKnown
+      ? "Legacy firmware does not report Joy-Con pair/solo topology. This is an owner reference, not detected solo mode. Choose a preview or update firmware."
+      : "Auto uses only the selected owner's metadata. Preview changes this editor's source labels and diagram, never firmware topology or saved mappings.";
+  elements.controllerLayoutNote.textContent = layout.note ||
+    (layout.generic ? "Generic reference art is not a model identification. Additional reported sources are unlocated, not buttons on this drawing." :
+      "Rear triggers are listed off-art below the front view. Unavailable stored mappings are retained.");
+  const diagramKey = `${layoutId}:${sources.join(",")}`;
+  if (diagramKey !== state.diagramKey) {
+    const focusedSource = elements.controllerCanvas.contains(document.activeElement)
+      ? document.activeElement.dataset.controllerButton : null;
+    state.diagramKey = diagramKey;
+    const [x, y, width, height] = layout.viewBox;
+    const angle = layout.rotation || 0;
+    const rotated = Math.abs(angle) === 90;
+    elements.controllerPhotoWrap.style.setProperty("--diagram-min", `${layout.minWidth}px`);
+    elements.controllerPhotoWrap.style.setProperty("--diagram-max", `${layout.maxWidth || Math.max(layout.minWidth, 900)}px`);
+    elements.controllerPhotoWrap.style.setProperty("--diagram-ratio", rotated ? `${height} / ${width}` : `${width} / ${height}`);
+    elements.controllerStage.style.setProperty("--stage-width", `${rotated ? width / height * 100 : 100}%`);
+    elements.controllerStage.style.setProperty("--stage-height", `${rotated ? height / width * 100 : 100}%`);
+    elements.controllerStage.style.setProperty("--stage-angle", `${angle}deg`);
+    elements.controllerStage.style.setProperty("--label-angle", `${-angle}deg`);
+    elements.controllerImage.src = `/assets/${layout.asset}`;
+    elements.controllerImage.alt = `${layout.name} · supplied front-view illustration`;
+    elements.controllerHotspots.replaceChildren();
+    elements.extraControls.replaceChildren();
+    for (const id of sources) {
+      const control = layout.controls[id];
+      const hotspot = document.createElement("button");
+      hotspot.type = "button";
+      hotspot.dataset.controllerButton = id;
+      if (control && !control.offArt) {
+        hotspot.style.setProperty("--x", `${(control.x - x) / width * 100}%`);
+        hotspot.style.setProperty("--y", `${(control.y - y) / height * 100}%`);
+        elements.controllerHotspots.append(hotspot);
+      } else {
+        elements.extraControls.append(hotspot);
+      }
+    }
+    for (const note of layout.annotations || []) {
+      const annotation = document.createElement("span");
+      annotation.className = "controller-annotation";
+      annotation.textContent = note.label;
+      annotation.style.setProperty("--x", `${(note.x - x) / width * 100}%`);
+      annotation.style.setProperty("--y", `${(note.y - y) / height * 100}%`);
+      elements.controllerHotspots.append(annotation);
+    }
+    if (focusedSource) {
+      const replacement = [...elements.controllerCanvas.querySelectorAll("[data-controller-button]")]
+        .find(button => button.dataset.controllerButton === focusedSource);
+      (replacement || elements.selectedSource).focus({ preventScroll: true });
+    }
+  }
+  elements.controllerCanvas.querySelectorAll("[data-controller-button]").forEach(hotspot => {
     const button = hotspot.dataset.controllerButton;
     const output = getControlMapping(button);
-    hotspot.textContent = state.schema.extra_buttons.includes(button) ? controlLabel(button, style) : controlGlyph(button, style);
+    hotspot.textContent = hotspot.parentElement === elements.extraControls ? sourceLabel(button) : sourceGlyph(button);
     hotspot.classList.toggle("selected", button === selected);
-    hotspot.classList.toggle("disabled-map", output === null);
-    hotspot.title = `${controlLabel(button, style)} → ${output === null ? "Disabled" : controlLabel(output, style)}`;
+    hotspot.classList.toggle("disabled-map", output == null);
+    if (!liveDiagram) hotspot.classList.remove("pressed");
+    hotspot.setAttribute("aria-pressed", String(button === selected));
+    hotspot.title = `${sourceLabel(button)} [${button}] → ${output == null ? "Disabled" : controlLabel(output)}`;
     hotspot.setAttribute("aria-label", hotspot.title);
-    hotspot.onclick = () => {
-      state.selectedButton = button;
-      stopMacroPreview("Preview stopped: control selection changed.");
-      renderButtonMap();
-      elements.controllerCanvas.querySelector(`[data-controller-button="${button}"]`).focus();
-    };
   });
-
-  elements.selectedControlGlyph.textContent = controlGlyph(selected, style);
-  elements.selectedControlName.textContent = controlLabel(selected, style);
-  elements.selectedControlDescription.textContent = (
-    `Physical ${controlLabel(selected, style)} currently produces ${mappedOutput === null ? "no output" : controlLabel(mappedOutput, style)}.`
-  );
+  elements.selectedSource.innerHTML = sourceOptions(selected);
+  elements.selectedSource.querySelector('option[value=""]')?.remove();
+  elements.selectedControlGlyph.textContent = sourceGlyph(selected);
+  elements.selectedControlName.textContent = sourceLabel(selected);
+  elements.selectedControlDescription.textContent =
+    `${sourceAvailable(selected) ? "Source" : "Stored / unavailable source"} ${sourceLabel(selected)} [${selected}] produces ${mappedOutput == null ? "no output" : controlLabel(mappedOutput)}.${sourceAvailable(selected) ? "" : " Its mapping is retained; change the preview to locate it."}`;
   elements.selectedMapping.innerHTML = buttonOptions(mappedOutput, true, state.schema.output_controls, style);
-  elements.selectedMapping.onchange = () => {
-    setControlMapping(selected, elements.selectedMapping.value || null);
-    renderButtonMap();
-    updateDirtyState();
-  };
-  if (state.liveSample) renderPlaytest(state.liveSample);
 }
+
+elements.controllerCanvas.addEventListener("click", event => {
+  const hotspot = event.target.closest("[data-controller-button]");
+  if (!hotspot || state.busy || captureBlocking()) return;
+  state.selectedButton = hotspot.dataset.controllerButton;
+  stopMacroPreview("Preview stopped: control selection changed.");
+  renderButtonMap();
+});
+elements.selectedSource.addEventListener("change", () => {
+  if (state.busy || captureBlocking()) return;
+  state.selectedButton = elements.selectedSource.value;
+  renderButtonMap();
+});
+elements.selectedMapping.addEventListener("change", () => {
+  if (state.busy || captureBlocking()) return;
+  setControlMapping(state.selectedButton, elements.selectedMapping.value || null);
+  renderButtonMap();
+  updateDirtyState();
+});
+elements.controllerLayoutPreview.addEventListener("change", () => {
+  if (state.busy || captureBlocking()) return;
+  state.layoutPreview = elements.controllerLayoutPreview.value;
+  renderButtonMap();
+  refreshSourceControls();
+});
+
+// Patch source controls in place on topology changes. Never rerender the editor,
+// stop macro playback, replace focused inputs, or mutate hidden draft values.
+function refreshSourceControls() {
+  if (!state.profile) return;
+  elements.builtinActions.dataset.controllerStyle = currentControllerStyle();
+  elements.macroControls.dataset.controllerStyle = currentControllerStyle();
+  const shortcuts = state.profile.shortcuts;
+  const modifiers = [
+    [elements.shortcutModifier.querySelector("select"), shortcuts.modifier, shortcuts.profiles],
+    [elements.shift.querySelector("#shift-modifier"), state.profile.shift.modifier, []],
+    [elements.macroControls.querySelector("#macro-cancel"), state.profile.macros[state.selectedMacro].cancel, []],
+  ];
+  for (const [select, selected, excluded] of modifiers) {
+    if (select) select.innerHTML = sourceOptions(selected, state.schema.controls, excluded);
+  }
+  elements.shortcuts.querySelectorAll("select").forEach((select, index) => {
+    select.innerHTML = sourceOptions(shortcuts.profiles[index], state.schema.shortcut_selectors,
+      [shortcuts.modifier, ...shortcuts.profiles.filter((_, other) => other !== index)]);
+  });
+  document.querySelectorAll("[data-source-card]").forEach(card => {
+    const available = sourceAvailable(card.dataset.sourceCard);
+    card.hidden = !available && !card.contains(document.activeElement);
+    card.classList.toggle("source-unavailable", !available);
+  });
+  document.querySelectorAll("[data-source-label]").forEach(node => {
+    const id = node.dataset.sourceLabel;
+    node.textContent = sourceLabel(id) + (sourceAvailable(id) ? "" : " (stored / unavailable)");
+  });
+  document.querySelectorAll('[data-kind="action-chord"]').forEach(input => {
+    const id = input.dataset.name;
+    const card = input.closest("label");
+    card.hidden = !sourceAvailable(id) && !input.checked && input !== document.activeElement;
+    card.classList.toggle("source-unavailable", !sourceAvailable(id));
+    card.querySelector("b").textContent = sourceGlyph(id);
+    card.querySelector("small").textContent = sourceLabel(id) + (sourceAvailable(id) ? "" : " (stored / unavailable)");
+  });
+  elements.shiftMap.querySelectorAll("select").forEach(select => {
+    const map = state.schema.extra_buttons.includes(select.dataset.name)
+      ? state.profile.shift.extra_button_map : state.profile.shift.button_map;
+    select.innerHTML = buttonOptions(map[select.dataset.name], true, state.schema.buttons);
+  });
+  document.querySelectorAll("[data-output-label]").forEach(node => {
+    node.textContent = controlLabel(node.dataset.outputLabel);
+  });
+}
+
+elements.form.addEventListener("focusout", event => {
+  const card = event.target.closest("[data-source-card]");
+  if (card && !sourceAvailable(card.dataset.sourceCard) && !card.contains(event.relatedTarget)) {
+    card.hidden = true;
+  }
+});
 
 const analogDefinitions = [
   ["sticks", "left", "Left stick", [
@@ -982,14 +1149,14 @@ function renderTurbo() {
   elements.turbo.innerHTML = state.schema.buttons.map((button) => {
     const override = settings.overrides[button];
     const off = state.profile.turbo[button] === "off";
-    return `<div class="control-card turbo-card" data-turbo-button="${button}">
-      <label for="turbo-${button}">${escapeHtml(controlLabel(button))} · physical source</label>
+    return `<div class="control-card turbo-card" data-turbo-button="${button}" data-source-card="${button}"${sourceAvailable(button) ? "" : " hidden"}>
+      <label for="turbo-${button}"><span data-source-label="${button}">${escapeHtml(sourceLabel(button))}</span> · physical source</label>
       <select class="select" id="turbo-${button}" data-kind="turbo" data-name="${button}">
         ${modeOptions(state.schema.turbo_modes, state.profile.turbo[button])}
       </select>
       <label class="checkbox-pill turbo-override">
         <input type="checkbox" data-kind="turbo-override" data-name="${button}"${override ? " checked" : ""}${off ? " disabled" : ""}>
-        <span>Override shared settings for ${escapeHtml(controlLabel(button))}</span>
+        <span>Override shared settings for <span data-source-label="${button}">${escapeHtml(sourceLabel(button))}</span></span>
       </label>
       <div class="turbo-setting-grid">${turboSettingFields(override || settings.defaults, button, off || !override)}</div>
       <p class="field-help" data-turbo-timing></p>
@@ -1010,7 +1177,7 @@ function updateTurboTiming() {
     card.classList.toggle("narrow-pulse", tooNarrow);
     card.querySelector("[data-turbo-timing]").textContent =
       `${on.toFixed(2)} ms ON / ${off.toFixed(2)} ms OFF${mode === "off" ? " · inactive" : ""}`;
-    if (tooNarrow) narrow.push(controlLabel(button));
+    if (tooNarrow) narrow.push(sourceLabel(button));
   });
   elements.turboTimingNotice.classList.toggle("warning", narrow.length > 0);
   elements.turboTimingNotice.textContent = narrow.length
@@ -1032,9 +1199,9 @@ function actionChordCard(action, title, description, selectedButtons, defaults) 
   const effectiveButtons = inherited ? defaults : selectedButtons;
   const selected = new Set(effectiveButtons);
   const defaultText = inherited
-    ? `Using default: ${defaults.map((button) => controlLabel(button)).join(" + ")}.`
+    ? `Using default: ${defaults.map(button => sourceLabel(button)).join(" + ")}.`
     : defaults?.length
-      ? `Clear every selection to restore ${defaults.map((button) => controlLabel(button)).join(" + ")}.`
+      ? `Clear every selection to restore ${defaults.map(button => sourceLabel(button)).join(" + ")}.`
       : "Empty disables this action.";
   return `
     <div class="action-card">
@@ -1044,11 +1211,11 @@ function actionChordCard(action, title, description, selectedButtons, defaults) 
       </div>
       <div class="check-grid controller-choices">
         ${state.schema.controls.map((button) => `
-          <label class="checkbox-pill controller-choice">
+          <label class="checkbox-pill controller-choice"${sourceAvailable(button) || selected.has(button) ? "" : " hidden"}>
             <input type="checkbox" data-kind="action-chord" data-action="${action}" data-name="${button}"${selected.has(button) ? " checked" : ""}>
             <span data-button="${button}">
-              <b>${controlGlyph(button, state.identities[state.identityIndex]?.controller?.style || "generic")}</b>
-              <small>${controlLabel(button)}</small>
+              <b>${escapeHtml(sourceGlyph(button))}</b>
+              <small>${escapeHtml(sourceLabel(button))}${sourceAvailable(button) ? "" : " (stored / unavailable)"}</small>
             </span>
           </label>`).join("")}
       </div>
@@ -1665,8 +1832,7 @@ function renderMacro() {
   stopMacroPreview("Ready", true);
   draggedMacroStep = null;
   macroNotice("");
-  const controllerStyle =
-    state.identities[state.identityIndex]?.controller?.style || "generic";
+  const controllerStyle = currentControllerStyle();
   elements.builtinActions.dataset.controllerStyle = controllerStyle;
   elements.macroControls.dataset.controllerStyle = controllerStyle;
   const macro = state.profile.macros[state.selectedMacro];
@@ -1711,7 +1877,7 @@ function renderMacro() {
     <div class="control-card">
       <label for="macro-cancel">Macro ${state.selectedMacro + 1} cancel control</label>
       <select class="select" id="macro-cancel" data-kind="macro-selector" data-field="cancel">
-        ${buttonOptions(macro.cancel, true, state.schema.controls, controllerStyle)}
+        ${sourceOptions(macro.cancel)}
       </select>
       <div class="macro-playback-fields">
         <div class="number-field">
@@ -1738,7 +1904,7 @@ function renderMacro() {
   elements.macroPreviewTitle.textContent = `Macro ${state.selectedMacro + 1} draft preview`;
   elements.macroPreviewButtons.innerHTML = state.schema.buttons.map((button) => `
     <span class="preview-button" data-preview-button="${button}">
-      <b>${escapeHtml(controlLabel(button, controllerStyle))}</b><small>Passthrough</small>
+      <b data-output-label="${button}">${escapeHtml(controlLabel(button, controllerStyle))}</b><small>Passthrough</small>
     </span>`).join("");
   renderMacroSteps();
   updateMacroPlayback();
@@ -1795,7 +1961,7 @@ function renderMacroSteps() {
               ${state.schema.buttons.map((button) => `
                 <label class="checkbox-pill">
                   <input type="checkbox" data-kind="macro-output" data-index="${index}" data-name="${button}"${outputButtons.has(button) ? " checked" : ""}${overrides.has("buttons") ? "" : " disabled"}>
-                  <span>${controlLabel(button, controllerStyle)}</span>
+                  <span data-output-label="${button}">${escapeHtml(controlLabel(button, controllerStyle))}</span>
                 </label>`).join("")}
             </div>
           </div>
@@ -1832,6 +1998,7 @@ function renderEditor() {
   renderFeedback();
   renderTurbo();
   renderMacro();
+  refreshSourceControls();
   elements.loading.hidden = true;
   elements.form.hidden = false;
   updateDirtyState();

@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="540" height="764" viewBox="0 0 540 764" role="img" aria-labelledby="title description">
+  <title id="title">Wii Remote and Nunchuk — connected white controllers</title>
+  <desc id="description">Original white Nintendo Wii Remote beside a white Nunchuk, joined by a gently looping cable at the remote expansion connector. The Nunchuk shows its raised analog stick and rear C and Z buttons in a three-quarter view. Transparent background. Simple vector gradients, with no filters, textures, fonts or external assets.</desc>
+  <metadata>Visual references: https://commons.wikimedia.org/wiki/File:Nintendo-Wii-Remote-wNunchuk.jpg and https://en.wikipedia.org/wiki/Wii_Remote . Independently drawn artwork; no embedded photographs.</metadata>
+  <defs>
+    <linearGradient id="white" x1=".1" y1="0" x2=".9" y2="1">
+      <stop stop-color="#f5f7f9" />
+      <stop offset="1" stop-color="#d7dee5" />
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2=".6">
+      <stop stop-color="#e1e7ec" />
+      <stop offset="1" stop-color="#b9c4cf" />
+    </linearGradient>
+    <linearGradient id="button" x1=".2" y1="0" x2=".7" y2="1">
+      <stop stop-color="#fff" />
+      <stop offset="1" stop-color="#d3dde6" />
+    </linearGradient>
+    <radialGradient id="rubber" cx="45%" cy="30%" r="80%">
+      <stop stop-color="#eef2f4" />
+      <stop offset="1" stop-color="#c1cdd5" />
+    </radialGradient>
+    <radialGradient id="nunchuk-shell" cx="32%" cy="18%" r="90%">
+      <stop stop-color="#f5f8fa"/>
+      <stop offset=".58" stop-color="#dce4ea"/>
+      <stop offset="1" stop-color="#b3c1cc"/>
+    </radialGradient>
+    <linearGradient id="nunchuk-deck" x1=".25" y1="0" x2=".8" y2="1">
+      <stop stop-color="#ffffff"/>
+      <stop offset=".65" stop-color="#e9eff3"/>
+      <stop offset="1" stop-color="#ced9e1"/>
+    </linearGradient>
+    <g id="small-button">
+      <circle cy="1" r="14" fill="#b1bfca" />
+      <circle cy="-1" r="12.5" fill="url(#button)" stroke="#f9fbfc" stroke-width="1.1" />
+    </g>
+    <g id="number-button">
+      <circle cy="1" r="21" fill="#a5b4c0" />
+      <circle cy="-1" r="19" fill="url(#button)" stroke="#fbfcfd" stroke-width="1.2" />
+    </g>
+  </defs>
+  <g id="nunchuk-cable" fill="none" stroke-linecap="round">
+    <path d="M13 504C8 597 43 688 143 718C219 741 321 739 375 718C404 707 420 696 420 676" stroke="#a4b2bd" stroke-width="9"/>
+    <path d="M13 504C8 597 43 688 143 718C219 741 321 739 375 718C404 707 420 696 420 676" stroke="#e7edf1" stroke-width="6.5"/>
+  </g>
+  <g id="expansion-connector">
+    <path d="M396 615H444V651Q444 664 435 665H405Q396 664 396 651Z" fill="url(#side)" stroke="#96a6b2" stroke-width="1.3" />
+    <path d="M399 615H441V648Q441 657 434 658H406Q399 657 399 648Z" fill="url(#white)" stroke="#f7f9fb" stroke-width="1.2" />
+    <path d="M391 629H396V643H391ZM444 629H449V643H444Z" fill="#bac6cf" stroke="#93a4b2" stroke-width="1" />
+    <path d="M413 663H427V679H413Z" fill="#d6dfe5" stroke="#9cabb7" stroke-width="1" />
+    <path d="M414 668H426M414 673H426" stroke="#a8b6c1" stroke-width="1" />
+  </g>
+  <g id="nunchuk" aria-label="White Nunchuk with a sculpted palm grip and low analog stick" transform="translate(-70 140) scale(.6)">
+    <g id="rear-buttons" stroke="#9eafbc" stroke-width="1.8">
+      <path d="M611 257L637 263Q650 266 646 280L641 296Q639 302 631 301L605 292Z" fill="url(#side)"/>
+      <path d="M591 301L621 309Q636 313 631 327L619 351Q615 360 605 356L581 346Z" fill="url(#side)"/>
+      <path d="M619 270L638 275M603 315L621 321" fill="none" stroke="#f7fafc" stroke-width="2"/>
+    </g>
+    <path d="M154 525C130 511 154 452 193 398C240 331 302 276 365 234C418 198 464 175 506 168C552 160 615 165 643 185C656 196 657 224 649 252C637 295 609 346 588 367C569 371 562 356 541 357C498 357 459 389 430 423C390 470 356 529 307 560C261 589 210 584 178 563C162 553 154 540 154 525Z" fill="url(#nunchuk-shell)" stroke="#9fadb7" stroke-width="2.1"/>
+    <path d="M154 525C133 507 164 446 198 399C245 334 305 281 369 238C422 202 466 179 508 173C550 167 610 169 639 185C649 191 652 206 649 221C579 242 516 266 457 302C380 348 324 407 263 464C217 507 182 532 154 525Z" fill="url(#nunchuk-deck)" stroke="#c1cdd6" stroke-width="1.5"/>
+    <path d="M165 512C194 474 218 440 263 397C320 341 382 289 454 254C524 220 581 202 630 196" fill="none" stroke="#fff" stroke-opacity=".65" stroke-width="4" stroke-linecap="round"/>
+    <path d="M160 531C193 530 225 503 267 465C327 409 384 352 459 308C521 271 584 247 647 228" fill="none" stroke="#aebec9" stroke-width="1.8"/>
+    <path d="M181 559C218 580 261 579 301 556C337 534 366 499 396 460" fill="none" stroke="#f1f6f9" stroke-opacity=".8" stroke-width="2"/>
+    <g id="analog-stick" transform="translate(505 178)">
+      <ellipse cy="2" rx="60" ry="24" fill="#cad5de"/>
+      <ellipse cy="1" rx="49" ry="19" fill="#a9bac6"/>
+      <path d="M-27-34H27L29 1C22 14-22 14-29 1Z" fill="url(#white)" stroke="#b4c3cd" stroke-width="1.5"/>
+      <path d="M-26-30V0Q0 10 26 0" fill="none" stroke="#fff" stroke-width="2"/>
+      <path d="M-45-42C-44-54-25-58 0-58C25-58 44-54 45-42L49-35C48-22-48-22-49-35Z" fill="url(#side)" stroke="#b1c0cb" stroke-width="1.5"/>
+      <ellipse cy="-44" rx="43" ry="13" fill="url(#rubber)" stroke="#f8fbfc" stroke-width="1.8"/>
+      <ellipse cy="-45" rx="34" ry="9" fill="#e1e9ee" stroke="#c4d0d9" stroke-width="1.2"/>
+      <path d="M-30-49Q0-58 30-49" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+    </g>
+  </g>
+  <g id="nunchuk-strain-relief" transform="translate(22 485) rotate(25)">
+    <path d="M-10-13H10V15Q10 21 5 21H-5Q-10 21-10 15Z" fill="url(#side)" stroke="#a0afba" stroke-width="1.1"/>
+    <path d="M-8-5H8M-8 3H8M-7 11H7" stroke="#a6b6c2" stroke-width="1.3"/>
+    <path d="M-7-10V15" stroke="#f8fafc" stroke-width="1.1"/>
+  </g>
+  <g transform="translate(320 10)">
+    <g id="wii-remote" aria-label="Original white Wii Remote">
+      <path d="M44 13H156Q176 13 176 37V585Q176 614 150 614H50Q24 614 24 585V37Q24 13 44 13Z" fill="url(#side)" stroke="#8e9da9" stroke-width="1.5" />
+      <path d="M49 13H151Q164 13 164 22H36Q36 13 49 13Z" fill="#45545f" />
+      <path d="M46 19H154Q171 19 171 37V582Q171 601 150 603H50Q29 601 29 582V37Q29 19 46 19Z" fill="url(#white)" stroke="#bdc9d2" stroke-width="1.2" />
+      <path d="M45 23H155Q167 23 167 38M33 41V579Q33 596 51 598" stroke="#fff" stroke-width="1.7" fill="none" />
+      <path d="M44 606Q100 611 156 606" fill="none" stroke="#a7b5c0" stroke-width="1.2" />
+      <g id="power-button" transform="translate(56 50)">
+        <use xlink:href="#small-button" />
+        <path d="M-4-6A7 7 0 1 0 4-6M0-9V-1" fill="none" stroke="#ce727b" stroke-width="1.8" stroke-linecap="round" />
+      </g>
+      <g id="directional-pad" transform="translate(100 128)">
+        <path d="M-12-39H12Q17-39 17-34V-17H34Q39-17 39-12V12Q39 17 34 17H17V34Q17 39 12 39H-12Q-17 39-17 34V17H-34Q-39 17-39 12V-12Q-39-17-34-17H-17V-34Q-17-39-12-39Z" fill="#adbcc7" />
+        <path d="M-11-36H11Q14-36 14-33V-17Q14-14 17-14H33Q36-14 36-11V11Q36 14 33 14H17Q14 14 14 17V33Q14 36 11 36H-11Q-14 36-14 33V17Q-14 14-17 14H-33Q-36 14-36 11V-11Q-36-14-33-14H-17Q-14-14-14-17V-33Q-14-36-11-36Z" fill="url(#button)" stroke="#fff" stroke-width="1.2" />
+        <path d="M0-28V-20M0 20V28M-28 0H-20M20 0H28" fill="none" stroke="#a9b7c2" stroke-width="2.3" stroke-linecap="round" />
+      </g>
+      <g id="a-button" transform="translate(100 217)">
+        <circle cy="1" r="26" fill="#b1bdc9" stroke="#97a7b5" stroke-width="1.2" />
+        <circle cy="-1" r="23.5" fill="url(#button)" stroke="#fff" stroke-width="1.4" />
+        <path d="M-7 8L0-12L7 8M-4 1H4" fill="none" stroke="#96a7b6" stroke-width="1.8" stroke-linejoin="round" />
+      </g>
+      <g id="minus-button" transform="translate(60 295)">
+        <use xlink:href="#small-button" />
+        <path d="M-5-1H5" stroke="#95a6b5" stroke-width="1.8" />
+      </g>
+      <g id="home-button" transform="translate(100 295)">
+        <use xlink:href="#small-button" />
+        <path d="M-8-2L0-9L8-2H6V6H-6V-2ZM-2 0V4H2V0Z" fill="#68b9d8" fill-rule="evenodd" />
+      </g>
+      <g id="plus-button" transform="translate(140 295)">
+        <use xlink:href="#small-button" />
+        <path d="M-5-1H5M0-6V4" stroke="#95a6b5" stroke-width="1.8" />
+      </g>
+      <g id="one-button" transform="translate(100 446)">
+        <use xlink:href="#number-button" />
+        <path d="M-5-7L1-11V9M-5 9H6" fill="none" stroke="#94a5b4" stroke-width="1.8" stroke-linejoin="round" />
+      </g>
+      <g id="two-button" transform="translate(100 496)">
+        <use xlink:href="#number-button" />
+        <path d="M-6-7C-3-15 10-12 7-4C5 0-2 4-6 9H8" fill="none" stroke="#94a5b4" stroke-width="1.8" stroke-linejoin="round" />
+      </g>
+      <g id="player-indicators">
+        <rect x="54" y="542" width="9" height="9" rx=".8" fill="#64bce8" stroke="#379aca" stroke-width=".7" />
+        <path d="M82 542H91V551H82ZM110 542H119V551H110ZM138 542H147V551H138Z" fill="#8496a5" />
+      </g>
+      <g id="speaker" fill="#8293a1">
+        <circle cx="89" cy="342" r="1.4" />
+        <circle cx="100" cy="342" r="1.4" />
+        <circle cx="111" cy="342" r="1.4" />
+        <circle cx="89" cy="353" r="2.1" />
+        <circle cx="100" cy="353" r="2.1" />
+        <circle cx="111" cy="353" r="2.1" />
+        <circle cx="89" cy="364" r="2.1" />
+        <circle cx="100" cy="364" r="2.1" />
+        <circle cx="111" cy="364" r="2.1" />
+        <circle cx="89" cy="375" r="2.1" />
+        <circle cx="100" cy="375" r="2.1" />
+        <circle cx="111" cy="375" r="2.1" />
+        <circle cx="89" cy="386" r="2.1" />
+        <circle cx="100" cy="386" r="2.1" />
+        <circle cx="111" cy="386" r="2.1" />
+        <circle cx="89" cy="397" r="1.4" />
+        <circle cx="100" cy="397" r="1.4" />
+        <circle cx="111" cy="397" r="1.4" />
+      </g>
+      <path aria-label="POWER" fill="#a1aeba" d="M46.87 73.97Q46.87 74.585 46.468 74.948Q46.067 75.311 45.378 75.311H44.104V77H43.517V72.666H45.341Q46.07 72.666 46.47 73.007Q46.87 73.349 46.87 73.97ZM46.279 73.976Q46.279 73.136 45.27 73.136H44.104V74.847H45.295Q46.279 74.847 46.279 73.976ZM52.351 74.813Q52.351 75.493 52.091 76.003Q51.831 76.514 51.345 76.788Q50.859 77.062 50.197 77.062Q49.53 77.062 49.045 76.791Q48.561 76.52 48.306 76.008Q48.05 75.496 48.05 74.813Q48.05 73.773 48.619 73.187Q49.188 72.601 50.204 72.601Q50.865 72.601 51.351 72.864Q51.837 73.127 52.094 73.629Q52.351 74.13 52.351 74.813ZM51.751 74.813Q51.751 74.004 51.346 73.542Q50.942 73.081 50.204 73.081Q49.459 73.081 49.053 73.536Q48.647 73.992 48.647 74.813Q48.647 75.628 49.058 76.106Q49.468 76.585 50.197 76.585Q50.948 76.585 51.349 76.122Q51.751 75.659 51.751 74.813ZM57.85 77H57.149L56.398 74.247Q56.325 73.988 56.183 73.321Q56.103 73.678 56.048 73.918Q55.992 74.158 55.208 77H54.507L53.23 72.666H53.842L54.62 75.419Q54.759 75.936 54.876 76.483Q54.949 76.145 55.046 75.745Q55.143 75.345 55.9 72.666H56.463L57.217 75.363Q57.389 76.025 57.487 76.483L57.515 76.376Q57.598 76.022 57.65 75.799Q57.703 75.576 58.515 72.666H59.127ZM60.215 77V72.666H63.504V73.146H60.803V74.536H63.319V75.01H60.803V76.52H63.63V77ZM68.031 77 66.905 75.2H65.555V77H64.967V72.666H67.007Q67.739 72.666 68.137 72.993Q68.536 73.321 68.536 73.905Q68.536 74.388 68.254 74.717Q67.973 75.047 67.477 75.133L68.708 77ZM67.945 73.912Q67.945 73.533 67.688 73.335Q67.431 73.136 66.948 73.136H65.555V74.736H66.973Q67.437 74.736 67.691 74.519Q67.945 74.302 67.945 73.912Z" />
+      <path aria-label="HOME" fill="#a1aeba" d="M93.173 324V321.991H90.829V324H90.242V319.666H90.829V321.499H93.173V319.666H93.761V324ZM99.424 321.813Q99.424 322.493 99.164 323.003Q98.904 323.514 98.418 323.788Q97.932 324.062 97.27 324.062Q96.603 324.062 96.118 323.791Q95.634 323.52 95.378 323.008Q95.123 322.496 95.123 321.813Q95.123 320.773 95.692 320.187Q96.261 319.601 97.276 319.601Q97.938 319.601 98.424 319.864Q98.91 320.127 99.167 320.629Q99.424 321.13 99.424 321.813ZM98.824 321.813Q98.824 321.004 98.419 320.542Q98.015 320.081 97.276 320.081Q96.532 320.081 96.126 320.536Q95.72 320.992 95.72 321.813Q95.72 322.628 96.13 323.106Q96.541 323.585 97.27 323.585Q98.021 323.585 98.422 323.122Q98.824 322.659 98.824 321.813ZM104.477 324V321.108Q104.477 320.629 104.505 320.186Q104.354 320.736 104.234 321.047L103.114 324H102.702L101.567 321.047L101.395 320.524L101.293 320.186L101.302 320.527L101.315 321.108V324H100.792V319.666H101.564L102.717 322.671Q102.779 322.853 102.836 323.06Q102.893 323.268 102.911 323.36Q102.936 323.237 103.014 322.986Q103.093 322.736 103.12 322.671L104.252 319.666H105.006V324ZM106.59 324V319.666H109.878V320.146H107.177V321.536H109.694V322.01H107.177V323.52H110.004V324Z" />
+      <path aria-label="Wii" fill="#9eabb6" d="M101.224 585H98.106L94.771 572.764Q94.442 571.615 93.813 568.648Q93.458 570.234 93.212 571.301Q92.966 572.367 89.479 585H86.362L80.688 565.736H83.409L86.868 577.973Q87.483 580.27 88.003 582.703Q88.331 581.199 88.762 579.422Q89.192 577.645 92.556 565.736H95.058L98.407 577.727Q99.173 580.666 99.61 582.703L99.733 582.225Q100.103 580.652 100.335 579.661Q100.567 578.67 104.177 565.736H106.897ZM108.866 567.062V564.711H111.327V567.062ZM108.866 585V570.207H111.327V585ZM115.087 567.062V564.711H117.548V567.062ZM115.087 585V570.207H117.548V585Z" />
+    </g>
+  </g>
+</svg>

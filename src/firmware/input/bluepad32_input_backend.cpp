@@ -2829,6 +2829,32 @@ void bluepad32_input_backend_playtest_snapshot(
             (slot.device->report_parser.set_lightbar_color != nullptr ? 2u : 0u) |
             (slot.device->report_parser.set_player_leds != nullptr ? 4u : 0u) |
             (slot.state.motion_sample_count != 0 ? 8u : 0u);
+        if (slot.active) {
+            const int side = joycon_side(slot.device);
+            if (side != 0) {
+                out->controller_layout = slot.companion != nullptr
+                    ? Bluepad32ControllerLayout::kJoyCon2MergedPair
+                    : side < 0
+                        ? Bluepad32ControllerLayout::kJoyCon2LeftSolo
+                        : Bluepad32ControllerLayout::kJoyCon2RightSolo;
+            } else {
+                switch (slot.device->controller_subtype) {
+                    case CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL:
+                    case CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL:
+                    case CONTROLLER_SUBTYPE_WIIMOTE_ACCEL:
+                        out->controller_layout =
+                            Bluepad32ControllerLayout::kWiiRemote;
+                        break;
+                    case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK:
+                    case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL:
+                        out->controller_layout =
+                            Bluepad32ControllerLayout::kWiiNunchuk;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
     }
     critical_section_exit(&g_state_lock);
 }

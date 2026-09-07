@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="800" height="570" viewBox="0 0 800 570" role="img" aria-labelledby="title description">
+  <title id="title">Nintendo Switch Pro Controller — original model</title>
+  <desc id="description">Front-view original Nintendo Switch Pro Controller, with a smoky charcoal face, separate dark grip panels, black shoulder buttons, offset analog sticks, cross directional pad, Nintendo ABXY layout, capture and home buttons, and lower player indicators. Transparent background. Lightweight vector shapes and simple gradients; no filters, textures, fonts or external images.</desc>
+  <metadata>Visual reference: https://www.nintendo.com/us/store/products/pro-controller/ . Independently drawn vector artwork.</metadata>
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#3c454b" />
+      <stop offset="1" stop-color="#20272c" />
+    </linearGradient>
+    <linearGradient id="face" x1=".2" y1="0" x2=".75" y2="1">
+      <stop stop-color="#4b555a" />
+      <stop offset="1" stop-color="#293137" />
+    </linearGradient>
+    <linearGradient id="button" x1="0" y1="0" x2=".3" y2="1">
+      <stop stop-color="#505b62" />
+      <stop offset="1" stop-color="#303a41" />
+    </linearGradient>
+    <radialGradient id="dish" cx="50%" cy="90%" r="100%">
+      <stop stop-color="#283239" />
+      <stop offset="1" stop-color="#424f58" />
+    </radialGradient>
+    <g id="stick">
+      <circle cy="2" r="62" fill="#202a31" stroke="#546169" stroke-width="2" />
+      <circle cy="1" r="52" fill="#141e25" />
+      <circle cy="-2" r="47" fill="#536169" stroke="#748189" stroke-width="1.5" />
+      <circle cy="-2" r="39" fill="url(#dish)" stroke="#1b272f" stroke-width="2.5" />
+    </g>
+    <g id="key">
+      <circle cy="2" r="29" fill="#172128" />
+      <circle cy="-1" r="26.5" fill="url(#button)" stroke="#657179" stroke-width="1.3" />
+    </g>
+    <g id="small-key">
+      <circle cy="1" r="19" fill="#172128" />
+      <circle cy="-1" r="17" fill="url(#button)" stroke="#657179" stroke-width="1.1" />
+    </g>
+    <g id="capture">
+      <rect x="-17" y="-17" width="34" height="34" rx="5" fill="#172128" />
+      <rect x="-14.5" y="-15" width="29" height="29" rx="3" fill="url(#button)" stroke="#657179" stroke-width="1.2" />
+      <circle cy="-1" r="10.5" fill="none" stroke="#202c33" stroke-width="1.5" />
+    </g>
+    <g id="home">
+      <use xlink:href="#small-key" />
+      <path d="M-11-3L0-13L11-3H8V8H-8V-3ZM-3-2V4H3V-2Z" fill="#18232b" fill-rule="evenodd" />
+    </g>
+  </defs>
+  <g id="controller">
+    <g id="shoulder-buttons" fill="url(#shell)" stroke="#647079" stroke-width="1.4">
+      <path d="M105 94C114 49 155 23 231 22L275 46L198 98Z" />
+      <path d="M695 94C686 49 645 23 569 22L525 46L602 98Z" />
+    </g>
+    <path d="M153 57C218 34 300 40 400 39C500 40 582 34 647 57C696 75 720 128 738 220C754 301 776 414 780 458C785 512 763 543 723 552C681 560 658 529 631 480L597 421Q586 405 566 405H234Q214 405 203 421L169 480C142 529 119 560 77 552C37 543 15 512 20 458C24 414 46 301 62 220C80 128 104 75 153 57Z" fill="url(#shell)" stroke="#182229" stroke-width="2" />
+    <path d="M153 57C218 34 300 40 400 39C500 40 582 34 647 57C696 75 716 122 733 207C684 223 646 257 616 303C585 351 574 385 566 405H234C226 385 215 351 184 303C154 257 116 223 67 207C84 122 104 75 153 57Z" fill="url(#face)" stroke="#182229" stroke-width="1.8" />
+    <path d="M107 112C124 81 139 69 157 63C223 41 302 45 400 44C498 45 577 41 643 63C661 69 676 81 693 112" fill="none" stroke="#87939a" stroke-width="1.6" />
+    <path d="M69 212C120 232 160 270 188 313C213 351 224 381 230 402M731 212C680 232 640 270 612 313C587 351 576 381 570 402" fill="none" stroke="#637179" stroke-width="1.3" />
+    <path d="M40 433C31 499 51 535 81 544M760 433C769 499 749 535 719 544" fill="none" stroke="#56636b" stroke-opacity=".6" stroke-width="1.3" />
+    <g id="smoky-shell-detail" fill="none" stroke="#85939b" stroke-width="2" opacity=".12">
+      <circle cx="171" cy="103" r="10" />
+      <circle cx="629" cy="103" r="10" />
+      <circle cx="258" cy="355" r="9" />
+      <circle cx="547" cy="361" r="9" />
+      <path d="M198 87H246L271 102M602 87H554L529 102M350 262H445L461 279V345H367L350 328ZM274 373H340M474 375H525" />
+    </g>
+    <use xlink:href="#stick" transform="translate(190 181)" />
+    <use xlink:href="#stick" transform="translate(500 306)" />
+    <g id="minus-button" transform="translate(301 118)">
+      <use xlink:href="#small-key" />
+      <path d="M-9-3H9V2H-9Z" fill="#18232b" />
+    </g>
+    <g id="plus-button" transform="translate(499 118)">
+      <use xlink:href="#small-key" />
+      <path d="M-2.5-12H2.5V-3H11V2H2.5V11H-2.5V2H-11V-3H-2.5Z" fill="#18232b" />
+    </g>
+    <use xlink:href="#capture" transform="translate(349 181)" />
+    <use xlink:href="#home" transform="translate(451 181)" />
+    <g id="directional-pad" transform="translate(294 306)">
+      <path d="M-17-62H17Q23-62 23-56V-23H56Q62-23 62-17V17Q62 23 56 23H23V56Q23 62 17 62H-17Q-23 62-23 56V23H-56Q-62 23-62 17V-17Q-62-23-56-23H-23V-56Q-23-62-17-62Z" fill="#152028" />
+      <path d="M-15-57H15Q18-57 18-54V-23Q18-18 23-18H54Q57-18 57-15V15Q57 18 54 18H23Q18 18 18 23V54Q18 57 15 57H-15Q-18 57-18 54V23Q-18 18-23 18H-54Q-57 18-57 15V-15Q-57-18-54-18H-23Q-18-18-18-23V-54Q-18-57-15-57Z" fill="url(#button)" stroke="#6b7880" stroke-width="1.5" />
+      <path d="M-4-38L0-46L4-38ZM-4 38L0 46L4 38ZM-38-4L-46 0L-38 4ZM38-4L46 0L38 4Z" fill="#b4bfc5" />
+    </g>
+    <g id="player-indicators">
+      <path d="M356 406H444V416H356Z" fill="#1a252c" />
+      <rect x="372" y="409" width="8" height="3" rx="1" fill="#99bc76" />
+      <path d="M388 409H396V412H388ZM404 409H412V412H404ZM420 409H428V412H420Z" fill="#606e76" />
+    </g>
+    <g transform="translate(610 138)">
+      <use xlink:href="#key" />
+      <path d="M-8-13L8 10M8-13L-8 10" fill="none" stroke="#bdc6cb" stroke-width="2.6" stroke-linejoin="round" />
+    </g>
+    <g transform="translate(558 190)">
+      <use xlink:href="#key" />
+      <path d="M-9-13L0-1L9-13M0-1V10" fill="none" stroke="#bdc6cb" stroke-width="2.6" stroke-linejoin="round" />
+    </g>
+    <g transform="translate(662 190)">
+      <use xlink:href="#key" />
+      <path d="M-10 10L0-14L10 10M-6 2H6" fill="none" stroke="#bdc6cb" stroke-width="2.6" stroke-linejoin="round" />
+    </g>
+    <g transform="translate(610 242)">
+      <use xlink:href="#key" />
+      <path d="M-7-13V10H1C12 10 12-2 1-2H-7M-7-13H1C11-13 11-2 1-2" fill="none" stroke="#bdc6cb" stroke-width="2.6" stroke-linejoin="round" />
+    </g>
+    <g id="switch-mark" transform="translate(349 63) scale(.64)" fill="#919da3" opacity=".65">
+      <g transform="translate(39 0)">
+        <path d="M36 0H22C9 0 0 10 0 23V59C0 72 9 82 22 82H36ZM29 7V75H22C13 75 7 69 7 59V23C7 13 13 7 22 7Z" fill-rule="evenodd" />
+        <circle cx="21" cy="25" r="7.8" />
+        <path d="M46 0H61C74 0 82 10 82 23V59C82 72 74 82 61 82H46ZM64 37A8 8 0 1 0 64 53A8 8 0 1 0 64 37Z" fill-rule="evenodd" />
+      </g>
+      <g>
+        <path aria-label="NINTENDO" d="M26.371 111 21.274 101.994Q21.424 103.305 21.424 104.102V111H19.249V99.304H22.046L27.218 108.385Q27.068 107.132 27.068 106.103V99.304H29.243V111ZM36.526 111V99.304H38.974V111ZM53.371 111 48.274 101.994Q48.424 103.305 48.424 104.102V111H46.249V99.304H49.046L54.218 108.385Q54.068 107.132 54.068 106.103V99.304H56.243V111ZM68.805 101.197V111H66.356V101.197H62.579V99.304H72.59V101.197ZM78.91 111V99.304H88.107V101.197H81.359V104.135H87.601V106.028H81.359V109.107H88.448V111ZM102.371 111 97.274 101.994Q97.424 103.305 97.424 104.102V111H95.249V99.304H98.046L103.218 108.385Q103.068 107.132 103.068 106.103V99.304H105.243V111ZM122.951 105.065Q122.951 106.875 122.242 108.223Q121.532 109.572 120.233 110.286Q118.934 111 117.257 111H112.526V99.304H116.759Q119.714 99.304 121.333 100.794Q122.951 102.284 122.951 105.065ZM120.486 105.065Q120.486 103.181 119.507 102.189Q118.527 101.197 116.709 101.197H114.974V109.107H117.05Q118.627 109.107 119.556 108.02Q120.486 106.933 120.486 105.065ZM141.175 105.098Q141.175 106.924 140.452 108.311Q139.73 109.697 138.385 110.431Q137.041 111.166 135.248 111.166Q132.492 111.166 130.927 109.543Q129.363 107.92 129.363 105.098Q129.363 102.284 130.923 100.707Q132.484 99.13 135.264 99.13Q138.045 99.13 139.61 100.724Q141.175 102.317 141.175 105.098ZM138.676 105.098Q138.676 103.206 137.78 102.131Q136.883 101.056 135.264 101.056Q133.621 101.056 132.724 102.122Q131.828 103.189 131.828 105.098Q131.828 107.024 132.745 108.132Q133.662 109.24 135.248 109.24Q136.891 109.24 137.784 108.161Q138.676 107.082 138.676 105.098Z" />
+        <path aria-label="SWITCH" d="M33.054 135.26Q33.054 138.696 30.506 140.514Q27.958 142.332 23.027 142.332Q18.528 142.332 15.971 140.738Q13.415 139.145 12.684 135.907L17.416 135.127Q17.897 136.986 19.292 137.825Q20.686 138.663 23.16 138.663Q28.29 138.663 28.29 135.542Q28.29 134.546 27.7 133.898Q27.111 133.251 26.04 132.819Q24.969 132.388 21.931 131.773Q19.308 131.159 18.279 130.786Q17.25 130.412 16.419 129.906Q15.589 129.399 15.008 128.686Q14.427 127.972 14.104 127.009Q13.78 126.046 13.78 124.801Q13.78 121.63 16.162 119.945Q18.544 118.26 23.093 118.26Q27.443 118.26 29.626 119.621Q31.809 120.982 32.44 124.12L27.692 124.768Q27.327 123.257 26.206 122.493Q25.085 121.729 22.994 121.729Q18.544 121.729 18.544 124.519Q18.544 125.432 19.018 126.013Q19.491 126.594 20.42 127Q21.35 127.407 24.189 128.021Q27.559 128.735 29.012 129.341Q30.464 129.947 31.311 130.752Q32.158 131.558 32.606 132.678Q33.054 133.799 33.054 135.26ZM60.897 142H55.086L51.916 128.47Q51.334 126.079 50.936 123.473Q50.538 125.647 50.289 126.785Q50.04 127.922 46.752 142H40.942L34.916 118.608H39.879L43.266 133.716L44.03 137.368Q44.495 135.061 44.935 132.96Q45.375 130.86 48.247 118.608H53.725L56.68 131.06Q57.029 132.454 57.859 137.368L58.274 135.442L59.154 131.624L61.976 118.608H66.94ZM69.748 142V118.608H74.645V142ZM90.252 122.394V142H85.355V122.394H77.801V118.608H97.823V122.394ZM111.886 138.48Q116.319 138.48 118.045 134.031L122.312 135.642Q120.934 139.028 118.27 140.68Q115.605 142.332 111.886 142.332Q106.242 142.332 103.162 139.136Q100.083 135.94 100.083 130.196Q100.083 124.436 103.054 121.348Q106.026 118.26 111.67 118.26Q115.788 118.26 118.377 119.912Q120.967 121.563 122.013 124.768L117.697 125.946Q117.149 124.187 115.547 123.149Q113.945 122.111 111.77 122.111Q108.45 122.111 106.731 124.17Q105.013 126.229 105.013 130.196Q105.013 134.23 106.781 136.355Q108.549 138.48 111.886 138.48ZM141.107 142V131.973H130.914V142H126.016V118.608H130.914V127.922H141.107V118.608H146.004V142Z" />
+      </g>
+    </g>
+  </g>
+</svg>

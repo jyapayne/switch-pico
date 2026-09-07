@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="560" viewBox="-19 -10 200 560" role="img" aria-labelledby="title description">
+  <title id="title">Nintendo Switch 2 — right Joy-Con 2</title>
+  <desc id="description">Front-view right Joy-Con 2 with a graphite shell, coral accent ring, ABXY buttons, analog stick, plus, home and C buttons. Transparent background; four gradients, no filters, textures or external assets.</desc>
+  <metadata>Visual reference: https://www.nintendo.com/us/store/products/nintendo-switch-2-joy-con-2-l-r-light-blue-light-red-123677/ and https://www.nintendo.com/us/store/products/nintendo-switch-2-joy-con-2-charging-grip-123690/ . Independently drawn vector artwork, without embedded reference images.</metadata>
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#3b4348" />
+      <stop offset="1" stop-color="#20262b" />
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#4b555a" />
+      <stop offset="1" stop-color="#293137" />
+    </linearGradient>
+    <linearGradient id="button" x1="0" y1="0" x2=".4" y2="1">
+      <stop stop-color="#505b62" />
+      <stop offset="1" stop-color="#303a41" />
+    </linearGradient>
+    <radialGradient id="dish" cx="50%" cy="90%" r="100%">
+      <stop stop-color="#283239" />
+      <stop offset="1" stop-color="#424f58" />
+    </radialGradient>
+    <path id="right-shell" d="M3 5H20C111 5 164 61 164 139V376C164 482 132 537 20 537H3Z" />
+    <g id="key">
+      <circle cy="1" r="20.5" fill="#172127" />
+      <circle cy="-1" r="18.5" fill="url(#button)" stroke="#657178" stroke-width="1.2" />
+    </g>
+    <g id="stick">
+      <circle cy="2" r="46" fill="#172127" />
+      <circle r="43" fill="#39464d" stroke="currentColor" stroke-width="3" />
+      <circle cy="-1" r="38.5" fill="#182329" />
+      <circle cy="-2" r="35.5" fill="#56646c" />
+      <circle cy="-2" r="29.5" fill="url(#dish)" stroke="#202b32" stroke-width="2" />
+      <path d="M0-40V-32M-38-2H-31M31-2H38M0 29V36" fill="none" stroke="#1a252c" stroke-width="2" stroke-linecap="round" />
+    </g>
+    <g id="home">
+      <circle cy="1" r="18" fill="#162027" />
+      <circle cy="-1" r="16" fill="url(#button)" stroke="#626e76" stroke-width="1.1" />
+      <path d="M-11-3L0-12L11-3H8V7H-8V-3ZM-3-2V3H3V-2Z" fill="#172127" fill-rule="evenodd" />
+    </g>
+    <g id="chat">
+      <rect x="-15.5" y="-15.5" width="31" height="31" rx="4" fill="#162027" />
+      <rect x="-13.5" y="-14" width="27" height="27" rx="2.5" fill="url(#button)" stroke="#626e76" stroke-width="1" />
+      <path d="M6-7C-4-13-12-4-6 5C-3 9 3 9 7 5" fill="none" stroke="#172127" stroke-width="3" />
+    </g>
+  </defs>
+  <g id="right-joycon" aria-label="Right Joy-Con 2">
+    <path d="M25 1C103 0 161 48 169 125L163 127C156 59 108 10 25 9Z" fill="url(#shell)" stroke="#667178" stroke-width="1.2" />
+    <path d="M-4 9Q-7 9-7 15V524Q-7 532-3 533H6V9Z" fill="#f38c7d" stroke="#c56960" stroke-width="1" />
+    <use xlink:href="#right-shell" fill="url(#face)" stroke="#172127" stroke-width="2" />
+    <path d="M6 9H20C106 9 159 64 160 138" fill="none" stroke="#79848a" stroke-opacity=".7" stroke-width="1.5" />
+    <path d="M160 390C156 483 125 531 21 533H7" fill="none" stroke="#4c585f" stroke-width="1.2" />
+    <g transform="translate(31 63)">
+      <path d="M-4-14H4V-4H14V4H4V14H-4V4H-14V-4H-4Z" fill="#182229" stroke="#68757d" stroke-width="1.1" />
+      <path d="M-2-12H2V-2H12V2H2V12H-2V2H-12V-2H-2Z" fill="url(#button)" />
+    </g>
+    <g transform="translate(80 101)">
+      <use xlink:href="#key" />
+      <path d="M-6-9L6 7M6-9L-6 7" fill="none" stroke="#bcc5c9" stroke-width="1.7" />
+    </g>
+    <g transform="translate(40 140)">
+      <use xlink:href="#key" />
+      <path d="M-6-9L0-1L6-9M0-1V7" fill="none" stroke="#bcc5c9" stroke-width="1.7" />
+    </g>
+    <g transform="translate(120 140)">
+      <use xlink:href="#key" />
+      <path d="M-7 7L0-10L7 7M-4.5 2H4.5" fill="none" stroke="#bcc5c9" stroke-width="1.7" stroke-linejoin="round" />
+    </g>
+    <g transform="translate(80 179)">
+      <use xlink:href="#key" />
+      <path d="M-5-9V7H1C9 7 9-1 1-1H-5M-5-9H1C8-9 8-1 1-1" fill="none" stroke="#bcc5c9" stroke-width="1.7" stroke-linejoin="round" />
+    </g>
+    <use xlink:href="#stick" transform="translate(80 278)" color="#f58d80" />
+    <use xlink:href="#home" transform="translate(45 375)" />
+    <use xlink:href="#chat" transform="translate(45 431)" />
+  </g>
+</svg>

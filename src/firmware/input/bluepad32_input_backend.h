@@ -64,6 +64,15 @@ struct Bluepad32SlotSnapshot {
     ControllerState state;
 };
 
+enum class Bluepad32ControllerLayout : uint8_t {
+    kUnspecified = 0,
+    kJoyCon2LeftSolo = 1,
+    kJoyCon2RightSolo = 2,
+    kJoyCon2MergedPair = 3,
+    kWiiRemote = 4,
+    kWiiNunchuk = 5,
+};
+
 // Side-effect-free raw input snapshot for management telemetry. Unlike the
 // report-path snapshot, reading this does not consume motion samples.
 struct Bluepad32PlaytestSnapshot {
@@ -74,6 +83,8 @@ struct Bluepad32PlaytestSnapshot {
     uint16_t physical_button_mask = 0;
     uint8_t battery = 0;
     uint8_t capabilities = 0;
+    Bluepad32ControllerLayout controller_layout =
+        Bluepad32ControllerLayout::kUnspecified;
     ControllerState state{};
 };
 

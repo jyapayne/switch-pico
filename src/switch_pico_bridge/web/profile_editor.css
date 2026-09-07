@@ -293,6 +293,7 @@ h4 { font-size: 1rem; }
 .panel-heading > p { max-width: 440px; color: var(--muted); font-size: 0.78rem; line-height: 1.55; text-align: right; }
 .controller-mapper { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 18px; align-items: stretch; }
 .controller-canvas {
+  min-width: 0;
   padding: 18px;
   overflow: hidden;
   border: 1px solid rgba(89, 199, 255, 0.24);
@@ -300,16 +301,20 @@ h4 { font-size: 1rem; }
   background: #090f1d;
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.04);
 }
-.controller-caption { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 27px; }
+.controller-caption { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; min-height: 27px; }
 .controller-caption strong { color: #dfe8ff; font-size: 0.8rem; }
-.controller-live { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 0.65rem; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
-.controller-live i { width: 7px; height: 7px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 0 4px rgba(74, 222, 165, 0.09), 0 0 12px var(--mint); }
-.controller-photo-wrap { position: relative; width: 100%; margin: 10px auto 4px; aspect-ratio: 1.62; transition: aspect-ratio 180ms ease; }
-.controller-canvas[data-style="switch"] .controller-photo-wrap { aspect-ratio: 1.38; }
-.controller-canvas[data-style="playstation"] .controller-photo-wrap { aspect-ratio: 1.8; }
-.controller-photo { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; user-select: none; filter: drop-shadow(0 22px 28px rgba(0, 0, 0, 0.46)); }
+.controller-live { display: inline-flex; align-items: center; gap: 7px; color: var(--amber); font-size: 0.65rem; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+.controller-live[data-state="live"] { color: var(--mint); }
+.layout-picker { margin-block: 16px 8px; }
+.layout-picker .select { width: 100%; margin-top: 6px; }
+.controller-viewport { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 16px 0; scrollbar-color: var(--subtle) var(--surface-2); }
+.controller-viewport:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
+.controller-photo-wrap { --diagram-min: 640px; --diagram-max: 900px; position: relative; width: 100%; min-width: var(--diagram-min); max-width: var(--diagram-max); margin: 0 auto; aspect-ratio: var(--diagram-ratio, 800 / 552); }
+.controller-stage { position: absolute; top: 50%; left: 50%; width: var(--stage-width, 100%); height: var(--stage-height, 100%); transform: translate(-50%, -50%) rotate(var(--stage-angle, 0deg)); }
+.controller-photo { display: block; width: 100%; height: 100%; pointer-events: none; user-select: none; filter: drop-shadow(0 16px 20px rgba(0, 0, 0, 0.46)); }
+.controller-annotation { position: absolute; left: var(--x); top: var(--y); max-width: 170px; padding: 6px; transform: translate(-50%, -50%) rotate(var(--label-angle, 0deg)); border: 1px solid var(--muted); border-radius: 6px; color: var(--ink); background: var(--surface-2); font-size: 0.65rem; text-align: center; pointer-events: none; }
 .extra-controls { display: flex; flex-wrap: wrap; gap: 9px; margin: 10px 0; }
-.extra-controls button { min-width: 48px; padding: 9px 12px; color: var(--ink); border: 1px solid var(--sky); border-radius: 9px; background: var(--surface-2); font-size: 0.72rem; font-weight: 800; cursor: pointer; }
+.extra-controls button { min-height: 44px; min-width: 48px; padding: 9px 12px; color: var(--ink); border: 1px solid var(--sky); border-radius: 9px; background: var(--surface-2); font-size: 0.72rem; font-weight: 800; cursor: pointer; }
 .extra-controls button.disabled-map { color: var(--muted); border-color: var(--control-line); }
 .extra-controls button.selected, .extra-controls button:focus-visible { outline: 2px solid var(--sky); outline-offset: 3px; }
 .extra-controls button.pressed { color: #090f1d; background: var(--amber); border-color: var(--amber); }
@@ -324,90 +329,28 @@ h4 { font-size: 1rem; }
   top: var(--y);
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   color: #eff6ff;
   border: 2px solid var(--sky);
   border-radius: 50%;
   background: rgba(7, 12, 25, 0.9);
   box-shadow: 0 0 0 4px rgba(89, 199, 255, 0.12), 0 5px 16px rgba(0, 0, 0, 0.42);
-  transform: translate(-50%, -50%);
-  font-size: 0.7rem;
+  transform: translate(-50%, -50%) rotate(var(--label-angle, 0deg));
+  font-size: 0.59rem;
   font-weight: 900;
   line-height: 1;
   transition: transform 120ms ease, border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
 }
-.controller-hotspots button:hover, .controller-hotspots button:focus-visible { z-index: 2; border-color: var(--blue); transform: translate(-50%, -50%) scale(1.13); }
-.controller-hotspots button.selected { z-index: 3; color: #090a16; border-color: var(--rose); background: var(--rose); box-shadow: 0 0 0 5px rgba(255, 124, 159, 0.18), 0 8px 20px rgba(0, 0, 0, 0.48); transform: translate(-50%, -50%) scale(1.16); }
-.controller-hotspots button[data-controller-button$="_trigger"] { width: 60px; height: 30px; border-radius: 11px; }
-.controller-hotspots button.disabled-map { color: var(--subtle); border-color: #56617a; background: rgba(8, 11, 20, 0.9); box-shadow: none; }
-.controller-hotspots button[data-controller-button$="_shoulder"] { width: 60px; height: 30px; border-radius: 11px; }
-.controller-hotspots button[data-controller-button^="dpad_"] { width: 27px; height: 27px; font-size: 0.58rem; }
-.controller-hotspots button[data-controller-button="select"],
-.controller-hotspots button[data-controller-button="start"],
-.controller-hotspots button[data-controller-button="capture"],
-.controller-hotspots button[data-controller-button="system"] { width: 29px; height: 29px; font-size: 0.63rem; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="left_shoulder"] { --x: 22%; --y: 12%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="left_trigger"] { --x: 22%; --y: 4%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="right_trigger"] { --x: 78%; --y: 4%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="right_shoulder"] { --x: 78%; --y: 12%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="left_stick"] { --x: 23%; --y: 43%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="right_stick"] { --x: 63%; --y: 68%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="dpad_up"] { --x: 36%; --y: 62%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="dpad_right"] { --x: 40%; --y: 68%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="dpad_down"] { --x: 36%; --y: 74%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="dpad_left"] { --x: 32%; --y: 68%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="north"] { --x: 77%; --y: 33%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="east"] { --x: 84%; --y: 43%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="south"] { --x: 77%; --y: 54%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="west"] { --x: 70%; --y: 43%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="select"] { --x: 42%; --y: 43%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="start"] { --x: 57%; --y: 43%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="capture"] { --x: 50%; --y: 52%; }
-.controller-canvas:is([data-style="generic"], [data-style="xbox"]) [data-controller-button="system"] { --x: 50%; --y: 26%; }
-
-.controller-canvas[data-style="switch"] [data-controller-button="left_shoulder"] { --x: 27%; --y: 8%; }
-.controller-canvas[data-style="switch"] [data-controller-button="right_shoulder"] { --x: 73%; --y: 8%; }
-.controller-canvas[data-style="switch"] [data-controller-button="left_trigger"] { --x: 27%; --y: 2%; }
-.controller-canvas[data-style="switch"] [data-controller-button="right_trigger"] { --x: 73%; --y: 2%; }
-.controller-canvas[data-style="switch"] [data-controller-button="left_stick"] { --x: 24%; --y: 30%; }
-.controller-canvas[data-style="switch"] [data-controller-button="right_stick"] { --x: 63%; --y: 51%; }
-.controller-canvas[data-style="switch"] [data-controller-button="dpad_up"] { --x: 35%; --y: 46%; }
-.controller-canvas[data-style="switch"] [data-controller-button="dpad_right"] { --x: 39%; --y: 51%; }
-.controller-canvas[data-style="switch"] [data-controller-button="dpad_down"] { --x: 35%; --y: 56%; }
-.controller-canvas[data-style="switch"] [data-controller-button="dpad_left"] { --x: 31%; --y: 51%; }
-.controller-canvas[data-style="switch"] [data-controller-button="north"] { --x: 77%; --y: 22%; }
-.controller-canvas[data-style="switch"] [data-controller-button="east"] { --x: 85%; --y: 32%; }
-.controller-canvas[data-style="switch"] [data-controller-button="south"] { --x: 77%; --y: 43%; }
-.controller-canvas[data-style="switch"] [data-controller-button="west"] { --x: 69%; --y: 32%; }
-.controller-canvas[data-style="switch"] [data-controller-button="select"] { --x: 39%; --y: 21%; }
-.controller-canvas[data-style="switch"] [data-controller-button="start"] { --x: 61%; --y: 21%; }
-.controller-canvas[data-style="switch"] [data-controller-button="capture"] { --x: 44%; --y: 31%; }
-.controller-canvas[data-style="switch"] [data-controller-button="system"] { --x: 57%; --y: 32%; }
-
-.controller-canvas[data-style="playstation"] [data-controller-button="left_shoulder"] { --x: 21%; --y: 12%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="right_shoulder"] { --x: 79%; --y: 12%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="left_stick"] { --x: 34%; --y: 69%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="left_trigger"] { --x: 21%; --y: 3%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="right_trigger"] { --x: 79%; --y: 3%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="right_stick"] { --x: 66%; --y: 69%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="dpad_up"] { --x: 18%; --y: 42%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="dpad_right"] { --x: 24%; --y: 50%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="dpad_down"] { --x: 18%; --y: 58%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="dpad_left"] { --x: 12%; --y: 50%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="north"] { --x: 83%; --y: 39%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="east"] { --x: 91%; --y: 50%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="south"] { --x: 83%; --y: 61%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="west"] { --x: 75%; --y: 50%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="select"] { --x: 25%; --y: 30%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="start"] { --x: 75%; --y: 30%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="capture"] { --x: 50%; --y: 36%; }
-.controller-canvas[data-style="playstation"] [data-controller-button="system"] { --x: 50%; --y: 72%; }
+.controller-hotspots button:hover, .controller-hotspots button:focus-visible { z-index: 2; outline: 2px solid var(--blue); outline-offset: 2px; }
+.controller-hotspots button.selected { z-index: 3; color: #090a16; border-color: var(--rose); background: var(--rose); box-shadow: 0 0 0 4px rgba(255, 124, 159, 0.18); }
+.controller-hotspots button.disabled-map:not(.selected):not(.pressed) { color: var(--subtle); border-color: #56617a; background: rgba(8, 11, 20, 0.9); box-shadow: none; }
+.controller-hotspots button[data-controller-button^="dpad_"] { width: 26px; height: 26px; font-size: 0.58rem; }
+.source-unavailable { color: var(--amber); }
 
 .controller-hint { margin-top: 4px; color: var(--muted); font-size: 0.72rem; text-align: center; }
 .controller-credit { margin-top: 8px; color: var(--subtle); font-size: 0.64rem; text-align: center; }
-.controller-credit a { color: var(--muted); text-decoration-color: rgba(171, 181, 204, 0.45); text-underline-offset: 3px; }
 .mapping-inspector {
   display: flex;
   flex-direction: column;

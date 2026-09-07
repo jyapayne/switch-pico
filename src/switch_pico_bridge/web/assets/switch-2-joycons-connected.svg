@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="688" height="560" viewBox="-8 -10 688 560" role="img" aria-labelledby="title description">
+  <title id="title">Nintendo Switch 2 — connected Joy-Con 2 pair</title>
+  <desc id="description">Front-view left and right Joy-Con 2 attached to a central controller grip. Graphite shells, light-blue and coral stick rings, directional and ABXY buttons, capture, home and C buttons. Transparent background; four gradients, no filters, textures or external assets.</desc>
+  <metadata>Visual reference: https://www.nintendo.com/us/store/products/nintendo-switch-2-joy-con-2-l-r-light-blue-light-red-123677/ and https://www.nintendo.com/us/store/products/nintendo-switch-2-joy-con-2-charging-grip-123690/ . Independently drawn vector artwork, without embedded reference images.</metadata>
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#3b4348" />
+      <stop offset="1" stop-color="#20262b" />
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#4b555a" />
+      <stop offset="1" stop-color="#293137" />
+    </linearGradient>
+    <linearGradient id="button" x1="0" y1="0" x2=".4" y2="1">
+      <stop stop-color="#505b62" />
+      <stop offset="1" stop-color="#303a41" />
+    </linearGradient>
+    <radialGradient id="dish" cx="50%" cy="90%" r="100%">
+      <stop stop-color="#283239" />
+      <stop offset="1" stop-color="#424f58" />
+    </radialGradient>
+    <path id="right-shell" d="M3 5H20C111 5 164 61 164 139V376C164 482 132 537 20 537H3Z" />
+    <g id="key">
+      <circle cy="1" r="20.5" fill="#172127" />
+      <circle cy="-1" r="18.5" fill="url(#button)" stroke="#657178" stroke-width="1.2" />
+    </g>
+    <g id="stick">
+      <circle cy="2" r="46" fill="#172127" />
+      <circle r="43" fill="#39464d" stroke="currentColor" stroke-width="3" />
+      <circle cy="-1" r="38.5" fill="#182329" />
+      <circle cy="-2" r="35.5" fill="#56646c" />
+      <circle cy="-2" r="29.5" fill="url(#dish)" stroke="#202b32" stroke-width="2" />
+      <path d="M0-40V-32M-38-2H-31M31-2H38M0 29V36" fill="none" stroke="#1a252c" stroke-width="2" stroke-linecap="round" />
+    </g>
+    <g id="home">
+      <circle cy="1" r="18" fill="#162027" />
+      <circle cy="-1" r="16" fill="url(#button)" stroke="#626e76" stroke-width="1.1" />
+      <path d="M-11-3L0-12L11-3H8V7H-8V-3ZM-3-2V3H3V-2Z" fill="#172127" fill-rule="evenodd" />
+    </g>
+    <g id="chat">
+      <rect x="-15.5" y="-15.5" width="31" height="31" rx="4" fill="#162027" />
+      <rect x="-13.5" y="-14" width="27" height="27" rx="2.5" fill="url(#button)" stroke="#626e76" stroke-width="1" />
+      <path d="M6-7C-4-13-12-4-6 5C-3 9 3 9 7 5" fill="none" stroke="#172127" stroke-width="3" />
+    </g>
+    <g id="capture">
+      <rect x="-15.5" y="-15.5" width="31" height="31" rx="4" fill="#172127" />
+      <rect x="-13.5" y="-14" width="27" height="27" rx="2.5" fill="url(#button)" stroke="#626e76" stroke-width="1" />
+      <circle cy="-1" r="9.5" fill="none" stroke="#1c2830" stroke-width="1.4" />
+      <path d="M-9 2A9.5 9.5 0 0 0 9 2" fill="none" stroke="#738188" stroke-width=".8" />
+    </g>
+  </defs>
+  <g id="grip" aria-label="Connecting Joy-Con grip">
+    <path id="grip-wing" d="M82 164C41 188 27 287 12 398C0 470-1 517 22 536C42 553 69 535 94 507L125 339Z" fill="url(#shell)" stroke="#1b252b" stroke-width="2" />
+    <use xlink:href="#grip-wing" transform="translate(672 0) scale(-1 1)" />
+    <path d="M71 185C43 242 31 331 21 404C12 470 10 510 30 525" fill="none" stroke="#66747c" stroke-width="3" />
+    <path d="M601 185C629 242 641 331 651 404C660 470 662 510 642 525" fill="none" stroke="#66747c" stroke-width="3" />
+    <path d="M219 5H453V538H219Z" fill="#141f26" />
+    <path d="M231 5H441Q444 5 444 9V537H228V9Q228 5 231 5Z" fill="url(#shell)" stroke="#182228" stroke-width="1.5" />
+    <path d="M231 9H441" stroke="#7b878d" stroke-width="2" />
+    <path d="M231 534H441" stroke="#4d5961" stroke-width="1.5" />
+  </g>
+  <g transform="translate(64 0)">
+    <g id="left-joycon" aria-label="Left Joy-Con 2">
+      <path d="M139 1C61 0 3 48-5 125L1 127C8 59 56 10 139 9Z" fill="url(#shell)" stroke="#667178" stroke-width="1.2" />
+      <path d="M161 9H165V532H161Z" fill="#77cce8" />
+      <use xlink:href="#right-shell" transform="translate(164 0) scale(-1 1)" fill="url(#face)" stroke="#172127" stroke-width="2" />
+      <path d="M158 9H144C58 9 5 64 4 138" fill="none" stroke="#79848a" stroke-opacity=".7" stroke-width="1.5" />
+      <path d="M4 390C8 483 39 531 143 533H157" fill="none" stroke="#4c585f" stroke-width="1.2" />
+      <rect x="119" y="58" width="28" height="9" rx="1.5" fill="#19232a" stroke="#68757d" stroke-width="1" />
+      <path d="M121 60H145V63H121Z" fill="#48545c" />
+      <use xlink:href="#stick" transform="translate(84 141)" color="#83d4ee" />
+      <g transform="translate(84 239)">
+        <use xlink:href="#key" />
+        <path d="M0-9L-7 3H7Z" fill="#162128" />
+      </g>
+      <g transform="translate(44 278)">
+        <use xlink:href="#key" />
+        <path d="M-8-1L5-8V6Z" fill="#162128" />
+      </g>
+      <g transform="translate(124 278)">
+        <use xlink:href="#key" />
+        <path d="M8-1L-5-8V6Z" fill="#162128" />
+      </g>
+      <g transform="translate(84 317)">
+        <use xlink:href="#key" />
+        <path d="M0 7L-7-5H7Z" fill="#162128" />
+      </g>
+      <use xlink:href="#capture" transform="translate(119 375)" />
+    </g>
+  </g>
+  <g transform="translate(444 0)">
+    <g id="right-joycon" aria-label="Right Joy-Con 2">
+      <path d="M25 1C103 0 161 48 169 125L163 127C156 59 108 10 25 9Z" fill="url(#shell)" stroke="#667178" stroke-width="1.2" />
+      <path d="M1 9H5V533H1Z" fill="#f38c7d" stroke="#c56960" stroke-width="1" />
+      <use xlink:href="#right-shell" fill="url(#face)" stroke="#172127" stroke-width="2" />
+      <path d="M6 9H20C106 9 159 64 160 138" fill="none" stroke="#79848a" stroke-opacity=".7" stroke-width="1.5" />
+      <path d="M160 390C156 483 125 531 21 533H7" fill="none" stroke="#4c585f" stroke-width="1.2" />
+      <g transform="translate(31 63)">
+        <path d="M-4-14H4V-4H14V4H4V14H-4V4H-14V-4H-4Z" fill="#182229" stroke="#68757d" stroke-width="1.1" />
+        <path d="M-2-12H2V-2H12V2H2V12H-2V2H-12V-2H-2Z" fill="url(#button)" />
+      </g>
+      <g transform="translate(80 101)">
+        <use xlink:href="#key" />
+        <path d="M-6-9L6 7M6-9L-6 7" fill="none" stroke="#bcc5c9" stroke-width="1.7" />
+      </g>
+      <g transform="translate(40 140)">
+        <use xlink:href="#key" />
+        <path d="M-6-9L0-1L6-9M0-1V7" fill="none" stroke="#bcc5c9" stroke-width="1.7" />
+      </g>
+      <g transform="translate(120 140)">
+        <use xlink:href="#key" />
+        <path d="M-7 7L0-10L7 7M-4.5 2H4.5" fill="none" stroke="#bcc5c9" stroke-width="1.7" stroke-linejoin="round" />
+      </g>
+      <g transform="translate(80 179)">
+        <use xlink:href="#key" />
+        <path d="M-5-9V7H1C9 7 9-1 1-1H-5M-5-9H1C8-9 8-1 1-1" fill="none" stroke="#bcc5c9" stroke-width="1.7" stroke-linejoin="round" />
+      </g>
+      <use xlink:href="#stick" transform="translate(80 278)" color="#f58d80" />
+      <use xlink:href="#home" transform="translate(45 375)" />
+      <use xlink:href="#chat" transform="translate(45 431)" />
+    </g>
+  </g>
+  <g id="console-mark" transform="translate(266 208) scale(.87)" fill="#151e23">
+    <path d="M36 0H22C9 0 0 10 0 23V59C0 72 9 82 22 82H36ZM29 7V75H22C13 75 7 69 7 59V23C7 13 13 7 22 7Z" fill-rule="evenodd" />
+    <circle cx="21" cy="25" r="7.8" />
+    <path d="M46 0H61C74 0 82 10 82 23V59C82 72 74 82 61 82H46ZM64 37A8 8 0 1 0 64 53A8 8 0 1 0 64 37Z" fill-rule="evenodd" />
+    <path d="M94 17 C103 4 113-3 127-3 C147-3 158 8 158 25 C158 42 146 52 119 66 H159 V82 H94 V68 C136 35 139 32 138 24 C138 17 133 14 127 14 C119 14 112 19 106 27Z" />
+    <g font-family="Arial, Helvetica, sans-serif" text-anchor="middle" font-weight="700">
+      <path aria-label="NINTENDO" d="M26.371 111 21.274 101.994Q21.424 103.305 21.424 104.102V111H19.249V99.304H22.046L27.218 108.385Q27.068 107.132 27.068 106.103V99.304H29.243V111ZM36.526 111V99.304H38.974V111ZM53.371 111 48.274 101.994Q48.424 103.305 48.424 104.102V111H46.249V99.304H49.046L54.218 108.385Q54.068 107.132 54.068 106.103V99.304H56.243V111ZM68.805 101.197V111H66.356V101.197H62.579V99.304H72.59V101.197ZM78.91 111V99.304H88.107V101.197H81.359V104.135H87.601V106.028H81.359V109.107H88.448V111ZM102.371 111 97.274 101.994Q97.424 103.305 97.424 104.102V111H95.249V99.304H98.046L103.218 108.385Q103.068 107.132 103.068 106.103V99.304H105.243V111ZM122.951 105.065Q122.951 106.875 122.242 108.223Q121.532 109.572 120.233 110.286Q118.934 111 117.257 111H112.526V99.304H116.759Q119.714 99.304 121.333 100.794Q122.951 102.284 122.951 105.065ZM120.486 105.065Q120.486 103.181 119.507 102.189Q118.527 101.197 116.709 101.197H114.974V109.107H117.05Q118.627 109.107 119.556 108.02Q120.486 106.933 120.486 105.065ZM141.175 105.098Q141.175 106.924 140.452 108.311Q139.73 109.697 138.385 110.431Q137.041 111.166 135.248 111.166Q132.492 111.166 130.927 109.543Q129.363 107.92 129.363 105.098Q129.363 102.284 130.923 100.707Q132.484 99.13 135.264 99.13Q138.045 99.13 139.61 100.724Q141.175 102.317 141.175 105.098ZM138.676 105.098Q138.676 103.206 137.78 102.131Q136.883 101.056 135.264 101.056Q133.621 101.056 132.724 102.122Q131.828 103.189 131.828 105.098Q131.828 107.024 132.745 108.132Q133.662 109.24 135.248 109.24Q136.891 109.24 137.784 108.161Q138.676 107.082 138.676 105.098Z" />
+      <path aria-label="SWITCH" d="M33.054 135.26Q33.054 138.696 30.506 140.514Q27.958 142.332 23.027 142.332Q18.528 142.332 15.971 140.738Q13.415 139.145 12.684 135.907L17.416 135.127Q17.897 136.986 19.292 137.825Q20.686 138.663 23.16 138.663Q28.29 138.663 28.29 135.542Q28.29 134.546 27.7 133.898Q27.111 133.251 26.04 132.819Q24.969 132.388 21.931 131.773Q19.308 131.159 18.279 130.786Q17.25 130.412 16.419 129.906Q15.589 129.399 15.008 128.686Q14.427 127.972 14.104 127.009Q13.78 126.046 13.78 124.801Q13.78 121.63 16.162 119.945Q18.544 118.26 23.093 118.26Q27.443 118.26 29.626 119.621Q31.809 120.982 32.44 124.12L27.692 124.768Q27.327 123.257 26.206 122.493Q25.085 121.729 22.994 121.729Q18.544 121.729 18.544 124.519Q18.544 125.432 19.018 126.013Q19.491 126.594 20.42 127Q21.35 127.407 24.189 128.021Q27.559 128.735 29.012 129.341Q30.464 129.947 31.311 130.752Q32.158 131.558 32.606 132.678Q33.054 133.799 33.054 135.26ZM60.897 142H55.086L51.916 128.47Q51.334 126.079 50.936 123.473Q50.538 125.647 50.289 126.785Q50.04 127.922 46.752 142H40.942L34.916 118.608H39.879L43.266 133.716L44.03 137.368Q44.495 135.061 44.935 132.96Q45.375 130.86 48.247 118.608H53.725L56.68 131.06Q57.029 132.454 57.859 137.368L58.274 135.442L59.154 131.624L61.976 118.608H66.94ZM69.748 142V118.608H74.645V142ZM90.252 122.394V142H85.355V122.394H77.801V118.608H97.823V122.394ZM111.886 138.48Q116.319 138.48 118.045 134.031L122.312 135.642Q120.934 139.028 118.27 140.68Q115.605 142.332 111.886 142.332Q106.242 142.332 103.162 139.136Q100.083 135.94 100.083 130.196Q100.083 124.436 103.054 121.348Q106.026 118.26 111.67 118.26Q115.788 118.26 118.377 119.912Q120.967 121.563 122.013 124.768L117.697 125.946Q117.149 124.187 115.547 123.149Q113.945 122.111 111.77 122.111Q108.45 122.111 106.731 124.17Q105.013 126.229 105.013 130.196Q105.013 134.23 106.781 136.355Q108.549 138.48 111.886 138.48ZM141.107 142V131.973H130.914V142H126.016V118.608H130.914V127.922H141.107V118.608H146.004V142Z" />
+    </g>
+  </g>
+  <g id="player-indicators" fill="#536068">
+    <rect x="237" y="244" width="6" height="7" rx="1.2" />
+    <rect x="237" y="263" width="6" height="7" rx="1.2" />
+    <rect x="237" y="282" width="6" height="7" rx="1.2" />
+    <rect x="237" y="301" width="6" height="7" rx="1.2" />
+    <rect x="429" y="244" width="6" height="7" rx="1.2" />
+    <rect x="429" y="263" width="6" height="7" rx="1.2" />
+    <rect x="429" y="282" width="6" height="7" rx="1.2" />
+    <rect x="429" y="301" width="6" height="7" rx="1.2" />
+  </g>
+</svg>

@@ -166,8 +166,18 @@ PROFILE_MACRO_REPEAT_MIN = 1
 PROFILE_MACRO_REPEAT_MAX = 255
 PROFILE_PLAYTEST_LEGACY_SCHEMA_VERSION = 2
 PROFILE_PLAYTEST_LEGACY_SIZE = 54
-PROFILE_PLAYTEST_SCHEMA_VERSION = 3
-PROFILE_PLAYTEST_SIZE = 55
+PROFILE_PLAYTEST_EXTRA_BUTTON_SCHEMA_VERSION = 3
+PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE = 55
+PROFILE_PLAYTEST_SCHEMA_VERSION = 4
+PROFILE_PLAYTEST_SIZE = 56
+PROFILE_PLAYTEST_LAYOUTS = (
+    None,
+    "joycon2-left",
+    "joycon2-right",
+    "joycon2-pair",
+    "wii-remote",
+    "wii-nunchuk",
+)
 PROFILE_PLAYTEST_SLOT_COUNT = 4
 PROFILE_METADATA_SCHEMA_VERSION = 1
 PROFILE_METADATA_MAX_BYTES = 31
@@ -900,6 +910,7 @@ class ProfilePlaytest:
     capabilities: int
     motion: tuple[int, int, int, int, int, int] | None
     extra_buttons: int = 0
+    layout: str | None = None
 
     def to_json_object(self) -> dict[str, Any]:
         return {
@@ -917,6 +928,7 @@ class ProfilePlaytest:
                 if self.identity is not None
                 else None
             ),
+            "layout": self.layout,
             "buttons": _button_mask_to_json(self.button_mask),
             "extra_buttons": [
                 name for index, name in enumerate(EXTRA_BUTTONS)
@@ -3629,12 +3641,16 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
     _raise_status(envelope)
     expected_size = {
         PROFILE_PLAYTEST_LEGACY_SCHEMA_VERSION: PROFILE_PLAYTEST_LEGACY_SIZE,
+        PROFILE_PLAYTEST_EXTRA_BUTTON_SCHEMA_VERSION: PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE,
         PROFILE_PLAYTEST_SCHEMA_VERSION: PROFILE_PLAYTEST_SIZE,
     }.get(envelope.schema_version)
     if len(envelope.payload) != expected_size:
         raise ConfigManagerError("invalid profile playtest payload")
     payload = envelope.payload
-    extra_buttons = payload[54] if envelope.schema_version == PROFILE_PLAYTEST_SCHEMA_VERSION else 0
+    extra_buttons = payload[54] if len(payload) >= PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE else 0
+    layout_code = payload[55] if envelope.schema_version == PROFILE_PLAYTEST_SCHEMA_VERSION else 0
+    if layout_code >= len(PROFILE_PLAYTEST_LAYOUTS):
+        raise ConfigManagerError("invalid playtest controller layout")
     if extra_buttons & ~0x7F:
         raise ConfigManagerError("invalid playtest extra buttons")
     flags = payload[0]
@@ -3687,6 +3703,7 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
         capabilities=payload[40],
         motion=motion_values if has_motion else None,
         extra_buttons=extra_buttons,
+        layout=PROFILE_PLAYTEST_LAYOUTS[layout_code],
     )
 
 

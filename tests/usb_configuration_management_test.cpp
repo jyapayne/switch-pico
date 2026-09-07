@@ -518,6 +518,8 @@ void test_profile_vendor_requests() {
     current_playtest[2].identity = expected_identity;
     current_playtest[2].physical_button_mask = 0x8001;
     current_playtest[2].state.extra_buttons = 0x7f;
+    current_playtest[2].controller_layout =
+        Bluepad32ControllerLayout::kJoyCon2MergedPair;
     current_playtest[2].state.left_stick_x = -1234;
     current_playtest[2].state.left_stick_y = 2345;
     current_playtest[2].state.right_stick_x = INT16_MIN;
@@ -558,14 +560,24 @@ void test_profile_vendor_requests() {
                     control_payload, kResponseHeaderSize + 52)) == -6 &&
                 control_payload[kResponseHeaderSize + 39] == 201 &&
                 control_payload[kResponseHeaderSize + 40] == 0x0f &&
-                control_payload[kResponseHeaderSize + 54] == 0x7f,
+                control_payload[kResponseHeaderSize + 54] == 0x7f &&
+                control_payload[kResponseHeaderSize + 55] == 3,
             "profile playtest response lost live controller state");
+    current_playtest[2].controller_layout =
+        static_cast<Bluepad32ControllerLayout>(6);
+    uint8_t invalid_playtest[kMaximumResponseSize]{};
+    require(encode_profile_playtest(
+                2, current_playtest[2], invalid_playtest, sizeof(invalid_playtest)) == 0,
+            "unknown playtest layout metadata must be rejected");
+    current_playtest[2].controller_layout =
+        Bluepad32ControllerLayout::kJoyCon2MergedPair;
     current_playtest[2].active = false;
     require(usb_configuration_management_vendor_control(
                 0, CONTROL_STAGE_SETUP, &request) &&
                 control_payload[kResponseHeaderSize] == 0 &&
                 control_payload[kResponseHeaderSize + 1] == 0xff &&
-                control_payload[kResponseHeaderSize + 54] == 0,
+                control_payload[kResponseHeaderSize + 54] == 0 &&
+                control_payload[kResponseHeaderSize + 55] == 0,
             "disconnected profile playtest was not encoded");
     current_profile_metadata = {};
     current_profile_metadata.metadata.state = ProfileServiceState::kReady;

@@ -245,7 +245,11 @@ Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `
 
 Switch 2's **C, GL, GR, Left SL/SR and Right SL/SR** are additional source-only controls. Map each to a normal button or trigger, assign a button-only alternate Shift mapping, or use it in action/macro chords, cancellation and modifiers. Extra mappings default to disabled. The live playtest shows raw extras separately; they are not fictitious output channels on the emulated Switch Pro/XInput controller.
 
-The editor selects Switch Pro, DualSense, or Xbox artwork from the connected controller's USB VID/PID and places each remappable control directly over the matching physical button. Controller artwork is from [AL2009man/Gamepad-Asset-Pack](https://github.com/AL2009man/Gamepad-Asset-Pack) under its MIT license; the bundled license and source revision are recorded beside the assets.
+Controller Studio uses the supplied lightweight SVGs for Switch 2 Pro, Joy-Con 2 left/right solo and paired layouts, original Switch Pro, DualSense, Xbox, and Wii Remote/Nunchuk views. Hotspots follow the artwork's actual coordinates; solo Joy-Con views rotate with their firmware input mappings. Rear buttons and rails are labeled below the front view rather than drawn in fictitious positions. On narrow screens, pan the diagram or use the **Source control** menu.
+
+**Auto** uses matching-owner live metadata to distinguish a Joy-Con pair from a solo half. **Preview** changes only the editor's diagram and source labels; it does not pair controllers or change saved mappings, and physical highlighting is disabled. Source choices reflect the layout while stored unavailable mappings are retained. Wii orientation is not reported, so horizontal/vertical views require an explicit preview. The current pair still uses the left controller's profile bank; select that owner to edit paired input.
+
+The read-only playtest endpoint (`0x39`) uses schema 4, 56 bytes: byte 55 identifies unspecified (0), Joy-Con 2 left solo (1), right solo (2), pair (3), Wii Remote (4), or Wii Remote + Nunchuk (5). Host tools still read schema 2/54-byte and schema 3/55-byte payloads; older firmware cannot confirm Joy-Con topology. This metadata does not change profile records, input mapping, or rumble.
 
 Profile names and controller aliases are stored as independently checksummed
 catalog metadata. Runtime profiles use schema 7 and unchanged 384-byte records; schemas 1–6 migrate with extra inputs unmapped and existing settings preserved. Names remain separate. The

@@ -24,17 +24,35 @@ _ASSET_TYPES = {
         "text/javascript; charset=utf-8",
     ),
     "/style.css": ("profile_editor.css", "text/css; charset=utf-8"),
-    "/assets/controller-switch-pro.svg": (
-        "assets/controller-switch-pro.svg",
-        "image/svg+xml",
+    "/assets/controller_layouts.js": (
+        "controller_layouts.js", "text/javascript; charset=utf-8",
     ),
-    "/assets/controller-dualsense.svg": (
-        "assets/controller-dualsense.svg",
-        "image/svg+xml",
+    "/assets/switch-pro-controller-simple.svg": (
+        "assets/switch-pro-controller-simple.svg", "image/svg+xml",
     ),
-    "/assets/controller-xbox.svg": (
-        "assets/controller-xbox.svg",
-        "image/svg+xml",
+    "/assets/switch-2-pro-controller-simple.svg": (
+        "assets/switch-2-pro-controller-simple.svg", "image/svg+xml",
+    ),
+    "/assets/switch-2-joycon-left.svg": (
+        "assets/switch-2-joycon-left.svg", "image/svg+xml",
+    ),
+    "/assets/switch-2-joycon-single.svg": (
+        "assets/switch-2-joycon-single.svg", "image/svg+xml",
+    ),
+    "/assets/switch-2-joycons-connected.svg": (
+        "assets/switch-2-joycons-connected.svg", "image/svg+xml",
+    ),
+    "/assets/ps5-dualsense-simple.svg": (
+        "assets/ps5-dualsense-simple.svg", "image/svg+xml",
+    ),
+    "/assets/xbox-controller-simple.svg": (
+        "assets/xbox-controller-simple.svg", "image/svg+xml",
+    ),
+    "/assets/wii-remote-simple.svg": (
+        "assets/wii-remote-simple.svg", "image/svg+xml",
+    ),
+    "/assets/wii-remote-nunchuk-simple.svg": (
+        "assets/wii-remote-nunchuk-simple.svg", "image/svg+xml",
     ),
 }
 
@@ -110,34 +128,92 @@ _CONTROL_LABELS = {
         "left_stick": "L3",
         "right_stick": "R3",
     },
+    "wii": {
+        "north": "B",
+        "east": "2",
+        "south": "1",
+        "west": "A",
+        "select": "Minus",
+        "start": "Plus",
+        "system": "Home",
+    },
 }
 
 
 def _controller_presentation(
     identity: config_manager.ControllerIdentity,
+    layout: str | None = None,
 ) -> dict[str, str]:
+    live_layouts = {
+        "joycon2-left": ("Nintendo Joy-Con 2 (L)", "switch", {0x2067}),
+        "joycon2-right": ("Nintendo Joy-Con 2 (R)", "switch", {0x2066}),
+        "joycon2-pair": ("Nintendo Joy-Con 2 pair", "switch", {0x2067, 0x2066}),
+        "wii-remote": ("Nintendo Wii Remote", "wii", {0x0306, 0x0330}),
+        "wii-nunchuk": ("Nintendo Wii Remote + Nunchuk", "wii", {0x0306, 0x0330}),
+    }
+    live = live_layouts.get(layout)
+    if live is not None and (
+        identity.is_global_fallback
+        or identity.vendor_id == 0x057E and identity.product_id in live[2]
+    ):
+        return {"model": live[0], "style": live[1], "layout": cast(str, layout)}
     if identity.is_global_fallback:
-        return {"model": "Generic controller", "style": "generic"}
+        return {"model": "Generic controller", "style": "generic", "layout": "generic"}
 
     known = {
-        (0x057E, 0x2009): ("Nintendo Switch Pro Controller", "switch"),
-        (0x057E, 0x2069): ("Nintendo Switch 2 Pro Controller", "switch"),
-        (0x057E, 0x2067): ("Nintendo Joy-Con 2 (L)", "switch"),
-        (0x057E, 0x2066): ("Nintendo Joy-Con 2 (R)", "switch"),
-        (0x054C, 0x0CE6): ("Sony DualSense", "playstation"),
-        (0x054C, 0x09CC): ("Sony DualShock 4", "playstation"),
+        (0x057E, 0x2009): ("Nintendo Switch Pro Controller", "switch", "switch-pro"),
+        (0x057E, 0x2069): ("Nintendo Switch 2 Pro Controller", "switch", "switch2-pro"),
+        (0x057E, 0x2067): ("Nintendo Joy-Con 2 (L)", "switch", "joycon2-left"),
+        (0x057E, 0x2066): ("Nintendo Joy-Con 2 (R)", "switch", "joycon2-right"),
+        (0x054C, 0x0CE6): ("Sony DualSense", "playstation", "dualsense"),
+        (0x054C, 0x0DF2): ("Sony DualSense Edge", "playstation", "dualsense"),
+        (0x054C, 0x09CC): ("Sony DualShock 4", "playstation", "generic"),
+        # VID/PID cannot distinguish Wii extensions or Wii U Pro from Remote Plus.
+        (0x057E, 0x0306): ("Nintendo Wii controller", "generic", "generic"),
+        (0x057E, 0x0330): ("Nintendo Wii / Wii U controller", "generic", "generic"),
     }
     exact = known.get((identity.vendor_id, identity.product_id))
     if exact is not None:
-        model, style = exact
-        return {"model": model, "style": style}
+        model, style, model_layout = exact
+        return {"model": model, "style": style, "layout": model_layout}
     if identity.vendor_id == 0x054C:
-        return {"model": "Sony controller", "style": "playstation"}
+        return {"model": "Sony controller", "style": "playstation", "layout": "generic"}
     if identity.vendor_id == 0x045E:
-        return {"model": "Xbox controller", "style": "xbox"}
+        return {"model": "Xbox controller", "style": "xbox", "layout": "xbox"}
     if identity.vendor_id == 0x2DC8:
-        return {"model": "8BitDo controller", "style": "switch"}
-    return {"model": "Connected controller", "style": "generic"}
+        return {"model": "8BitDo controller", "style": "switch", "layout": "generic"}
+    return {"model": "Connected controller", "style": "generic", "layout": "generic"}
+
+
+def _source_controls(controller: dict[str, str]) -> list[str]:
+    layout = controller["layout"]
+    if layout == "switch2-pro":
+        controls = config_manager.OUTPUT_CONTROLS + ("c", "gl", "gr")
+    elif layout == "joycon2-pair":
+        controls = config_manager.OUTPUT_CONTROLS + (
+            "c", "left_sl", "left_sr", "right_sl", "right_sr",
+        )
+    elif layout in {"joycon2-left", "joycon2-right"}:
+        controls = (
+            "south", "east", "west", "north", "left_shoulder",
+            "right_shoulder", "left_stick",
+        ) + (
+            ("select", "capture", "left_trigger", "left_sl", "left_sr")
+            if layout == "joycon2-left"
+            else ("start", "system", "right_trigger", "c", "right_sl", "right_sr")
+        )
+    elif layout in {"wii-remote", "wii-nunchuk"}:
+        controls = (
+            "south", "east", "west", "north", "select", "start", "system",
+            "dpad_up", "dpad_down", "dpad_left", "dpad_right",
+        ) + (
+            ("left_shoulder", "right_shoulder") if layout == "wii-nunchuk" else ()
+        )
+    elif layout in {"switch-pro", "dualsense", "xbox"} or controller["style"] == "playstation":
+        controls = config_manager.OUTPUT_CONTROLS
+    else:
+        controls = config_manager.LOGICAL_CONTROLS
+    return list(controls)
 
 
 def _controller_label(
@@ -446,28 +522,21 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
     def _list_profiles(self) -> dict[str, Any]:
         device = self.profile_server.find_device()
         entries = config_manager.list_profiles(device)
-        return {
-            "identities": [
-                {
-                    "index": index,
-                    "label": _controller_label(entry.identity, entry.alias),
-                    "key": entry.identity.to_bytes().hex(),
-                    "active_profile": entry.active_profile_index + 1,
-                    "controller": _controller_presentation(entry.identity),
-                    "alias": entry.alias,
-                    "modifier_controls": list(
-                        config_manager.LOGICAL_CONTROLS
-                        if entry.identity.vendor_id == 0x057E
-                        and entry.identity.product_id in {0x2069, 0x2067, 0x2066}
-                        else config_manager.OUTPUT_CONTROLS
-                        if _controller_presentation(entry.identity)["style"]
-                        in {"xbox", "playstation"}
-                        else config_manager.LOGICAL_BUTTONS + config_manager.EXTRA_BUTTONS
-                    ),
-                }
-                for index, entry in enumerate(entries)
-            ]
-        }
+        identities = []
+        for index, entry in enumerate(entries):
+            controller = _controller_presentation(entry.identity)
+            source_controls = _source_controls(controller)
+            identities.append({
+                "index": index,
+                "label": _controller_label(entry.identity, entry.alias),
+                "key": entry.identity.to_bytes().hex(),
+                "active_profile": entry.active_profile_index + 1,
+                "controller": controller,
+                "alias": entry.alias,
+                "source_controls": source_controls,
+                "modifier_controls": source_controls,
+            })
+        return {"identities": identities}
 
     def _read_profile(self, identity_index: int, profile_index: int) -> dict[str, Any]:
         device = self.profile_server.find_device()
@@ -495,10 +564,11 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
             else None
         )
         result["controller"] = (
-            _controller_presentation(playtest.identity)
-            if playtest.identity is not None
-            else None
+            _controller_presentation(playtest.identity, playtest.layout)
+            if playtest.connected and playtest.identity is not None
+            else _controller_presentation(identity)
         )
+        result["source_controls"] = _source_controls(result["controller"])
         result["label"] = (
             _controller_label(playtest.identity)
             if playtest.identity is not None

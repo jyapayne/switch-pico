@@ -629,6 +629,19 @@ The live playtest, eight-slot catalog, controller-native labels, automatic
 active-profile synchronization, and Sets A/B are implemented. Set C remains
 candidate work; the native Switch-family output plan below is separate.
 
+Studio now uses nine supplied SVG assets with model-specific, viewBox-relative
+hotspots and sideways Joy-Con source mappings. Live playtest schema 4 adds a
+read-only topology byte; the host retains schema 2/3 compatibility. Auto views
+follow actual matching-owner pair/solo metadata; explicit previews do not
+change firmware topology or highlight another controller as detected hardware.
+Rear/rail controls remain off-art and unavailable stored mappings are retained.
+Chromium checks covered all assets, ten layout/orientation views, mobile
+panning and non-overlapping hotspots, remapping, and simulated live topology
+transitions without losing focus or draft data. The connected real Joy-Con pair
+reported its paired layout on the flashed firmware. All 293 tests and all five
+firmware builds passed. Pair profiles still share the left bank at this
+checkpoint; independent pair banks are separate work.
+
 | Priority | Candidate | Intended scope | Dependency or principal risk |
 |---|---|---|---|
 | A1 — Complete | Named and copyable profiles | Profile names and controller aliases use catalog metadata rather than input-profile fields. Copy/export/import preserve the current draft and per-section resets leave other settings unchanged. | Atomic metadata records; no report-path cost. |

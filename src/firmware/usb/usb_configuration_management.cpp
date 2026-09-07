@@ -516,7 +516,9 @@ size_t encode_profile_playtest(
                 CONTROLLER_IDENTITY_ENCODED_SIZE) ||
             snapshot.state.motion_sample_count >
                 CONTROLLER_MOTION_SAMPLE_CAPACITY ||
-            (snapshot.state.extra_buttons & 0x80u) != 0) {
+            (snapshot.state.extra_buttons & 0x80u) != 0 ||
+            static_cast<uint8_t>(snapshot.controller_layout) >
+                static_cast<uint8_t>(Bluepad32ControllerLayout::kWiiNunchuk)) {
             return 0;
         }
         payload[0] = 1;
@@ -538,6 +540,7 @@ size_t encode_profile_playtest(
         payload[39] = snapshot.battery;
         payload[40] = snapshot.capabilities;
         payload[54] = snapshot.state.extra_buttons;
+        payload[55] = static_cast<uint8_t>(snapshot.controller_layout);
         if (snapshot.state.motion_sample_count != 0) {
             payload[0] |= 2;
             const ControllerMotionSample& motion =

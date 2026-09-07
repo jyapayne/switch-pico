@@ -68,11 +68,35 @@ def test_editor_serves_assets_and_complete_schema(
         with urllib.request.urlopen(f"{base_url}/app.js", timeout=2) as response:
             response.read()
             assert response.headers["Content-Type"].startswith("text/javascript")
-        with urllib.request.urlopen(
-            f"{base_url}/assets/controller-switch-pro.svg", timeout=2
-        ) as response:
-            response.read()
-            assert response.headers["Content-Type"] == "image/svg+xml"
+        for filename in (
+            "switch-pro-controller-simple.svg",
+            "switch-2-pro-controller-simple.svg",
+            "switch-2-joycon-left.svg",
+            "switch-2-joycon-single.svg",
+            "switch-2-joycons-connected.svg",
+            "ps5-dualsense-simple.svg",
+            "xbox-controller-simple.svg",
+            "wii-remote-simple.svg",
+            "wii-remote-nunchuk-simple.svg",
+        ):
+            with urllib.request.urlopen(
+                f"{base_url}/assets/{filename}", timeout=2
+            ) as response:
+                assert response.headers["Content-Type"] == "image/svg+xml"
+                assert b"<svg" in response.read()
+        for path in (
+            "/assets/controller-switch-pro.svg",
+            "/assets/controller-dualsense.svg",
+            "/assets/controller-xbox.svg",
+            "/assets/GAMEPAD_ASSET_LICENSE.txt",
+            "/assets/../profile_editor.html",
+            "/assets/%2e%2e/profile_editor.html",
+            "/assets/%2e%2e%2fprofile_editor.html",
+            "/assets/switch-2-joycon-left.svg/../profile_editor.html",
+        ):
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(f"{base_url}{path}", timeout=2)
+            assert error.value.code == 404
 
         status, schema = request_json(f"{base_url}/api/schema")
 
@@ -91,9 +115,13 @@ def test_editor_serves_assets_and_complete_schema(
     )
 
 
-@pytest.mark.parametrize("product_id", [0x2069, 0x2067, 0x2066])
+@pytest.mark.parametrize(("product_id", "extras"), [
+    (0x2069, {"c", "gl", "gr"}),
+    (0x2067, {"left_sl", "left_sr"}),
+    (0x2066, {"c", "right_sl", "right_sr"}),
+])
 def test_switch2_input_choices_are_never_output_targets(
-    monkeypatch: pytest.MonkeyPatch, product_id: int,
+    monkeypatch: pytest.MonkeyPatch, product_id: int, extras: set[str],
 ) -> None:
     device = FakeDevice()
     identity = replace(device.stable_identity, vendor_id=0x057E, product_id=product_id)
@@ -106,7 +134,8 @@ def test_switch2_input_choices_are_never_output_targets(
         assert status == 200
     owner = listing["identities"][1]
     assert owner["controller"]["style"] == "switch"
-    assert set(config_manager.EXTRA_BUTTONS) <= set(owner["modifier_controls"])
+    assert set(owner["source_controls"]) & set(config_manager.EXTRA_BUTTONS) == extras
+    assert set(owner["modifier_controls"]) & set(config_manager.EXTRA_BUTTONS) == extras
     assert set(schema["extra_buttons"]).isdisjoint(schema["output_controls"])
     assert schema["output_controls"] == list(config_manager.OUTPUT_CONTROLS)
 
@@ -194,21 +223,83 @@ def test_editor_identifies_connected_controller_artwork(
         status, listing = request_json(f"{base_url}/api/profiles")
 
     assert status == 200
-    assert [identity["controller"] for identity in listing["identities"]] == [
-        {"model": "Generic controller", "style": "generic"},
-        {"model": "Nintendo Switch Pro Controller", "style": "switch"},
-        {"model": "Sony DualSense", "style": "playstation"},
-        {"model": "Xbox controller", "style": "xbox"},
-    ]
-    assert [identity["label"] for identity in listing["identities"]] == [
-        "Default profile",
-        "Switch Pro · 05:06",
-        "DualSense · 15:16",
-        "Xbox · 50:60",
+    assert [
+        (identity["controller"]["style"], identity["controller"]["layout"])
+        for identity in listing["identities"]
+    ] == [
+        ("generic", "generic"), ("switch", "switch-pro"),
+        ("playstation", "dualsense"), ("xbox", "xbox"),
     ]
     assert [identity["key"] for identity in listing["identities"]] == [
         identity.to_bytes().hex() for identity in device.profile_identities
     ]
+
+
+@pytest.mark.parametrize("owner_index", [0, 1])
+def test_live_layout_transitions_do_not_infer_topology_from_profile_owner(
+    monkeypatch: pytest.MonkeyPatch, owner_index: int,
+) -> None:
+    device = FakeDevice()
+    left = replace(device.stable_identity, vendor_id=0x057E, product_id=0x2067)
+    device.stable_identity = left
+    device.profile_identities = [device.global_identity, left]
+    device.active_profiles[left.to_bytes()] = 0
+    device.profiles[(left.to_bytes(), 0)] = config_manager.ControllerProfile.default().to_bytes()
+    device.playtest_motion = None
+    with running_server(monkeypatch, device) as (base_url, _):
+        for code, expected in ((1, "joycon2-left"), (3, "joycon2-pair"), (1, "joycon2-left")):
+            device.playtest_layout = code
+            status, sample = request_json(f"{base_url}/api/profiles/{owner_index}/1/playtest")
+            assert status == 200
+            assert sample["controller"]["layout"] == expected
+            assert sample["owner_key"] == device.profile_identities[owner_index].to_bytes().hex()
+            assert sample["identity_key"] == left.to_bytes().hex()
+            expected_extras = (
+                {"c", "left_sl", "left_sr", "right_sl", "right_sr"}
+                if code == 3 else {"left_sl", "left_sr"}
+            )
+            assert set(sample["source_controls"]) & set(config_manager.EXTRA_BUTTONS) == expected_extras
+        status, listing = request_json(f"{base_url}/api/profiles")
+        assert status == 200
+        assert listing["identities"][1]["controller"]["layout"] == "joycon2-left"
+        device.playtest_connected = False
+        status, offline = request_json(f"{base_url}/api/profiles/{owner_index}/1/playtest")
+        assert status == 200
+        assert offline["connected"] is False
+        assert offline["layout"] is None
+        assert offline["controller"] == listing["identities"][owner_index]["controller"]
+
+
+def test_live_metadata_cannot_turn_an_unrelated_identity_into_a_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    device.playtest_layout = 3
+    with running_server(monkeypatch, device) as (base_url, _):
+        status, sample = request_json(f"{base_url}/api/profiles/0/1/playtest")
+    assert status == 200
+    assert sample["controller"]["layout"] == "xbox"
+
+
+def test_wii_pid_does_not_claim_a_remote_or_extension_without_live_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    device.stable_identity = replace(device.stable_identity, vendor_id=0x057E, product_id=0x0330)
+    device.profile_identities = [device.global_identity, device.stable_identity]
+    device.active_profiles[device.stable_identity.to_bytes()] = 0
+    with running_server(monkeypatch, device) as (base_url, _):
+        status, listing = request_json(f"{base_url}/api/profiles")
+        assert status == 200
+        assert listing["identities"][1]["controller"]["layout"] == "generic"
+        for code, expected in ((0, "generic"), (4, "wii-remote"), (5, "wii-nunchuk"), (0, "generic")):
+            device.playtest_layout = code
+            status, sample = request_json(f"{base_url}/api/profiles/0/1/playtest")
+            assert status == 200
+            assert sample["controller"]["layout"] == expected
+            if code:
+                assert set(sample["source_controls"]).isdisjoint(config_manager.EXTRA_BUTTONS)
+                assert ("left_shoulder" in sample["source_controls"]) == (code == 5)
 
 
 def test_editor_reads_writes_and_activates_profiles_atomically(
@@ -222,19 +313,12 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
         assert listing["identities"][1]["key"] == (
             device.stable_identity.to_bytes().hex()
         )
-        assert listing["identities"][1]["controller"] == {
-            "model": "Xbox controller",
-            "style": "xbox",
-        }
+        assert listing["identities"][1]["controller"]["layout"] == "xbox"
 
         status, playtest = request_json(f"{base_url}/api/profiles/1/8/playtest")
         assert status == 200
         assert playtest["connected"] is True
-        assert playtest["label"] == "Xbox · 50:60"
-        assert playtest["controller"] == {
-            "model": "Xbox controller",
-            "style": "xbox",
-        }
+        assert playtest["controller"]["layout"] == "xbox"
         assert playtest["buttons"] == [
             "south",
             "dpad_up",

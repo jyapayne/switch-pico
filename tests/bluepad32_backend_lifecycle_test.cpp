@@ -1344,6 +1344,12 @@ void test_switch2_pair_lifecycle(bool right_first) {
                 solo.state.right_stick_x == 0 && solo.state.right_stick_y == 0 &&
                 (right_first ? solo.state.button_south : solo.state.button_west),
             "solo JoyCon must rotate face controls, stick click and rail shoulders");
+    Bluepad32PlaytestSnapshot playtest{};
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(playtest.controller_layout ==
+                (right_first ? Bluepad32ControllerLayout::kJoyCon2RightSolo
+                             : Bluepad32ControllerLayout::kJoyCon2LeftSolo),
+            "playtest must identify the live rotated solo half");
     require(solo.state.left_stick_x ==
                 (right_first ? INT16_MAX : scale_axis(100)) &&
                 solo.state.left_stick_y ==
@@ -1363,6 +1369,11 @@ void test_switch2_pair_lifecycle(bool right_first) {
                 merged.connection_generation != solo.connection_generation &&
                 controller_identity_equal(merged.identity, identity_for_device(&left)),
             "either connection order must merge into first output with left profile owner");
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(playtest.controller_layout ==
+                Bluepad32ControllerLayout::kJoyCon2MergedPair &&
+                playtest.state.motion_sample_count == 0,
+            "playtest must detect a live companion before any merged motion report");
     Bluepad32CaptureSnapshot capture{};
     require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
                 capture.state == CaptureState::kDisconnected,
@@ -1445,6 +1456,11 @@ void test_switch2_pair_lifecycle(bool right_first) {
                 !detached.state.dpad_up && !detached.state.button_east &&
                 (right_first ? detached.state.button_south : detached.state.button_west),
             "either half detach must immediately publish only the rotated survivor and own profile");
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(playtest.controller_layout ==
+                (right_first ? Bluepad32ControllerLayout::kJoyCon2RightSolo
+                             : Bluepad32ControllerLayout::kJoyCon2LeftSolo),
+            "playtest must stop presenting a pair immediately after companion loss");
     require(survivor.last_rumble_duration_ms == 0 &&
                 slot_snapshot(2).connection_generation == ordinary_before.connection_generation &&
                 slot_snapshot(2).state.button_north,
@@ -2031,6 +2047,29 @@ void test_rejections() {
                 playtest.battery == 201 &&
                 (playtest.capabilities & 0x08u) != 0,
             "playtest snapshot did not expose input capabilities");
+    struct LayoutCase {
+        uni_controller_subtype_t subtype;
+        Bluepad32ControllerLayout layout;
+    };
+    const LayoutCase layouts[] = {
+        {CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL, Bluepad32ControllerLayout::kWiiRemote},
+        {CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL, Bluepad32ControllerLayout::kWiiRemote},
+        {CONTROLLER_SUBTYPE_WIIMOTE_ACCEL, Bluepad32ControllerLayout::kWiiRemote},
+        {CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK, Bluepad32ControllerLayout::kWiiNunchuk},
+        {CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL, Bluepad32ControllerLayout::kWiiNunchuk},
+        {CONTROLLER_SUBTYPE_WII_CLASSIC, Bluepad32ControllerLayout::kUnspecified},
+        {CONTROLLER_SUBTYPE_WIIUPRO, Bluepad32ControllerLayout::kUnspecified},
+        {CONTROLLER_SUBTYPE_WII_BALANCE_BOARD, Bluepad32ControllerLayout::kUnspecified},
+        {CONTROLLER_SUBTYPE_WIIMOTE_UDRAW_TABLET, Bluepad32ControllerLayout::kUnspecified},
+        {CONTROLLER_SUBTYPE_NONE, Bluepad32ControllerLayout::kUnspecified},
+    };
+    for (const LayoutCase& expected : layouts) {
+        slot_zero.controller_subtype = expected.subtype;
+        bluepad32_input_backend_playtest_snapshot(0, &playtest);
+        require(playtest.controller_layout == expected.layout &&
+                    playtest.state.motion_sample_count == 3,
+                "Wii layout must follow the live subtype, not motion or previous extension");
+    }
     bluepad32_input_backend_report_sent(0);
     require(read_controller_state(0, &snapshot) &&
                 snapshot.motion_sample_count == 3,

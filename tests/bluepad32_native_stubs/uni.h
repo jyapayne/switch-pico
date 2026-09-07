@@ -82,6 +82,20 @@ enum {
     MISC_BUTTON_CAPTURE = 1 << 3,
 };
 
+typedef enum {
+    CONTROLLER_SUBTYPE_NONE = 0,
+    CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL,
+    CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL,
+    CONTROLLER_SUBTYPE_WIIMOTE_ACCEL,
+    CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK,
+    CONTROLLER_SUBTYPE_UNUSED_00,
+    CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL,
+    CONTROLLER_SUBTYPE_WII_CLASSIC,
+    CONTROLLER_SUBTYPE_WIIUPRO,
+    CONTROLLER_SUBTYPE_WII_BALANCE_BOARD,
+    CONTROLLER_SUBTYPE_WIIMOTE_UDRAW_TABLET,
+} uni_controller_subtype_t;
+
 struct uni_gamepad_t {
     uint32_t dpad;
     uint32_t buttons;
@@ -148,6 +162,7 @@ inline uint8_t uni_circular_buffer_is_empty(const uni_circular_buffer_t* buffer)
 struct uni_hid_device_s {
     uint16_t vendor_id;
     uint16_t product_id;
+    uni_controller_subtype_t controller_subtype;
     uni_bt_conn_t conn;
     int idx;
     bool gamepad;

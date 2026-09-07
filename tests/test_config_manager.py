@@ -137,6 +137,7 @@ class FakeDevice:
         self.playtest_state_generation = 93
         self.playtest_button_mask = 0x9001
         self.playtest_extra_buttons = 0
+        self.playtest_layout = 0
         self.playtest_sticks = (-1234, 2345, -30000, 30000)
         self.playtest_triggers = (123, 65000)
         self.playtest_motion = (1, -2, 3, -4, 5, -6)
@@ -234,6 +235,7 @@ class FakeDevice:
         payload[39] = self.playtest_battery
         payload[40] = self.playtest_capabilities
         payload[54] = self.playtest_extra_buttons
+        payload[55] = self.playtest_layout
         if self.playtest_motion is not None:
             struct.pack_into("<hhhhhh", payload, 42, *self.playtest_motion)
         return bytes(payload), flags
@@ -2103,25 +2105,45 @@ def test_profile_playtest_decodes_raw_controller_state() -> None:
         config_manager.parse_profile_playtest(envelope)
 
 
-def test_playtest_extra_inputs_and_legacy_firmware_are_distinct() -> None:
+def test_playtest_layout_and_extra_inputs_preserve_legacy_firmware() -> None:
     device = FakeDevice()
+    device.stable_identity = replace(device.stable_identity, vendor_id=0x057E, product_id=0x2067)
     device.playtest_extra_buttons = 0x55
+    device.playtest_layout = 3
     payload, flags = device._profile_playtest_payload()
+
     def parse(data: bytes, schema: int) -> config_manager.ProfilePlaytest:
         return config_manager.parse_profile_playtest(config_manager.parse_response(
             make_response(config_manager.OP_PROFILE_PLAYTEST, data, flags=flags, schema=schema),
             config_manager.OP_PROFILE_PLAYTEST,
         ))
-    current = parse(payload, 3)
+
+    current = parse(payload, 4)
+    assert current.to_json_object()["layout"] == "joycon2-pair"
     assert current.to_json_object()["extra_buttons"] == ["c", "gr", "left_sr", "right_sr"]
     assert current.to_json_object()["buttons"] == ["south", "dpad_up", "dpad_right"]
-    legacy = parse(payload[:54], 2)
-    assert legacy == replace(current, extra_buttons=0)
-    assert legacy.to_json_object()["extra_buttons"] == []
+    assert parse(payload[:55], 3) == replace(current, layout=None)
+    assert parse(payload[:54], 2) == replace(current, extra_buttons=0, layout=None)
+    assert parse(payload[:55] + b"\x00", 4).layout is None
+    for data, schema in (
+        (payload[:54] + b"\x80", 3),
+        (payload[:54] + b"\x80\x03", 4),
+        (payload[:55] + b"\x06", 4),
+        (payload[:55] + b"\xff", 4),
+        (payload, 2),
+        (payload, 3),
+        (payload[:55], 4),
+        (payload + b"\x00", 4),
+        (payload, 5),
+    ):
+        with pytest.raises(config_manager.ConfigManagerError):
+            parse(data, schema)
+
+    device.playtest_connected = False
+    disconnected, flags = device._profile_playtest_payload()
+    assert parse(disconnected, 4).layout is None
     with pytest.raises(config_manager.ConfigManagerError):
-        parse(payload[:54] + b"\x80", 3)
-    with pytest.raises(config_manager.ConfigManagerError):
-        parse(payload, 2)
+        parse(disconnected[:55] + b"\x03", 4)
 
 
 def test_profile_reset_and_activate_wait_for_correlated_transactions(

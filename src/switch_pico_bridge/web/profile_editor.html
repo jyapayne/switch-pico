@@ -110,49 +110,45 @@
           <div class="controller-mapper">
             <div class="controller-canvas" id="controllerCanvas" data-style="generic">
               <div class="controller-caption">
-                <span class="controller-live"><i></i> Connected layout</span>
+                <span class="controller-live" id="controllerLayoutStatus">Reference layout</span>
                 <strong id="controllerModel">Generic controller</strong>
               </div>
-              <div class="controller-photo-wrap">
-                <img
-                  class="controller-photo"
-                  id="controllerImage"
-                  src="/assets/controller-xbox.svg"
-                  alt="Connected controller"
-                >
-                <div class="controller-hotspots" id="controllerHotspots">
-                  <button type="button" data-controller-button="left_shoulder" aria-label="Left Shoulder">L</button>
-                  <button type="button" data-controller-button="right_shoulder" aria-label="Right Shoulder">R</button>
-                  <button type="button" data-controller-button="left_trigger" aria-label="Left Trigger">LT</button>
-                  <button type="button" data-controller-button="right_trigger" aria-label="Right Trigger">RT</button>
-                  <button type="button" data-controller-button="dpad_up" aria-label="D-pad Up">▲</button>
-                  <button type="button" data-controller-button="dpad_right" aria-label="D-pad Right">▶</button>
-                  <button type="button" data-controller-button="dpad_down" aria-label="D-pad Down">▼</button>
-                  <button type="button" data-controller-button="dpad_left" aria-label="D-pad Left">◀</button>
-                  <button type="button" data-controller-button="north" aria-label="North button">N</button>
-                  <button type="button" data-controller-button="west" aria-label="West button">W</button>
-                  <button type="button" data-controller-button="east" aria-label="East button">E</button>
-                  <button type="button" data-controller-button="south" aria-label="South button">S</button>
-                  <button type="button" data-controller-button="left_stick" aria-label="Left Stick">L3</button>
-                  <button type="button" data-controller-button="right_stick" aria-label="Right Stick">R3</button>
-                  <button type="button" data-controller-button="select" aria-label="Select">−</button>
-                  <button type="button" data-controller-button="start" aria-label="Start">+</button>
-                  <button type="button" data-controller-button="capture" aria-label="Capture">▣</button>
-                  <button type="button" data-controller-button="system" aria-label="System">⌂</button>
+              <div class="layout-picker">
+                <label class="field-label" for="controllerLayoutPreview">Auto / layout preview</label>
+                <select class="select" id="controllerLayoutPreview" aria-describedby="controllerLayoutHelp">
+                  <option value="auto">Auto · selected owner / live metadata</option>
+                  <option value="xbox">Preview · Xbox</option>
+                  <option value="dualsense">Preview · DualSense</option>
+                  <option value="switch-pro">Preview · original Switch Pro</option>
+                  <option value="switch2-pro">Preview · Switch 2 Pro</option>
+                  <option value="joycon2-pair">Preview · Joy-Con 2 pair</option>
+                  <option value="joycon2-left">Preview · Joy-Con 2 left solo</option>
+                  <option value="joycon2-right">Preview · Joy-Con 2 right solo</option>
+                  <option value="wii-horizontal">Preview · Wii horizontal / accelerometer</option>
+                  <option value="wii-vertical">Preview · Wii vertical</option>
+                  <option value="wii-nunchuk">Preview · Wii Remote + Nunchuk</option>
+                </select>
+                <p class="field-help" id="controllerLayoutHelp">Preview changes only this editor's source labels and diagram, never firmware topology or saved mappings.</p>
+              </div>
+              <div class="controller-viewport" tabindex="0" role="region" aria-label="Controller diagram; scroll horizontally on narrow screens">
+                <div class="controller-photo-wrap" id="controllerPhotoWrap">
+                  <div class="controller-stage" id="controllerStage">
+                    <img class="controller-photo" id="controllerImage" src="/assets/xbox-controller-simple.svg" alt="Generic controller reference">
+                    <div class="controller-hotspots" id="controllerHotspots"></div>
+                  </div>
                 </div>
               </div>
-              <p class="controller-hint">Select a highlighted control on the controller to remap it.</p>
-              <p class="field-label" id="extraControlsLabel">Switch 2 extra inputs</p>
+              <p class="controller-hint">Select a control on the illustration or below it. On narrow screens, swipe sideways or use the Source control menu.</p>
+              <p class="field-label" id="extraControlsLabel">Off-art controls · rear, rails or unlocated sources</p>
               <div class="extra-controls" id="extraControls" role="group" aria-labelledby="extraControlsLabel"></div>
-              <p class="field-help">C, back and rail buttons are source-only controls. Unmapped extra inputs produce no console output.</p>
-              <p class="controller-credit">
-                Image:
-                <a id="controllerCredit" href="https://github.com/AL2009man/Gamepad-Asset-Pack" target="_blank" rel="noreferrer">Controller artwork by Al. Lopez · MIT</a>
-              </p>
+              <p class="field-help" id="controllerLayoutNote"></p>
+              <p class="controller-credit">Original vector artwork supplied for Switch Pico Controller Studio.</p>
             </div>
 
             <aside class="mapping-inspector">
               <p class="eyebrow">Selected control</p>
+              <label class="field-label" for="selectedSource">Source control</label>
+              <select class="select" id="selectedSource" aria-describedby="selectedControlDescription"></select>
               <div class="selected-control-mark" id="selectedControlGlyph">S</div>
               <h4 id="selectedControlName">South button</h4>
               <p id="selectedControlDescription">Physical South currently produces South.</p>
@@ -439,6 +435,7 @@
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/playtest.js" defer></script>
+  <script src="/assets/controller_layouts.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

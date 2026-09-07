@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="800" height="548" viewBox="0 0 800 548" role="img" aria-labelledby="title description">
+  <title id="title">PS5 DualSense wireless controller — white</title>
+  <desc id="description">Front-view white-and-black PlayStation 5 DualSense controller, with symmetrical analog sticks, a touchpad with blue edge lights, directional buttons, triangle circle cross square controls, speaker, PlayStation and microphone buttons. Transparent background. Lightweight vector shapes and simple gradients; no filters, textures, fonts or external images.</desc>
+  <metadata>Visual reference: https://www.playstation.com/en-us/accessories/dualsense-wireless-controller/ . Independently drawn vector artwork.</metadata>
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2=".8" y2="1">
+      <stop stop-color="#3c454b" />
+      <stop offset="1" stop-color="#20272c" />
+    </linearGradient>
+    <radialGradient id="dish" cx="50%" cy="90%" r="100%">
+      <stop stop-color="#283239" />
+      <stop offset="1" stop-color="#424f58" />
+    </radialGradient>
+    <linearGradient id="white" x1=".15" y1="0" x2=".85" y2="1">
+      <stop stop-color="#f2f4f7" />
+      <stop offset="1" stop-color="#bfc8d4" />
+    </linearGradient>
+    <g id="stick">
+      <circle cy="2" r="62" fill="#202a31" stroke="#546169" stroke-width="2" />
+      <circle cy="1" r="52" fill="#141e25" />
+      <circle cy="-2" r="47" fill="#536169" stroke="#748189" stroke-width="1.5" />
+      <circle cy="-2" r="39" fill="url(#dish)" stroke="#1b272f" stroke-width="2.5" />
+    </g>
+    <g id="ps-key">
+      <circle cy="1" r="25" fill="#a3adb9" />
+      <circle cy="-1" r="23" fill="url(#white)" stroke="#f7f9fb" stroke-width="1.2" />
+    </g>
+    <path id="ps-direction" d="M-10-27H10Q21-27 21-16V1Q21 6 16 10L5 20Q0 24-5 20L-16 10Q-21 6-21 1V-16Q-21-27-10-27Z" />
+  </defs>
+  <g id="controller">
+    <g id="shoulders" fill="url(#shell)" stroke="#657179" stroke-width="1.5">
+      <path d="M113 61V42C142 24 177 23 218 24L219 60Z" />
+      <path d="M687 61V42C658 24 623 23 582 24L581 60Z" />
+    </g>
+    <path d="M133 53C192 34 293 37 400 37C507 37 608 34 667 53C723 107 753 187 770 285C783 365 780 447 756 493C744 516 713 529 677 529C660 528 641 476 614 420C597 385 581 356 553 355C487 357 313 357 247 355C219 356 203 385 186 420C159 476 140 528 123 529C87 529 56 516 44 493C20 447 17 365 30 285C47 187 77 107 133 53Z" fill="url(#shell)" stroke="#172128" stroke-width="2" />
+    <path id="left-white-shell" d="M133 53C166 43 209 39 247 42L266 148C272 178 263 195 241 222C188 290 144 405 106 510C100 528 87 525 73 514C35 487 25 433 27 363C26 247 60 124 112 66Z" fill="url(#white)" stroke="#aab5c1" stroke-width="1.5" />
+    <use xlink:href="#left-white-shell" transform="translate(800 0) scale(-1 1)" />
+    <path d="M120 62C153 49 196 46 242 47M680 62C647 49 604 46 558 47" fill="none" stroke="#fff" stroke-width="2" />
+    <path d="M249 356C219 357 204 380 184 423C162 470 143 520 130 526M551 356C581 357 596 380 616 423C638 470 657 520 670 526" fill="none" stroke="#5b6872" stroke-width="1.5" />
+    <g id="touchpad">
+      <path d="M252 42C294 35 506 35 548 42Q558 45 555 64L537 161Q530 201 497 204H303Q270 201 263 161L245 64Q242 45 252 42Z" fill="#15202b" />
+      <path d="M251 48L270 157Q276 184 287 190M549 48L530 157Q524 184 513 190" fill="none" stroke="#477df1" stroke-width="5" stroke-linecap="round" />
+      <path d="M262 42Q400 33 538 42Q551 43 548 60L531 153Q525 190 496 194H304Q275 190 269 153L252 60Q249 43 262 42Z" fill="url(#white)" stroke="#c9d2dc" stroke-width="1.3" />
+      <path d="M264 46Q400 38 536 46" fill="none" stroke="#fff" stroke-width="1.7" />
+    </g>
+    <g id="create-button" transform="translate(231 92) rotate(-13)">
+      <rect x="-9" y="-17" width="18" height="34" rx="9" fill="url(#white)" stroke="#8d99a5" stroke-width="1.4" />
+      <path d="M-6-24L-9-29M0-24V-31M6-24L9-29" stroke="#8c99a5" stroke-width="1.2" />
+    </g>
+    <g id="options-button" transform="translate(569 92) rotate(13)">
+      <rect x="-9" y="-17" width="18" height="34" rx="9" fill="url(#white)" stroke="#8d99a5" stroke-width="1.4" />
+      <path d="M-5-24H5M-5-28H5M-5-32H5" stroke="#8c99a5" stroke-width="1.2" />
+    </g>
+    <g id="directional-pad" transform="translate(166 174)">
+      <g transform="translate(0 -39)">
+        <use xlink:href="#ps-direction" fill="url(#white)" stroke="#8e99a5" stroke-width="2.7" />
+        <path d="M-4-10L0-16L4-10Z" fill="#a4afba" />
+      </g>
+      <g transform="translate(39 0) rotate(90)">
+        <use xlink:href="#ps-direction" fill="url(#white)" stroke="#8e99a5" stroke-width="2.7" />
+        <path d="M-4-10L0-16L4-10Z" fill="#a4afba" />
+      </g>
+      <g transform="translate(0 39) rotate(180)">
+        <use xlink:href="#ps-direction" fill="url(#white)" stroke="#8e99a5" stroke-width="2.7" />
+        <path d="M-4-10L0-16L4-10Z" fill="#a4afba" />
+      </g>
+      <g transform="translate(-39 0) rotate(-90)">
+        <use xlink:href="#ps-direction" fill="url(#white)" stroke="#8e99a5" stroke-width="2.7" />
+        <path d="M-4-10L0-16L4-10Z" fill="#a4afba" />
+      </g>
+    </g>
+    <g id="face-buttons" fill="none" stroke="#8d99a8" stroke-width="2.4">
+      <g transform="translate(634 120)">
+        <use xlink:href="#ps-key" stroke="none" />
+        <path d="M0-16L-15 10H15Z" />
+      </g>
+      <g transform="translate(580 174)">
+        <use xlink:href="#ps-key" stroke="none" />
+        <path d="M-12-13H12V11H-12Z" />
+      </g>
+      <g transform="translate(688 174)">
+        <use xlink:href="#ps-key" stroke="none" />
+        <circle cy="-1" r="14" />
+      </g>
+      <g transform="translate(634 228)">
+        <use xlink:href="#ps-key" stroke="none" />
+        <path d="M-11-12L11 10M11-12L-11 10" />
+      </g>
+    </g>
+    <use xlink:href="#stick" transform="translate(282 282) scale(.85)" />
+    <use xlink:href="#stick" transform="translate(518 282) scale(.85)" />
+    <g id="ps-button" transform="translate(400 277)" fill="#111b22" stroke="#63717b" stroke-width=".8">
+      <path d="M-6-22L7-18C18-14 18-3 8 0L3-2V-12L0-13V14L-6 12Z" />
+      <path d="M-9-3L-22 2C-34 7-21 14-10 11L-10 6C-17 8-23 7-17 5L-9 2ZM4 0C15-3 27 1 24 6C23 8 12 12 3 15V9L16 5C21 3 13 2 5 5Z" />
+    </g>
+    <g id="mute-button">
+      <rect x="-19" y="-5" width="38" height="10" rx="5" transform="translate(400 322)" fill="#131e26" />
+      <rect x="-17" y="-4" width="34" height="7" rx="3.5" transform="translate(400 322)" fill="#59666f" />
+    </g>
+    <g id="microphone" transform="translate(400 342)" stroke="#687984" stroke-width="1.2" fill="none">
+      <rect x="-2" y="-5" width="4" height="7" rx="2" />
+      <path d="M-4-1V1Q0 7 4 1V-1M0 5V7M-3 7H3" />
+    </g>
+    <g id="speaker" fill="#111b22">
+      <circle cx="372" cy="218" r="3.3" />
+      <circle cx="383" cy="218" r="3.3" />
+      <circle cx="394" cy="218" r="3.3" />
+      <circle cx="405" cy="218" r="3.3" />
+      <circle cx="416" cy="218" r="3.3" />
+      <circle cx="427" cy="218" r="3.3" />
+      <circle cx="383" cy="229" r="3.3" />
+      <circle cx="394" cy="229" r="3.3" />
+      <circle cx="405" cy="229" r="3.3" />
+      <circle cx="416" cy="229" r="3.3" />
+    </g>
+  </g>
+</svg>
