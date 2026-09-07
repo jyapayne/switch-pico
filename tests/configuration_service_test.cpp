@@ -133,6 +133,7 @@ void test_service_lifecycle_and_mutations(bool v2) {
     require(snapshot.state == ConfigurationServiceState::kReady &&
                 snapshot.configuration.pairing_window_seconds == 90 &&
                 snapshot.configuration.requested_mode == original_mode &&
+                snapshot.configuration.joycon_mode == JoyConMode::kPaired &&
                 snapshot.configuration.native_switch_controller_count == 0,
             "Core 0 did not preserve legacy settings without approval");
     require(g_flash.program_count == programs_after_seed &&
@@ -160,6 +161,7 @@ void test_service_lifecycle_and_mutations(bool v2) {
     configuration_service_snapshot(&snapshot);
     require(snapshot.state == ConfigurationServiceState::kReady &&
                 snapshot.configuration.requested_mode == original_mode &&
+                snapshot.configuration.joycon_mode == JoyConMode::kPaired &&
                 snapshot.configuration.native_switch_controller_count == 0 &&
                 snapshot.transaction.status ==
                     ConfigurationTransactionStatus::kIdle,
@@ -172,7 +174,7 @@ void test_service_lifecycle_and_mutations(bool v2) {
                     ADAPTER_CONFIGURATION_SCHEMA_VERSION &&
                 after_migration.snapshot().payload_size ==
                     ADAPTER_CONFIGURATION_ENCODED_SIZE,
-            "power cycle did not observe the migrated v3 record");
+            "power cycle did not observe the migrated v4 record");
     AdapterConfiguration migrated{};
     require(adapter_configuration_decode(
                 after_migration.snapshot().schema_version,
@@ -180,8 +182,9 @@ void test_service_lifecycle_and_mutations(bool v2) {
                 after_migration.snapshot().payload_size, &migrated) &&
                 migrated.pairing_window_seconds == 90 &&
                 migrated.requested_mode == original_mode &&
+                migrated.joycon_mode == JoyConMode::kPaired &&
                 migrated.native_switch_controller_count == 0,
-            "migrated v3 bytes did not preserve legacy configuration");
+            "migrated v4 bytes did not preserve legacy configuration");
 
     require(configuration_service_set_mode(
                 10, AdapterRequestedMode::kSwitch, implemented) ==
@@ -476,6 +479,17 @@ void test_service_lifecycle_and_mutations(bool v2) {
 }
 
 void test_abandoned_host_receive_does_not_block_recovery() {
+    AdapterConfiguration original{};
+    original.pairing_window_seconds = 90;
+    original.requested_mode = AdapterRequestedMode::kSwitch;
+    original.joycon_mode = JoyConMode::kIndividual;
+    uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+    ConfigurationStorage seed;
+    require(adapter_configuration_encode(original, payload, sizeof(payload)) &&
+                seed.initialize(fake_io()) &&
+                seed.commit(ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
+                            sizeof(payload)) == ConfigurationStorageResult::kOk,
+            "recovery configuration fixture did not persist");
     configuration_service_prepare();
     configuration_service_initialize_pre_usb();
     configuration_service_initialize_on_storage_core();
@@ -484,7 +498,7 @@ void test_abandoned_host_receive_does_not_block_recovery() {
     configuration_service_snapshot(&snapshot);
     AdapterConfiguration abandoned = snapshot.configuration;
     abandoned.pairing_window_seconds = 180;
-    uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+    abandoned.joycon_mode = JoyConMode::kPaired;
     require(adapter_configuration_encode(abandoned, payload,
                                          sizeof(payload)),
             "abandoned recovery-race configuration did not encode");
@@ -513,6 +527,11 @@ void test_abandoned_host_receive_does_not_block_recovery() {
     require_mode_status(kRecoveryAuto,
                         ConfigurationTransactionStatus::kCommitted,
                         "recovery Auto did not commit after abandoned receive");
+    configuration_service_snapshot(&snapshot);
+    require(snapshot.configuration.requested_mode == AdapterRequestedMode::kAuto &&
+                snapshot.configuration.joycon_mode == JoyConMode::kIndividual &&
+                snapshot.configuration.pairing_window_seconds == 90,
+            "recovery Auto replaced durable settings with defaults or abandoned data");
     require(configuration_service_mode_transaction_reboot_ready(
                 kRecoveryAuto),
             "recovery Auto did not become latest reboot authority");
@@ -535,7 +554,7 @@ void queue_configuration(uint32_t transaction_id,
             "approval configuration did not reach pending commit");
 }
 
-void test_native_switch_approval_preservation_and_revocation() {
+void test_native_switch_approval_preservation_and_revocation(bool migrate_v3) {
     ControllerIdentity pro{};
     pro.stable = true;
     pro.transport = ControllerTransport::kClassic;
@@ -548,6 +567,8 @@ void test_native_switch_approval_preservation_and_revocation() {
     left.product_id = 0x2006;
     AdapterConfiguration configuration{};
     configuration.pairing_window_seconds = 90;
+    configuration.joycon_mode =
+        migrate_v3 ? JoyConMode::kPaired : JoyConMode::kIndividual;
     configuration.native_switch_controller_count = 2;
     configuration.native_switch_controllers[0] = pro;
     configuration.native_switch_controllers[1] = left;
@@ -555,28 +576,59 @@ void test_native_switch_approval_preservation_and_revocation() {
     ConfigurationStorage seed;
     require(adapter_configuration_encode(configuration, payload, sizeof(payload)) &&
                 seed.initialize(fake_io()) &&
-                seed.commit(ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
-                            sizeof(payload)) == ConfigurationStorageResult::kOk,
+                seed.commit(migrate_v3 ? ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION
+                                       : ADAPTER_CONFIGURATION_SCHEMA_VERSION,
+                            payload, sizeof(payload)) ==
+                    ConfigurationStorageResult::kOk,
             "approved controller configuration did not persist");
     configuration_service_prepare();
     configuration_service_initialize_pre_usb();
     ConfigurationServiceSnapshot snapshot{};
     configuration_service_snapshot(&snapshot);
-    require(adapter_configuration_native_switch_approved(
-                snapshot.configuration, pro) &&
+    require(snapshot.configuration.joycon_mode == configuration.joycon_mode &&
+                adapter_configuration_native_switch_approved(
+                    snapshot.configuration, pro) &&
                 adapter_configuration_native_switch_approved(
                     snapshot.configuration, left),
             "pre-USB snapshot did not expose persisted approvals");
     configuration_service_initialize_on_storage_core();
+    if (migrate_v3) {
+        configuration_service_task_on_storage_core(0);
+        ConfigurationStorage migrated;
+        AdapterConfiguration decoded{};
+        require(migrated.initialize(fake_io()) &&
+                    migrated.snapshot().schema_version ==
+                        ADAPTER_CONFIGURATION_SCHEMA_VERSION &&
+                    adapter_configuration_decode(
+                        migrated.snapshot().schema_version,
+                        migrated.snapshot().payload,
+                        migrated.snapshot().payload_size, &decoded) &&
+                    decoded.joycon_mode == JoyConMode::kPaired &&
+                    decoded.pairing_window_seconds == 90 &&
+                    adapter_configuration_native_switch_approved(decoded, pro) &&
+                    adapter_configuration_native_switch_approved(decoded, left),
+                "v3 service migration changed settings or approvals");
+        configuration.joycon_mode = JoyConMode::kIndividual;
+        queue_configuration(100, configuration);
+        configuration_service_snapshot(&snapshot);
+        require(snapshot.configuration.joycon_mode == JoyConMode::kPaired,
+                "player mode changed before durable commit");
+        configuration_service_task_on_storage_core(1000);
+        configuration_service_snapshot(&snapshot);
+        require(snapshot.configuration.joycon_mode == JoyConMode::kIndividual,
+                "committed Individual mode was not published");
+    }
+    const uint32_t start_ms = migrate_v3 ? 2000 : 0;
 
     const AdapterModeAvailability implemented{true, true, true, true};
     require(configuration_service_set_mode(
                 1, AdapterRequestedMode::kSwitch, implemented) ==
                 ConfigurationTransactionStatus::kPending,
             "approved configuration blocked host mode selection");
-    configuration_service_task_on_storage_core(0);
+    configuration_service_task_on_storage_core(start_ms);
     configuration_service_snapshot(&snapshot);
     require(snapshot.configuration.requested_mode == AdapterRequestedMode::kSwitch &&
+                snapshot.configuration.joycon_mode == JoyConMode::kIndividual &&
                 adapter_configuration_native_switch_approved(
                     snapshot.configuration, pro) &&
                 adapter_configuration_native_switch_approved(
@@ -586,9 +638,10 @@ void test_native_switch_approval_preservation_and_revocation() {
                 0x80000002u, AdapterRequestedMode::kXInput, implemented) ==
                 ConfigurationTransactionStatus::kPending,
             "approved configuration blocked internal mode selection");
-    configuration_service_task_on_storage_core(1000);
+    configuration_service_task_on_storage_core(start_ms + 1000);
     configuration_service_snapshot(&snapshot);
     require(snapshot.configuration.requested_mode == AdapterRequestedMode::kXInput &&
+                snapshot.configuration.joycon_mode == JoyConMode::kIndividual &&
                 adapter_configuration_native_switch_approved(
                     snapshot.configuration, pro) &&
                 adapter_configuration_native_switch_approved(
@@ -598,10 +651,11 @@ void test_native_switch_approval_preservation_and_revocation() {
     configuration = snapshot.configuration;
     configuration.pairing_window_seconds = 120;
     queue_configuration(3, configuration);
-    configuration_service_task_on_storage_core(2000);
+    configuration_service_task_on_storage_core(start_ms + 2000);
     configuration_service_snapshot(&snapshot);
     require(snapshot.configuration.pairing_window_seconds == 120 &&
                 snapshot.configuration.requested_mode == AdapterRequestedMode::kXInput &&
+                snapshot.configuration.joycon_mode == JoyConMode::kIndividual &&
                 adapter_configuration_native_switch_approved(
                     snapshot.configuration, pro) &&
                 adapter_configuration_native_switch_approved(
@@ -619,13 +673,14 @@ void test_native_switch_approval_preservation_and_revocation() {
                 snapshot.configuration, pro),
             "approval was revoked before durable commit");
     g_flash.fail_program = true;
-    configuration_service_task_on_storage_core(3000);
+    configuration_service_task_on_storage_core(start_ms + 3000);
     g_flash.fail_program = false;
     configuration_service_snapshot(&snapshot);
     require(snapshot.transaction.status ==
                 ConfigurationTransactionStatus::kStorageError &&
                 snapshot.generation == approved_generation &&
                 snapshot.payload_crc == approved_crc &&
+                snapshot.configuration.joycon_mode == JoyConMode::kIndividual &&
                 adapter_configuration_native_switch_approved(
                     snapshot.configuration, pro),
             "failed revocation changed the published durable configuration");
@@ -636,17 +691,19 @@ void test_native_switch_approval_preservation_and_revocation() {
                     after_failure.snapshot().schema_version,
                     after_failure.snapshot().payload,
                     after_failure.snapshot().payload_size, &recovered) &&
+                recovered.joycon_mode == JoyConMode::kIndividual &&
                 adapter_configuration_native_switch_approved(recovered, pro) &&
                 adapter_configuration_native_switch_approved(recovered, left),
             "interrupted revocation destroyed persisted approvals");
 
     queue_configuration(5, configuration);
-    configuration_service_task_on_storage_core(3000);
+    configuration_service_task_on_storage_core(start_ms + 3000);
     configuration_service_snapshot(&snapshot);
     require(snapshot.transaction.status ==
                 ConfigurationTransactionStatus::kCommitted &&
                 snapshot.configuration.pairing_window_seconds == 120 &&
                 snapshot.configuration.requested_mode == AdapterRequestedMode::kXInput &&
+                snapshot.configuration.joycon_mode == JoyConMode::kIndividual &&
                 !adapter_configuration_native_switch_approved(
                     snapshot.configuration, pro) &&
                 adapter_configuration_native_switch_approved(
@@ -658,6 +715,7 @@ void test_native_switch_approval_preservation_and_revocation() {
                     after_revocation.snapshot().schema_version,
                     after_revocation.snapshot().payload,
                     after_revocation.snapshot().payload_size, &recovered) &&
+                recovered.joycon_mode == JoyConMode::kIndividual &&
                 !adapter_configuration_native_switch_approved(recovered, pro) &&
                 adapter_configuration_native_switch_approved(recovered, left),
             "controller-specific revocation did not survive power cycle");
@@ -669,9 +727,10 @@ void test_native_switch_approval_preservation_and_revocation() {
     require(adapter_configuration_native_switch_approved(
                 snapshot.configuration, left),
             "reset erased approval before commit");
-    configuration_service_task_on_storage_core(4000);
+    configuration_service_task_on_storage_core(start_ms + 4000);
     configuration_service_snapshot(&snapshot);
     require(snapshot.transaction.status == ConfigurationTransactionStatus::kCommitted &&
+                snapshot.configuration.joycon_mode == JoyConMode::kPaired &&
                 !adapter_configuration_native_switch_approved(
                     snapshot.configuration, left),
             "configuration reset did not revoke persisted approval");
@@ -685,7 +744,9 @@ int main(int argc, char** argv) {
     } else if (strcmp(argv[1], "v2-migration") == 0) {
         test_service_lifecycle_and_mutations(true);
     } else if (strcmp(argv[1], "native-approvals") == 0) {
-        test_native_switch_approval_preservation_and_revocation();
+        test_native_switch_approval_preservation_and_revocation(false);
+    } else if (strcmp(argv[1], "v3-migration") == 0) {
+        test_native_switch_approval_preservation_and_revocation(true);
     } else {
         require(strcmp(argv[1], "abandoned-receive") == 0,
                 "unknown service test scenario");

@@ -58,6 +58,7 @@ def test_configuration_service_native(tmp_path: Path) -> None:
     for scenario in (
         "lifecycle",
         "v2-migration",
+        "v3-migration",
         "native-approvals",
         "abandoned-receive",
     ):

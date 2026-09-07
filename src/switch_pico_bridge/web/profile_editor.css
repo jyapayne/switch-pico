@@ -186,6 +186,19 @@ h4 { font-size: 1rem; }
 .select:focus, .number-input:focus { border-color: var(--sky); box-shadow: 0 0 0 4px rgba(89, 199, 255, 0.1); }
 .select:disabled, .number-input:disabled { cursor: not-allowed; opacity: 0.45; border-color: var(--line-soft); box-shadow: none; }
 .select option:disabled { color: var(--subtle); }
+.joycon-mode { margin-top: 22px; padding: 16px 0; border-block: 1px solid var(--line); }
+.joycon-mode h3 { font-size: 1rem; }
+.joycon-mode .field-label { margin-top: 14px; }
+.joycon-mode-help { margin: 12px 0; color: var(--muted); font-size: 0.73rem; line-height: 1.5; }
+.joycon-mode-help summary { color: var(--blue); cursor: pointer; }
+.joycon-mode-help summary:focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+.joycon-mode-help > div { display: grid; gap: 8px; margin-top: 10px; }
+.joycon-mode-help strong { color: var(--ink); }
+.joycon-mode .button { width: 100%; }
+.joycon-mode-status { margin-top: 10px; color: var(--mint); font-size: 0.74rem; line-height: 1.5; overflow-wrap: anywhere; }
+.joycon-mode-status[data-state="loading"] { color: var(--muted); }
+.joycon-mode-status[data-state="pending"], .joycon-mode-status[data-state="unsupported"] { color: var(--amber); }
+.joycon-mode-status[data-state="error"] { color: var(--rose); }
 .profile-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 22px; }
 .profile-button {
   --slot-color: var(--blue);

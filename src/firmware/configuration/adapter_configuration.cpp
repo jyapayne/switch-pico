@@ -8,6 +8,10 @@ bool pairing_window_valid(uint16_t pairing_window_seconds) {
            pairing_window_seconds <= ADAPTER_PAIRING_WINDOW_SECONDS_MAX;
 }
 
+bool joycon_mode_valid(JoyConMode mode) {
+    return mode == JoyConMode::kPaired || mode == JoyConMode::kIndividual;
+}
+
 bool native_switch_identity_eligible(const ControllerIdentity& identity) {
     return identity.stable &&
            identity.transport == ControllerTransport::kClassic &&
@@ -77,6 +81,7 @@ bool adapter_configuration_encode(const AdapterConfiguration& configuration,
         output_size != ADAPTER_CONFIGURATION_ENCODED_SIZE ||
         !pairing_window_valid(configuration.pairing_window_seconds) ||
         !adapter_requested_mode_valid(configuration.requested_mode) ||
+        !joycon_mode_valid(configuration.joycon_mode) ||
         configuration.native_switch_controller_count >
             ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY) {
         return false;
@@ -88,6 +93,7 @@ bool adapter_configuration_encode(const AdapterConfiguration& configuration,
         static_cast<uint8_t>(configuration.pairing_window_seconds >> 8);
     output[2] = static_cast<uint8_t>(configuration.requested_mode);
     output[3] = configuration.native_switch_controller_count;
+    output[4] = static_cast<uint8_t>(configuration.joycon_mode);
     for (size_t index = 0;
          index < configuration.native_switch_controller_count; ++index) {
         const ControllerIdentity& identity =
@@ -136,15 +142,19 @@ bool adapter_configuration_decode(uint16_t schema_version,
         }
         decoded.requested_mode = AdapterRequestedMode::kAuto;
     } else if (schema_version == ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION ||
+               schema_version == ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION ||
                schema_version == ADAPTER_CONFIGURATION_SCHEMA_VERSION) {
-        const bool current =
+        const bool has_approvals =
+            schema_version >= ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION;
+        const bool has_joycon_mode =
             schema_version == ADAPTER_CONFIGURATION_SCHEMA_VERSION;
         const size_t expected_size =
-            current ? ADAPTER_CONFIGURATION_ENCODED_SIZE
-                    : ADAPTER_CONFIGURATION_V2_ENCODED_SIZE;
-        if (payload_size != expected_size || payload[4] != 0 ||
+            has_approvals ? ADAPTER_CONFIGURATION_ENCODED_SIZE
+                          : ADAPTER_CONFIGURATION_V2_ENCODED_SIZE;
+        if (payload_size != expected_size ||
+            (!has_joycon_mode && payload[4] != 0) ||
             payload[5] != 0 || payload[6] != 0 || payload[7] != 0 ||
-            (!current && payload[3] != 0) ||
+            (!has_approvals && payload[3] != 0) ||
             payload[3] >
                 ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY) {
             return false;
@@ -154,7 +164,13 @@ bool adapter_configuration_decode(uint16_t schema_version,
         if (!adapter_requested_mode_valid(decoded.requested_mode)) {
             return false;
         }
-        if (current) {
+        if (has_joycon_mode) {
+            decoded.joycon_mode = static_cast<JoyConMode>(payload[4]);
+            if (!joycon_mode_valid(decoded.joycon_mode)) {
+                return false;
+            }
+        }
+        if (has_approvals) {
             decoded.native_switch_controller_count = payload[3];
             size_t offset = ADAPTER_CONFIGURATION_HEADER_SIZE;
             for (size_t index = 0;

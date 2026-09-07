@@ -357,6 +357,9 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         if path == "/api/profiles":
             self._api_call(self._list_profiles)
             return
+        if path == "/api/joycon-mode":
+            self._api_call(self._read_joycon_mode)
+            return
         capture = self._parse_capture_path(path)
         if capture is not None:
             identity_index, profile_index, action = capture
@@ -385,6 +388,9 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         if not self._allow_mutation():
             return
         path = urlsplit(self.path).path
+        if path == "/api/joycon-mode":
+            self._api_call(self._set_joycon_mode)
+            return
         identity_selection = self._parse_identity_path(path)
         if identity_selection is not None:
             identity_index, action = identity_selection
@@ -868,6 +874,40 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                 "request body must be a JSON object"
             )
         return value
+
+    def _read_joycon_mode(self) -> dict[str, Any]:
+        configuration = config_manager.read_configuration(
+            self.profile_server.find_device()
+        )
+        supported = configuration.schema_version >= 4
+        mode = (
+            configuration.joycon_mode
+            if supported
+            else config_manager.JOYCON_MODE_PAIRED
+        )
+        return {
+            "mode": config_manager.JOYCON_MODE_NAMES[mode],
+            "generation": configuration.generation,
+            "supported": supported,
+        }
+
+    def _set_joycon_mode(self) -> dict[str, Any]:
+        body = self._read_json_object()
+        mode = body.get("mode")
+        if (
+            set(body) != {"mode"}
+            or not isinstance(mode, str)
+            or mode not in config_manager.JOYCON_MODE_NAMES
+        ):
+            raise config_manager.ConfigManagerError(
+                "request must contain only mode: paired or individual"
+            )
+        config_manager.set_joycon_mode(
+            self.profile_server.find_device(),
+            config_manager.JOYCON_MODE_NAMES.index(mode),
+            self.profile_server.operation_timeout,
+        )
+        return self._read_joycon_mode()
 
     def _write_profile(self, identity_index: int, profile_index: int) -> dict[str, Any]:
         profile = config_manager.ControllerProfile.from_json(self._read_json_body())

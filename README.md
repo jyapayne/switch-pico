@@ -209,6 +209,54 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 - **Pairing window expires**: new authentication and full discovery stop while a controller is active; remembered controllers may still initiate reconnects, and a solo Joy-Con 2 resumes low-duty discovery of its remembered opposite half.
 - **Clear all pairings**: hold BOOTSEL continuously for 10 seconds, through the initial double blink, until the rapid confirmation blink starts. All controllers are disconnected and must be paired again.
 
+### Joy-Con 2 player arrangement
+
+In Controller Studio, use **Joy-Con 2 default mode** and **Apply default mode**.
+This is a real adapter-wide setting, separate from the artwork preview:
+
+- **Paired:** ready opposite halves form one player and use their L+R bank.
+- **Individual:** both halves can remain connected as separate sideways players,
+  each using its own solo bank. Select the L or R owner to edit its settings.
+
+Changes apply live without Bluetooth disconnection or fresh pairing. Affected
+input, macro/capture and rumble epochs are cleared; unrelated players and all
+saved banks remain intact. Unmatched halves stay solo. The default persists
+across reboot:
+
+```sh
+uv run switch-pico-config joycon-mode
+uv run switch-pico-config joycon-mode individual
+uv run switch-pico-config joycon-mode paired --json
+```
+
+#### Join or split a specific pair from the controllers
+
+- On the **left** Joy-Con 2, hold **ZL + Minus**.
+- On the **right** Joy-Con 2, hold **ZR + Plus**.
+- Hold both chords together for **2 seconds**, until the short confirmation
+  pulse, then **release all four buttons**.
+
+Two solo halves join; an existing pair splits. Other controllers are untouched.
+The shortcut does not change the saved default: its connection-only override
+ends when either participating half disconnects, or when the adapter default
+changes. Existing solo/pair banks and active selections are reused.
+
+Each half's complete two-button chord is reserved while held and until both
+buttons on that half release, even if the other half has not joined the
+attempt. Those inputs do not reach profile macros or the console. Other inputs
+remain available. Fresh held reports from both halves are required; stale,
+failed or ambiguous attempts require release before retry. When several solo
+halves are armed ambiguously, no arbitrary pair is chosen. A chord cannot steal
+a member from a different already-joined pair.
+
+For a non-destructive disconnect/reset, Nintendo documents pressing
+[SYNC once, then a normal button to wake the Joy-Con 2](https://en-americas-support.nintendo.com/app/answers/detail/a_id/68521/).
+
+Configuration schema 4 keeps the 232-byte object and stores the default mode
+in byte 4 (`0` Paired, `1` Individual); bytes 5–7 remain reserved. Schemas 1–3
+migrate to Paired, preserving USB mode, pairing-window duration and existing
+native approvals. Older firmware cannot save this setting.
+
 ### Managing configuration, profiles, and pairings from a PC
 
 Connect the Pico 2 W to the PC while the AIO firmware is running normally; do not enter the ROM BOOTSEL drive. `switch-pico-config` uses versioned private vendor requests on USB endpoint 0, so it does not add an interface or depend on Linux `hidraw` nodes.
@@ -249,7 +297,7 @@ Controller Studio uses the supplied lightweight SVGs for Switch 2 Pro, Joy-Con 2
 
 **Auto** uses matching-owner live metadata to distinguish a Joy-Con pair from a solo half. **Preview** changes only the editor's diagram and source labels; it does not pair controllers or change saved mappings, and physical highlighting is disabled. Source choices reflect the layout while stored unavailable mappings are retained. Wii orientation is not reported, so horizontal/vertical views require an explicit preview.
 
-**Joy-Con 2 pair profiles:** the first successful connection of an L + R combination creates a separate **Nintendo Joy-Con 2 (L + R)** owner with eight profiles. It initially copies the left bank's profiles, names, and active selection; its alias starts empty. Both solo banks stay unchanged. Pair edits, names, and active selections are independent thereafter. Disconnecting a half restores the survivor's solo bank; reconnecting the same members restores their existing pair bank without copying again. Different member combinations have different banks. Select the L + R owner—not either solo owner—to edit paired settings.
+**Joy-Con 2 pair profiles:** the first successful join of an L + R combination creates a separate **Nintendo Joy-Con 2 (L + R)** owner with eight profiles. It initially copies the left bank's profiles, names, and active selection; its alias starts empty. Both solo banks stay unchanged. Pair edits, names, and active selections are independent thereafter. Splitting or losing a half restores solo banks; joining the same members again restores their existing pair bank without copying. Different member combinations have different banks. Select the L + R owner—not either solo owner—to edit paired settings.
 
 Pair keys contain both complete Bluetooth addresses and address types, in canonical L/R order. They retain the 14-byte identity size: transport byte 1 is 3; byte 0 contains the stable bit plus the left/right static-random flags in bits 1/2; bytes 2–7 and 8–13 contain the left and right addresses. Pair keys are profile identities, not Bluetooth peers or native-output approvals. Update host tools with firmware when using this identity kind.
 
@@ -347,16 +395,18 @@ Motion-producing Bluepad32 parsers normalize to 1024 units per degree/second and
 The AIO firmware implements the proprietary BLE protocol for Nintendo `057E:2069` (Pro), `057E:2067` (left Joy-Con 2), and `057E:2066` (right Joy-Con 2). This is controller **input** support, distinct from the existing Switch 2 console-wake feature and from emulating a native Switch 2 USB controller.
 
 - **Pairing:** fresh SYNC pairing requires the existing bounded pairing window. A directed reconnect must target this adapter's Bluetooth address and match its persistent application-level authorization. These links are unencrypted and are **not authenticated SMP bonds**. No global Bluetooth security downgrade is made; automatic SMP requests for these devices fail closed while other controllers retain their existing policy. Public/static addresses can own profiles; transient private addresses are not promoted to persistent identities.
-- **Joy-Con ownership:** an opposite ready half joins a solo half after its independent pair bank is ready. Either connection order works; the first-ready player slot is retained. The pair identity includes both typed member addresses, and the right half supplies motion. Losing a half clears its inputs and pending effects; the survivor returns to sideways solo operation and its own bank. Failed bank initialization leaves the existing solo intact rather than sharing its settings with the pair. A lone half has rotated controls and SL/SR shoulders. Two pairs exhaust the four physical Bluetooth connections. Pairing does not reopen discovery outside the existing connection policy.
+- **Joy-Con ownership:** the saved player-mode default and connection-only shortcut determine whether ready opposite halves join. Enrollment must finish before a pair is published; a failed join leaves the solos intact. Pair identity includes both typed member addresses, and the right half supplies paired motion. Splitting clears stale input/effects and restores sideways solo banks. Changing the default does not disconnect Bluetooth; a participant disconnect clears its temporary grouping override. Two pairs exhaust the four physical Bluetooth connections. New authentication remains restricted to the normal pairing window.
 - **Protocol:** service, characteristic and CCCD UUIDs are discovered rather than trusting fixed ATT handles. Setup requires matching acknowledgements, reads user/factory stick calibration and gyro bias, and rejects malformed/failed transactions. Motion is normalized to the existing SDL-oriented units; sensor clock/range classification and physical axis accuracy still need wider model qualification.
 - **Rumble:** Switch HD commands now retain independent left/right frequency/amplitude fields and up to three ordered subframes through the native Switch 2 encoder and bounded queues described below. XInput and local feedback retain their conventional fixed-carrier behavior. This is separate from the original Switch-native opt-in backend.
 - **Not implemented:** Joy-Con mouse output, native GameChat signaling, NFC/IR and Switch 2 NSO GameCube support. C and back/rail inputs can instead be remapped to controls the selected USB mode supports.
 
 This is a scoped reimplementation informed by [Bluepad32 PR #219](https://github.com/ricardoquesada/bluepad32/pull/219), reviewed at `9c95e43a87d3bd8a68565da0836d8a758bd8d8af`, not a wholesale fork import. Protocol references: [ndeadly's research](https://github.com/ndeadly/switch2_controller_research), [Nadeflore](https://github.com/Nadeflore/switch2-controllers), [Switch2Connect](https://github.com/TommyWabg/Switch2Connect), and [SDL's Switch 2 sensor implementation](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_switch2.c).
 
-**Verification:** 321 tests passed; AIO, XInput/feasibility, HD-rumble, haptics and UART firmware variants built. Native protocol tests use the SDK's real BTstack types/accessors and cover discovery, acknowledgement ordering, calibration, persistence, output deadlines and teardown. Lifecycle/storage tests cover both Joy-Con connection orders, multiple pairs, detach/replacement, independent pair banks, interrupted initialization and pairing-policy isolation. The editor's layouts, remapping and source preservation were exercised in Chromium.
+**Verification:** 349 tests passed; AIO, XInput/feasibility, HD-rumble, haptics and UART firmware variants built. Native protocol tests use real BTstack types/accessors. Lifecycle/storage tests cover player-mode transitions, both connection orders, two-pair membership, bank isolation and interrupted initialization. Gesture cases cover timing/freshness/wrap, input masking, real macro/capture cancellation, ambiguity, failures, and disconnect/default restoration. Studio controls, draft preservation, CLI refresh and desktop/mobile layouts were exercised in Chromium.
 
 On hardware, the new L + R owner copied all eight left-bank profiles and names, bringing the inventory to eight owners / 64 profiles without changing the original 56. A temporary edit and name on inactive pair profile 8 survived reboot while both solo banks stayed unchanged; pair activation was also independent. Test edits, names and active selections were restored. Studio selected the real composite owner and its Identify action produced two physical rumble dispatches.
+
+Hardware mode changes split the pair into two live USB slots and recombined it without fresh pairing; Individual remained selected after reboot. The user felt join and split confirmation pulses from the physical shortcut. Saved configuration generation stayed unchanged during each gesture. A temporary split under a Paired default ended after resetting/reconnecting the right half, restoring the original pair. The final saved default is Individual; all 64 profiles, names, aliases and active selections were preserved.
 
 At the initial Switch 2 input checkpoint, a real Pro (`3C:A9:AB:65:73:12`) completed setup, appeared in persistent pairing/profile inventories, and delivered live sticks, accelerometer, gyro and independent C/GL/GR presses. A 100-report USB rumble exercise retained its connection while 3,033 controller reports arrived. Schema-7 extra mappings were written/read and restored; all 32 then-existing profiles, metadata and active selections were preserved, with adapter configuration generation 13 / CRC `3af5ee18` unchanged. Subsequent native-rumble and pair measurements are documented here and below; wider sensor-axis, perceptual-equivalence and long-duration transport qualification remains open. Use schema-7-capable firmware after saving expanded profiles.
 
@@ -485,9 +535,9 @@ uv run switch-pico-config config native-rumble revoke --identity N
 Use the physical controller's row from `profiles list`, not the global fallback.
 `config native-rumble list` also supplies approval indices; `revoke --approval N`
 can remove an approval after its profile-catalog entry has been forgotten.
-Approvals persist in adapter configuration schema 3 (232 bytes). Schema 1/2
-migration preserves existing settings and starts with no approvals; profile
-schema 6 and the profile catalog are unchanged.
+Approvals persist in adapter configuration schema 4 (232 bytes), alongside the
+Joy-Con default mode. Schema 1/2 migration starts with no approvals; schema 3
+migration preserves its approval list. Profile schema 7/catalog 3 are separate.
 
 The native encoder preserves safe unity bytes when synchronized, otherwise
 encodes independent actuator/band/substep state with documented quantization.
@@ -915,15 +965,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 825,232 bytes | 4 MiB |
+| Executable flash image | 833,320 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds and Switch 2 application authorizations | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 151,652 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 151,804 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,107,856 bytes of flash,
-leaving 3,086,448 bytes. Allocated SRAM sections leave 380,828 bytes of link-time
+The executable plus persistent reservations consume 1,115,944 bytes of flash,
+leaving 3,078,360 bytes. Allocated SRAM sections leave 380,676 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.

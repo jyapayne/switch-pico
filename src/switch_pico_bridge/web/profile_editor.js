@@ -24,6 +24,19 @@ const macroCapture = {
   requestActive: false,
   timer: 0,
 };
+const joyconMode = {
+  saved: null,
+  selected: null,
+  pending: false,
+  supported: false,
+  generation: 0,
+  loading: true,
+  applying: false,
+  requestActive: false,
+  revision: 0,
+  readError: "",
+  applyError: "",
+};
 const state = {
   schema: null,
   identities: [],
@@ -57,6 +70,9 @@ const elements = {
   connection: document.querySelector("#connectionState"),
   connectionText: document.querySelector("#connectionText"),
   identity: document.querySelector("#identitySelect"),
+  joyconMode: document.querySelector("#joyconModeSelect"),
+  applyJoyconMode: document.querySelector("#applyJoyconModeButton"),
+  joyconModeStatus: document.querySelector("#joyconModeStatus"),
   profileList: document.querySelector("#profileList"),
   profileOwner: document.querySelector("#profileOwner"),
   controllerAlias: document.querySelector("#controllerAlias"),
@@ -541,6 +557,83 @@ async function api(path, options = {}) {
   }
   return payload;
 }
+function joyconModeChanged() {
+  return joyconMode.selected !== null && joyconMode.selected !== joyconMode.saved;
+}
+
+function renderJoyconMode() {
+  const locked = state.busy || captureBlocking() || macroCapture.requestActive ||
+    joyconMode.loading || joyconMode.applying;
+  elements.joyconMode.disabled = locked || !joyconMode.supported || !state.adapterConnected;
+  elements.applyJoyconMode.disabled = elements.joyconMode.disabled ||
+    Boolean(joyconMode.readError) || !joyconModeChanged();
+  if (joyconMode.selected !== null && elements.joyconMode.value !== joyconMode.selected) {
+    elements.joyconMode.value = joyconMode.selected;
+  }
+  let status;
+  let mode;
+  const saved = joyconMode.saved === null ? "" :
+    `Saved default: ${label(joyconMode.saved)} · generation ${joyconMode.generation}.`;
+  const selection = joyconModeChanged()
+    ? ` Selection: ${label(joyconMode.selected)} — not applied.` : "";
+  if (joyconMode.applying) {
+    mode = "loading";
+    status = `Saving ${label(joyconMode.selected)} default… Your profile draft is unchanged.`;
+  } else if (joyconMode.loading) {
+    mode = "loading";
+    status = `Reading saved preference… ${saved}${selection}`;
+  } else if (joyconMode.applyError || joyconMode.readError) {
+    mode = "error";
+    status = `${joyconMode.applyError || joyconMode.readError} ${saved ? `Last confirmed ${saved.toLowerCase()}` : "Saved preference is unknown."}${selection}`;
+  } else if (joyconMode.saved === null) {
+    mode = "error";
+    status = "Saved preference is unknown. Refresh to read it from the adapter.";
+  } else if (!joyconMode.supported) {
+    mode = "unsupported";
+    status = `Paired is the legacy default. This firmware cannot save player mode; update the adapter firmware (configuration schema 4 required).${selection}`;
+  } else if (!state.adapterConnected) {
+    mode = "error";
+    status = `Adapter unavailable. Last confirmed ${saved.toLowerCase()}${selection}`;
+  } else {
+    mode = joyconModeChanged() ? "pending" : "saved";
+    status = `${saved}${selection} Shortcuts can override these connections. Use live playtest to check the current arrangement.`;
+  }
+  elements.joyconModeStatus.dataset.state = mode;
+  if (elements.joyconModeStatus.textContent !== status) {
+    elements.joyconModeStatus.textContent = status;
+  }
+}
+
+function acceptJoyconMode(payload, committed = false) {
+  joyconMode.saved = payload.mode;
+  joyconMode.supported = payload.supported;
+  joyconMode.generation = payload.generation;
+  if (committed || !joyconMode.pending) joyconMode.selected = payload.mode;
+  joyconMode.pending = joyconModeChanged();
+  joyconMode.readError = "";
+  if (joyconMode.selected === payload.mode) joyconMode.applyError = "";
+}
+
+async function refreshJoyconMode(showLoading = false) {
+  if (joyconMode.requestActive || joyconMode.applying) return;
+  const revision = joyconMode.revision;
+  joyconMode.requestActive = true;
+  joyconMode.loading = showLoading || joyconMode.saved === null;
+  renderJoyconMode();
+  try {
+    const payload = await api("/api/joycon-mode");
+    if (revision === joyconMode.revision) acceptJoyconMode(payload);
+  } catch (error) {
+    if (revision === joyconMode.revision) {
+      joyconMode.readError = `Could not read player mode: ${error.message}`;
+    }
+  } finally {
+    joyconMode.requestActive = false;
+    joyconMode.loading = false;
+    renderJoyconMode();
+  }
+}
+
 
 function setBusy(busy) {
   state.busy = busy;
@@ -664,6 +757,7 @@ async function pollLibraryMetadata() {
   }
   state.libraryRequestActive = true;
   try {
+    await refreshJoyconMode();
     const payload = await api("/api/profiles");
     syncLibraryMetadata(payload.identities);
     setConnection("ready", "Adapter connected");
@@ -1415,6 +1509,7 @@ function renderCapture() {
       ...elements.profileList.querySelectorAll("button"),
     ].forEach((control) => { control.disabled = true; });
   }
+  renderJoyconMode();
 }
 
 function capturePath(session, action) {
@@ -2029,6 +2124,12 @@ async function loadProfile() {
     if (owner) owner.alias = payload.alias;
     state.active = payload.active;
     setConnection("ready", "Adapter connected");
+    syncControllerPresentation();
+    if (state.presentation.sources.length &&
+        !sourceAvailable(state.selectedButton) &&
+        getControlMapping(state.selectedButton) == null) {
+      state.selectedButton = state.presentation.sources[0];
+    }
     renderEditor();
   } catch (error) {
     state.profile = null;
@@ -2043,6 +2144,7 @@ async function loadProfile() {
 async function loadLibrary(preserveDraft = false) {
   setBusy(true);
   try {
+    await refreshJoyconMode(true);
     const payload = await api("/api/profiles");
     syncLibraryMetadata(payload.identities, !preserveDraft);
     if (!preserveDraft || !state.profile) {
@@ -2257,6 +2359,40 @@ elements.identity.addEventListener("change", async () => {
 
 elements.refresh.addEventListener("click", async () => {
   await loadLibrary(true);
+});
+
+elements.joyconMode.addEventListener("change", () => {
+  if (elements.joyconMode.disabled) return;
+  joyconMode.selected = elements.joyconMode.value;
+  joyconMode.pending = joyconModeChanged();
+  joyconMode.applyError = "";
+  renderJoyconMode();
+});
+
+elements.applyJoyconMode.addEventListener("click", async () => {
+  if (elements.applyJoyconMode.disabled || state.busy || captureBlocking() ||
+      macroCapture.requestActive) return;
+  joyconMode.applying = true;
+  joyconMode.applyError = "";
+  joyconMode.revision += 1;
+  setBusy(true);
+  try {
+    const payload = await api("/api/joycon-mode", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: joyconMode.selected }),
+    });
+    acceptJoyconMode(payload, true);
+    toast(`${label(payload.mode)} default saved. Your profile draft is unchanged; live playtest reports the actual arrangement.`);
+  } catch (error) {
+    joyconMode.applyError = `Could not confirm player mode: ${error.message}`;
+    toast(joyconMode.applyError, true);
+  } finally {
+    joyconMode.applying = false;
+    setBusy(false);
+    window.clearTimeout(state.libraryTimer);
+    state.libraryTimer = window.setTimeout(pollLibraryMetadata, 0);
+  }
 });
 
 elements.resetDraft.addEventListener("click", () => {
@@ -2643,7 +2779,7 @@ elements.activate.addEventListener("click", async () => {
 window.addEventListener("beforeunload", (event) => {
   stopMacroPreview("Preview stopped: leaving the editor.");
   stopCapture("Recording stopped because you left the editor.");
-  if (!isDirty() && !macroCapture.session) return;
+  if (!isDirty() && !macroCapture.session && !joyconModeChanged()) return;
   event.preventDefault();
   event.returnValue = "";
 });

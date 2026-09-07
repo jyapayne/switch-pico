@@ -302,6 +302,7 @@ void test_mode_vendor_requests() {
     using namespace UsbConfigurationManagement;
     current_configuration.configuration.requested_mode =
         AdapterRequestedMode::kXInput;
+    current_configuration.configuration.joycon_mode = JoyConMode::kIndividual;
     current_active_mode = AdapterUsbMode::kSwitchProbe;
 
     tusb_control_request_t request =
@@ -339,8 +340,10 @@ void test_mode_vendor_requests() {
                 control_payload[10] ==
                     ADAPTER_CONFIGURATION_SCHEMA_VERSION &&
                 control_payload[kResponseHeaderSize + 2] ==
-                    static_cast<uint8_t>(AdapterRequestedMode::kXInput),
-            "configuration response did not keep requested mode separate");
+                    static_cast<uint8_t>(AdapterRequestedMode::kXInput) &&
+                control_payload[kResponseHeaderSize + 4] ==
+                    static_cast<uint8_t>(JoyConMode::kIndividual),
+            "configuration response did not report the saved USB and player modes");
 
     std::vector<uint8_t> mode_set(5);
     write_u32(&mode_set, 0, 0x12345678);

@@ -90,22 +90,23 @@ void test_schema_encoding() {
     AdapterConfiguration configuration{};
     configuration.pairing_window_seconds = 90;
     configuration.requested_mode = AdapterRequestedMode::kXInput;
+    configuration.joycon_mode = JoyConMode::kIndividual;
     uint8_t payload[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
     require(adapter_configuration_encode(configuration, payload,
                                          sizeof(payload)),
-            "valid v3 configuration did not encode");
+            "valid v4 configuration did not encode");
     const uint8_t expected[ADAPTER_CONFIGURATION_ENCODED_SIZE] = {
         90,
         0,
         static_cast<uint8_t>(AdapterRequestedMode::kXInput),
         0,
-        0,
+        static_cast<uint8_t>(JoyConMode::kIndividual),
         0,
         0,
         0,
     };
     require(memcmp(payload, expected, sizeof(expected)) == 0,
-            "v3 configuration bytes are not canonical");
+            "v4 configuration bytes are not canonical");
 
     AdapterConfiguration decoded{};
     require(adapter_configuration_decode(
@@ -113,8 +114,9 @@ void test_schema_encoding() {
                 sizeof(payload), &decoded) &&
                 decoded.pairing_window_seconds == 90 &&
                 decoded.requested_mode == AdapterRequestedMode::kXInput &&
+                decoded.joycon_mode == JoyConMode::kIndividual &&
                 decoded.native_switch_controller_count == 0,
-            "v3 configuration did not round trip");
+            "v4 configuration did not round trip");
 
     const AdapterRequestedMode valid_modes[] = {
         AdapterRequestedMode::kAuto,
@@ -130,7 +132,8 @@ void test_schema_encoding() {
                     adapter_configuration_decode(
                         ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
                         sizeof(payload), &decoded) &&
-                    decoded.requested_mode == mode,
+                    decoded.requested_mode == mode &&
+                    decoded.joycon_mode == JoyConMode::kIndividual,
                 "valid requested mode did not round trip");
     }
 
@@ -156,6 +159,7 @@ void test_schema_encoding() {
                 sizeof(legacy), &decoded) &&
                 decoded.pairing_window_seconds == 120 &&
                 decoded.requested_mode == AdapterRequestedMode::kAuto &&
+                decoded.joycon_mode == JoyConMode::kPaired &&
                 decoded.native_switch_controller_count == 0,
             "v1 configuration did not migrate without approvals");
     uint8_t malformed_legacy[sizeof(legacy)];
@@ -178,6 +182,7 @@ void test_schema_encoding() {
                 &decoded) &&
                 decoded.pairing_window_seconds == 120 &&
                 decoded.requested_mode == AdapterRequestedMode::kMac &&
+                decoded.joycon_mode == JoyConMode::kPaired &&
                 decoded.native_switch_controller_count == 0,
             "v2 migration changed settings or granted native rumble");
     for (size_t index = 3; index < sizeof(v2); ++index) {
@@ -195,13 +200,16 @@ void test_schema_encoding() {
             "v2 record with wrong size was accepted");
 
     for (size_t index = 3; index < sizeof(payload); ++index) {
+        if (index == 4) {
+            continue;
+        }
         uint8_t malformed[sizeof(payload)];
         memcpy(malformed, payload, sizeof(payload));
         malformed[index] = 1;
         require(!adapter_configuration_decode(
                     ADAPTER_CONFIGURATION_SCHEMA_VERSION, malformed,
                     sizeof(malformed), &decoded),
-                "v3 nonzero reserved or unused byte was accepted");
+                "v4 nonzero reserved or unused byte was accepted");
     }
     uint8_t invalid_mode[sizeof(payload)];
     memcpy(invalid_mode, payload, sizeof(payload));
@@ -210,16 +218,33 @@ void test_schema_encoding() {
                 ADAPTER_CONFIGURATION_SCHEMA_VERSION, invalid_mode,
                 sizeof(invalid_mode), &decoded),
             "out-of-range requested mode was accepted");
+    const uint8_t invalid_joycon_modes[] = {2, 0xff};
+    for (uint8_t mode : invalid_joycon_modes) {
+        memcpy(invalid_mode, payload, sizeof(payload));
+        invalid_mode[4] = mode;
+        require(!adapter_configuration_decode(invalid_mode, sizeof(invalid_mode),
+                                              &decoded),
+                "out-of-range Joy-Con2 mode was accepted");
+        configuration.joycon_mode = static_cast<JoyConMode>(mode);
+        require(!adapter_configuration_encode(configuration, payload,
+                                              sizeof(payload)),
+                "out-of-range Joy-Con2 mode encoded");
+    }
+    configuration.joycon_mode = JoyConMode::kPaired;
+    require(adapter_configuration_encode(configuration, payload, sizeof(payload)) &&
+                adapter_configuration_decode(payload, sizeof(payload), &decoded) &&
+                decoded.joycon_mode == JoyConMode::kPaired,
+            "Paired mode did not round trip");
     require(!adapter_configuration_decode(
                 ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
                 sizeof(payload) - 1, &decoded),
-            "short v3 record was accepted");
+            "short v4 record was accepted");
     uint8_t oversized[ADAPTER_CONFIGURATION_ENCODED_SIZE + 1]{};
     memcpy(oversized, payload, sizeof(payload));
     require(!adapter_configuration_decode(
                 ADAPTER_CONFIGURATION_SCHEMA_VERSION, oversized,
                 sizeof(oversized), &decoded),
-            "oversized v3 record was accepted");
+            "oversized v4 record was accepted");
 
     configuration.pairing_window_seconds = 9;
     require(!adapter_configuration_encode(configuration, payload,
@@ -234,7 +259,7 @@ void test_schema_encoding() {
     configuration.requested_mode = AdapterRequestedMode::kAuto;
     require(!adapter_configuration_encode(configuration, oversized,
                                           sizeof(oversized)),
-            "v3 encoder accepted a noncanonical output size");
+            "v4 encoder accepted a noncanonical output size");
 }
 
 void test_native_switch_approval_identity_and_canonical_encoding() {
@@ -261,6 +286,25 @@ void test_native_switch_approval_identity_and_canonical_encoding() {
                 !adapter_configuration_native_switch_approved(
                     decoded, nintendo_identity(3, 0x2006)),
             "approval did not remain specific to the complete controller identity");
+
+    decoded.joycon_mode = JoyConMode::kIndividual;
+    require(adapter_configuration_decode(
+                ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION, payload,
+                sizeof(payload), &decoded) &&
+                decoded.joycon_mode == JoyConMode::kPaired &&
+                adapter_configuration_native_switch_approved(decoded, pro) &&
+                adapter_configuration_native_switch_approved(decoded, left) &&
+                adapter_configuration_native_switch_approved(decoded, right),
+            "v3 migration erased approvals or retained a stale player mode");
+    for (size_t index = 4; index < ADAPTER_CONFIGURATION_HEADER_SIZE; ++index) {
+        uint8_t malformed[sizeof(payload)];
+        memcpy(malformed, payload, sizeof(payload));
+        malformed[index] = 1;
+        require(!adapter_configuration_decode(
+                    ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION, malformed,
+                    sizeof(malformed), &decoded),
+                "v3 reserved header byte was accepted");
+    }
 
     configuration.native_switch_controllers[0] = right;
     configuration.native_switch_controllers[1] = pro;
@@ -368,16 +412,27 @@ void test_legacy_migration_power_loss() {
     const uint16_t versions[] = {
         ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION,
         ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION,
+        ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION,
     };
     for (uint16_t version : versions) {
-        const bool v2 = version == ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION;
-        const uint8_t legacy[] = {
-            90, 0, static_cast<uint8_t>(v2 ? AdapterRequestedMode::kXInput
-                                         : AdapterRequestedMode::kAuto),
-            0, 0, 0, 0, 0,
-        };
-        const size_t legacy_size = v2 ? ADAPTER_CONFIGURATION_V2_ENCODED_SIZE
-                                     : ADAPTER_CONFIGURATION_LEGACY_ENCODED_SIZE;
+        const bool v1 = version == ADAPTER_CONFIGURATION_LEGACY_SCHEMA_VERSION;
+        const bool v3 = version == ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION;
+        AdapterConfiguration source{};
+        source.pairing_window_seconds = 90;
+        source.requested_mode = v1 ? AdapterRequestedMode::kAuto
+                                   : AdapterRequestedMode::kXInput;
+        if (v3) {
+            source.native_switch_controller_count = 2;
+            source.native_switch_controllers[0] = nintendo_identity(1);
+            source.native_switch_controllers[1] = nintendo_identity(2, 0x2006);
+        }
+        uint8_t legacy[ADAPTER_CONFIGURATION_ENCODED_SIZE]{};
+        require(adapter_configuration_encode(source, legacy, sizeof(legacy)),
+                "legacy migration fixture did not encode");
+        const size_t legacy_size =
+            v3 ? ADAPTER_CONFIGURATION_ENCODED_SIZE
+               : (v1 ? ADAPTER_CONFIGURATION_LEGACY_ENCODED_SIZE
+                     : ADAPTER_CONFIGURATION_V2_ENCODED_SIZE);
         FakeFlash flash;
         ConfigurationStorage store;
         require(store.initialize(fake_io(&flash)) &&
@@ -390,7 +445,7 @@ void test_legacy_migration_power_loss() {
                                              &migrated) &&
                     adapter_configuration_encode(migrated, payload,
                                                  sizeof(payload)),
-                "legacy settings did not convert to schema3");
+                "legacy settings did not convert to schema4");
         flash.fail_after_programs = flash.successful_programs;
         require(store.commit(ADAPTER_CONFIGURATION_SCHEMA_VERSION, payload,
                              sizeof(payload)) ==
@@ -418,8 +473,15 @@ void test_legacy_migration_power_loss() {
                         rebooted.snapshot().payload_size, &decoded) &&
                     decoded.pairing_window_seconds == 90 &&
                     decoded.requested_mode == migrated.requested_mode &&
-                    decoded.native_switch_controller_count == 0,
-                "migration retry changed settings or granted rumble approval");
+                    decoded.joycon_mode == JoyConMode::kPaired &&
+                    decoded.native_switch_controller_count ==
+                        source.native_switch_controller_count &&
+                    (!v3 ||
+                     (adapter_configuration_native_switch_approved(
+                          decoded, source.native_switch_controllers[0]) &&
+                      adapter_configuration_native_switch_approved(
+                          decoded, source.native_switch_controllers[1]))),
+                "migration retry changed settings or controller approvals");
     }
 }
 
@@ -553,18 +615,33 @@ void test_transaction_validation() {
                 transaction.begin(
                     14, ADAPTER_CONFIGURATION_V2_SCHEMA_VERSION,
                     ADAPTER_CONFIGURATION_V2_ENCODED_SIZE, 0) ==
+                    ConfigurationTransactionStatus::kUnsupportedSchema &&
+                transaction.begin(
+                    15, ADAPTER_CONFIGURATION_V3_SCHEMA_VERSION,
+                    ADAPTER_CONFIGURATION_ENCODED_SIZE, 0) ==
                     ConfigurationTransactionStatus::kUnsupportedSchema,
-            "legacy host writes could silently erase stored approvals");
+            "legacy host writes could silently erase stored settings");
     payload[3] = ADAPTER_CONFIGURATION_NATIVE_SWITCH_CONTROLLER_CAPACITY + 1;
     require(transaction.begin(
-                15, ADAPTER_CONFIGURATION_SCHEMA_VERSION, sizeof(payload),
+                16, ADAPTER_CONFIGURATION_SCHEMA_VERSION, sizeof(payload),
                 configuration_crc32(payload, sizeof(payload))) ==
                 ConfigurationTransactionStatus::kReceiving &&
-                transaction.append(15, 0, payload, sizeof(payload)) ==
+                transaction.append(16, 0, payload, sizeof(payload)) ==
                     ConfigurationTransactionStatus::kReceiving &&
-                transaction.finish(15) ==
+                transaction.finish(16) ==
                     ConfigurationTransactionStatus::kMalformed,
             "valid CRC allowed a malformed approval list to reach storage");
+    payload[3] = 0;
+    payload[4] = 2;
+    require(transaction.begin(
+                17, ADAPTER_CONFIGURATION_SCHEMA_VERSION, sizeof(payload),
+                configuration_crc32(payload, sizeof(payload))) ==
+                ConfigurationTransactionStatus::kReceiving &&
+                transaction.append(17, 0, payload, sizeof(payload)) ==
+                    ConfigurationTransactionStatus::kReceiving &&
+                transaction.finish(17) ==
+                    ConfigurationTransactionStatus::kMalformed,
+            "valid CRC allowed an invalid Joy-Con2 mode to reach storage");
 }
 
 }  // namespace

@@ -16,6 +16,7 @@
 #include "input/switch2_wake.h"
 #include "pico/critical_section.h"
 #include "profile/profile_storage.h"
+#include "profile/controller_profile_runtime.h"
 
 namespace {
 
@@ -53,6 +54,7 @@ bool expect_configuration_timer_prearmed = false;
 uint32_t expected_configuration_timer_add_count = 0;
 int cyw43_init_calls = 0;
 int uni_init_calls = 0;
+void (*during_uni_init)() = nullptr;
 int switch2_wake_initializations = 0;
 int switch2_wake_requests = 0;
 bool switch2_connections_ready = true;
@@ -93,6 +95,14 @@ struct Switch2HostEvent {
 std::vector<Switch2HostEvent> switch2_host_events;
 uint32_t switch2_output_drops = 0;
 
+struct LocalRumbleEvent {
+    uni_hid_device_t* device;
+    uint16_t duration_ms;
+    uint8_t high;
+    uint8_t low;
+};
+std::vector<LocalRumbleEvent> local_rumble_events;
+
 struct CoreStopped {};
 
 
@@ -105,6 +115,7 @@ void require(bool condition, const char* message) {
 
 void play_rumble(uni_hid_device_t* device, uint16_t,
                  uint16_t duration_ms, uint8_t high, uint8_t low) {
+    local_rumble_events.push_back({device, duration_ms, high, low});
     ++device->rumble_calls;
     device->last_high = high;
     device->last_low = low;
@@ -595,6 +606,7 @@ void uni_platform_set_custom(uni_platform* platform) {
 
 int uni_init(int, const char**) {
     ++uni_init_calls;
+    if (during_uni_init != nullptr) during_uni_init();
     return 0;
 }
 
@@ -726,6 +738,7 @@ uint8_t profile_flash[PROFILE_STORAGE_ARENA_COUNT][PROFILE_STORAGE_ARENA_SIZE]{}
 ProfileStorage runtime_profile_storage;
 bool runtime_profile_storage_initialized = false;
 bool fail_profile_program = false;
+unsigned profile_write_attempts = 0;
 unsigned pair_observation_count = 0;
 void (*before_pair_seed)(const ControllerIdentity&) = nullptr;
 
@@ -742,6 +755,7 @@ bool runtime_profile_read(void*, uint8_t arena, size_t offset,
 }
 
 bool runtime_profile_erase(void*, uint8_t arena) {
+    ++profile_write_attempts;
     require(state_lock_depth == 0, "profile erases must not hold the input state lock");
     if (arena >= PROFILE_STORAGE_ARENA_COUNT) return false;
     memset(profile_flash[arena], 0xff, PROFILE_STORAGE_ARENA_SIZE);
@@ -750,6 +764,7 @@ bool runtime_profile_erase(void*, uint8_t arena) {
 
 bool runtime_profile_program(void*, uint8_t arena, size_t offset,
                              const uint8_t* page, size_t size) {
+    ++profile_write_attempts;
     require(state_lock_depth == 0, "profile writes must not hold the input state lock");
     if (fail_profile_program || arena >= PROFILE_STORAGE_ARENA_COUNT ||
         size != PROFILE_STORAGE_PAGE_SIZE ||
@@ -802,6 +817,8 @@ void request_repeated_clear_during_disconnect() {
 }  // namespace
 ControllerIdentity observed_profile_identities[8]{};
 size_t observed_profile_identity_count = 0;
+AdapterConfiguration runtime_configuration{};
+uint32_t runtime_configuration_generation = 1;
 void configuration_service_prepare() {}
 void configuration_service_initialize_on_storage_core() {}
 void configuration_service_task_on_storage_core(uint32_t) {
@@ -848,8 +865,32 @@ bool profile_service_observe_joycon_pair_on_storage_core(
 void configuration_service_snapshot(ConfigurationServiceSnapshot* output) {
     *output = {};
     output->state = ConfigurationServiceState::kReady;
-    output->configuration.pairing_window_seconds =
-        ADAPTER_PAIRING_WINDOW_SECONDS_DEFAULT;
+    output->configuration = runtime_configuration;
+    output->generation = runtime_configuration_generation;
+}
+uint32_t configuration_service_reset_generation() {
+    return 0;
+}
+uint32_t profile_service_database_generation() {
+    return runtime_profile_storage.snapshot().generation;
+}
+void profile_service_active_profile_snapshot(
+    const ControllerIdentity& identity, ProfileServiceActiveProfileSnapshot* output) {
+    *output = {};
+    output->metadata.state = ProfileServiceState::kReady;
+    output->metadata.generation = profile_service_database_generation();
+    const auto* owner = runtime_profile_storage.find(identity);
+    if (owner == nullptr) return;
+    output->profile_index = owner->active_profile;
+    output->valid = runtime_profile_storage.get(
+        identity, owner->active_profile, &output->profile) == ProfileStorageResult::kOk;
+}
+ConfigurationTransactionStatus profile_service_activate_internal(
+    uint32_t, const ControllerIdentity& identity, uint8_t profile_index) {
+    const auto result = runtime_profile_storage.activate(identity, profile_index);
+    return result == ProfileStorageResult::kOk || result == ProfileStorageResult::kUnchanged
+               ? ConfigurationTransactionStatus::kCommitted
+               : ConfigurationTransactionStatus::kStorageError;
 }
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
 AdapterUsbMode test_adapter_mode = AdapterUsbMode::kXInput;
@@ -1087,6 +1128,1057 @@ void require_active_profile(const ControllerIdentity& identity,
                     ProfileStorageResult::kOk &&
                 profile.weak_rumble_scale == expected_scale,
             "live owner must resolve its independent persisted active profile");
+}
+
+void set_runtime_joycon_mode(JoyConMode mode) {
+    runtime_configuration.joycon_mode = mode;
+    ++runtime_configuration_generation;
+    process_configuration_timer(&g_configuration_timer);
+    ConfigurationServiceSnapshot saved{};
+    configuration_service_snapshot(&saved);
+    require(saved.configuration.joycon_mode == mode &&
+                saved.generation == runtime_configuration_generation &&
+                device_disconnect_calls == 0 && uni_init_calls == 0 &&
+                core1_launch_calls == 0,
+            "live mode updates must retain the committed preference without disconnect or restart");
+}
+void test_switch2_individual_core_start() {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    bluepad32_input_backend_init();
+    auto right = switch2_device(0, UNI_SW2_JOYCON_R_PID);
+    auto left = switch2_device(1, UNI_SW2_JOYCON_L_PID);
+    register_lookup_device(&right);
+    register_lookup_device(&left);
+    during_uni_init = []() {
+        require(installed_platform != nullptr &&
+                    installed_platform->on_device_ready(lookup_devices[0]) == UNI_ERROR_SUCCESS &&
+                    installed_platform->on_device_ready(lookup_devices[1]) == UNI_ERROR_SUCCESS &&
+                    slot_snapshot(0).active && slot_snapshot(1).active &&
+                    pair_observation_count == 0,
+                "persisted Individual must govern ready callbacks before BTstack initialization completes");
+    };
+    bool stopped = false;
+    try {
+        core1_main();
+    } catch (const CoreStopped&) {
+        stopped = true;
+    }
+    during_uni_init = nullptr;
+    require(stopped && uni_init_calls == 1 && slot_snapshot(0).active && slot_snapshot(1).active,
+            "Core1 initialization must retain both solo players without an initial pair race");
+}
+
+
+void test_switch2_individual_boot(bool right_first) {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    auto left = switch2_device(right_first ? 1 : 0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(right_first ? 0 : 1, UNI_SW2_JOYCON_R_PID);
+    auto& first = right_first ? right : left;
+    auto& second = right_first ? left : right;
+    remember_switch2(left);
+    remember_switch2(right);
+    register_lookup_device(&left);
+    register_lookup_device(&right);
+    ready_switch2(first);
+    require(scanning_enabled && background_scan_parameters &&
+                !classic_scanning_enabled && !bondable &&
+                accepted_stk_methods == 0 && !switch_pico_switch2_pairing_allowed() &&
+                platform_on_device_discovered(second.conn.btaddr, nullptr, 0, 0) ==
+                    UNI_ERROR_SUCCESS,
+            "Individual must still admit a remembered opposite half without BOOTSEL or authentication");
+    const auto first_solo = slot_snapshot(0);
+    platform_on_device_connected(&second);
+    require(!scanning_enabled &&
+                platform_on_device_ready(&second) == UNI_ERROR_SUCCESS,
+            "remembered Individual mate setup must pause scanning and become ready");
+    process_configuration_timer(&g_configuration_timer);
+    require(slot_snapshot(0).active && slot_snapshot(1).active &&
+                slot_snapshot(0).connection_generation == first_solo.connection_generation &&
+                !scanning_enabled && !classic_scanning_enabled && pair_observation_count == 0,
+            "persisted Individual must avoid transient boot merging and stop scanning once balanced");
+    require(controller_identity_equal(slot_snapshot(left.idx).identity, identity_for_device(&left)) &&
+                controller_identity_equal(slot_snapshot(right.idx).identity, identity_for_device(&right)),
+            "both Individual players must publish their own solo profile identity");
+    uni_controller_t data{};
+    data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    data.gamepad.dpad = DPAD_LEFT;
+    data.gamepad.axis_x = -512;
+    data.gamepad.axis_y = 100;
+    left.switch2_extra_buttons = UNI_SW2_BUTTON_LEFT_SL;
+    platform_on_controller_data(&left, &data);
+    const auto left_state = slot_snapshot(left.idx).state;
+    data.gamepad = {};
+    data.gamepad.buttons = BUTTON_B | BUTTON_THUMB_R;
+    data.gamepad.axis_rx = 200;
+    data.gamepad.axis_ry = -512;
+    right.switch2_extra_buttons = UNI_SW2_BUTTON_RIGHT_SR;
+    platform_on_controller_data(&right, &data);
+    const auto right_state = slot_snapshot(right.idx).state;
+    require(left_state.button_south && !left_state.dpad_left &&
+                left_state.button_left_shoulder && !left_state.button_right_shoulder &&
+                left_state.left_stick_x == scale_axis(100) &&
+                left_state.left_stick_y == INT16_MAX &&
+                right_state.button_south && right_state.button_left_stick &&
+                !right_state.button_right_stick && right_state.button_right_shoulder &&
+                !right_state.button_left_shoulder &&
+                right_state.left_stick_x == INT16_MAX &&
+                right_state.left_stick_y == scale_axis(200) &&
+                slot_snapshot(left.idx).state.left_stick_x == left_state.left_stick_x,
+            "two Individual halves must keep independent sideways input and rail routing");
+    Bluepad32PlaytestSnapshot playtest{};
+    bluepad32_input_backend_playtest_snapshot(left.idx, &playtest);
+    require(playtest.controller_layout == Bluepad32ControllerLayout::kJoyCon2LeftSolo,
+            "Individual left must report actual solo topology");
+    bluepad32_input_backend_playtest_snapshot(right.idx, &playtest);
+    require(playtest.controller_layout == Bluepad32ControllerLayout::kJoyCon2RightSolo,
+            "Individual right must report actual solo topology");
+    bluepad32_input_backend_queue_rumble(left.idx, ControllerRumbleOutput{17, 27});
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_low == 17 && right.last_low == 0,
+            "Individual player rumble must not fan out to its opposite half");
+    platform_on_device_disconnected(&second);
+    require(scanning_enabled && !classic_scanning_enabled &&
+                platform_on_device_discovered(second.conn.btaddr, nullptr, 0, 0) ==
+                    UNI_ERROR_SUCCESS,
+            "losing an Individual half must resume only remembered opposite-half scanning");
+    ready_switch2(second);
+    require(!scanning_enabled && !classic_scanning_enabled &&
+                slot_snapshot(0).active && slot_snapshot(1).active,
+            "remembered Individual reconnection must stop scanning again without merging");
+}
+
+void test_switch2_mode_roundtrip(bool right_first) {
+    start_backend();
+    initialize_runtime_profile_storage();
+    auto left = switch2_device(right_first ? 1 : 0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(right_first ? 0 : 1, UNI_SW2_JOYCON_R_PID);
+    const auto left_identity = identity_for_device(&left);
+    const auto right_identity = identity_for_device(&right);
+    auto left_profile = controller_profile_default(left_identity, 2);
+    left_profile.weak_rumble_scale = 37;
+    auto right_profile = controller_profile_default(right_identity, 5);
+    right_profile.weak_rumble_scale = 63;
+    require(runtime_profile_storage.set(left_identity, 2, left_profile) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(left_identity, 2) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.set(right_identity, 5, right_profile) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(right_identity, 5) == ProfileStorageResult::kOk,
+            "roundtrip requires independently selected saved solo banks");
+    ready_switch2(right_first ? right : left);
+    ready_switch2(right_first ? left : right);
+    const auto pair_identity = slot_snapshot(0).identity;
+    auto pair_profile = controller_profile_default(pair_identity, 7);
+    pair_profile.weak_rumble_scale = 95;
+    require(runtime_profile_storage.set(pair_identity, 7, pair_profile) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(pair_identity, 7) == ProfileStorageResult::kOk,
+            "roundtrip requires a distinct saved composite-bank selection");
+    auto classic = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    platform_on_device_connected(&classic);
+    require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
+            "Classic must coexist with either Joy-Con player mode");
+    uni_controller_t data{};
+    data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    data.gamepad.buttons = BUTTON_Y;
+    platform_on_controller_data(&classic, &data);
+    data.gamepad = {};
+    data.gamepad.dpad = DPAD_UP;
+    data.gamepad.axis_x = -512;
+    data.gamepad.axis_y = 100;
+    left.switch2_extra_buttons = UNI_SW2_BUTTON_GL | UNI_SW2_BUTTON_LEFT_SL;
+    platform_on_controller_data(&left, &data);
+    data.gamepad = {};
+    data.gamepad.buttons = BUTTON_B;
+    data.gamepad.axis_rx = 200;
+    data.gamepad.axis_ry = -512;
+    right.switch2_extra_buttons = UNI_SW2_BUTTON_C | UNI_SW2_BUTTON_RIGHT_SR;
+    platform_on_controller_data(&right, &data);
+    bluepad32_input_backend_queue_rumble(2, ControllerRumbleOutput{71, 81});
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{31, 41});
+    process_rumble_timer(&g_rumble_timer);
+    const auto pair_before = slot_snapshot(0);
+    const auto spare_before = slot_snapshot(1);
+    const auto classic_before = slot_snapshot(2);
+    const int classic_calls = classic.rumble_calls;
+    const unsigned left_resets = left.switch2_haptics_resets;
+    const unsigned right_resets = right.switch2_haptics_resets;
+    require(bluepad32_input_backend_capture_start(
+                0, pair_before.connection_generation, CaptureOptions{}),
+            "pair capture must start before splitting");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{91, 101});
+    bluepad32_input_backend_queue_profile_feedback(
+        0, pair_before.connection_generation, 8, ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    const auto left_solo = slot_snapshot(0);
+    const auto right_solo = slot_snapshot(1);
+    require(left_solo.active && right_solo.active &&
+                left_solo.connection_generation != pair_before.connection_generation &&
+                right_solo.connection_generation != spare_before.connection_generation &&
+                controller_identity_equal(left_solo.identity, left_identity) &&
+                controller_identity_equal(right_solo.identity, right_identity) &&
+                left_solo.state.button_west && !left_solo.state.dpad_up &&
+                left_solo.state.left_stick_x == scale_axis(100) &&
+                left_solo.state.left_stick_y == INT16_MAX &&
+                right_solo.state.button_south && !right_solo.state.button_east &&
+                right_solo.state.left_stick_x == INT16_MAX &&
+                right_solo.state.left_stick_y == scale_axis(200) &&
+                left_solo.state.motion_sample_count == 0 && right_solo.state.motion_sample_count == 0,
+            "split must retain both raw halves and immediately restore rotated solo owners at stable slots");
+    require_active_profile(left_solo.identity, 2, 37);
+    require_active_profile(right_solo.identity, 5, 63);
+    Bluepad32CaptureSnapshot capture{};
+    require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kDisconnected &&
+                left.switch2_haptics_resets > left_resets &&
+                right.switch2_haptics_resets > right_resets &&
+                left.last_rumble_duration_ms == 0 && right.last_rumble_duration_ms == 0,
+            "split must cancel recording and both physical haptics epochs");
+    const int stops = left.rumble_calls + right.rumble_calls;
+    bluepad32_input_backend_queue_profile_feedback(
+        0, pair_before.connection_generation, 8, ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    process_rumble_timer(&g_rumble_timer);
+    require(left.rumble_calls + right.rumble_calls == stops &&
+                left.last_low == 0 && right.last_low == 0 &&
+                left.player_leds == 1 && right.player_leds == 2 &&
+                !bluepad32_input_backend_identify(pair_identity),
+            "retired pair feedback and identify must not leak into Individual players");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{17, 27});
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{47, 57});
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_low == 17 && right.last_low == 47,
+            "split outputs must route independent player haptics");
+    const uint8_t capture_slot = right_first ? 1 : 0;
+    require(bluepad32_input_backend_capture_start(
+                capture_slot, slot_snapshot(capture_slot).connection_generation, CaptureOptions{}),
+            "either Individual slot must remain recordable before remerging");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{91, 101});
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{111, 121});
+    bluepad32_input_backend_queue_profile_feedback(
+        1, right_solo.connection_generation, 8, ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    before_pair_seed = [](const ControllerIdentity&) {
+        require(slot_snapshot(0).active && slot_snapshot(1).active &&
+                    !controller_identity_is_joycon_pair(slot_snapshot(0).identity) &&
+                    !controller_identity_is_joycon_pair(slot_snapshot(1).identity),
+                "live pair storage admission must precede publication of either topology change");
+    };
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    before_pair_seed = nullptr;
+    const auto restored = slot_snapshot(0);
+    require_pair_owner(restored.identity, left, right);
+    require(restored.connection_generation != left_solo.connection_generation &&
+                !slot_snapshot(1).active &&
+                slot_snapshot(1).connection_generation != right_solo.connection_generation &&
+                !slot_snapshot(1).state.button_south &&
+                slot_snapshot(1).state.extra_buttons == 0 &&
+                restored.state.dpad_up && restored.state.button_east &&
+                restored.state.left_stick_x == INT16_MIN &&
+                restored.state.right_stick_x == scale_axis(200) &&
+                restored.state.motion_sample_count == 0 &&
+                bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kDisconnected &&
+                left.last_rumble_duration_ms == 0 && right.last_rumble_duration_ms == 0,
+            "remerge must retain raw pair inputs, cancel either recording, and neutralize the retired solo");
+    require_active_profile(restored.identity, 7, 95);
+    require_active_profile(left_identity, 2, 37);
+    require_active_profile(right_identity, 5, 63);
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_low == 0 && right.last_low == 0 &&
+                slot_snapshot(2).connection_generation == classic_before.connection_generation &&
+                slot_snapshot(2).state.button_north &&
+                classic.rumble_calls == classic_calls && classic.last_low == 71 &&
+                negotiated_intervals[left.conn.handle] == 24 &&
+                negotiated_intervals[right.conn.handle] == 24 &&
+                interval_requests[left.conn.handle] == 1 && interval_requests[right.conn.handle] == 1,
+            "mode roundtrip must preserve unrelated Classic state, haptics and physical mixed-link intervals");
+    ControllerProfile inactive{};
+    require(runtime_profile_storage.get(pair_identity, 2, &inactive) == ProfileStorageResult::kOk &&
+                inactive.weak_rumble_scale == 37,
+            "existing composite profiles, including inactive seeded rows, must survive mode roundtrips");
+}
+
+void test_switch2_mode_two_pairs() {
+    start_pairing_backend();
+    auto right0 = switch2_device(0, UNI_SW2_JOYCON_R_PID);
+    auto right1 = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    auto left0 = switch2_device(2, UNI_SW2_JOYCON_L_PID);
+    auto left1 = switch2_device(3, UNI_SW2_JOYCON_L_PID);
+    ready_switch2(right0);
+    ready_switch2(right1);
+    ready_switch2(left0);
+    ready_switch2(left1);
+    const auto pair0 = slot_snapshot(0).identity;
+    const auto pair1 = slot_snapshot(1).identity;
+    require(runtime_profile_storage.activate(pair0, 6) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(pair1, 3) == ProfileStorageResult::kOk,
+            "two pairs need distinguishable saved selections");
+    for (unsigned roundtrip = 0; roundtrip < 2; ++roundtrip) {
+        set_runtime_joycon_mode(JoyConMode::kIndividual);
+        for (uint8_t slot = 0; slot < 4; ++slot) {
+            require(slot_snapshot(slot).active, "splitting two pairs must expose all four live players");
+        }
+        require(controller_identity_equal(slot_snapshot(0).identity, identity_for_device(&left0)) &&
+                    controller_identity_equal(slot_snapshot(1).identity, identity_for_device(&left1)) &&
+                    controller_identity_equal(slot_snapshot(2).identity, identity_for_device(&right0)) &&
+                    controller_identity_equal(slot_snapshot(3).identity, identity_for_device(&right1)) &&
+                    !scanning_enabled && !incoming_connections,
+                "full-capacity split must choose lowest free slots without moving existing left owners");
+        set_runtime_joycon_mode(JoyConMode::kPaired);
+        require_pair_owner(slot_snapshot(0).identity, left0, right0);
+        require_pair_owner(slot_snapshot(1).identity, left1, right1);
+        require(!slot_snapshot(2).active && !slot_snapshot(3).active &&
+                    !scanning_enabled && !incoming_connections,
+                "live pairing hints must restore both exact member combinations and original output slots");
+        require_active_profile(pair0, 6, UINT8_MAX);
+        require_active_profile(pair1, 3, UINT8_MAX);
+        bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{11, 21});
+        bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{31, 41});
+        process_rumble_timer(&g_rumble_timer);
+        require(left0.last_low == 11 && right0.last_low == 11 &&
+                    left1.last_low == 31 && right1.last_low == 31,
+                "roundtripped pair membership must remain visible in physical haptic routing");
+    }
+}
+
+void test_switch2_live_pair_failure(bool invalid_identity) {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    initialize_runtime_profile_storage();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    ready_switch2(left);
+    ready_switch2(right);
+    uni_controller_t data{};
+    data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    data.gamepad.dpad = DPAD_LEFT;
+    platform_on_controller_data(&left, &data);
+    data.gamepad = {};
+    data.gamepad.buttons = BUTTON_B;
+    platform_on_controller_data(&right, &data);
+    const auto left_before = slot_snapshot(0);
+    const auto right_before = slot_snapshot(1);
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{17, 27});
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{47, 57});
+    require(bluepad32_input_backend_capture_start(
+                1, right_before.connection_generation, CaptureOptions{}),
+            "active solo capture must survive a rejected live merge");
+    before_pair_seed = [](const ControllerIdentity&) {
+        require(slot_snapshot(0).active && slot_snapshot(1).active &&
+                    slot_snapshot(0).state.button_south && slot_snapshot(1).state.button_south,
+                "both active solos must stay intact while a new composite bank is seeded");
+    };
+    if (invalid_identity) right.switch2_identity_valid = false;
+    else fail_profile_program = true;
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    before_pair_seed = nullptr;
+    Bluepad32CaptureSnapshot capture{};
+    require(slot_snapshot(0).active && slot_snapshot(1).active &&
+                slot_snapshot(0).connection_generation == left_before.connection_generation &&
+                slot_snapshot(1).connection_generation == right_before.connection_generation &&
+                controller_identity_equal(slot_snapshot(0).identity, left_before.identity) &&
+                controller_identity_equal(slot_snapshot(1).identity, right_before.identity) &&
+                slot_snapshot(0).state.button_south && slot_snapshot(1).state.button_south &&
+                bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kRecording &&
+                left.switch2_haptics_resets == 0 && right.switch2_haptics_resets == 0,
+            "failed live pair admission must preserve both solo identities, states, generations and recording");
+    const unsigned expected_observations = invalid_identity ? 0 : 1;
+    require(pair_observation_count == expected_observations,
+            "invalid pair identity must fail before I/O and failed storage admission must be attempted once");
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_low == 17 && right.last_low == 47,
+            "failed admission must preserve both already-queued solo haptic commands");
+    for (unsigned tick = 0; tick < 100; ++tick) {
+        now_ms += 50;
+        process_configuration_timer(&g_configuration_timer);
+    }
+    ++runtime_configuration.pairing_window_seconds;
+    ++runtime_configuration_generation;
+    process_configuration_timer(&g_configuration_timer);
+    require(pair_observation_count == expected_observations,
+            "pending Paired preference must not create timer or unrelated-configuration retry storms");
+    fail_profile_program = false;
+    right.switch2_identity_valid = true;
+    if (!invalid_identity) {
+        require(runtime_profile_storage.initialize(runtime_profile_io()),
+                "pair failure recovery must replay intact solo profile banks");
+    }
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    require_pair_owner(slot_snapshot(0).identity, left, right);
+    require(!slot_snapshot(1).active, "explicit mode retry must recover without Bluetooth reconnect");
+}
+
+int live_identity_slot(const ControllerIdentity& identity) {
+    for (uint8_t index = 0; index < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++index) {
+        const auto snapshot = slot_snapshot(index);
+        if (snapshot.active && controller_identity_equal(snapshot.identity, identity)) return index;
+    }
+    return -1;
+}
+
+int live_pair_slot(const uni_hid_device_t& left, const uni_hid_device_t& right) {
+    ControllerIdentity pair{};
+    require(controller_identity_make_joycon_pair(
+                identity_for_device(&left), identity_for_device(&right), &pair),
+            "gesture participants must have a valid typed composite identity");
+    return live_identity_slot(pair);
+}
+
+void require_live_solo(const uni_hid_device_t& controller, const char* message) {
+    require(live_identity_slot(identity_for_device(&controller)) >= 0, message);
+}
+
+uni_controller_t gesture_input(bool right, bool trigger = true, bool menu = true) {
+    uni_controller_t report{};
+    report.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    if (right) {
+        report.gamepad.buttons = BUTTON_B | (trigger ? BUTTON_TRIGGER_R : 0);
+        report.gamepad.misc_buttons = menu ? MISC_BUTTON_START : 0;
+        report.gamepad.throttle = trigger ? 1023 : 0;
+        report.gamepad.axis_rx = 200;
+        report.gamepad.axis_ry = -512;
+    } else {
+        report.gamepad.buttons = trigger ? BUTTON_TRIGGER_L : 0;
+        report.gamepad.misc_buttons = menu ? MISC_BUTTON_SELECT : 0;
+        report.gamepad.brake = trigger ? 1023 : 0;
+        report.gamepad.dpad = DPAD_UP;
+        report.gamepad.axis_x = -512;
+        report.gamepad.axis_y = 100;
+    }
+    return report;
+}
+
+bool gesture_profile_consumer_enabled = false;
+ControllerState gesture_profile_outputs[BLUEPAD32_INPUT_BACKEND_SLOT_COUNT]{};
+
+void consume_gesture_profiles() {
+    if (!gesture_profile_consumer_enabled) return;
+    for (uint8_t index = 0; index < BLUEPAD32_INPUT_BACKEND_SLOT_COUNT; ++index) {
+        gesture_profile_outputs[index] = controller_profile_runtime_transform(
+            index, slot_snapshot(index), now_ms, AdapterUsbMode::kXInput).state;
+    }
+}
+
+void gesture_report(uni_hid_device_t& controller, bool trigger = true, bool menu = true) {
+    auto report = gesture_input(controller.product_id == UNI_SW2_JOYCON_R_PID, trigger, menu);
+    platform_on_controller_data(&controller, &report);
+    consume_gesture_profiles();
+}
+
+void gesture_tick() {
+    process_rumble_timer(&g_rumble_timer);
+    process_configuration_timer(&g_configuration_timer);
+    consume_gesture_profiles();
+}
+
+void gesture_reports(uni_hid_device_t& left, uni_hid_device_t& right) {
+    gesture_report(left);
+    gesture_report(right);
+    gesture_tick();
+}
+
+void hold_gesture(uni_hid_device_t& left, uni_hid_device_t& right, uint32_t duration_ms) {
+    gesture_reports(left, right);
+    for (uint32_t elapsed = 0; elapsed < duration_ms;) {
+        const uint32_t step = duration_ms - elapsed < 50 ? duration_ms - elapsed : 50;
+        elapsed += step;
+        now_ms += step;
+        gesture_reports(left, right);
+    }
+}
+
+void release_gesture(uni_hid_device_t& left, uni_hid_device_t& right) {
+    ++now_ms;
+    gesture_report(left, false, false);
+    gesture_report(right, false, false);
+    gesture_tick();
+}
+
+void require_gesture_masked(const Bluepad32SlotSnapshot& snapshot) {
+    const uint16_t menus =
+        logical_button_bit(ControllerProfileLogicalButton::kSelect) |
+        logical_button_bit(ControllerProfileLogicalButton::kStart);
+    require(!snapshot.state.button_select && !snapshot.state.button_start &&
+                snapshot.state.left_trigger == 0 && snapshot.state.right_trigger == 0 &&
+                (snapshot.pre_hotkey_button_mask & menus) == 0,
+            "reserved physical chord must not reach host state or pre-profile hotkeys");
+}
+
+void require_gesture_confirmation(size_t first, const uni_hid_device_t& left,
+                                  const uni_hid_device_t& right) {
+    unsigned left_pulses = 0;
+    unsigned right_pulses = 0;
+    for (size_t index = first; index < local_rumble_events.size(); ++index) {
+        const auto& event = local_rumble_events[index];
+        if ((event.high | event.low) == 0 || event.duration_ms == 0) continue;
+        require(event.duration_ms <= 150 &&
+                    (event.device == &left || event.device == &right),
+                "gesture confirmation must be short and restricted to its two physical participants");
+        if (event.device == &left) ++left_pulses;
+        else ++right_pulses;
+    }
+    require(left_pulses == 1 && right_pulses == 1,
+            "one successful gesture must acknowledge each physical half exactly once");
+}
+
+void test_switch2_gesture_timing() {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    ready_switch2(left);
+    ready_switch2(right);
+    const uint32_t configuration_generation = runtime_configuration_generation;
+    gesture_report(left, true, false);
+    require(slot_snapshot(0).state.left_trigger == UINT16_MAX,
+            "a trigger alone is not a reserved chord");
+    for (unsigned elapsed = 0; elapsed <= 2500; elapsed += 50) {
+        now_ms = elapsed;
+        gesture_report(left);
+        gesture_report(right, true, false);
+        gesture_tick();
+    }
+    require_live_solo(left, "one complete half and one partial half must not join");
+    require_live_solo(right, "partial participant must retain its solo owner");
+    require(pair_observation_count == 0, "a partial gesture must never enroll a composite bank");
+    release_gesture(left, right);
+    for (unsigned elapsed = 0; elapsed < 500; elapsed += 50) {
+        now_ms += 50;
+        gesture_report(left);
+        gesture_report(right, false, false);
+        gesture_tick();
+    }
+    const uint32_t shared_start = now_ms;
+    hold_gesture(left, right, 1999);
+    require_live_solo(left, "two seconds must start at concurrent hold, not the earlier left press");
+    require(pair_observation_count == 0, "1999ms must not seed or publish a pair");
+    now_ms = shared_start + 2000;
+    gesture_report(left);
+    gesture_tick();
+    require_live_solo(right, "a fresh left report must not stand in for the right's 2000ms held report");
+    const size_t confirmation_start = local_rumble_events.size();
+    gesture_report(right);
+    gesture_tick();
+    require(live_pair_slot(left, right) >= 0, "both fresh held spans at 2000ms must join Individual halves");
+    require_gesture_confirmation(confirmation_start, left, right);
+    const uint32_t joined_generation = slot_snapshot(live_pair_slot(left, right)).connection_generation;
+    hold_gesture(left, right, 2500);
+    gesture_report(left, false, false);
+    gesture_report(right, false, true);
+    gesture_tick();
+    hold_gesture(left, right, 2500);
+    require(live_pair_slot(left, right) >= 0 &&
+                slot_snapshot(live_pair_slot(left, right)).connection_generation == joined_generation &&
+                pair_observation_count == 1,
+            "held input and one participant's incomplete release must not toggle or reseed again");
+    release_gesture(left, right);
+    hold_gesture(left, right, 2000);
+    require_live_solo(left, "both participants' full release must permit a second toggle");
+    require_live_solo(right, "second toggle must expose the other physical solo");
+    require(runtime_configuration.joycon_mode == JoyConMode::kIndividual &&
+                runtime_configuration_generation == configuration_generation,
+            "connection gestures must never write the saved adapter preference");
+}
+
+void test_switch2_gesture_stale() {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    ready_switch2(left);
+    ready_switch2(right);
+    hold_gesture(left, right, 1000);
+    for (unsigned elapsed = 0; elapsed < 2500; elapsed += 50) {
+        now_ms += 50;
+        gesture_report(left);
+        gesture_tick();
+    }
+    require_live_solo(left, "cached right input must not fire after it goes stale");
+    hold_gesture(left, right, 2200);
+    require_live_solo(right, "resumed held reports must not rearm a stale attempt without release");
+    require(pair_observation_count == 0, "stale attempts must not touch pair storage");
+    release_gesture(left, right);
+    hold_gesture(left, right, 1000);
+    now_ms += 1100;
+    gesture_reports(left, right);
+    require_live_solo(left, "new reports must not hide a stale inter-report gap from a delayed timer");
+    hold_gesture(left, right, 2200);
+    require_live_solo(right, "a delayed-timer stale attempt must also require full release before retry");
+    release_gesture(left, right);
+    hold_gesture(left, right, 1900);
+    now_ms += 100;
+    gesture_tick();
+    require_live_solo(left, "fresh cached reports alone cannot establish two full held spans");
+    gesture_report(left);
+    gesture_tick();
+    require_live_solo(right, "a timer and one participant cannot complete the other's held span");
+    gesture_report(right);
+    gesture_tick();
+    require(live_pair_slot(left, right) >= 0, "release and fresh report spans must recover a stale attempt");
+}
+
+void test_switch2_gesture_clock_wrap() {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    ready_switch2(left);
+    ready_switch2(right);
+    now_ms = UINT32_MAX - 1000u;
+    hold_gesture(left, right, 1999);
+    require_live_solo(left, "clock wrap must not shorten the hold");
+    ++now_ms;
+    gesture_reports(left, right);
+    require(live_pair_slot(left, right) >= 0, "continuous held reports must complete across millisecond wrap");
+}
+
+void configure_gesture_profile(const ControllerIdentity& identity, uint8_t index, uint8_t scale) {
+    auto profile = controller_profile_default(identity, index);
+    profile.weak_rumble_scale = scale;
+    profile.button_map[static_cast<uint8_t>(ControllerProfileLogicalButton::kSelect)] =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kNorth);
+    profile.button_map[static_cast<uint8_t>(ControllerProfileLogicalButton::kStart)] =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kCapture);
+    profile.switching_chord =
+        logical_button_bit(ControllerProfileLogicalButton::kSelect) |
+        (1u << CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL);
+    profile.motion_toggle_chord =
+        logical_button_bit(ControllerProfileLogicalButton::kStart) |
+        (1u << CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL);
+    profile.macros[0].trigger_mask = logical_button_bit(ControllerProfileLogicalButton::kSouth);
+    profile.macros[0].first_step = 0;
+    profile.macros[0].step_count = 1;
+    profile.macros[0].mode = ControllerProfileMacroMode::kToggle;
+    profile.macro_step_count = 1;
+    for (uint8_t macro = 1; macro < CONTROLLER_PROFILE_MACRO_COUNT; ++macro) {
+        profile.macros[macro].first_step = 1;
+    }
+    profile.macro_steps[0].override_flags = kControllerProfileOverrideButtons;
+    profile.macro_steps[0].duration_ms = 10000;
+    profile.macro_steps[0].output_button_mask = logical_button_bit(ControllerProfileLogicalButton::kSystem);
+    require(runtime_profile_storage.set(identity, index, profile) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(identity, index) == ProfileStorageResult::kOk,
+            "gesture fixture needs independent profiles with observable macro and reserved-button mappings");
+}
+
+void test_switch2_gesture_masking_epochs() {
+    start_backend();
+    initialize_runtime_profile_storage();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    const auto left_identity = identity_for_device(&left);
+    const auto right_identity = identity_for_device(&right);
+    configure_gesture_profile(left_identity, 2, 37);
+    configure_gesture_profile(right_identity, 5, 63);
+    ready_switch2(left);
+    ready_switch2(right);
+    const auto pair_identity = slot_snapshot(0).identity;
+    configure_gesture_profile(pair_identity, 7, 95);
+    auto ordinary = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    ready_switch2(ordinary);
+    auto ordinary_report = gesture_input(true, false, false);
+    ordinary_report.gamepad.buttons = BUTTON_Y;
+    platform_on_controller_data(&ordinary, &ordinary_report);
+    const auto ordinary_before = slot_snapshot(2);
+    bluepad32_input_backend_queue_rumble(2, ControllerRumbleOutput{71, 81});
+    gesture_tick();
+    const int ordinary_rumble_calls = ordinary.rumble_calls;
+    const unsigned writes_before = profile_write_attempts;
+    const uint32_t saved_generation = runtime_configuration_generation;
+    gesture_profile_consumer_enabled = true;
+    controller_profile_runtime_reset();
+    release_gesture(left, right);
+    auto macro_press = gesture_input(true, false, false);
+    macro_press.gamepad.buttons = BUTTON_A;
+    ++now_ms;
+    platform_on_controller_data(&right, &macro_press);
+    consume_gesture_profiles();
+    require(gesture_profile_outputs[0].button_system, "a real profile macro must be running before the topology epoch");
+    release_gesture(left, right);
+    CaptureOptions options{};
+    options.channels = 0x1f;
+    options.max_events = 32;
+    require(bluepad32_input_backend_capture_start(
+                0, slot_snapshot(0).connection_generation, options),
+            "pair capture must record the arming path before splitting");
+    const auto pair_before = slot_snapshot(0);
+    ++now_ms;
+    gesture_report(left);
+    require_gesture_masked(slot_snapshot(0));
+    require(slot_snapshot(0).state.dpad_up && slot_snapshot(0).state.button_east &&
+                slot_snapshot(0).state.left_stick_x == INT16_MIN &&
+                slot_snapshot(0).state.right_stick_x == scale_axis(200),
+            "masking a single physical chord must preserve unrelated buttons, axes and companion input");
+    gesture_report(right);
+    gesture_tick();
+    require_gesture_masked(slot_snapshot(0));
+    hold_gesture(left, right, 1999);
+    require(gesture_profile_outputs[0].button_system &&
+                !gesture_profile_outputs[0].button_north &&
+                !gesture_profile_outputs[0].button_capture,
+            "arming must not leak remapped menus or cancel the preexisting macro");
+    Bluepad32CaptureSnapshot capture{};
+    require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kRecording,
+            "reserved chord consumption must not interrupt recording before success");
+    for (uint8_t index = 0; index < capture.event_count; ++index) {
+        require((capture.events[index].buttons &
+                    (logical_button_bit(ControllerProfileLogicalButton::kSelect) |
+                     logical_button_bit(ControllerProfileLogicalButton::kStart))) == 0 &&
+                    capture.events[index].left_trigger == 0 && capture.events[index].right_trigger == 0,
+                "recorded macros must never contain reserved gesture components");
+    }
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{91, 101});
+    bluepad32_input_backend_queue_profile_feedback(
+        0, pair_before.connection_generation, 8, ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    const size_t host_events_before = switch2_host_events.size();
+    const size_t confirmation_start = local_rumble_events.size();
+    ++now_ms;
+    gesture_reports(left, right);
+    require_live_solo(left, "Paired default must allow a gesture split");
+    require_live_solo(right, "gesture split must expose both members");
+    require_gesture_masked(slot_snapshot(0));
+    require_gesture_masked(slot_snapshot(1));
+    require(slot_snapshot(0).state.button_west && slot_snapshot(1).state.button_south &&
+                slot_snapshot(0).state.left_stick_x == scale_axis(100) &&
+                slot_snapshot(1).state.left_stick_x == INT16_MAX &&
+                !gesture_profile_outputs[0].button_system && !gesture_profile_outputs[1].button_system &&
+                bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kDisconnected &&
+                switch2_host_events.size() == host_events_before,
+            "successful split must rotate retained input, cancel macro/capture epochs and discard queued old rumble");
+    require_gesture_confirmation(confirmation_start, left, right);
+    bluepad32_input_backend_queue_profile_feedback(
+        0, pair_before.connection_generation, 8, ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    now_ms += 200;
+    gesture_report(left, false, true);
+    gesture_report(right, true, false);
+    gesture_tick();
+    require_gesture_masked(slot_snapshot(0));
+    require_gesture_masked(slot_snapshot(1));
+    require_gesture_confirmation(confirmation_start, left, right);
+    require(slot_snapshot(2).connection_generation == ordinary_before.connection_generation &&
+                slot_snapshot(2).state.button_north &&
+                ordinary.rumble_calls == ordinary_rumble_calls && ordinary.last_low == 71,
+            "gesture confirmation and retired feedback must not disturb unrelated input or rumble");
+    release_gesture(left, right);
+    gesture_report(left, true, false);
+    gesture_report(right, false, true);
+    require(slot_snapshot(0).state.left_trigger == UINT16_MAX && slot_snapshot(1).state.button_start,
+            "each half must return its component inputs after both components have released");
+    release_gesture(left, right);
+    auto solo_macro_press = gesture_input(false, false, false);
+    solo_macro_press.gamepad.dpad = DPAD_LEFT;
+    ++now_ms;
+    platform_on_controller_data(&left, &solo_macro_press);
+    consume_gesture_profiles();
+    require(gesture_profile_outputs[0].button_system,
+            "a real solo profile macro must be running before rejoining");
+    release_gesture(left, right);
+    require(bluepad32_input_backend_capture_start(
+                1, slot_snapshot(1).connection_generation, options),
+            "the other solo must remain recordable before gesture join");
+    hold_gesture(left, right, 1999);
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{111, 121});
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{131, 141});
+    const size_t solo_host_events_before = switch2_host_events.size();
+    ++now_ms;
+    gesture_reports(left, right);
+    require(live_pair_slot(left, right) >= 0 && !gesture_profile_outputs[0].button_system &&
+                !gesture_profile_outputs[1].button_system,
+            "rejoining must retire both solo macro contexts without reviving the former pair macro");
+    require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kDisconnected &&
+                switch2_host_events.size() == solo_host_events_before,
+            "gesture join must disconnect either solo recorder and discard both queued solo rumble epochs");
+    require_active_profile(pair_identity, 7, 95);
+    require_active_profile(left_identity, 2, 37);
+    require_active_profile(right_identity, 5, 63);
+    require(profile_write_attempts == writes_before &&
+                runtime_configuration.joycon_mode == JoyConMode::kPaired &&
+                runtime_configuration_generation == saved_generation,
+            "gesture roundtrip must preserve all existing profile banks and saved preference without flash writes");
+}
+
+void test_switch2_gesture_override_lifetime() {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    remember_switch2(left);
+    remember_switch2(right);
+    register_lookup_device(&left);
+    register_lookup_device(&right);
+    ready_switch2(left);
+    ready_switch2(right);
+    hold_gesture(left, right, 1900);
+    platform_on_device_disconnected(&right);
+    now_ms += 100;
+    gesture_reports(left, right);
+    require_live_solo(left, "disconnect during arming must leave the survivor solo");
+    require(pair_observation_count == 0, "late detached reports cannot complete a pending gesture");
+    ready_switch2(right);
+    release_gesture(left, right);
+    hold_gesture(left, right, 2000);
+    require(live_pair_slot(left, right) >= 0, "reconnected halves must support a new connection-only join");
+    auto ordinary = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    ready_switch2(ordinary);
+    ++runtime_configuration.pairing_window_seconds;
+    ++runtime_configuration_generation;
+    gesture_tick();
+    require(live_pair_slot(left, right) >= 0, "unrelated ready and configuration reconciliation must retain a join override");
+    platform_on_device_disconnected(&left);
+    gesture_tick();
+    ready_switch2(left);
+    gesture_tick();
+    require_live_solo(left, "disconnect must restore Individual for the returning participant");
+    require_live_solo(right, "disconnect must restore Individual for its still-connected partner");
+    release_gesture(left, right);
+    hold_gesture(left, right, 2000);
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    release_gesture(left, right);
+    hold_gesture(left, right, 2000);
+    require_live_solo(left, "a gesture must split while the saved default remains Paired");
+    for (unsigned tick = 0; tick < 20; ++tick) {
+        now_ms += 50;
+        gesture_tick();
+        require(!scanning_enabled && !classic_scanning_enabled &&
+                    platform_on_device_discovered(right.conn.btaddr, nullptr, 0, 0) ==
+                        UNI_ERROR_IGNORE_DEVICE,
+                "forced solos under Paired must stop background mate discovery despite free transport capacity");
+    }
+    require_live_solo(left, "background reconciliation must not rematch a manually split pair");
+    require_live_solo(right, "the second forced solo must stay independent beside an unrelated Classic link");
+    auto pro = switch2_device(3, UNI_SW2_PRO_PID);
+    ready_switch2(pro);
+    gesture_tick();
+    require_live_solo(right, "new ready events must not immediately undo the forced split");
+    platform_on_device_disconnected(&right);
+    gesture_tick();
+    require(scanning_enabled && background_scan_parameters && !classic_scanning_enabled &&
+                !bondable && !switch_pico_switch2_pairing_allowed() &&
+                platform_on_device_discovered(right.conn.btaddr, nullptr, 0, 0) == UNI_ERROR_SUCCESS,
+            "participant disconnect must clear the override and resume remembered-mate discovery without fresh pairing");
+    ready_switch2(right);
+    gesture_tick();
+    require(live_pair_slot(left, right) >= 0, "either split participant disconnecting must restore Paired for both");
+    require(!scanning_enabled && !classic_scanning_enabled,
+            "default reconnection must stop background discovery after restoring the pair");
+    release_gesture(left, right);
+    hold_gesture(left, right, 2000);
+    platform_on_device_disconnected(&right);
+    auto replacement = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    replacement.conn.btaddr[5] = 0x55;
+    ready_switch2(replacement);
+    gesture_tick();
+    require(live_pair_slot(left, replacement) >= 0 && live_pair_slot(left, right) < 0,
+            "reusing the physical index for a different identity must not inherit either member's former override");
+    platform_on_device_disconnected(&right);
+    gesture_report(right);
+    gesture_tick();
+    require(live_pair_slot(left, replacement) >= 0,
+            "late reports and disconnects from the retired participant must not clear its replacement's topology");
+    release_gesture(left, replacement);
+    hold_gesture(left, replacement, 2000);
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    require(live_pair_slot(left, replacement) >= 0, "changing the saved default must clear a forced-solo override");
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    release_gesture(left, replacement);
+    hold_gesture(left, replacement, 2000);
+    require(live_pair_slot(left, replacement) >= 0, "Individual must still permit an explicit current-pair join");
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    require_live_solo(left, "changing the saved default must also clear a forced-pair override");
+    require_live_solo(replacement, "clearing a forced-pair override must restore both Individual owners");
+}
+
+void test_switch2_gesture_two_pairs() {
+    start_backend();
+    auto right0 = switch2_device(0, UNI_SW2_JOYCON_R_PID);
+    auto right1 = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    auto left0 = switch2_device(2, UNI_SW2_JOYCON_L_PID);
+    auto left1 = switch2_device(3, UNI_SW2_JOYCON_L_PID);
+    ready_switch2(right0);
+    ready_switch2(right1);
+    ready_switch2(left0);
+    ready_switch2(left1);
+    const auto pair0 = slot_snapshot(live_pair_slot(left0, right0));
+    const auto pair1 = slot_snapshot(live_pair_slot(left1, right1));
+    hold_gesture(left0, right1, 2000);
+    require(live_pair_slot(left0, right0) >= 0 && live_pair_slot(left1, right1) >= 0 &&
+                slot_snapshot(live_pair_slot(left0, right0)).connection_generation == pair0.connection_generation &&
+                slot_snapshot(live_pair_slot(left1, right1)).connection_generation == pair1.connection_generation,
+            "chords from different live pairs must never steal or split either pair's members");
+    release_gesture(left0, right1);
+    const size_t first_confirmation = local_rumble_events.size();
+    hold_gesture(left0, right0, 2000);
+    require_live_solo(left0, "only the first current pair must split for its own two participants");
+    require_live_solo(right0, "first pair's right member must become independent");
+    require(live_pair_slot(left1, right1) >= 0 &&
+                slot_snapshot(live_pair_slot(left1, right1)).connection_generation == pair1.connection_generation,
+            "unjoining one pair must not split or invalidate the unrelated pair");
+    require_gesture_confirmation(first_confirmation, left0, right0);
+    const size_t second_confirmation = local_rumble_events.size();
+    hold_gesture(left1, right1, 2000);
+    require_gesture_confirmation(second_confirmation, left1, right1);
+    require_live_solo(left1, "second current pair must split independently");
+    require_live_solo(right1, "second pair's right member must become independent");
+    release_gesture(left0, right0);
+    release_gesture(left1, right1);
+    const auto former_right = slot_snapshot(live_identity_slot(identity_for_device(&right0)));
+    const auto former_left = slot_snapshot(live_identity_slot(identity_for_device(&left1)));
+    const size_t confirmation_start = local_rumble_events.size();
+    hold_gesture(left0, right1, 2000);
+    require(live_pair_slot(left0, right1) >= 0, "explicit solo participants must be allowed to choose a new cross-pair");
+    require_gesture_confirmation(confirmation_start, left0, right1);
+    gesture_tick();
+    require_live_solo(right0, "cross-joining must not regroup the untouched former right partner");
+    require_live_solo(left1, "cross-joining must not regroup the untouched former left partner");
+    require(slot_snapshot(live_identity_slot(identity_for_device(&right0))).connection_generation ==
+                former_right.connection_generation &&
+                slot_snapshot(live_identity_slot(identity_for_device(&left1))).connection_generation ==
+                    former_left.connection_generation,
+            "changing partners must leave former partners' logical epochs intact");
+    platform_on_device_disconnected(&right1);
+    auto replacement = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    replacement.conn.btaddr[5] = 0x65;
+    ready_switch2(replacement);
+    gesture_tick();
+    require(live_pair_slot(left0, replacement) >= 0,
+            "a former pair hint must not pin a cleared survivor to a stolen or disconnected member");
+    require_live_solo(right0, "clearing the current override must preserve the untouched former right's solo override");
+    require_live_solo(left1, "clearing the current override must preserve the untouched former left's solo override");
+    hold_gesture(left1, right0, 2000);
+    require(live_pair_slot(left1, right0) >= 0 && live_pair_slot(left0, replacement) >= 0,
+            "orphaned former partners must be independently joinable without disturbing the current pair");
+}
+
+void test_switch2_gesture_ambiguous() {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    auto left0 = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    auto left1 = switch2_device(2, UNI_SW2_JOYCON_L_PID);
+    ready_switch2(left0);
+    ready_switch2(right);
+    ready_switch2(left1);
+    const auto spare_before = slot_snapshot(2);
+    for (unsigned elapsed = 0; elapsed <= 2500; elapsed += 50) {
+        now_ms = elapsed;
+        gesture_report(left0);
+        gesture_report(right);
+        gesture_report(left1);
+        gesture_tick();
+    }
+    require_live_solo(left0, "two armed left solos must not choose an arbitrary pairing");
+    require_live_solo(right, "ambiguous solo arming must preserve the only right player");
+    require_live_solo(left1, "ambiguous solo arming must preserve the other left player");
+    gesture_report(left1, false, false);
+    hold_gesture(left0, right, 2200);
+    require(pair_observation_count == 0 && local_rumble_events.empty(),
+            "resolving ambiguity without releasing the attempt must not retry storage or acknowledge success");
+    release_gesture(left0, right);
+    hold_gesture(left0, right, 2000);
+    require(live_pair_slot(left0, right) >= 0 &&
+                slot_snapshot(2).connection_generation == spare_before.connection_generation &&
+                controller_identity_equal(slot_snapshot(2).identity, spare_before.identity),
+            "full release must allow one eligible L/R while preserving the unarmed extra solo");
+}
+
+void test_switch2_gesture_seed_failure() {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    initialize_runtime_profile_storage();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    const auto left_identity = identity_for_device(&left);
+    const auto right_identity = identity_for_device(&right);
+    configure_gesture_profile(left_identity, 2, 37);
+    configure_gesture_profile(right_identity, 5, 63);
+    ready_switch2(left);
+    ready_switch2(right);
+    // Establish the current USB host mode before testing a gesture failure;
+    // the adapter variant legitimately resets its initial haptics epoch.
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{});
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{});
+    release_gesture(left, right);
+    const unsigned left_resets_before = left.switch2_haptics_resets;
+    const unsigned right_resets_before = right.switch2_haptics_resets;
+    const auto left_before = slot_snapshot(0);
+    const auto right_before = slot_snapshot(1);
+    CaptureOptions options{};
+    options.max_duration_ms = 20000;
+    require(bluepad32_input_backend_capture_start(1, right_before.connection_generation, options),
+            "failed admission must preserve a live solo capture");
+    hold_gesture(left, right, 1999);
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{17, 27});
+    bluepad32_input_backend_queue_rumble(1, ControllerRumbleOutput{47, 57});
+    fail_profile_program = true;
+    ++now_ms;
+    gesture_reports(left, right);
+    Bluepad32CaptureSnapshot capture{};
+    require_live_solo(left, "failed seed must not retire the left solo");
+    require_live_solo(right, "failed seed must not retire the right solo");
+    require(slot_snapshot(0).connection_generation == left_before.connection_generation &&
+                slot_snapshot(1).connection_generation == right_before.connection_generation &&
+                slot_snapshot(0).state.button_west && slot_snapshot(1).state.button_south &&
+                bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kRecording &&
+                left.switch2_haptics_resets == left_resets_before &&
+                right.switch2_haptics_resets == right_resets_before &&
+                left.last_low == 17 && right.last_low == 47 && pair_observation_count == 1,
+            "seed failure must preserve identities, input, generations, recording and queued independent rumble");
+    const unsigned failed_writes = profile_write_attempts;
+    hold_gesture(left, right, 5000);
+    ++runtime_configuration.pairing_window_seconds;
+    ++runtime_configuration_generation;
+    gesture_tick();
+    require(pair_observation_count == 1 && profile_write_attempts == failed_writes &&
+                local_rumble_events.empty(),
+            "failed held gesture must not retry flash, churn topology or emit confirmation pulses");
+    fail_profile_program = false;
+    require(runtime_profile_storage.initialize(runtime_profile_io()),
+            "catalog replay must retain intact solo banks after failed pair admission");
+    require_active_profile(left_identity, 2, 37);
+    require_active_profile(right_identity, 5, 63);
+    release_gesture(left, right);
+    hold_gesture(left, right, 2000);
+    require(live_pair_slot(left, right) >= 0 && pair_observation_count == 2,
+            "explicit release and retry must recover once profile storage is available");
+    require_active_profile(slot_snapshot(live_pair_slot(left, right)).identity, 2, 37);
+    require_active_profile(right_identity, 5, 63);
+    require(runtime_configuration.joycon_mode == JoyConMode::kIndividual,
+            "failed and successful connection gestures must both leave the saved preference Individual");
+}
+
+void test_switch2_gesture_device_scope() {
+    start_backend();
+    auto original_left = device(0, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    auto original_right = device(1, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    original_left.vendor_id = original_right.vendor_id = UNI_SW2_NINTENDO_VID;
+    original_left.product_id = 0x2006;
+    original_right.product_id = 0x2007;
+    auto pro = switch2_device(2, UNI_SW2_PRO_PID);
+    auto other = device(3, true, UNI_BT_CONN_PROTOCOL_BLE);
+    uni_hid_device_t* controllers[] = {&original_left, &original_right, &pro, &other};
+    for (auto* controller : controllers) ready_switch2(*controller);
+    auto report = gesture_input(false);
+    report.gamepad.buttons |= BUTTON_TRIGGER_R;
+    report.gamepad.misc_buttons |= MISC_BUTTON_START;
+    report.gamepad.throttle = 1023;
+    for (unsigned elapsed = 0; elapsed <= 2500; elapsed += 50) {
+        now_ms = elapsed;
+        for (auto* controller : controllers) platform_on_controller_data(controller, &report);
+        gesture_tick();
+    }
+    for (uint8_t index = 0; index < 4; ++index) {
+        const auto snapshot = slot_snapshot(index);
+        require(snapshot.active && snapshot.state.button_select && snapshot.state.button_start &&
+                    snapshot.state.left_trigger == UINT16_MAX && snapshot.state.right_trigger == UINT16_MAX,
+                "original JoyCons, Switch2 Pro and unrelated controllers must retain all chord inputs");
+    }
+    require(pair_observation_count == 0 && local_rumble_events.empty(),
+            "the connection gesture must never operate on non-JoyCon2 controllers");
 }
 
 ControllerRumbleOutput ordered_switch2_hd(uint8_t frequency = 40) {
@@ -4283,6 +5375,24 @@ int main(int argc, char** argv) {
 #endif
     if (scenario == "switch2-hd-pro") {
         test_switch2_hd_pro();
+    } else if (scenario == "switch2-gesture-timing") {
+        test_switch2_gesture_timing();
+    } else if (scenario == "switch2-gesture-stale") {
+        test_switch2_gesture_stale();
+    } else if (scenario == "switch2-gesture-clock-wrap") {
+        test_switch2_gesture_clock_wrap();
+    } else if (scenario == "switch2-gesture-masking-epochs") {
+        test_switch2_gesture_masking_epochs();
+    } else if (scenario == "switch2-gesture-override-lifetime") {
+        test_switch2_gesture_override_lifetime();
+    } else if (scenario == "switch2-gesture-two-pairs") {
+        test_switch2_gesture_two_pairs();
+    } else if (scenario == "switch2-gesture-ambiguous") {
+        test_switch2_gesture_ambiguous();
+    } else if (scenario == "switch2-gesture-seed-failure") {
+        test_switch2_gesture_seed_failure();
+    } else if (scenario == "switch2-gesture-device-scope") {
+        test_switch2_gesture_device_scope();
     } else if (scenario == "switch2-hd-solo-left") {
         test_switch2_hd_solo(false);
     } else if (scenario == "switch2-hd-solo-right") {
@@ -4295,6 +5405,22 @@ int main(int argc, char** argv) {
         test_switch2_hd_epochs();
     } else if (scenario == "switch2-hd-feedback") {
         test_switch2_hd_feedback();
+    } else if (scenario == "switch2-individual-core-start") {
+        test_switch2_individual_core_start();
+    } else if (scenario == "switch2-individual-forward") {
+        test_switch2_individual_boot(false);
+    } else if (scenario == "switch2-individual-reverse") {
+        test_switch2_individual_boot(true);
+    } else if (scenario == "switch2-mode-forward") {
+        test_switch2_mode_roundtrip(false);
+    } else if (scenario == "switch2-mode-reverse") {
+        test_switch2_mode_roundtrip(true);
+    } else if (scenario == "switch2-mode-two-pairs") {
+        test_switch2_mode_two_pairs();
+    } else if (scenario == "switch2-mode-seed-failure") {
+        test_switch2_live_pair_failure(false);
+    } else if (scenario == "switch2-mode-identity-failure") {
+        test_switch2_live_pair_failure(true);
     } else if (scenario == "switch2-forward") {
         test_switch2_pair_lifecycle(false);
     } else if (scenario == "switch2-reverse") {

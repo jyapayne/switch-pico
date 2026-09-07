@@ -60,6 +60,9 @@ constexpr uint8_t kAllBlePairingMethods =
 constexpr uint16_t kProfileFeedbackPhaseDurationMs = 75;
 constexpr uint8_t kProfileFeedbackWeakMagnitude = UINT8_MAX;
 constexpr uint8_t kProfileFeedbackStrongMagnitude = UINT8_MAX;
+constexpr uint32_t kJoyConGestureHoldMs = 2000;
+constexpr uint32_t kJoyConGestureFreshMs = 250;
+constexpr uint16_t kJoyConGestureFeedbackMs = 75;
 // One initial indication can be followed by one committed switch before the
 // Core 1 timer drains the queue. Profile commits are rate-limited well beyond
 // the longest feedback sequence.
@@ -240,6 +243,41 @@ struct Switch2IntervalRequest {
     uint32_t requested_ms = 0;
 };
 Switch2IntervalRequest g_switch2_interval_requests[kSlotCount]{};
+JoyConMode g_joycon_mode = JoyConMode::kPaired;
+bool g_joycon_reconcile_requested = false;
+// Live-link hints only: splitting two pairs must not exchange their members
+// when the next Paired preference is applied.
+struct JoyConPairHint {
+    uni_hid_device_t* mate = nullptr;
+    uint8_t owner_slot = 0;
+};
+JoyConPairHint g_joycon_pair_hints[kSlotCount]{};
+
+enum class JoyConGroupingOverride : uint8_t {
+    Default,
+    Individual,
+    Paired,
+};
+struct JoyConConnectionOverride {
+    JoyConGroupingOverride mode = JoyConGroupingOverride::Default;
+    uni_hid_device_t* mate = nullptr;
+};
+JoyConConnectionOverride g_joycon_overrides[kSlotCount]{};
+
+// Core 1 physical-link state survives logical slot moves. Raw reports stay in
+// BackendSlot; only the derived logical view consumes the reserved buttons.
+struct JoyConGesture {
+    uni_hid_device_t* device = nullptr;
+    uint32_t last_report_ms = 0;
+    uint32_t started_ms = 0;
+    uint8_t participants = 0;
+    bool held = false;
+    bool released = true;
+    bool masked = false;
+    bool blocked = false;
+    bool joining = false;
+};
+JoyConGesture g_joycon_gestures[kSlotCount]{};
 uint32_t g_pairing_window_deadline_ms = 0;
 uint32_t g_pairing_window_duration_ms =
     kDefaultPairingWindowDurationMs;
@@ -370,23 +408,180 @@ int joycon_side(const uni_hid_device_t* device) {
     return device->product_id == UNI_SW2_JOYCON_R_PID ? 1 : 0;
 }
 
+bool joycon_default_pairing_allowed(const uni_hid_device_t* device) {
+    const int index = physical_index_for_device(device);
+    return g_joycon_mode == JoyConMode::kPaired && index >= 0 &&
+        g_joycon_overrides[index].mode == JoyConGroupingOverride::Default;
+}
+
+// Include the entire old attempt when another held solo makes selection
+// ambiguous. None of its members may retry until all have released.
+void block_joycon_gesture(uint8_t participants) {
+    for (uint8_t pass = 0; pass < kSlotCount; ++pass) {
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            if (participants & (1u << index)) {
+                participants |= g_joycon_gestures[index].participants;
+            }
+        }
+    }
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        if (!(participants & (1u << index))) continue;
+        g_joycon_gestures[index].participants = participants;
+        g_joycon_gestures[index].blocked = true;
+    }
+}
+
+bool joycon_gesture_live(uint8_t index) {
+    const JoyConGesture& gesture = g_joycon_gestures[index];
+    const int slot = slot_for_device(gesture.device);
+    return gesture.device != nullptr && slot >= 0 && g_slots[slot].active &&
+        physical_index_for_device(gesture.device) == index &&
+        joycon_side(gesture.device) != 0;
+}
+
+void arm_joycon_gesture(uint8_t left, uint8_t right, uint32_t now_ms,
+                       bool joining) {
+    JoyConGesture& l = g_joycon_gestures[left];
+    JoyConGesture& r = g_joycon_gestures[right];
+    if (!l.held || !r.held || l.blocked || r.blocked ||
+        l.participants != (1u << left) ||
+        r.participants != (1u << right)) return;
+    l.participants = r.participants = (1u << left) | (1u << right);
+    l.started_ms = r.started_ms = now_ms;
+    l.joining = r.joining = joining;
+}
+
+// Caller holds the state lock. Reports perform admission; the timer also
+// expires attempts, but elapsed cached input alone can never complete a hold.
+void refresh_joycon_gestures(uint32_t now_ms) {
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        JoyConGesture& gesture = g_joycon_gestures[index];
+        if (gesture.participants == 0 || gesture.blocked) continue;
+        if (!joycon_gesture_live(index) || !gesture.held ||
+            now_ms - gesture.last_report_ms > kJoyConGestureFreshMs) {
+            block_joycon_gesture(gesture.participants);
+        }
+    }
+    for (JoyConGesture& gesture : g_joycon_gestures) {
+        if (gesture.participants == 0) continue;
+        bool released = true;
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            if ((gesture.participants & (1u << index)) &&
+                !g_joycon_gestures[index].released) released = false;
+        }
+        if (!released) continue;
+        const uint8_t participants = gesture.participants;
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            if (!(participants & (1u << index))) continue;
+            g_joycon_gestures[index].participants = 0;
+            g_joycon_gestures[index].blocked = false;
+        }
+    }
+
+    int left = -1;
+    int right = -1;
+    uint8_t solos = 0;
+    bool ambiguous = false;
+    for (const BackendSlot& slot : g_slots) {
+        if (!slot.active || joycon_side(slot.device) == 0) continue;
+        const int index = physical_index_for_device(slot.device);
+        if (index < 0) continue;
+        if (slot.companion != nullptr) {
+            const int mate = physical_index_for_device(slot.companion);
+            if (mate >= 0) arm_joycon_gesture(index, mate, now_ms, false);
+            continue;
+        }
+        const JoyConGesture& gesture = g_joycon_gestures[index];
+        if (gesture.device != slot.device || !gesture.held || gesture.blocked) continue;
+        solos |= 1u << index;
+        int& side = joycon_side(slot.device) < 0 ? left : right;
+        ambiguous = ambiguous || side >= 0;
+        side = index;
+    }
+    if (ambiguous) {
+        block_joycon_gesture(solos);
+    } else if (left >= 0 && right >= 0) {
+        arm_joycon_gesture(left, right, now_ms, true);
+    }
+}
+
+void observe_joycon_gesture(uni_hid_device_t* device,
+                            const uni_gamepad_t& raw, uint32_t now_ms) {
+    const int side = joycon_side(device);
+    const int index = physical_index_for_device(device);
+    if (side == 0 || index < 0) return;
+    // Expire before updating the timestamp: a returning stale report must not
+    // hide a gap, even when no timer ran during it.
+    refresh_joycon_gestures(now_ms);
+    JoyConGesture& gesture = g_joycon_gestures[index];
+    gesture.device = device;
+    const bool trigger = (raw.buttons &
+        (side < 0 ? BUTTON_TRIGGER_L : BUTTON_TRIGGER_R)) != 0;
+    const bool menu = (raw.misc_buttons &
+        (side < 0 ? MISC_BUTTON_SELECT : MISC_BUTTON_START)) != 0;
+    gesture.last_report_ms = now_ms;
+    gesture.held = trigger && menu;
+    gesture.released = !trigger && !menu;
+    if (gesture.held) {
+        gesture.masked = true;
+        if (gesture.participants == 0) gesture.participants = 1u << index;
+    } else if (gesture.released) {
+        gesture.masked = false;
+    }
+    refresh_joycon_gestures(now_ms);
+}
+
+bool joycon_gesture_masked(const uni_hid_device_t* device) {
+    const int index = physical_index_for_device(device);
+    return index >= 0 && g_joycon_gestures[index].device == device &&
+        g_joycon_gestures[index].masked;
+}
+
+void mask_joycon_gesture(uni_gamepad_t& gamepad,
+                         const uni_hid_device_t* device) {
+    if (!joycon_gesture_masked(device)) return;
+    if (joycon_side(device) < 0) {
+        gamepad.buttons &= ~BUTTON_TRIGGER_L;
+        gamepad.misc_buttons &= ~MISC_BUTTON_SELECT;
+        gamepad.brake = 0;
+    } else {
+        gamepad.buttons &= ~BUTTON_TRIGGER_R;
+        gamepad.misc_buttons &= ~MISC_BUTTON_START;
+        gamepad.throttle = 0;
+    }
+}
+
 bool waiting_for_joycon_mate(int side = 0) {
     critical_section_enter_blocking(&g_state_lock);
     unsigned physical_count = 0;
     bool pending = false;
-    bool solo_mate = false;
+    unsigned left_count = 0;
+    unsigned right_count = 0;
     for (const BackendSlot& slot : g_slots) {
         physical_count += slot.device != nullptr;
         physical_count += slot.companion != nullptr;
         pending = pending || (slot.device != nullptr && !slot.active);
-        if (slot.active && slot.companion == nullptr) {
+        // An explicit solo choice is complete, not a request for another
+        // default-paired mate. Individual defaults retain balanced reconnects.
+        if (slot.active && slot.companion == nullptr &&
+            (g_joycon_mode == JoyConMode::kIndividual ||
+             joycon_default_pairing_allowed(slot.device))) {
             const int candidate_side = joycon_side(slot.device);
-            solo_mate = solo_mate ||
-                (candidate_side != 0 && (side == 0 || candidate_side == -side));
+            left_count += candidate_side < 0;
+            right_count += candidate_side > 0;
         }
     }
     critical_section_exit(&g_state_lock);
-    return physical_count < kSlotCount && !pending && solo_mate;
+    // Individual players still reconnect their remembered opposite half, but
+    // a balanced set is complete even though no logical pair was created.
+    const bool missing_left = g_joycon_mode == JoyConMode::kIndividual
+                                  ? right_count > left_count
+                                  : right_count != 0;
+    const bool missing_right = g_joycon_mode == JoyConMode::kIndividual
+                                   ? left_count > right_count
+                                   : left_count != 0;
+    return physical_count < kSlotCount && !pending &&
+           ((side <= 0 && missing_left) || (side >= 0 && missing_right));
 }
 
 void stop_background_scan() {
@@ -696,6 +891,7 @@ ControllerIdentity identity_for_device(const uni_hid_device_t* device) {
 void publish_ble_identity(const BleIdentityMapping& mapping) {
     ControllerIdentity observed_identity{};
     bool observe_identity = false;
+    bool joycon_identity_changed = false;
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
         if (slot.device != nullptr && slot.companion == nullptr &&
@@ -704,7 +900,10 @@ void publish_ble_identity(const BleIdentityMapping& mapping) {
             slot.device->conn.handle == mapping.connection_handle &&
             addresses_equal(slot.device->conn.btaddr,
                             mapping.connection_address)) {
-            slot.identity = make_ble_identity(mapping, slot.device);
+            const ControllerIdentity identity = make_ble_identity(mapping, slot.device);
+            joycon_identity_changed = slot.active && joycon_side(slot.device) != 0 &&
+                !controller_identity_equal(slot.identity, identity);
+            slot.identity = identity;
             if (slot.active) {
                 observed_identity = slot.identity;
                 observe_identity = true;
@@ -715,6 +914,9 @@ void publish_ble_identity(const BleIdentityMapping& mapping) {
     if (observe_identity) {
         profile_service_observe_identity_on_storage_core(
             observed_identity);
+        if (joycon_identity_changed && g_joycon_mode == JoyConMode::kPaired) {
+            g_joycon_reconcile_requested = true;
+        }
     }
 }
 
@@ -910,6 +1112,11 @@ void publish_all_neutral() {
         slot.profile_feedback = {};
         ++slot.state_generation;
         ++slot.connection_generation;
+    }
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        g_joycon_gestures[index] = {};
+        g_joycon_overrides[index] = {};
+        g_joycon_pair_hints[index] = {};
     }
     critical_section_exit(&g_state_lock);
     for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
@@ -1235,14 +1442,18 @@ void rotate_solo_joycon(uni_gamepad_t& gamepad, int side,
 }
 uni_gamepad_t logical_gamepad(const BackendSlot& slot) {
     uni_gamepad_t gamepad = slot.gamepad;
+    mask_joycon_gesture(gamepad, slot.device);
     if (slot.companion != nullptr) {
         const uni_gamepad_t& right = slot.companion_gamepad;
         gamepad.dpad |= right.dpad;
-        gamepad.buttons |= right.buttons;
-        gamepad.misc_buttons |= right.misc_buttons;
+        const bool masked = joycon_gesture_masked(slot.companion);
+        gamepad.buttons |=
+            right.buttons & ~(masked ? uint32_t{BUTTON_TRIGGER_R} : 0u);
+        gamepad.misc_buttons |=
+            right.misc_buttons & ~(masked ? uint32_t{MISC_BUTTON_START} : 0u);
         gamepad.axis_rx = right.axis_rx;
         gamepad.axis_ry = right.axis_ry;
-        gamepad.throttle = right.throttle;
+        gamepad.throttle = masked ? 0 : right.throttle;
         // The right half is the sole aim source. A left report must not
         // republish an already consumed right-hand motion sample.
         memcpy(gamepad.accel, right.accel, sizeof(gamepad.accel));
@@ -1591,6 +1802,9 @@ void process_clear_pairings(uint32_t now_ms) {
                 devices[device_count++] = slot.companion;
             }
             release_slot(slot);
+            g_joycon_gestures[slot_index] = {};
+            g_joycon_overrides[slot_index] = {};
+            g_joycon_pair_hints[slot_index] = {};
         }
     }
     critical_section_exit(&g_state_lock);
@@ -1768,6 +1982,9 @@ void update_status_led() {
     }
 }
 
+void apply_joycon_configuration(const ConfigurationServiceSnapshot& configuration);
+void process_joycon_gestures(uint32_t now_ms);
+
 void process_configuration_timer(btstack_timer_source_t* timer) {
     __atomic_add_fetch(
         &g_configuration_timer_ticks, 1, __ATOMIC_RELAXED);
@@ -1777,9 +1994,10 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
     apply_radio_connection_policy();
     configuration_service_task_on_storage_core(now_ms);
     profile_service_task_on_storage_core(now_ms);
-#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
     ConfigurationServiceSnapshot configuration{};
     configuration_service_snapshot(&configuration);
+    apply_joycon_configuration(configuration);
+#ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
     if (configuration.state == ConfigurationServiceState::kReady) {
         uint8_t previously_owned = 0;
         for (uint8_t i = 0; i < kSlotCount; ++i)
@@ -1893,10 +2111,12 @@ void seed_native_host_rumble() {
 
 void process_rumble_timer(btstack_timer_source_t* timer) {
     __atomic_add_fetch(&g_rumble_timer_ticks, 1, __ATOMIC_RELAXED);
-    const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    uint32_t now_ms = btstack_run_loop_get_time_ms();
 
     process_clear_pairings(now_ms);
     process_pairing_snapshot_request();
+    process_joycon_gestures(now_ms);
+    now_ms = btstack_run_loop_get_time_ms();
     const bool wake_identity_ready =
         switch2_wake_ready_for_connections();
     if (g_connection_policy_state ==
@@ -2148,6 +2368,361 @@ void recompute_connection_status() {
     apply_connection_policy();
 }
 
+void forget_joycon_pair_hint(uni_hid_device_t* device) {
+    const int physical_index = physical_index_for_device(device);
+    if (physical_index < 0) return;
+    for (JoyConPairHint& hint : g_joycon_pair_hints) {
+        if (hint.mate == device) hint = {};
+    }
+    g_joycon_pair_hints[physical_index] = {};
+}
+
+// Replacing an explicit association does not revoke its former partner's solo
+// choice. Only the new current association participates in disconnect reset.
+void set_joycon_override(uni_hid_device_t* left, uni_hid_device_t* right,
+                         JoyConGroupingOverride mode) {
+    uni_hid_device_t* devices[] = {left, right};
+    for (uni_hid_device_t* device : devices) {
+        for (JoyConConnectionOverride& current : g_joycon_overrides) {
+            if (current.mate == device) current.mate = nullptr;
+        }
+    }
+    g_joycon_overrides[physical_index_for_device(left)] = {mode, right};
+    g_joycon_overrides[physical_index_for_device(right)] = {mode, left};
+}
+
+// Caller holds the state lock; used for disconnect and physical index reuse.
+void reset_joycon_connection(uni_hid_device_t* device) {
+    const int index = physical_index_for_device(device);
+    if (index < 0) return;
+    bool changed = g_joycon_overrides[index].mode !=
+        JoyConGroupingOverride::Default;
+    for (JoyConConnectionOverride& current : g_joycon_overrides) {
+        if (current.mate == device) {
+            current = {};
+            changed = true;
+        }
+    }
+    g_joycon_overrides[index] = {};
+    if (changed) g_joycon_reconcile_requested = true;
+    block_joycon_gesture(g_joycon_gestures[index].participants);
+    g_joycon_gestures[index] = {};
+    for (JoyConGesture& gesture : g_joycon_gestures) {
+        gesture.participants &= ~(1u << index);
+    }
+    forget_joycon_pair_hint(device);
+}
+
+bool joycon_gesture_mature(uni_hid_device_t* first,
+                           uni_hid_device_t* second, bool joining,
+                           uint32_t now_ms) {
+    const int first_index = physical_index_for_device(first);
+    const int second_index = physical_index_for_device(second);
+    if (first_index < 0 || second_index < 0 || first_index == second_index ||
+        joycon_side(first) == 0 || joycon_side(first) != -joycon_side(second)) {
+        return false;
+    }
+    const uint8_t participants = (1u << first_index) | (1u << second_index);
+    const JoyConGesture& a = g_joycon_gestures[first_index];
+    const JoyConGesture& b = g_joycon_gestures[second_index];
+    if (a.device != first || b.device != second ||
+        a.started_ms != b.started_ms) return false;
+    const int indices[] = {first_index, second_index};
+    for (int index : indices) {
+        const JoyConGesture& gesture = g_joycon_gestures[index];
+        if (!joycon_gesture_live(index) ||
+            gesture.participants != participants ||
+            gesture.joining != joining || !gesture.held ||
+            now_ms - gesture.last_report_ms > kJoyConGestureFreshMs ||
+            static_cast<int32_t>(gesture.last_report_ms - gesture.started_ms) <
+                static_cast<int32_t>(kJoyConGestureHoldMs)) return false;
+    }
+    const int a_slot = slot_for_device(first);
+    const int b_slot = slot_for_device(second);
+    return joining
+        ? a_slot != b_slot && g_slots[a_slot].companion == nullptr &&
+              g_slots[b_slot].companion == nullptr
+        : a_slot == b_slot && g_slots[a_slot].companion != nullptr;
+}
+
+// Caller holds the state lock. Prefer the last live pair's exact members,
+// otherwise preserve the existing first-ready / lowest-slot admission order.
+int joycon_partner_slot(uni_hid_device_t* device, int slot_index) {
+    const int side = joycon_side(device);
+    if (side == 0 || !joycon_default_pairing_allowed(device)) return -1;
+    const auto& hint = g_joycon_pair_hints[physical_index_for_device(device)];
+    int first = -1;
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        const BackendSlot& candidate = g_slots[index];
+        if (index == slot_index || !candidate.active ||
+            candidate.companion != nullptr ||
+            !joycon_default_pairing_allowed(candidate.device) ||
+            joycon_side(candidate.device) != -side) continue;
+        if (candidate.device == hint.mate) return index;
+        const auto& candidate_hint =
+            g_joycon_pair_hints[physical_index_for_device(candidate.device)];
+        if (candidate_hint.mate != nullptr && candidate_hint.mate != device) continue;
+        if (first < 0) first = index;
+    }
+    return first;
+}
+
+void stop_joycon_output(uni_hid_device_t* device) {
+    if (device->report_parser.play_dual_rumble != nullptr) {
+        dispatch_rumble(device, 0, 0, 0);
+    }
+}
+
+// Core 1 only; shared by ready admission, saved defaults and explicit gestures.
+// Pair enrollment is atomic and idempotent, and always precedes topology
+// changes with no cross-core input lock held during storage I/O.
+bool merge_joycon_slots(int owner_index, int joining_index,
+                       uni_hid_device_t* joining_device,
+                       bool gesture = false) {
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& owner = g_slots[owner_index];
+    BackendSlot& joining = g_slots[joining_index];
+    uni_hid_device_t* const owner_device = owner.device;
+    const uint32_t owner_generation = owner.connection_generation;
+    const uint32_t joining_generation = joining.connection_generation;
+    const bool joining_active = joining.active;
+    const int side = joycon_side(joining_device);
+    const bool admission = gesture
+        ? joining.active && joycon_gesture_mature(
+              owner_device, joining_device, true, btstack_run_loop_get_time_ms())
+        : joycon_default_pairing_allowed(owner_device) &&
+              joycon_default_pairing_allowed(joining_device);
+    const bool eligible = admission &&
+        owner.active && owner.companion == nullptr &&
+        joining.companion == nullptr && side != 0 &&
+        joycon_side(owner_device) == -side &&
+        reserve_device_slot(joining_device) == joining_index;
+    const ControllerIdentity owner_identity = identity_for_device(owner_device);
+    const ControllerIdentity joining_identity = identity_for_device(joining_device);
+    critical_section_exit(&g_state_lock);
+    ControllerIdentity pair_identity{};
+    if (!eligible ||
+        !controller_identity_make_joycon_pair(
+            side < 0 ? joining_identity : owner_identity,
+            side < 0 ? owner_identity : joining_identity, &pair_identity) ||
+        !profile_service_observe_joycon_pair_on_storage_core(pair_identity)) {
+        return false;
+    }
+
+    critical_section_enter_blocking(&g_state_lock);
+    const bool still_admitted = gesture
+        ? joycon_gesture_mature(
+              owner_device, joining_device, true, btstack_run_loop_get_time_ms())
+        : joycon_default_pairing_allowed(owner_device) &&
+              joycon_default_pairing_allowed(joining_device);
+    if (!still_admitted ||
+        !owner.active || owner.device != owner_device ||
+        owner.companion != nullptr ||
+        owner.connection_generation != owner_generation ||
+        joining.active != joining_active || joining.companion != nullptr ||
+        joining.connection_generation != joining_generation ||
+        reserve_device_slot(joining_device) != joining_index) {
+        critical_section_exit(&g_state_lock);
+        return false;
+    }
+    invalidate_slot(owner);
+    invalidate_slot(joining);
+    // Clear both parser epochs and local motor feedback before publishing
+    // either the new pair or its neutral retired output.
+    stop_joycon_output(owner_device);
+    stop_joycon_output(joining_device);
+    if (side < 0) {
+        owner.companion = owner.device;
+        owner.companion_gamepad = owner.gamepad;
+        owner.companion_extra_buttons = owner.extra_buttons;
+        owner.device = joining_device;
+        owner.gamepad = joining.gamepad;
+        owner.extra_buttons = joining.extra_buttons;
+    } else {
+        owner.companion = joining_device;
+        owner.companion_gamepad = joining.gamepad;
+        owner.companion_extra_buttons = joining.extra_buttons;
+    }
+    owner.identity = pair_identity;
+    refresh_topology_input(owner);
+    joining.identity = controller_identity_global();
+    joining.device = nullptr;
+    joining.gamepad = {};
+    joining.extra_buttons = 0;
+    joining.active = false;
+    forget_joycon_pair_hint(owner.device);
+    forget_joycon_pair_hint(owner.companion);
+    if (gesture) {
+        set_joycon_override(owner.device, owner.companion,
+                            JoyConGroupingOverride::Paired);
+        queue_local_feedback(owner, kJoyConGestureFeedbackMs,
+                             kProfileFeedbackWeakMagnitude,
+                             kProfileFeedbackStrongMagnitude);
+    }
+    g_joycon_pair_hints[physical_index_for_device(owner.device)] =
+        {owner.companion, static_cast<uint8_t>(owner_index)};
+    g_joycon_pair_hints[physical_index_for_device(owner.companion)] =
+        {owner.device, static_cast<uint8_t>(owner_index)};
+    critical_section_exit(&g_state_lock);
+    apply_slot_lighting(static_cast<uint8_t>(owner_index), owner.device);
+    apply_slot_lighting(static_cast<uint8_t>(owner_index), owner.companion);
+    return true;
+}
+
+bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& owner = g_slots[owner_index];
+    const int physical_index = physical_index_for_device(owner.device);
+    if (!owner.active || owner.companion == nullptr || physical_index < 0 ||
+        (!gesture && g_joycon_overrides[physical_index].mode ==
+                         JoyConGroupingOverride::Paired) ||
+        (gesture && !joycon_gesture_mature(
+            owner.device, owner.companion, false,
+            btstack_run_loop_get_time_ms()))) {
+        critical_section_exit(&g_state_lock);
+        return false;
+    }
+    // Keep the pair's left member at its existing player index. Prefer the
+    // right member's physical index, falling back to the lowest free output.
+    int right_index = physical_index_for_device(owner.companion);
+    if (right_index < 0 || g_slots[right_index].device != nullptr) {
+        right_index = -1;
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            if (g_slots[index].device == nullptr) {
+                right_index = index;
+                break;
+            }
+        }
+    }
+    if (right_index < 0) {
+        critical_section_exit(&g_state_lock);
+        return false;
+    }
+    BackendSlot& right = g_slots[right_index];
+    ControllerIdentity left_identity{};
+    ControllerIdentity right_identity{};
+    // The enrolled owner is authoritative even if a later identity-resolution
+    // event has temporarily cleared a member's transport mapping.
+    if (!controller_identity_joycon_pair_members(
+            owner.identity, &left_identity, &right_identity)) {
+        critical_section_exit(&g_state_lock);
+        return false;
+    }
+    invalidate_slot(owner);
+    invalidate_slot(right);
+    stop_joycon_output(owner.device);
+    stop_joycon_output(owner.companion);
+    right.device = owner.companion;
+    right.identity = right_identity;
+    right.gamepad = owner.companion_gamepad;
+    right.extra_buttons = owner.companion_extra_buttons;
+    right.active = true;
+    owner.identity = left_identity;
+    owner.companion = nullptr;
+    owner.companion_gamepad = {};
+    owner.companion_extra_buttons = 0;
+    refresh_topology_input(owner);
+    refresh_topology_input(right);
+    if (gesture) {
+        set_joycon_override(owner.device, right.device,
+                            JoyConGroupingOverride::Individual);
+        queue_local_feedback(owner, kJoyConGestureFeedbackMs,
+                             kProfileFeedbackWeakMagnitude,
+                             kProfileFeedbackStrongMagnitude);
+        queue_local_feedback(right, kJoyConGestureFeedbackMs,
+                             kProfileFeedbackWeakMagnitude,
+                             kProfileFeedbackStrongMagnitude);
+    }
+    critical_section_exit(&g_state_lock);
+    apply_slot_lighting(owner_index, owner.device);
+    apply_slot_lighting(static_cast<uint8_t>(right_index), right.device);
+    return true;
+}
+
+void process_joycon_gestures(uint32_t now_ms) {
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        now_ms = btstack_run_loop_get_time_ms();
+        critical_section_enter_blocking(&g_state_lock);
+        refresh_joycon_gestures(now_ms);
+        const JoyConGesture& gesture = g_joycon_gestures[index];
+        if (gesture.blocked || joycon_side(gesture.device) >= 0) {
+            critical_section_exit(&g_state_lock);
+            continue;
+        }
+        uni_hid_device_t* right = nullptr;
+        for (uint8_t mate = 0; mate < kSlotCount; ++mate) {
+            if (mate != index && (gesture.participants & (1u << mate))) {
+                right = g_joycon_gestures[mate].device;
+            }
+        }
+        const bool joining = gesture.joining;
+        const int owner_slot = slot_for_device(gesture.device);
+        const int right_slot = slot_for_device(right);
+        const bool mature = joycon_gesture_mature(
+            gesture.device, right, joining, now_ms);
+        if (mature) block_joycon_gesture(gesture.participants);
+        critical_section_exit(&g_state_lock);
+        if (!mature) continue;
+        // Latch success AND failure before any enrollment I/O. A failed seed
+        // must not retry at the timer cadence or undo either participant.
+        const bool changed = joining
+            ? merge_joycon_slots(owner_slot, right_slot, right, true)
+            : split_joycon_slot(static_cast<uint8_t>(owner_slot), true);
+        if (changed) recompute_connection_status();
+    }
+}
+
+void apply_joycon_configuration(const ConfigurationServiceSnapshot& configuration) {
+    if (configuration.state != ConfigurationServiceState::kReady) return;
+    const JoyConMode requested = configuration.configuration.joycon_mode;
+    if (requested != g_joycon_mode) {
+        critical_section_enter_blocking(&g_state_lock);
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            g_joycon_overrides[index] = {};
+            block_joycon_gesture(g_joycon_gestures[index].participants);
+        }
+        g_joycon_mode = requested;
+        g_joycon_reconcile_requested = true;
+        critical_section_exit(&g_state_lock);
+    }
+    if (!g_joycon_reconcile_requested) return;
+    g_joycon_reconcile_requested = false;
+    if (g_joycon_mode == JoyConMode::kIndividual) {
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            split_joycon_slot(index);
+        }
+    } else {
+        uint8_t attempted = 0;
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            critical_section_enter_blocking(&g_state_lock);
+            const BackendSlot& slot = g_slots[index];
+            int partner = slot.active && slot.companion == nullptr &&
+                                  !(attempted & (1u << index))
+                              ? joycon_partner_slot(slot.device, index) : -1;
+            if (partner < 0 || (attempted & (1u << partner))) {
+                critical_section_exit(&g_state_lock);
+                continue;
+            }
+            int owner = index;
+            int joining = partner;
+            const auto& hint =
+                g_joycon_pair_hints[physical_index_for_device(slot.device)];
+            if (hint.mate == g_slots[partner].device && hint.owner_slot == partner) {
+                owner = partner;
+                joining = index;
+            }
+            uni_hid_device_t* joining_device = g_slots[joining].device;
+            attempted |= (1u << index) | (1u << partner);
+            critical_section_exit(&g_state_lock);
+            // Failed seeds/invalid identities leave both live solos intact.
+            // Retry only on a mode change or fresh identity/ready event, never
+            // at the 50 ms poll cadence or for unrelated configuration edits.
+            merge_joycon_slots(owner, joining, joining_device);
+        }
+    }
+    recompute_connection_status();
+}
+
 void platform_init(int argc, const char** argv) {
     (void)argc;
     (void)argv;
@@ -2173,6 +2748,9 @@ void platform_on_init_complete() {
         &g_configuration_timer, kConfigurationPollIntervalMs);
     btstack_run_loop_add_timer(&g_configuration_timer);
     __atomic_store_n(&g_initialization_stage, 6, __ATOMIC_RELEASE);
+    ConfigurationServiceSnapshot configuration{};
+    configuration_service_snapshot(&configuration);
+    apply_joycon_configuration(configuration);
     if (switch2_wake_ready_for_connections()) {
         recompute_connection_status();
     }
@@ -2219,6 +2797,7 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     if (physical_index >= 0) {
         g_retired_devices[physical_index] = nullptr;
         g_switch2_interval_requests[physical_index] = {};
+        if (slot_for_device(device) < 0) reset_joycon_connection(device);
     }
     const int slot_index = reserve_device_slot(device);
     if (slot_index >= 0) {
@@ -2254,6 +2833,7 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
     critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[slot_index];
     g_retired_devices[physical_index_for_device(device)] = device;
+    reset_joycon_connection(device);
     if (slot.companion != nullptr) {
         invalidate_slot(slot);
         if (slot.device == device) {
@@ -2311,68 +2891,13 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     }
     BackendSlot& pending = g_slots[slot_index];
     if (!pending.active) {
-        const int side = joycon_side(device);
-        int partner_index = -1;
-        if (side != 0) {
-            for (uint8_t index = 0; index < kSlotCount; ++index) {
-                const BackendSlot& candidate = g_slots[index];
-                if (index != slot_index && candidate.active &&
-                    candidate.companion == nullptr &&
-                    joycon_side(candidate.device) == -side) {
-                    partner_index = index;
-                    break;
-                }
-            }
-        }
+        const int partner_index = joycon_partner_slot(device, slot_index);
         if (partner_index >= 0) {
-            BackendSlot& partner = g_slots[partner_index];
-            const uint32_t partner_generation = partner.connection_generation;
-            const uint32_t pending_generation = pending.connection_generation;
-            uni_hid_device_t* const partner_device = partner.device;
-            const ControllerIdentity partner_identity =
-                identity_for_device(partner_device);
             critical_section_exit(&g_state_lock);
-
-            ControllerIdentity pair_identity{};
-            if (!controller_identity_make_joycon_pair(
-                    side < 0 ? connection_identity : partner_identity,
-                    side < 0 ? partner_identity : connection_identity,
-                    &pair_identity) ||
-                !profile_service_observe_joycon_pair_on_storage_core(
-                    pair_identity)) {
+            if (!merge_joycon_slots(partner_index, slot_index, device)) {
                 return UNI_ERROR_INIT_FAILED;
             }
-
-            // Storage can publish the complete bank without blocking Core 0.
-            // Only then replace the first-ready solo's topology and generation.
             critical_section_enter_blocking(&g_state_lock);
-            if (!partner.active || partner.device != partner_device ||
-                partner.companion != nullptr ||
-                partner.connection_generation != partner_generation ||
-                pending.active ||
-                pending.connection_generation != pending_generation ||
-                reserve_device_slot(device) != slot_index) {
-                critical_section_exit(&g_state_lock);
-                return UNI_ERROR_INIT_FAILED;
-            }
-            invalidate_slot(partner);
-            if (side < 0) {
-                partner.companion = partner.device;
-                partner.companion_gamepad = partner.gamepad;
-                partner.companion_extra_buttons = partner.extra_buttons;
-                partner.device = device;
-                partner.gamepad = {};
-                partner.extra_buttons = 0;
-            } else {
-                partner.companion = device;
-                partner.companion_gamepad = {};
-                partner.companion_extra_buttons = 0;
-            }
-            // Preserve the existing player's output index regardless of
-            // physical connection order, with a separately seeded pair owner.
-            partner.identity = pair_identity;
-            refresh_topology_input(partner);
-            release_slot(pending);
             slot_index = partner_index;
             paired = true;
         } else {
@@ -2413,15 +2938,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         }
 #endif
 #endif
-        if (paired) {
-            uni_hid_device_t* halves[] = {owner, companion};
-            for (uni_hid_device_t* half : halves) {
-                if (half->report_parser.play_dual_rumble != nullptr) {
-                    dispatch_rumble(half, 0, 0, 0);
-                }
-            }
-        }
-        if (lighting_target_is_current(
+        if (!paired && lighting_target_is_current(
                 static_cast<uint8_t>(slot_index), lighting_generation, owner)) {
             apply_slot_lighting(static_cast<uint8_t>(slot_index), owner);
             if (companion != nullptr) {
@@ -2431,6 +2948,10 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         if (!paired && connection_identity.stable) {
             profile_service_observe_identity_on_storage_core(
                 connection_identity);
+        }
+        if (!paired && joycon_side(device) != 0 &&
+            g_joycon_mode == JoyConMode::kPaired) {
+            g_joycon_reconcile_requested = true;
         }
     }
 
@@ -2462,6 +2983,8 @@ void platform_on_controller_data(uni_hid_device_t* device,
         slot.gamepad = controller->gamepad;
         slot.extra_buttons = extras;
     }
+    observe_joycon_gesture(
+        device, controller->gamepad, btstack_run_loop_get_time_ms());
     const uni_gamepad_t gamepad = logical_gamepad(slot);
     uni_hid_device_t* owner = slot.device;
     const bool fresh_motion =
@@ -2526,6 +3049,12 @@ uni_platform* get_platform() {
     __atomic_store_n(&g_initialization_stage, 2, __ATOMIC_RELEASE);
     configuration_service_initialize_on_storage_core();
     profile_service_initialize_on_storage_core();
+    ConfigurationServiceSnapshot configuration{};
+    configuration_service_snapshot(&configuration);
+    if (configuration.state == ConfigurationServiceState::kReady) {
+        // Load before uni_init can deliver even the first ready callback.
+        g_joycon_mode = configuration.configuration.joycon_mode;
+    }
     __atomic_store_n(&g_initialization_stage, 3, __ATOMIC_RELEASE);
     if (cyw43_arch_init() != 0) {
         halt_wireless_backend();
@@ -2656,7 +3185,12 @@ void bluepad32_input_backend_init() {
         g_consumed_generation[slot_index] = 0;
         g_last_snapshot_generation[slot_index] = 0;
         g_ble_identity_mappings[slot_index] = {};
+        g_joycon_pair_hints[slot_index] = {};
+        g_joycon_gestures[slot_index] = {};
+        g_joycon_overrides[slot_index] = {};
     }
+    g_joycon_mode = JoyConMode::kPaired;
+    g_joycon_reconcile_requested = false;
     g_pairing_window_requested = false;
     g_pairing_snapshot_requested = false;
     g_pairing_snapshot = {};

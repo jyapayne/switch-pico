@@ -99,7 +99,10 @@ STATUS_NAMES = {
     8: "storage failure",
 }
 
-CONFIGURATION_SCHEMA_VERSION = 3
+CONFIGURATION_SCHEMA_VERSION = 4
+JOYCON_MODE_PAIRED = 0
+JOYCON_MODE_INDIVIDUAL = 1
+JOYCON_MODE_NAMES = ("paired", "individual")
 CONFIGURATION_SIZE = 232
 NATIVE_SWITCH_CONTROLLER_CAPACITY = 16
 NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE = (
@@ -604,6 +607,7 @@ class AdapterConfiguration:
     requested_mode: int = REQUESTED_MODE_AUTO
     native_switch_controllers: tuple[ControllerIdentity, ...] = ()
     schema_version: int = CONFIGURATION_SCHEMA_VERSION
+    joycon_mode: int = JOYCON_MODE_PAIRED
 
 
 @dataclass(frozen=True)
@@ -3344,6 +3348,7 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
     _raise_status(envelope)
     payload = envelope.payload
     identities: tuple[ControllerIdentity, ...] = ()
+    joycon_mode = JOYCON_MODE_PAIRED
     if envelope.schema_version == 1:
         if len(payload) != 4 or payload[2:] != bytes(2):
             raise ConfigManagerError("unsupported configuration object")
@@ -3352,14 +3357,15 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
         if len(payload) != 8 or payload[3:] != bytes(5):
             raise ConfigManagerError("unsupported configuration object")
         requested_mode = payload[2]
-    elif envelope.schema_version == CONFIGURATION_SCHEMA_VERSION:
+    elif envelope.schema_version in (3, CONFIGURATION_SCHEMA_VERSION):
         if len(payload) != CONFIGURATION_SIZE:
             raise ConfigManagerError("unsupported configuration object")
         count = payload[3]
         end = 8 + count * CONTROLLER_IDENTITY_SIZE
         if (
             count > NATIVE_SWITCH_CONTROLLER_CAPACITY
-            or payload[4:8] != bytes(4)
+            or payload[5:8] != bytes(3)
+            or (envelope.schema_version == 3 and payload[4] != 0)
             or payload[end:] != bytes(CONFIGURATION_SIZE - end)
         ):
             raise ConfigManagerError("invalid native rumble approval encoding")
@@ -3372,6 +3378,8 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
         if identities != _canonical_native_switch_controllers(identities):
             raise ConfigManagerError("noncanonical native rumble approval order")
         requested_mode = payload[2]
+        if envelope.schema_version == CONFIGURATION_SCHEMA_VERSION:
+            joycon_mode = payload[4]
     else:
         raise ConfigManagerError("unsupported configuration object")
     pairing_window_seconds = struct.unpack_from("<H", payload)[0]
@@ -3383,6 +3391,8 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
         raise ConfigManagerError("invalid stored pairing-window duration")
     if requested_mode >= len(REQUESTED_MODE_NAMES):
         raise ConfigManagerError(f"invalid stored requested USB mode {requested_mode}")
+    if joycon_mode >= len(JOYCON_MODE_NAMES):
+        raise ConfigManagerError(f"invalid stored Joy-Con2 mode {joycon_mode}")
     return AdapterConfiguration(
         pairing_window_seconds=pairing_window_seconds,
         generation=envelope.generation,
@@ -3390,6 +3400,7 @@ def read_configuration(device: UsbDevice) -> AdapterConfiguration:
         requested_mode=requested_mode,
         native_switch_controllers=identities,
         schema_version=envelope.schema_version,
+        joycon_mode=joycon_mode,
     )
 
 
@@ -3429,16 +3440,23 @@ def write_configuration(
         configuration.requested_mode
     ) is not int or not 0 <= configuration.requested_mode < len(REQUESTED_MODE_NAMES):
         raise ConfigManagerError("invalid requested USB mode")
+    _require_int(configuration.joycon_mode, "Joy-Con2 mode", 0, 1)
+    if (
+        configuration.schema_version < CONFIGURATION_SCHEMA_VERSION
+        and configuration.joycon_mode != JOYCON_MODE_PAIRED
+    ):
+        raise ConfigManagerError("Joy-Con2 player mode requires schema 4 firmware")
     identities = _canonical_native_switch_controllers(
         configuration.native_switch_controllers
     )
-    if configuration.schema_version == CONFIGURATION_SCHEMA_VERSION:
+    if configuration.schema_version in (3, CONFIGURATION_SCHEMA_VERSION):
         payload = (
             struct.pack(
-                "<HBB4x",
+                "<HBBB3x",
                 configuration.pairing_window_seconds,
                 configuration.requested_mode,
                 len(identities),
+                configuration.joycon_mode,
             )
             + b"".join(identity.to_bytes() for identity in identities)
             + bytes(
@@ -3488,6 +3506,17 @@ def write_configuration(
     return _wait_for_transaction(device, transaction_id, timeout)
 
 
+def set_joycon_mode(
+    device: UsbDevice, mode: int, timeout: float
+) -> TransactionStatus:
+    """Persist the adapter-wide player mode without rebooting or changing profiles."""
+    _require_int(mode, "Joy-Con2 mode", 0, 1)
+    before = read_configuration(device)
+    if before.schema_version < CONFIGURATION_SCHEMA_VERSION:
+        raise ConfigManagerError("Joy-Con2 player mode requires schema 4 firmware")
+    return write_configuration(device, replace(before, joycon_mode=mode), timeout)
+
+
 def set_native_switch_rumble_approval(
     device: UsbDevice,
     identity: ControllerIdentity,
@@ -3498,7 +3527,7 @@ def set_native_switch_rumble_approval(
     _require_bool(approved, "native rumble approval")
     _canonical_native_switch_controllers((identity,))
     before = read_configuration(device)
-    if before.schema_version != CONFIGURATION_SCHEMA_VERSION:
+    if before.schema_version < 3:
         raise ConfigManagerError("native rumble approval requires schema 3 firmware")
     identities = tuple(
         item for item in before.native_switch_controllers if item != identity
@@ -4414,6 +4443,14 @@ def build_parser() -> argparse.ArgumentParser:
     reboot.add_argument("target", choices=("bootsel",))
     mode = commands.add_parser("mode", help="select the persistent USB mode")
     mode.add_argument("mode", choices=SELECTABLE_MODE_NAMES)
+    joycon_mode = commands.add_parser(
+        "joycon-mode",
+        help="read or apply the persistent Joy-Con2 player mode without reconnecting",
+    )
+    joycon_mode.add_argument("mode", nargs="?", choices=JOYCON_MODE_NAMES)
+    joycon_mode.add_argument(
+        "--json", action="store_true", help="emit the committed mode as JSON"
+    )
 
     config = commands.add_parser("config", help="read or change configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
@@ -4594,6 +4631,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Configuration generation: {configuration.generation}")
             print(f"Configuration CRC: {configuration.crc:08x}")
             print(f"Pairing window: {configuration.pairing_window_seconds} seconds")
+            print(f"Joy-Con2 player mode: {JOYCON_MODE_NAMES[configuration.joycon_mode]}")
         elif args.command == "diagnostics":
             diagnostics = read_runtime_diagnostics(device)
             print(f"Initialization stage: {diagnostics.initialization_stage}")
@@ -4622,6 +4660,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"USB mode changed to {args.mode}.")
             else:
                 print(f"USB mode is already {args.mode}.")
+        elif args.command == "joycon-mode":
+            if args.mode is not None:
+                set_joycon_mode(device, JOYCON_MODE_NAMES.index(args.mode), args.timeout)
+            configuration = read_configuration(device)
+            mode_name = JOYCON_MODE_NAMES[configuration.joycon_mode]
+            supported = configuration.schema_version >= CONFIGURATION_SCHEMA_VERSION
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "mode": mode_name,
+                            "generation": configuration.generation,
+                            "supported": supported,
+                        }
+                    )
+                )
+            else:
+                print(f"Joy-Con2 player mode: {mode_name}")
+                print(f"Configuration generation: {configuration.generation}")
+                if not supported:
+                    print("Changing Joy-Con2 player mode requires schema 4 firmware.")
         elif args.command == "config":
             if args.config_command == "show":
                 configuration = read_configuration(device)
@@ -4630,6 +4689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "requested_mode="
                     f"{REQUESTED_MODE_NAMES[configuration.requested_mode]}"
                 )
+                print(f"joycon_mode={JOYCON_MODE_NAMES[configuration.joycon_mode]}")
                 print(f"generation={configuration.generation}")
                 print(f"crc={configuration.crc:08x}")
                 for identity in configuration.native_switch_controllers:
@@ -4663,7 +4723,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.native_rumble_command == "list":
                     configuration = read_configuration(device)
                     print(NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE)
-                    if configuration.schema_version != CONFIGURATION_SCHEMA_VERSION:
+                    if configuration.schema_version < 3:
                         print("Native rumble approval requires schema 3 firmware.")
                     _print_profiles(entries, physical_only=True)
                     for index, entry in enumerate(entries):

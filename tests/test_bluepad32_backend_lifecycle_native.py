@@ -84,6 +84,9 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                 f"-I{root / 'bluepad32_config'}",
                 str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
                 str(root / "src" / "firmware" / "profile" / "controller_profile.cpp"),
+                str(root / "src" / "firmware" / "profile" / "controller_profile_transform.cpp"),
+                str(root / "src" / "firmware" / "profile" / "controller_synthetic_input.cpp"),
+                str(root / "src" / "firmware" / "profile" / "controller_profile_runtime.cpp"),
                 str(root / "src" / "firmware" / "profile" / "profile_storage.cpp"),
                 str(root / "bluepad32_config" / "parser" / "uni_switch2_haptics.c"),
                 str(
@@ -96,6 +99,23 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         subprocess.run(command, check=True, cwd=root)
         subprocess.run([str(executable), "xbox-rumble"], check=True, cwd=root)
         for scenario in (
+            "switch2-individual-core-start",
+            "switch2-individual-forward",
+            "switch2-individual-reverse",
+            "switch2-mode-forward",
+            "switch2-mode-reverse",
+            "switch2-mode-two-pairs",
+            "switch2-mode-seed-failure",
+            "switch2-mode-identity-failure",
+            "switch2-gesture-timing",
+            "switch2-gesture-stale",
+            "switch2-gesture-clock-wrap",
+            "switch2-gesture-masking-epochs",
+            "switch2-gesture-override-lifetime",
+            "switch2-gesture-two-pairs",
+            "switch2-gesture-ambiguous",
+            "switch2-gesture-seed-failure",
+            "switch2-gesture-device-scope",
             "switch2-forward",
             "switch2-reverse",
             "switch2-multiple-pairs",

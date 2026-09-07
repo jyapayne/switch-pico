@@ -10,9 +10,10 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
+import usb.core
 
 from switch_pico_bridge import config_manager, profile_web
-from tests.test_config_manager import FakeDevice, custom_profile
+from tests.test_config_manager import FakeDevice, custom_profile, native_rumble_identity
 
 
 @contextmanager
@@ -602,6 +603,184 @@ def test_editor_rejects_invalid_or_unauthorized_mutations(
     assert status == 400
     assert "outer_saturation" in invalid["error"]
     assert device.profiles[(device.global_identity.to_bytes(), 0)] == original
+
+
+def test_joycon_mode_preserves_configuration_and_all_profile_banks(
+    monkeypatch: pytest.MonkeyPatch, joycon_pair_device: FakeDevice,
+) -> None:
+    device = joycon_pair_device
+    config_manager.write_configuration(
+        device,
+        config_manager.AdapterConfiguration(
+            135, 0, 0, config_manager.REQUESTED_MODE_XINPUT,
+            (native_rumble_identity(),),
+        ),
+        1.0,
+    )
+    for index, identity in enumerate(device.profile_identities):
+        key = identity.to_bytes()
+        device.profiles[(key, index)] = custom_profile().to_bytes()
+        device.profile_names[(key, index)] = f"Layout {index}"
+        device.profile_aliases[key] = f"Controller {index}"
+    before = config_manager.read_configuration(device)
+    profiles = device.profiles.copy()
+    names = device.profile_names.copy()
+    aliases = device.profile_aliases.copy()
+    active = device.active_profiles.copy()
+    pairings = config_manager.read_pairings(device)
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, initial = request_json(f"{base_url}/api/joycon-mode")
+        assert status == 200
+        assert initial == {
+            "mode": "paired", "generation": before.generation, "supported": True,
+        }
+        for mode in ("individual", "paired"):
+            status, committed = request_json(
+                f"{base_url}/api/joycon-mode", method="PUT",
+                value={"mode": mode}, token=token,
+            )
+            assert status == 200
+            stored = config_manager.read_configuration(device)
+            assert committed == {
+                "mode": mode, "generation": stored.generation, "supported": True,
+            }
+            assert stored.joycon_mode == config_manager.JOYCON_MODE_NAMES.index(mode)
+            assert stored.generation > before.generation
+            assert replace(
+                stored, joycon_mode=before.joycon_mode,
+                generation=before.generation, crc=before.crc,
+            ) == before
+            assert request_json(f"{base_url}/api/joycon-mode") == (200, committed)
+    assert device.profiles == profiles
+    assert device.profile_names == names
+    assert device.profile_aliases == aliases
+    assert device.active_profiles == active
+    assert config_manager.read_pairings(device) == pairings
+    assert device.reboot_transaction_ids == []
+
+
+@pytest.mark.parametrize("schema", [1, 2, 3])
+def test_joycon_mode_legacy_reads_default_and_refuses_mutations(
+    monkeypatch: pytest.MonkeyPatch, schema: int,
+) -> None:
+    device = FakeDevice()
+    config_manager.write_configuration(
+        device,
+        config_manager.AdapterConfiguration(
+            95, 0, 0,
+            native_switch_controllers=(native_rumble_identity(),) if schema == 3 else (),
+            schema_version=schema,
+        ),
+        1.0,
+    )
+    before = config_manager.read_configuration(device)
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, legacy = request_json(f"{base_url}/api/joycon-mode")
+        assert status == 200
+        assert legacy == {
+            "mode": "paired", "generation": before.generation, "supported": False,
+        }
+        for mode in ("paired", "individual"):
+            status, _ = request_json(
+                f"{base_url}/api/joycon-mode", method="PUT",
+                value={"mode": mode}, token=token,
+            )
+            assert status == 400
+    assert config_manager.read_configuration(device) == before
+
+
+def test_joycon_mode_rejects_unauthorized_and_malformed_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    config_manager.write_configuration(
+        device, config_manager.AdapterConfiguration(110, 0, 0), 1.0,
+    )
+    before = config_manager.read_configuration(device)
+    with running_server(monkeypatch, device) as (base_url, token):
+        endpoint = f"{base_url}/api/joycon-mode"
+        for supplied_token in (None, "invalid"):
+            status, _ = request_json(
+                endpoint, method="PUT", value={"mode": "individual"},
+                token=supplied_token,
+            )
+            assert status == 403
+        for body in (
+            {}, [], {"mode": 1}, {"mode": True}, {"mode": None},
+            {"mode": ["individual"]}, {"mode": "Individual"},
+            {"mode": "individual", "pairing_window_seconds": 10},
+        ):
+            status, _ = request_json(
+                endpoint, method="PUT", value=body, token=token,
+            )
+            assert status == 400
+        for raw in (b"", b"{", b"\xff", b" " * (profile_web._MAXIMUM_REQUEST_BYTES + 1)):
+            request = urllib.request.Request(
+                endpoint, data=raw, method="PUT",
+                headers={"X-Switch-Pico-Token": token},
+            )
+            with pytest.raises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(request, timeout=2)
+            assert rejected.value.code == 400
+        for method in ("GET", "PUT"):
+            request = urllib.request.Request(
+                endpoint, method=method,
+                data=b'{"mode":"individual"}' if method == "PUT" else None,
+                headers={"Host": "untrusted.example", "X-Switch-Pico-Token": token},
+            )
+            with pytest.raises(urllib.error.HTTPError) as rejected:
+                urllib.request.urlopen(request, timeout=2)
+            assert rejected.value.code == 403
+    assert config_manager.read_configuration(device) == before
+
+
+def test_joycon_mode_commit_is_not_reported_as_confirmed_when_readback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    config_manager.write_configuration(
+        device, config_manager.AdapterConfiguration(110, 0, 0), 1.0,
+    )
+    read_configuration = config_manager.read_configuration
+    before = read_configuration(device)
+
+    def disconnect_after_commit(device: config_manager.UsbDevice) -> config_manager.AdapterConfiguration:
+        configuration = read_configuration(device)
+        if configuration.generation != before.generation:
+            raise usb.core.USBError("device disconnected")
+        return configuration
+
+    monkeypatch.setattr(config_manager, "read_configuration", disconnect_after_commit)
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, response = request_json(
+            f"{base_url}/api/joycon-mode", method="PUT",
+            value={"mode": "individual"}, token=token,
+        )
+    assert status == 503
+    assert "error" in response
+    assert "mode" not in response
+    assert read_configuration(device).joycon_mode == config_manager.JOYCON_MODE_INDIVIDUAL
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_joycon_mode_usb_failure_returns_service_unavailable(
+    monkeypatch: pytest.MonkeyPatch, method: str,
+) -> None:
+    device = FakeDevice()
+    before = device.configuration
+
+    def disconnected(*args: Any, **kwargs: Any) -> Any:
+        raise usb.core.USBError("device disconnected")
+
+    monkeypatch.setattr(device, "ctrl_transfer", disconnected)
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, response = request_json(
+            f"{base_url}/api/joycon-mode", method=method,
+            value={"mode": "individual"} if method == "PUT" else None, token=token,
+        )
+    assert status == 503
+    assert "error" in response
+    assert device.configuration == before
 
 
 def test_recorder_accepts_first_connection_generation_zero(

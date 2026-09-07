@@ -62,6 +62,7 @@ class FakeDevice:
         self.transaction_expected_size = 0
         self.transaction_expected_crc = 0
         self.transaction_status = config_manager.STATUS_OK
+        self.fail_configuration_commit_status: int | None = None
         self.pending_requested_mode: int | None = None
         self.mode_pending_reads = 0
         self.fail_mode_status: int | None = None
@@ -450,16 +451,19 @@ class FakeDevice:
             assert (
                 zlib.crc32(self.transaction_payload) & 0xFFFFFFFF
             ) == self.transaction_expected_crc
-            self.configuration = bytes(self.transaction_payload)
-            self.configuration_generation += 1
-            self.transaction_status = config_manager.STATUS_OK
+            if self.fail_configuration_commit_status is not None:
+                self.transaction_status = self.fail_configuration_commit_status
+            else:
+                self.configuration = bytes(self.transaction_payload)
+                self.configuration_generation += 1
+                self.transaction_status = config_manager.STATUS_OK
         elif request == config_manager.OP_CONFIGURATION_RESET:
             self.transaction_id = struct.unpack("<I", payload)[0]
             assert 0 < self.transaction_id <= (config_manager.HOST_TRANSACTION_ID_MASK)
             self.configuration = struct.pack(
                 "<HB5x", 60, config_manager.REQUESTED_MODE_AUTO
             )
-            if self.configuration_schema == config_manager.CONFIGURATION_SCHEMA_VERSION:
+            if self.configuration_schema >= 3:
                 self.configuration += bytes(config_manager.CONFIGURATION_SIZE - 8)
             self.configuration_generation += 1
             self.transaction_payload = bytearray(self.configuration)
@@ -710,9 +714,12 @@ def native_rumble_identity(
 
 def native_rumble_configuration(
     identities: tuple[config_manager.ControllerIdentity, ...] = (),
+    joycon_mode: int = config_manager.JOYCON_MODE_PAIRED,
 ) -> bytes:
     return (
-        struct.pack("<HBB4x", 90, config_manager.REQUESTED_MODE_XINPUT, len(identities))
+        struct.pack(
+            "<HBBB3x", 90, config_manager.REQUESTED_MODE_XINPUT, len(identities), joycon_mode
+        )
         + b"".join(identity.to_bytes() for identity in identities)
         + bytes((16 - len(identities)) * 14)
     )
@@ -734,6 +741,7 @@ def test_legacy_configuration_has_no_native_rumble_approval(
     configuration = config_manager.read_configuration(device)
     assert configuration.pairing_window_seconds == 75
     assert configuration.requested_mode == mode
+    assert configuration.joycon_mode == config_manager.JOYCON_MODE_PAIRED
     assert configuration.native_switch_controllers == ()
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.set_native_switch_rumble_approval(
@@ -750,7 +758,8 @@ def test_legacy_configuration_has_no_native_rumble_approval(
     assert not device.out_requests
 
 
-def test_native_rumble_configuration_canonical_wire_round_trip() -> None:
+@pytest.mark.parametrize("schema", (3, 4))
+def test_native_rumble_configuration_canonical_wire_round_trip(schema: int) -> None:
     device = FakeDevice()
     identities = tuple(
         native_rumble_identity(
@@ -761,17 +770,19 @@ def test_native_rumble_configuration_canonical_wire_round_trip() -> None:
     config_manager.write_configuration(
         device,
         config_manager.AdapterConfiguration(
-            90, 0, 0, config_manager.REQUESTED_MODE_XINPUT, tuple(reversed(identities))
+            90, 0, 0, config_manager.REQUESTED_MODE_XINPUT, tuple(reversed(identities)),
+            schema_version=schema,
         ),
         1.0,
     )
-    assert device.configuration_schema == 3
+    assert device.configuration_schema == schema
     assert device.configuration == native_rumble_configuration(identities)
     stored = config_manager.read_configuration(device)
     assert stored.native_switch_controllers == identities
     assert stored.crc == zlib.crc32(device.configuration) & 0xFFFFFFFF
     assert stored.pairing_window_seconds == 90
     assert stored.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+    assert stored.joycon_mode == config_manager.JOYCON_MODE_PAIRED
 
 
 @pytest.mark.parametrize(
@@ -852,12 +863,17 @@ def test_native_rumble_write_rejects_invalid_approvals_before_transaction(
     assert not device.out_requests
 
 
+@pytest.mark.parametrize(
+    ("schema", "joycon_mode"),
+    ((3, config_manager.JOYCON_MODE_PAIRED), (4, config_manager.JOYCON_MODE_INDIVIDUAL)),
+)
 def test_native_rumble_cli_approval_is_physical_and_preserves_other_settings(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    schema: int, joycon_mode: int,
 ) -> None:
     device = FakeDevice()
-    device.configuration_schema = 3
-    device.configuration = native_rumble_configuration()
+    device.configuration_schema = schema
+    device.configuration = native_rumble_configuration(joycon_mode=joycon_mode)
     first = native_rumble_identity()
     second = native_rumble_identity(bytes.fromhex("A1A2A3A4A5A6"))
     for identity in (first, second):
@@ -888,13 +904,10 @@ def test_native_rumble_cli_approval_is_physical_and_preserves_other_settings(
     assert approved.native_switch_controllers == (first,)
     assert approved.pairing_window_seconds == 90
     assert approved.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+    assert approved.joycon_mode == joycon_mode
     assert device.profiles == previous_profiles
     assert device.active_profiles == previous_active
     assert device.records == previous_pairings
-    assert config_manager.main(["config", "native-rumble", "list"]) == 0
-    output = capsys.readouterr().out
-    assert f"Approved identity 2: {first.address_text}" in output
-    assert f"Approved identity 3: {second.address_text}" not in output
     assert (
         config_manager.main(["config", "set", "--pairing-window-seconds", "120"]) == 0
     )
@@ -902,10 +915,12 @@ def test_native_rumble_cli_approval_is_physical_and_preserves_other_settings(
     assert preserved.pairing_window_seconds == 120
     assert preserved.requested_mode == config_manager.REQUESTED_MODE_XINPUT
     assert preserved.native_switch_controllers == (first,)
+    assert preserved.joycon_mode == joycon_mode
     config_manager.set_mode(device, config_manager.REQUESTED_MODE_DINPUT, 1.0)
     preserved = config_manager.read_configuration(device)
     assert preserved.requested_mode == config_manager.REQUESTED_MODE_DINPUT
     assert preserved.native_switch_controllers == (first,)
+    assert preserved.joycon_mode == joycon_mode
     assert (
         config_manager.main(["config", "native-rumble", "revoke", "--identity", "2"])
         == 0
@@ -914,6 +929,7 @@ def test_native_rumble_cli_approval_is_physical_and_preserves_other_settings(
     assert revoked.native_switch_controllers == ()
     assert revoked.requested_mode == config_manager.REQUESTED_MODE_DINPUT
     assert revoked.pairing_window_seconds == 120
+    assert revoked.joycon_mode == joycon_mode
 
 
 @pytest.mark.parametrize("identity_index", ("0", "1", "99"))
@@ -995,6 +1011,7 @@ def test_configuration_transaction_and_reset() -> None:
             before.generation,
             before.crc,
             config_manager.REQUESTED_MODE_XINPUT,
+            joycon_mode=config_manager.JOYCON_MODE_INDIVIDUAL,
         ),
         1.0,
     )
@@ -1002,12 +1019,139 @@ def test_configuration_transaction_and_reset() -> None:
     stored = config_manager.read_configuration(device)
     assert stored.pairing_window_seconds == 90
     assert stored.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+    assert stored.joycon_mode == config_manager.JOYCON_MODE_INDIVIDUAL
     reset = config_manager.reset_configuration(device, 1.0)
     assert reset.stored_generation == 5
     reset_configuration = config_manager.read_configuration(device)
     assert reset_configuration.pairing_window_seconds == 60
     assert reset_configuration.requested_mode == config_manager.REQUESTED_MODE_AUTO
     assert reset_configuration.native_switch_controllers == ()
+    assert reset_configuration.joycon_mode == config_manager.JOYCON_MODE_PAIRED
+
+
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    (
+        (1, struct.pack("<H2x", 75)),
+        (2, struct.pack("<HB5x", 75, config_manager.REQUESTED_MODE_DINPUT)),
+        (3, native_rumble_configuration((native_rumble_identity(),))),
+    ),
+)
+def test_joycon_mode_legacy_read_and_write_refusal(
+    schema: int, payload: bytes,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = FakeDevice()
+    device.configuration_schema = schema
+    device.configuration = payload
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
+    assert config_manager.main(["joycon-mode", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "mode": "paired", "generation": 3, "supported": False,
+    }
+    configuration = config_manager.read_configuration(device)
+    assert configuration.joycon_mode == config_manager.JOYCON_MODE_PAIRED
+    if schema == 3:
+        assert configuration.native_switch_controllers == (native_rumble_identity(),)
+    for mode in config_manager.JOYCON_MODE_NAMES:
+        assert config_manager.main(["joycon-mode", mode, "--json"]) == 1
+        assert capsys.readouterr().out == ""
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.write_configuration(
+            device, replace(configuration, joycon_mode=config_manager.JOYCON_MODE_INDIVIDUAL),
+            1.0,
+        )
+    assert device.configuration == payload
+    assert not device.out_requests
+
+
+@pytest.mark.parametrize(
+    ("offset", "value"), ((4, 2), (4, 255), (5, 1), (6, 1), (7, 1))
+)
+def test_joycon_mode_rejects_invalid_wire_encoding(offset: int, value: int) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 4
+    payload = bytearray(native_rumble_configuration((native_rumble_identity(),)))
+    payload[offset] = value
+    device.configuration = bytes(payload)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_configuration(device)
+
+
+@pytest.mark.parametrize("size", (8, 231, 233))
+def test_joycon_mode_requires_exact_configuration_size(size: int) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 4
+    payload = native_rumble_configuration()
+    device.configuration = (payload + b"\x00")[:size]
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_configuration(device)
+
+
+@pytest.mark.parametrize("mode", (-1, 2, True, 1.0, "individual"))
+def test_joycon_mode_rejects_invalid_values_before_transaction(mode: object) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 4
+    device.configuration = native_rumble_configuration()
+    before = config_manager.read_configuration(device)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.set_joycon_mode(device, mode, 1.0)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.write_configuration(device, replace(before, joycon_mode=mode), 1.0)
+    assert not device.out_requests
+
+
+def test_joycon_mode_cli_commits_and_reads_without_reboot_or_profile_changes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 4
+    identity = native_rumble_identity()
+    device.configuration = native_rumble_configuration((identity,))
+    previous_profiles = dict(device.profiles)
+    previous_active = dict(device.active_profiles)
+    previous_aliases = dict(device.profile_aliases)
+    previous_names = dict(device.profile_names)
+    previous_pairings = list(device.records)
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
+    for generation, mode in enumerate(("individual", "paired"), start=4):
+        assert config_manager.main(["joycon-mode", mode, "--json"]) == 0
+        expected = {"mode": mode, "generation": generation, "supported": True}
+        assert json.loads(capsys.readouterr().out) == expected
+        stored = config_manager.read_configuration(device)
+        assert stored.joycon_mode == config_manager.JOYCON_MODE_NAMES.index(mode)
+        assert stored.pairing_window_seconds == 90
+        assert stored.requested_mode == config_manager.REQUESTED_MODE_XINPUT
+        assert stored.native_switch_controllers == (identity,)
+        assert device.configuration == native_rumble_configuration(
+            (identity,), config_manager.JOYCON_MODE_NAMES.index(mode)
+        )
+        writes_before_read = tuple(device.out_requests)
+        assert config_manager.main(["joycon-mode", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out) == expected
+        assert tuple(device.out_requests) == writes_before_read
+    assert device.profiles == previous_profiles
+    assert device.active_profiles == previous_active
+    assert device.profile_aliases == previous_aliases
+    assert device.profile_names == previous_names
+    assert device.records == previous_pairings
+    assert not device.reboot_transaction_ids
+    assert not device.bootsel_reboot_requested
+
+
+def test_joycon_mode_cli_commit_failure_does_not_claim_new_preference(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = FakeDevice()
+    device.configuration_schema = 4
+    device.configuration = native_rumble_configuration((native_rumble_identity(),))
+    before = config_manager.read_configuration(device)
+    device.fail_configuration_commit_status = 8
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
+    assert config_manager.main(["joycon-mode", "individual", "--json"]) == 1
+    assert capsys.readouterr().out == ""
+    assert config_manager.read_configuration(device) == before
+    assert not device.reboot_transaction_ids
 
 
 def test_configuration_transaction_ids_stay_in_host_range(

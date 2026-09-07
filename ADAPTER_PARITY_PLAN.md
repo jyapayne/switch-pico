@@ -663,6 +663,27 @@ solo bank; independent activation was checked and all test settings restored.
 Studio's selected pair key matched the live firmware owner, and Identify
 produced two physical dispatches.
 
+Joy-Con 2 now supports a persisted adapter-wide Paired/Individual default in
+configuration schema 4, byte 4 of the unchanged 232-byte payload. Studio and
+`joycon-mode [paired|individual]` apply it live. Individual uses separate
+sideways players/solo banks; Paired reuses the composite bank. Live split/join
+preserves Bluetooth links, unrelated players and existing pair membership,
+while clearing affected input/capture/rumble epochs.
+
+The physical connection-only override is a two-second hold of left ZL+Minus
+and right ZR+Plus. It joins the selected solos or splits their current pair;
+ambiguous solo arming does not choose arbitrarily. Reserved inputs are masked
+before profile/macro handling, both participants need fresh held reports, and
+all chord buttons must release before retry. Confirmation is bounded to the
+participating halves. Disconnect/reuse or a changed saved default clears the
+override, without writing a per-pair preference.
+
+All 349 tests and all five builds passed. Real hardware exercised both live
+mode transitions, Individual boot persistence, physical join/split pulses,
+unchanged configuration generations during gestures, and automatic default
+restoration after resetting/reconnecting one half. All 64 profile records and
+metadata remain unchanged; the final saved default is Individual.
+
 | Priority | Candidate | Intended scope | Dependency or principal risk |
 |---|---|---|---|
 | A1 — Complete | Named and copyable profiles | Profile names and controller aliases use catalog metadata rather than input-profile fields. Copy/export/import preserve the current draft and per-section resets leave other settings unchanged. | Atomic metadata records; no report-path cost. |
@@ -799,11 +820,11 @@ without losing the Joy-Con links. A 30-second production mixed-rumble run
 kept native DualSense streaming, with no send failures or ingress drops,
 14 Joy-Con output-stage discards and nine PCM skips. It is not lossless.
 
-Verification is now 289 passing tests and all five firmware builds. All
-40 pre-existing profiles, metadata and adapter configuration remain unchanged;
-the current inventory contains 56 profiles across seven identities. Temporary
-measurement hooks were removed, and the final production image passed another
-simultaneous-rumble exercise after normal controller reconnect. See the
+The native-HD checkpoint passed 289 tests and all five firmware builds; its
+40 pre-existing profiles and metadata survived. Its inventory then contained
+56 profiles across seven identities. Temporary measurement hooks were removed,
+and that production image passed another simultaneous-rumble exercise after
+normal controller reconnect. See the
 [native HD contract and measurements](README.md#switch-2-native-hd-rumble).
 
 ### Native Switch-family HD rumble — Implemented, qualification incomplete
@@ -834,7 +855,7 @@ Current constraints:
 - `native_output_scheduler.cpp` arbitrates both native writers with urgent-stop
   precedence, earliest deadlines, rotating ties, periodic credit reservations,
   and generation-bound grant completion. Radio power policy is unchanged.
-- Adapter configuration schema 3 persists up to 16 explicit physical approvals.
+- Adapter configuration schema 4 persists up to 16 explicit physical approvals and the Joy-Con default mode.
   Profile schema 7/catalog 3 preserves prior settings; bonds and wake identity are unchanged.
 - Original Switch Joy-Cons remain separate, horizontally mapped controllers.
   Joy-Con 2 logical pairing is a distinct BLE implementation described above.
