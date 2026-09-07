@@ -346,8 +346,11 @@ function renderPlaytest(sample) {
   state.liveSample = sample;
   if (!matchingLiveSample(sample)) {
     clearPlaytest(
-      sample.connected ? "Live input belongs to another profile owner; this draft and its layout are unchanged." :
-        "Connect or move the selected controller to compare its raw input with this draft."
+      sample.connected
+        ? sample.identity?.is_joycon_pair
+          ? "Paired input belongs to the L+R profile owner. Select that owner for paired settings; this draft and its layout are unchanged."
+          : "Live input belongs to another profile owner; this draft and its layout are unchanged."
+        : "Connect or move the selected controller to compare its raw input with this draft."
     );
     return;
   }
@@ -870,9 +873,12 @@ function renderButtonMap() {
     : live && !topologyKnown
       ? "Legacy firmware does not report Joy-Con pair/solo topology. This is an owner reference, not detected solo mode. Choose a preview or update firmware."
       : "Auto uses only the selected owner's metadata. Preview changes this editor's source labels and diagram, never firmware topology or saved mappings.";
-  elements.controllerLayoutNote.textContent = layout.note ||
-    (layout.generic ? "Generic reference art is not a model identification. Additional reported sources are unlocated, not buttons on this drawing." :
-      "Rear triggers are listed off-art below the front view. Unavailable stored mappings are retained.");
+  elements.controllerLayoutNote.textContent =
+    !preview && live?.layout === "joycon2-pair" && !live.identity?.is_joycon_pair
+      ? "This older firmware reports paired input through a physical controller's profile bank. There is no independent L+R bank; edits still affect the selected existing owner. Update firmware for separate pair profiles. The grip is illustrative, not detected."
+      : layout.note ||
+        (layout.generic ? "Generic reference art is not a model identification. Additional reported sources are unlocated, not buttons on this drawing." :
+          "Rear triggers are listed off-art below the front view. Unavailable stored mappings are retained.");
   const diagramKey = `${layoutId}:${sources.join(",")}`;
   if (diagramKey !== state.diagramKey) {
     const focusedSource = elements.controllerCanvas.contains(document.activeElement)

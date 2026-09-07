@@ -247,7 +247,11 @@ Switch 2's **C, GL, GR, Left SL/SR and Right SL/SR** are additional source-only 
 
 Controller Studio uses the supplied lightweight SVGs for Switch 2 Pro, Joy-Con 2 left/right solo and paired layouts, original Switch Pro, DualSense, Xbox, and Wii Remote/Nunchuk views. Hotspots follow the artwork's actual coordinates; solo Joy-Con views rotate with their firmware input mappings. Rear buttons and rails are labeled below the front view rather than drawn in fictitious positions. On narrow screens, pan the diagram or use the **Source control** menu.
 
-**Auto** uses matching-owner live metadata to distinguish a Joy-Con pair from a solo half. **Preview** changes only the editor's diagram and source labels; it does not pair controllers or change saved mappings, and physical highlighting is disabled. Source choices reflect the layout while stored unavailable mappings are retained. Wii orientation is not reported, so horizontal/vertical views require an explicit preview. The current pair still uses the left controller's profile bank; select that owner to edit paired input.
+**Auto** uses matching-owner live metadata to distinguish a Joy-Con pair from a solo half. **Preview** changes only the editor's diagram and source labels; it does not pair controllers or change saved mappings, and physical highlighting is disabled. Source choices reflect the layout while stored unavailable mappings are retained. Wii orientation is not reported, so horizontal/vertical views require an explicit preview.
+
+**Joy-Con 2 pair profiles:** the first successful connection of an L + R combination creates a separate **Nintendo Joy-Con 2 (L + R)** owner with eight profiles. It initially copies the left bank's profiles, names, and active selection; its alias starts empty. Both solo banks stay unchanged. Pair edits, names, and active selections are independent thereafter. Disconnecting a half restores the survivor's solo bank; reconnecting the same members restores their existing pair bank without copying again. Different member combinations have different banks. Select the L + R owner—not either solo owner—to edit paired settings.
+
+Pair keys contain both complete Bluetooth addresses and address types, in canonical L/R order. They retain the 14-byte identity size: transport byte 1 is 3; byte 0 contains the stable bit plus the left/right static-random flags in bits 1/2; bytes 2–7 and 8–13 contain the left and right addresses. Pair keys are profile identities, not Bluetooth peers or native-output approvals. Update host tools with firmware when using this identity kind.
 
 The read-only playtest endpoint (`0x39`) uses schema 4, 56 bytes: byte 55 identifies unspecified (0), Joy-Con 2 left solo (1), right solo (2), pair (3), Wii Remote (4), or Wii Remote + Nunchuk (5). Host tools still read schema 2/54-byte and schema 3/55-byte payloads; older firmware cannot confirm Joy-Con topology. This metadata does not change profile records, input mapping, or rumble.
 
@@ -343,16 +347,18 @@ Motion-producing Bluepad32 parsers normalize to 1024 units per degree/second and
 The AIO firmware implements the proprietary BLE protocol for Nintendo `057E:2069` (Pro), `057E:2067` (left Joy-Con 2), and `057E:2066` (right Joy-Con 2). This is controller **input** support, distinct from the existing Switch 2 console-wake feature and from emulating a native Switch 2 USB controller.
 
 - **Pairing:** fresh SYNC pairing requires the existing bounded pairing window. A directed reconnect must target this adapter's Bluetooth address and match its persistent application-level authorization. These links are unencrypted and are **not authenticated SMP bonds**. No global Bluetooth security downgrade is made; automatic SMP requests for these devices fail closed while other controllers retain their existing policy. Public/static addresses can own profiles; transient private addresses are not promoted to persistent identities.
-- **Joy-Con ownership:** an opposite ready half automatically joins a solo half. Either connection order works; the first-ready player slot is retained, with the left controller's identity/profile owning the pair. The right half supplies motion. A disconnected half's inputs and pending effects are removed immediately; the surviving half returns to sideways solo operation and its own profile identity. A lone half has rotated controls and SL/SR shoulders. Two pairs exhaust the four physical Bluetooth connections. Pairing does not reopen discovery outside the existing connection policy.
+- **Joy-Con ownership:** an opposite ready half joins a solo half after its independent pair bank is ready. Either connection order works; the first-ready player slot is retained. The pair identity includes both typed member addresses, and the right half supplies motion. Losing a half clears its inputs and pending effects; the survivor returns to sideways solo operation and its own bank. Failed bank initialization leaves the existing solo intact rather than sharing its settings with the pair. A lone half has rotated controls and SL/SR shoulders. Two pairs exhaust the four physical Bluetooth connections. Pairing does not reopen discovery outside the existing connection policy.
 - **Protocol:** service, characteristic and CCCD UUIDs are discovered rather than trusting fixed ATT handles. Setup requires matching acknowledgements, reads user/factory stick calibration and gyro bias, and rejects malformed/failed transactions. Motion is normalized to the existing SDL-oriented units; sensor clock/range classification and physical axis accuracy still need wider model qualification.
 - **Rumble:** Switch HD commands now retain independent left/right frequency/amplitude fields and up to three ordered subframes through the native Switch 2 encoder and bounded queues described below. XInput and local feedback retain their conventional fixed-carrier behavior. This is separate from the original Switch-native opt-in backend.
 - **Not implemented:** Joy-Con mouse output, native GameChat signaling, NFC/IR and Switch 2 NSO GameCube support. C and back/rail inputs can instead be remapped to controls the selected USB mode supports.
 
 This is a scoped reimplementation informed by [Bluepad32 PR #219](https://github.com/ricardoquesada/bluepad32/pull/219), reviewed at `9c95e43a87d3bd8a68565da0836d8a758bd8d8af`, not a wholesale fork import. Protocol references: [ndeadly's research](https://github.com/ndeadly/switch2_controller_research), [Nadeflore](https://github.com/Nadeflore/switch2-controllers), [Switch2Connect](https://github.com/TommyWabg/Switch2Connect), and [SDL's Switch 2 sensor implementation](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_switch2.c).
 
-**Verification:** 289 tests passed; AIO, XInput/feasibility, HD-rumble, haptics and UART firmware variants built. Native protocol tests use the SDK's real BTstack types/accessors and cover discovery, acknowledgement ordering, calibration, persistence, output deadlines and teardown. Lifecycle tests cover both Joy-Con connection orders, multiple pairs, detach/replacement and pairing-policy isolation. The editor's extra/Shift mappings were exercised in Chromium.
+**Verification:** 321 tests passed; AIO, XInput/feasibility, HD-rumble, haptics and UART firmware variants built. Native protocol tests use the SDK's real BTstack types/accessors and cover discovery, acknowledgement ordering, calibration, persistence, output deadlines and teardown. Lifecycle/storage tests cover both Joy-Con connection orders, multiple pairs, detach/replacement, independent pair banks, interrupted initialization and pairing-policy isolation. The editor's layouts, remapping and source preservation were exercised in Chromium.
 
-On the flashed Pico, a real Switch 2 Pro (`3C:A9:AB:65:73:12`) completed setup, appeared in persistent pairing/profile inventories, and delivered live sticks, accelerometer, gyro and independent C/GL/GR presses. A 100-report USB rumble exercise retained its connection while 3,033 controller reports arrived. Schema-7 extra mappings were written/read and restored on hardware; all 32 pre-existing profiles, metadata and active selections were compared against a pre-flash backup and preserved, with adapter configuration generation 13 / CRC `3af5ee18` unchanged. Physical rumble feel, Joy-Con 2 pair behavior, long-duration reconnect and mixed-controller transport remain hardware qualification items. Use schema-7-capable firmware after saving expanded profiles.
+On hardware, the new L + R owner copied all eight left-bank profiles and names, bringing the inventory to eight owners / 64 profiles without changing the original 56. A temporary edit and name on inactive pair profile 8 survived reboot while both solo banks stayed unchanged; pair activation was also independent. Test edits, names and active selections were restored. Studio selected the real composite owner and its Identify action produced two physical rumble dispatches.
+
+At the initial Switch 2 input checkpoint, a real Pro (`3C:A9:AB:65:73:12`) completed setup, appeared in persistent pairing/profile inventories, and delivered live sticks, accelerometer, gyro and independent C/GL/GR presses. A 100-report USB rumble exercise retained its connection while 3,033 controller reports arrived. Schema-7 extra mappings were written/read and restored; all 32 then-existing profiles, metadata and active selections were preserved, with adapter configuration generation 13 / CRC `3af5ee18` unchanged. Subsequent native-rumble and pair measurements are documented here and below; wider sensor-axis, perceptual-equivalence and long-duration transport qualification remains open. Use schema-7-capable firmware after saving expanded profiles.
 
 ### Switch 2 native HD rumble
 
@@ -909,35 +915,42 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 815,192 bytes | 4 MiB |
+| Executable flash image | 825,232 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds and Switch 2 application authorizations | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 150,824 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 151,652 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,097,816 bytes of flash,
-leaving 3,096,488 bytes. Allocated SRAM sections leave 381,656 bytes of link-time
+The executable plus persistent reservations consume 1,107,856 bytes of flash,
+leaving 3,086,448 bytes. Allocated SRAM sections leave 380,828 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.
 
 Profiles use two 128 KiB append-only arenas and retain 248 physical record
-slots. Catalog 2 uses a 128-byte header plus a 384-byte profile in the same
+slots. Catalog 3 uses a 128-byte header plus a 384-byte profile in the same
 512-byte stride. The second page is programmed before the header-containing
 first page, and records are read back before publication. Profile names
 remain 256-byte metadata payloads and aliases remain 32 bytes. The compact
 index stores locations and generations; active/fallback profiles for observed
 identities and the selected profile are decoded, not the entire database.
+Pair initialization commits one seed record that snapshots the left bank's
+immutable profile/name record references and active selection. Subsequent
+writes are independent, and compaction materializes pair-owned records.
+Interrupted initialization exposes either no pair bank or the complete bank,
+never a partly copied bank. An ambiguous storage write/readback failure freezes
+catalog access until reboot/replay; existing live profiles retain their last
+committed cached settings.
 
 The catalog supports eight profiles for the global fallback and each of 16
-stable identities. Missing records resolve to defaults, so profiles 5–8 do
+stable identities, including pair owners. Missing records resolve to defaults, so profiles 5–8 do
 not consume flash until changed. When an arena fills, the latest indexed
 records are compacted into its peer and the new superblock is published last.
 Interrupted or corrupt appends leave the previous valid record available.
-Catalog 1 and retired four-profile banks migrate through the alternate arena;
+Catalogs 1/2 and retired four-profile banks migrate through the alternate arena;
 the old published data is retained until all copies and the new superblock
-verify. Schema 1–5 profiles retain their meaning when decoded as schema 6.
+verify. Schema 1–6 profiles retain their meaning when decoded as schema 7.
 Keep a profile export before downgrading: older firmware cannot read the new
 catalog/profile format.
 

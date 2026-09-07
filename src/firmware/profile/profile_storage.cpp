@@ -9,7 +9,8 @@ constexpr uint8_t kRecordMagic[4] = {'S', 'P', 'C', 'R'};
 constexpr uint8_t kLegacyStorageMagic[4] = {'S', 'P', 'P', 'F'};
 constexpr uint8_t kLegacyDatabaseMagic[4] = {'S', 'P', 'D', 'B'};
 constexpr uint16_t kLegacyCatalogVersion = 1;
-constexpr uint16_t kCatalogVersion = 2;
+constexpr uint16_t kExpandedCatalogVersion = 2;
+constexpr uint16_t kCatalogVersion = 3;
 constexpr size_t kRecordPayloadOffset = 128;
 constexpr size_t kLegacyRecordPayloadOffset = 256;
 static_assert(kRecordPayloadOffset + CONTROLLER_PROFILE_ENCODED_SIZE ==
@@ -188,10 +189,17 @@ bool ProfileStorage::initialize(const ProfileStorageIo &io) {
   return initialized_;
 }
 
+bool ProfileStorage::valid_owner(const ControllerIdentity &identity) const {
+  return valid_identity(identity) &&
+         (!controller_identity_is_joycon_pair(identity) ||
+          find(identity) != nullptr);
+}
+
 ProfileStorageResult
 ProfileStorage::ensure_identity(const ControllerIdentity &identity) {
-  if (!initialized_ || !valid_identity(identity)) {
-    return ProfileStorageResult::kInvalidArgument;
+  if (!initialized_ || !valid_owner(identity)) {
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   if (find(identity) != nullptr) {
     return ProfileStorageResult::kUnchanged;
@@ -202,12 +210,46 @@ ProfileStorage::ensure_identity(const ControllerIdentity &identity) {
   return append(RecordType::kActivate, identity, 0, nullptr, 0);
 }
 
+ProfileStorageResult
+ProfileStorage::ensure_joycon_pair(const ControllerIdentity &pair) {
+  if (!initialized_) {
+    return ProfileStorageResult::kIoError;
+  }
+  ControllerIdentity left{};
+  ControllerIdentity right{};
+  if (!controller_identity_joycon_pair_members(pair, &left, &right)) {
+    return ProfileStorageResult::kInvalidArgument;
+  }
+  if (find(pair) != nullptr) {
+    return ProfileStorageResult::kUnchanged;
+  }
+  const uint8_t needed = 1 + (find(left) == nullptr) + (find(right) == nullptr);
+  if (identity_count_ + needed > CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1) {
+    return ProfileStorageResult::kFull;
+  }
+  ProfileStorageResult result = ensure_identity(left);
+  if (result != ProfileStorageResult::kOk &&
+      result != ProfileStorageResult::kUnchanged) {
+    return result;
+  }
+  result = ensure_identity(right);
+  if (result != ProfileStorageResult::kOk &&
+      result != ProfileStorageResult::kUnchanged) {
+    return result;
+  }
+  // One committed record snapshots the immutable left record references.
+  // Defaults are identity-independent; later edits use normal copy-on-write.
+  return append(RecordType::kSeedJoyConPair, pair,
+                CONTROLLER_PROFILE_ALL, nullptr, 0);
+}
+
 ProfileStorageResult ProfileStorage::get(const ControllerIdentity &identity,
                                          uint8_t profile_index,
                                          ControllerProfile *output) const {
-  if (!initialized_ || output == nullptr || !valid_identity(identity) ||
+  if (!initialized_ || output == nullptr || !valid_owner(identity) ||
       profile_index >= CONTROLLER_PROFILE_COUNT) {
-    return ProfileStorageResult::kInvalidArgument;
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   const ProfileStorageIdentityIndex *entry = find(identity);
   if (entry == nullptr ||
@@ -223,10 +265,11 @@ ProfileStorageResult ProfileStorage::get(const ControllerIdentity &identity,
 ProfileStorageResult ProfileStorage::set(const ControllerIdentity &identity,
                                          uint8_t profile_index,
                                          const ControllerProfile &profile) {
-  if (!initialized_ || !valid_identity(identity) ||
+  if (!initialized_ || !valid_owner(identity) ||
       profile_index >= CONTROLLER_PROFILE_COUNT ||
       !controller_profile_validate(profile)) {
-    return ProfileStorageResult::kInvalidArgument;
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
   if (!controller_profile_encode(profile, encoded, sizeof(encoded))) {
@@ -250,10 +293,11 @@ ProfileStorageResult ProfileStorage::set(const ControllerIdentity &identity,
 
 ProfileStorageResult ProfileStorage::reset(const ControllerIdentity &identity,
                                            uint8_t profile_index) {
-  if (!initialized_ || !valid_identity(identity) ||
+  if (!initialized_ || !valid_owner(identity) ||
       (profile_index != CONTROLLER_PROFILE_ALL &&
        profile_index >= CONTROLLER_PROFILE_COUNT)) {
-    return ProfileStorageResult::kInvalidArgument;
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   const ProfileStorageIdentityIndex *entry = find(identity);
   if (entry == nullptr) {
@@ -278,9 +322,10 @@ ProfileStorageResult ProfileStorage::reset(const ControllerIdentity &identity,
 ProfileStorageResult
 ProfileStorage::activate(const ControllerIdentity &identity,
                          uint8_t profile_index) {
-  if (!initialized_ || !valid_identity(identity) ||
+  if (!initialized_ || !valid_owner(identity) ||
       profile_index >= CONTROLLER_PROFILE_COUNT) {
-    return ProfileStorageResult::kInvalidArgument;
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   const ProfileStorageIdentityIndex *entry = find(identity);
   if (entry != nullptr && entry->active_profile == profile_index) {
@@ -297,8 +342,9 @@ ProfileStorageResult ProfileStorage::get_alias(
     const ControllerIdentity &identity, char *output,
     size_t output_size) const {
   if (!initialized_ || output == nullptr || output_size == 0 ||
-      !valid_identity(identity)) {
-    return ProfileStorageResult::kInvalidArgument;
+      !valid_owner(identity)) {
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   const ProfileStorageIdentityIndex *entry = find(identity);
   if (entry == nullptr ||
@@ -314,10 +360,11 @@ ProfileStorageResult ProfileStorage::get_alias(
 ProfileStorageResult ProfileStorage::set_alias(
     const ControllerIdentity &identity, const char *value,
     size_t value_size) {
-  if (!initialized_ || !valid_identity(identity) ||
+  if (!initialized_ || !valid_owner(identity) ||
       value_size > PROFILE_STORAGE_METADATA_MAX_BYTES ||
       (value_size != 0 && value == nullptr)) {
-    return ProfileStorageResult::kInvalidArgument;
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   char current[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
   if (find(identity) == nullptr &&
@@ -343,9 +390,10 @@ ProfileStorageResult ProfileStorage::get_profile_name(
     const ControllerIdentity &identity, uint8_t profile_index,
     char *output, size_t output_size) const {
   if (!initialized_ || output == nullptr || output_size == 0 ||
-      !valid_identity(identity) ||
+      !valid_owner(identity) ||
       profile_index >= CONTROLLER_PROFILE_COUNT) {
-    return ProfileStorageResult::kInvalidArgument;
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   const ProfileStorageIdentityIndex *entry = find(identity);
   if (entry == nullptr ||
@@ -374,11 +422,12 @@ ProfileStorageResult ProfileStorage::get_profile_name(
 ProfileStorageResult ProfileStorage::set_profile_name(
     const ControllerIdentity &identity, uint8_t profile_index,
     const char *value, size_t value_size) {
-  if (!initialized_ || !valid_identity(identity) ||
+  if (!initialized_ || !valid_owner(identity) ||
       profile_index >= CONTROLLER_PROFILE_COUNT ||
       value_size > PROFILE_STORAGE_METADATA_MAX_BYTES ||
       (value_size != 0 && value == nullptr)) {
-    return ProfileStorageResult::kInvalidArgument;
+    return initialized_ ? ProfileStorageResult::kInvalidArgument
+                        : ProfileStorageResult::kIoError;
   }
   const ProfileStorageIdentityIndex *entry = find(identity);
   if (entry == nullptr &&
@@ -443,7 +492,8 @@ ProfileStorageResult ProfileStorage::scan_arena(
   }
   *version = read_u16(&superblock[4]);
   if (memcmp(superblock, kSuperblockMagic, sizeof(kSuperblockMagic)) != 0 ||
-      (*version != kCatalogVersion && *version != kLegacyCatalogVersion) ||
+      (*version != kCatalogVersion && *version != kExpandedCatalogVersion &&
+       *version != kLegacyCatalogVersion) ||
       profile_storage_crc32(superblock, 12) != read_u32(&superblock[12]) ||
       !bytes_are(0, &superblock[16], sizeof(superblock) - 16)) {
     return ProfileStorageResult::kUnchanged;
@@ -479,9 +529,11 @@ ProfileStorageResult ProfileStorage::scan_arena(
     controller_identity_decode(&record[20], CONTROLLER_IDENTITY_ENCODED_SIZE,
                                &identity_value);
     const uint32_t record_generation = read_u32(&record[8]);
-    apply_record(index, identity_count, static_cast<RecordType>(record[6]),
-                 identity_value, record[7], record_generation,
-                 pack_record(arena, offset));
+    if (!apply_record(index, identity_count, static_cast<RecordType>(record[6]),
+                      identity_value, record[7], record_generation,
+                      pack_record(arena, offset))) {
+      return ProfileStorageResult::kIoError;
+    }
     if (!have_generation || generation_is_newer(record_generation, *generation)) {
       have_generation = true;
       *generation = record_generation;
@@ -512,7 +564,8 @@ bool ProfileStorage::validate_record(const uint8_t *record,
   const bool known_type =
       type == RecordType::kProfile || type == RecordType::kReset ||
       type == RecordType::kResetAll || type == RecordType::kActivate ||
-      type == RecordType::kAlias || type == RecordType::kProfileNames;
+      type == RecordType::kAlias || type == RecordType::kProfileNames ||
+      (version == kCatalogVersion && type == RecordType::kSeedJoyConPair);
   const bool indexed_profile =
       type == RecordType::kProfile || type == RecordType::kReset ||
       type == RecordType::kActivate;
@@ -529,6 +582,11 @@ bool ProfileStorage::validate_record(const uint8_t *record,
   if (!controller_identity_decode(
           &record[20], CONTROLLER_IDENTITY_ENCODED_SIZE, &identity_value) ||
       !valid_identity(identity_value) || !known_type ||
+      (version != kCatalogVersion &&
+       controller_identity_is_joycon_pair(identity_value)) ||
+      (type == RecordType::kSeedJoyConPair &&
+       (!controller_identity_is_joycon_pair(identity_value) ||
+        profile_index != CONTROLLER_PROFILE_ALL)) ||
       (indexed_profile && profile_index >= CONTROLLER_PROFILE_COUNT) ||
       payload_size != expected_payload_size ||
       profile_storage_crc32(payload, payload_size) != read_u32(&record[16])) {
@@ -575,7 +633,8 @@ bool ProfileStorage::read_record_payload(
                                     ? kLegacyRecordPayloadOffset
                                     : kRecordPayloadOffset;
   const size_t payload_size = read_u16(&header[12]);
-  if ((version != kCatalogVersion && version != kLegacyCatalogVersion) ||
+  if ((version != kCatalogVersion && version != kExpandedCatalogVersion &&
+       version != kLegacyCatalogVersion) ||
       payload_size > capacity ||
       payload_size > PROFILE_STORAGE_RECORD_SIZE - payload_offset ||
       !io_.read(io_.context, record_arena(record),
@@ -620,6 +679,7 @@ ProfileStorageResult ProfileStorage::append(RecordType type,
   if (next_offset_ + PROFILE_STORAGE_RECORD_SIZE > PROFILE_STORAGE_ARENA_SIZE) {
     const ProfileStorageResult result = compact();
     if (result != ProfileStorageResult::kOk) {
+      initialized_ = false;
       return result;
     }
   }
@@ -628,10 +688,17 @@ ProfileStorageResult ProfileStorage::append(RecordType type,
   next_offset_ += PROFILE_STORAGE_RECORD_SIZE;
   if (!write_record(snapshot_.active_bank, offset, type, identity,
                     profile_index, generation, payload, payload_size)) {
+    // The header may have committed even when program/readback reports an
+    // error. Freeze all mutations until initialize() replays durable state;
+    // otherwise a retry could seed from a different left snapshot.
+    initialized_ = false;
     return ProfileStorageResult::kIoError;
   }
-  apply_record(index_, &identity_count_, type, identity, profile_index,
-               generation, pack_record(snapshot_.active_bank, offset));
+  if (!apply_record(index_, &identity_count_, type, identity, profile_index,
+                    generation, pack_record(snapshot_.active_bank, offset))) {
+    initialized_ = false;
+    return ProfileStorageResult::kIoError;
+  }
   snapshot_.generation = generation;
   snapshot_.payload_crc = profile_storage_crc32(payload, payload_size);
   return ProfileStorageResult::kOk;
@@ -851,7 +918,8 @@ ProfileStorageResult ProfileStorage::migrate_legacy() {
         !controller_identity_decode(
             entry_header, CONTROLLER_IDENTITY_ENCODED_SIZE, &identity_value) ||
         !identity_value.stable ||
-        controller_identity_is_global(identity_value)) {
+        controller_identity_is_global(identity_value) ||
+        controller_identity_is_joycon_pair(identity_value)) {
       return ProfileStorageResult::kIoError;
     }
     for (uint8_t profile = 0; profile < PROFILE_STORAGE_LEGACY_PROFILE_COUNT;
@@ -1004,7 +1072,7 @@ bool ProfileStorage::write_record(uint8_t arena, size_t offset, RecordType type,
          memcmp(record, verified, sizeof(record)) == 0;
 }
 
-void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
+bool ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
                                   uint8_t *identity_count, RecordType type,
                                   const ControllerIdentity &identity,
                                   uint8_t profile_index, uint32_t generation,
@@ -1017,9 +1085,46 @@ void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
       break;
     }
   }
+  if (type == RecordType::kSeedJoyConPair) {
+    if (entry != nullptr) {
+      return true; // A duplicate seed can never overwrite pair-owned edits.
+    }
+    ControllerIdentity left{};
+    ControllerIdentity right{};
+    if (!controller_identity_joycon_pair_members(identity, &left, &right) ||
+        *identity_count >= CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1) {
+      return false;
+    }
+    const ProfileStorageIdentityIndex *source = nullptr;
+    bool have_right = false;
+    for (uint8_t current = 0; current < *identity_count; ++current) {
+      if (index[current].used &&
+          controller_identity_equal(index[current].identity, left)) {
+        source = &index[current];
+      }
+      if (index[current].used &&
+          controller_identity_equal(index[current].identity, right)) {
+        have_right = true;
+      }
+    }
+    if (source == nullptr || !have_right) {
+      return false;
+    }
+    entry = &index[(*identity_count)++];
+    *entry = *source;
+    entry->identity = identity;
+    entry->alias_record = PROFILE_STORAGE_NO_RECORD;
+    entry->alias_generation = 0;
+    entry->active_generation = generation;
+    entry->profile_names_generation = generation;
+    for (uint8_t profile = 0; profile < CONTROLLER_PROFILE_COUNT; ++profile) {
+      entry->profile_generation[profile] = generation;
+    }
+    return true;
+  }
   if (entry == nullptr) {
     if (*identity_count >= CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1) {
-      return;
+      return false;
     }
     entry = &index[(*identity_count)++];
     *entry = {};
@@ -1035,7 +1140,7 @@ void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
       entry->active_profile = profile_index;
       entry->active_generation = generation;
     }
-    return;
+    return true;
   }
   if (type == RecordType::kAlias) {
     if (entry->alias_generation == 0 ||
@@ -1043,7 +1148,7 @@ void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
       entry->alias_record = record;
       entry->alias_generation = generation;
     }
-    return;
+    return true;
   }
   if (type == RecordType::kProfileNames) {
     if (entry->profile_names_generation == 0 ||
@@ -1052,7 +1157,7 @@ void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
       entry->profile_names_record = record;
       entry->profile_names_generation = generation;
     }
-    return;
+    return true;
   }
   if (type == RecordType::kResetAll) {
     for (uint8_t profile = 0; profile < CONTROLLER_PROFILE_COUNT; ++profile) {
@@ -1067,7 +1172,7 @@ void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
       entry->active_profile = 0;
       entry->active_generation = generation;
     }
-    return;
+    return true;
   }
   if (entry->profile_generation[profile_index] == 0 ||
       generation_is_newer(generation,
@@ -1076,4 +1181,5 @@ void ProfileStorage::apply_record(ProfileStorageIdentityIndex *index,
         type == RecordType::kProfile ? record : PROFILE_STORAGE_NO_RECORD;
     entry->profile_generation[profile_index] = generation;
   }
+  return true;
 }

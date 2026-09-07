@@ -235,6 +235,145 @@ def test_editor_identifies_connected_controller_artwork(
     ]
 
 
+@pytest.fixture
+def joycon_pair_device() -> FakeDevice:
+    device = FakeDevice()
+    pair = config_manager.ControllerIdentity.from_bytes(
+        bytes.fromhex("0503102030405060C12233445566")
+    )
+    left, right = pair.joycon_pair_members()
+    device.profile_identities = [device.global_identity, left, right, pair]
+    device.stable_identity = pair
+    device.active_profiles = {
+        identity.to_bytes(): index for index, identity in enumerate(device.profile_identities)
+    }
+    default_profile = config_manager.ControllerProfile.default().to_bytes()
+    device.profiles = {
+        (identity.to_bytes(), index): default_profile
+        for identity in device.profile_identities
+        for index in range(config_manager.PROFILE_CAPACITY)
+    }
+    device.playtest_layout = 3
+    device.playtest_motion = None
+    return device
+
+
+def test_persistent_pair_owner_is_offline_capable_and_isolated_from_solo_banks(
+    monkeypatch: pytest.MonkeyPatch, joycon_pair_device: FakeDevice,
+) -> None:
+    device = joycon_pair_device
+    _, left, right, pair = device.profile_identities
+    device.playtest_connected = False
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, listing = request_json(f"{base_url}/api/profiles")
+        assert status == 200
+        owners = listing["identities"]
+        assert [owner["key"] for owner in owners] == [
+            identity.to_bytes().hex() for identity in device.profile_identities
+        ]
+        assert [owner["controller"]["layout"] for owner in owners[1:]] == [
+            "joycon2-left", "joycon2-right", "joycon2-pair",
+        ]
+        owner = owners[3]
+        assert owner["controller"]["model"] != owners[1]["controller"]["model"]
+        assert "50:60" in owner["label"] and "55:66" in owner["label"]
+        assert owner["identity"]["members"]["left"]["address"] == left.address_text
+        assert owner["identity"]["members"]["left"]["address_type"] == 0
+        assert owner["identity"]["members"]["right"]["address"] == right.address_text
+        assert owner["identity"]["members"]["right"]["address_type"] == 1
+        assert set(owner["source_controls"]) & set(config_manager.EXTRA_BUTTONS) == {
+            "c", "left_sl", "left_sr", "right_sl", "right_sr",
+        }
+        status, offline = request_json(f"{base_url}/api/profiles/3/8/playtest")
+        assert status == 200
+        assert offline["connected"] is False
+        assert offline["controller"] == owner["controller"]
+        assert offline["source_controls"] == owner["source_controls"]
+
+        expected = {
+            index: config_manager.ControllerProfile.default().to_json_object()
+            for index in (1, 2, 3)
+        }
+        for bank, output in ((3, "north"), (1, "east"), (2, "west")):
+            expected[bank]["button_map"]["south"] = output
+            status, _ = request_json(
+                f"{base_url}/api/profiles/{bank}/8", method="PUT",
+                value=expected[bank], token=token,
+            )
+            assert status == 200
+            for other_bank, expected_profile in expected.items():
+                status, stored = request_json(f"{base_url}/api/profiles/{other_bank}/8")
+                assert status == 200
+                assert stored["profile"] == expected_profile
+        for path, value in (
+            ("profiles/3/8/name", "Pair platformer"),
+            ("identities/3/alias", "Couch pair"),
+        ):
+            status, _ = request_json(
+                f"{base_url}/api/{path}", method="PUT", value={"value": value}, token=token,
+            )
+            assert status == 200
+        status, _ = request_json(
+            f"{base_url}/api/profiles/3/8/activate", method="POST", token=token,
+        )
+        assert status == 200
+        status, listing = request_json(f"{base_url}/api/profiles")
+        assert status == 200
+        assert [owner["active_profile"] for owner in listing["identities"]] == [1, 2, 3, 8]
+        assert listing["identities"][3]["label"] == "Couch pair"
+        assert listing["identities"][3]["key"] == pair.to_bytes().hex()
+        for bank in (1, 2, 3):
+            status, stored = request_json(f"{base_url}/api/profiles/{bank}/8")
+            assert status == 200
+            assert stored["name"] == ("Pair platformer" if bank == 3 else "")
+            assert stored["alias"] == ("Couch pair" if bank == 3 else "")
+
+        device.playtest_connected = True
+        for bank in (1, 2, 3):
+            status, live = request_json(f"{base_url}/api/profiles/{bank}/8/playtest")
+            assert status == 200
+            assert live["owner_key"] == device.profile_identities[bank].to_bytes().hex()
+            assert live["identity_key"] == pair.to_bytes().hex()
+            assert (live["identity_key"] == live["owner_key"]) == (bank == 3)
+        assert live["label"] == "Couch pair"
+        other_pair = config_manager.ControllerIdentity.make_joycon_pair(
+            left, replace(right, address=bytes.fromhex("C12233445567"))
+        )
+        device.stable_identity = other_pair
+        status, other_live = request_json(f"{base_url}/api/profiles/3/8/playtest")
+        assert status == 200
+        assert other_live["owner_key"] == pair.to_bytes().hex()
+        assert other_live["identity_key"] == other_pair.to_bytes().hex()
+        assert other_live["owner_key"] != other_live["identity_key"]
+
+
+def test_capture_cannot_bind_pair_input_to_a_solo_owner(
+    monkeypatch: pytest.MonkeyPatch, joycon_pair_device: FakeDevice,
+) -> None:
+    device = joycon_pair_device
+    left = device.profile_identities[1]
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, _ = request_json(f"{base_url}/api/profiles/1/1/playtest")
+        assert status == 200
+        status, _ = request_json(
+            f"{base_url}/api/profiles/1/1/capture/start", method="POST", token=token,
+            value={
+                "owner_key": left.to_bytes().hex(),
+                "capture_id": "solo-bank-paired-input",
+                "slot": device.playtest_slot,
+                "connection_generation": device.playtest_connection_generation,
+                "macro_index": 0,
+                "profile": config_manager.ControllerProfile.default().to_json_object(),
+                "channels": 1,
+                "max_events": 8,
+                "axis_quantum": 512,
+                "trigger_quantum": 1024,
+                "max_duration_ms": 1000,
+            },
+        )
+        assert status == 400
+
+
 @pytest.mark.parametrize("owner_index", [0, 1])
 def test_live_layout_transitions_do_not_infer_topology_from_profile_owner(
     monkeypatch: pytest.MonkeyPatch, owner_index: int,
@@ -254,6 +393,7 @@ def test_live_layout_transitions_do_not_infer_topology_from_profile_owner(
             assert sample["controller"]["layout"] == expected
             assert sample["owner_key"] == device.profile_identities[owner_index].to_bytes().hex()
             assert sample["identity_key"] == left.to_bytes().hex()
+            assert sample["identity"]["is_joycon_pair"] is False
             expected_extras = (
                 {"c", "left_sl", "left_sr", "right_sl", "right_sr"}
                 if code == 3 else {"left_sl", "left_sr"}
@@ -261,6 +401,9 @@ def test_live_layout_transitions_do_not_infer_topology_from_profile_owner(
             assert set(sample["source_controls"]) & set(config_manager.EXTRA_BUTTONS) == expected_extras
         status, listing = request_json(f"{base_url}/api/profiles")
         assert status == 200
+        assert [owner["key"] for owner in listing["identities"]] == [
+            device.global_identity.to_bytes().hex(), left.to_bytes().hex(),
+        ]
         assert listing["identities"][1]["controller"]["layout"] == "joycon2-left"
         device.playtest_connected = False
         status, offline = request_json(f"{base_url}/api/profiles/{owner_index}/1/playtest")

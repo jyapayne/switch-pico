@@ -12,9 +12,13 @@ namespace {
 
 struct FakeFlash {
   uint8_t bytes[PROFILE_STORAGE_ARENA_COUNT][PROFILE_STORAGE_ARENA_SIZE];
+  bool fail_program_once = false;
 };
 
 FakeFlash flash{};
+bool observe_pair_during_program = false;
+ControllerIdentity pending_pair{};
+ControllerIdentity pending_left{};
 
 void require(bool condition, const char *message) {
   if (!condition) {
@@ -51,6 +55,20 @@ bool fake_program(void *context, uint8_t arena, size_t offset,
       size != PROFILE_STORAGE_PAGE_SIZE ||
       offset % PROFILE_STORAGE_PAGE_SIZE != 0 ||
       offset + size > PROFILE_STORAGE_ARENA_SIZE) {
+    return false;
+  }
+  if (observe_pair_during_program) {
+    ProfileServiceActiveProfileSnapshot pair_snapshot{};
+    ProfileServiceActiveProfileSnapshot left_snapshot{};
+    profile_service_active_profile_snapshot(pending_pair, &pair_snapshot);
+    profile_service_active_profile_snapshot(pending_left, &left_snapshot);
+    require(!pair_snapshot.valid && left_snapshot.valid &&
+                left_snapshot.profile_index == 7 &&
+                left_snapshot.profile.weak_rumble_scale == 27,
+            "pair seed exposed incomplete profiles while writing flash");
+  }
+  if (storage->fail_program_once) {
+    storage->fail_program_once = false;
     return false;
   }
   for (size_t index = 0; index < size; ++index) {
@@ -426,6 +444,123 @@ void test_catalog1_selected_and_active_snapshots_migrate() {
           "old selection/activation snapshots lost migrated content or defaults");
 }
 
+void test_pair_publication_failure_recovery_and_independence() {
+  memset(flash.bytes, 0xff, sizeof(flash.bytes));
+  ControllerIdentity left = stable_identity();
+  left.transport = ControllerTransport::kBle;
+  left.vendor_id = 0x057e;
+  left.product_id = 0x2067;
+  ControllerIdentity right = left;
+  right.product_id = 0x2066;
+  right.address[5] = 8;
+  ControllerIdentity pair{};
+  require(controller_identity_make_joycon_pair(left, right, &pair),
+          "service pair identity is invalid");
+  ProfileStorage setup;
+  require(setup.initialize(fake_io()), "service pair fixture did not initialize");
+  for (uint8_t slot = 0; slot < CONTROLLER_PROFILE_COUNT; ++slot) {
+    ControllerProfile profile = controller_profile_default(left, slot);
+    profile.weak_rumble_scale = 20 + slot;
+    const char name[2] = {'L', static_cast<char>('0' + slot)};
+    require(setup.set(left, slot, profile) == ProfileStorageResult::kOk &&
+                setup.set_profile_name(left, slot, name, sizeof(name)) ==
+                    ProfileStorageResult::kOk,
+            "service solo fixture did not persist");
+  }
+  require(setup.activate(left, 7) == ProfileStorageResult::kOk &&
+              setup.set_alias(left, "Solo", 4) == ProfileStorageResult::kOk,
+          "service solo activation did not persist");
+  profile_service_initialize_on_storage_core();
+  require(!active_snapshot(pair).valid &&
+              !profile_service_observe_identity_on_storage_core(pair) &&
+              profile_service_select(pair, 0) == ConfigurationTransactionStatus::kMalformed &&
+              profile_service_activate(100, pair, 0) ==
+                  ConfigurationTransactionStatus::kMalformed &&
+              profile_service_activate_internal(0x80000001u, pair, 0) ==
+                  ConfigurationTransactionStatus::kMalformed &&
+              profile_service_reset(101, pair, CONTROLLER_PROFILE_ALL) ==
+                  ConfigurationTransactionStatus::kMalformed &&
+              profile_service_set_metadata(102, pair, 7, "Premature", 9) ==
+                  ConfigurationTransactionStatus::kMalformed &&
+              profile_service_begin(103, pair, 0, CONTROLLER_PROFILE_SCHEMA_VERSION,
+                                    CONTROLLER_PROFILE_ENCODED_SIZE, 0) ==
+                  ConfigurationTransactionStatus::kMalformed,
+          "service admitted an unseeded pair or supplied its fallback profile");
+  ProfileServiceListSnapshot before{};
+  profile_service_list_snapshot(&before);
+  pending_pair = pair;
+  pending_left = left;
+  observe_pair_during_program = true;
+  flash.fail_program_once = true;
+  require(!profile_service_observe_joycon_pair_on_storage_core(pair),
+          "failed seed published a ready pair");
+  observe_pair_during_program = false;
+  ProfileServiceListSnapshot failed{};
+  profile_service_list_snapshot(&failed);
+  const auto solo_after_failure = active_snapshot(left);
+  require(failed.count == before.count &&
+              failed.metadata.state == ProfileServiceState::kStorageError &&
+              failed.metadata.generation == before.metadata.generation &&
+              !active_snapshot(pair).valid && solo_after_failure.valid &&
+              solo_after_failure.profile_index == 7 &&
+              solo_after_failure.profile.weak_rumble_scale == 27 &&
+              !profile_service_observe_joycon_pair_on_storage_core(pair),
+          "rejected pair replaced the last committed solo publication");
+  profile_service_initialize_on_storage_core();
+  observe_pair_during_program = true;
+  require(profile_service_observe_joycon_pair_on_storage_core(pair),
+          "pair seed did not retry after recovery");
+  observe_pair_during_program = false;
+  ProfileServiceListSnapshot seeded{};
+  profile_service_list_snapshot(&seeded);
+  require(seeded.count == before.count + 2 &&
+              seeded.metadata.state == ProfileServiceState::kReady &&
+              active_snapshot(pair).valid &&
+              active_snapshot(pair).profile_index == 7 &&
+              active_snapshot(pair).profile.weak_rumble_scale == 27,
+          "seeded pair list and active profile were not published together");
+  require(profile_service_select(pair, 7) ==
+              ConfigurationTransactionStatus::kCommitted,
+          "seeded pair could not be selected");
+  ProfileServiceMetadataSnapshot metadata{};
+  profile_service_metadata_snapshot(&metadata);
+  require(metadata.valid && metadata.alias[0] == '\0' &&
+              strcmp(metadata.profile_names[7], "L7") == 0,
+          "service did not expose independent seeded metadata");
+  auto profile = controller_profile_default(pair, 7);
+  profile.weak_rumble_scale = 81;
+  write_profile(104, pair, 7, profile, 9000);
+  require(active_snapshot(pair).profile.weak_rumble_scale == 81 &&
+              active_snapshot(left).profile.weak_rumble_scale == 27 &&
+              profile_service_activate(105, pair, 3) ==
+                  ConfigurationTransactionStatus::kPending,
+          "pair edit changed the solo active profile");
+  profile_service_task_on_storage_core(10000);
+  require(active_snapshot(pair).profile_index == 3 &&
+              active_snapshot(left).profile_index == 7,
+          "pair activation changed the solo selection");
+  require(profile_service_set_metadata(106, pair, 7, "Pair", 4) ==
+              ConfigurationTransactionStatus::kPending,
+          "pair metadata edit did not queue");
+  profile_service_task_on_storage_core(11000);
+  require(profile_service_observe_joycon_pair_on_storage_core(pair),
+          "existing pair reconnect failed");
+  profile_service_metadata_snapshot(&metadata);
+  require(metadata.valid && strcmp(metadata.profile_names[7], "Pair") == 0 &&
+              profile_service_select(left, 7) ==
+                  ConfigurationTransactionStatus::kCommitted,
+          "pair reconnect overwrote pair-owned metadata");
+  profile_service_metadata_snapshot(&metadata);
+  require(metadata.valid && strcmp(metadata.profile_names[7], "L7") == 0 &&
+              strcmp(metadata.alias, "Solo") == 0,
+          "pair metadata edit changed solo metadata");
+  profile_service_initialize_on_storage_core();
+  require(profile_service_observe_joycon_pair_on_storage_core(pair) &&
+              active_snapshot(pair).profile_index == 3 &&
+              active_snapshot(left).profile_index == 7,
+          "service reload reseeded the pair active selection");
+}
+
 } // namespace
 
 ProfileStorageIo pico_profile_storage_io() { return fake_io(); }
@@ -435,6 +570,7 @@ int main() {
   test_profile_bounds_and_transaction_namespace();
   test_schema7_validation_and_atomic_selection();
   test_catalog1_selected_and_active_snapshots_migrate();
+  test_pair_publication_failure_recovery_and_independence();
   std::cout << "profile service tests passed\n";
   return 0;
 }

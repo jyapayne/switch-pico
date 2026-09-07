@@ -74,6 +74,8 @@ void profile_service_initialize_on_storage_core();
 void profile_service_task_on_storage_core(uint32_t now_ms);
 bool profile_service_observe_identity_on_storage_core(
     const ControllerIdentity& identity);
+bool profile_service_observe_joycon_pair_on_storage_core(
+    const ControllerIdentity& pair);
 
 ConfigurationTransactionStatus profile_service_select(
     const ControllerIdentity& identity, uint8_t profile_index);

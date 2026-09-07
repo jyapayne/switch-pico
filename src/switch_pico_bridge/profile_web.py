@@ -144,6 +144,12 @@ def _controller_presentation(
     identity: config_manager.ControllerIdentity,
     layout: str | None = None,
 ) -> dict[str, str]:
+    if identity.is_joycon_pair:
+        return {
+            "model": "Nintendo Joy-Con 2 (L+R)",
+            "style": "switch",
+            "layout": "joycon2-pair",
+        }
     live_layouts = {
         "joycon2-left": ("Nintendo Joy-Con 2 (L)", "switch", {0x2067}),
         "joycon2-right": ("Nintendo Joy-Con 2 (R)", "switch", {0x2066}),
@@ -235,6 +241,9 @@ def _controller_label(
     }
     model = friendly_models.get(presentation["model"], presentation["model"])
     address_suffix = ":".join(f"{octet:02X}" for octet in identity.address[-2:])
+    if identity.is_joycon_pair:
+        partner_suffix = ":".join(f"{octet:02X}" for octet in identity.partner_address[-2:])
+        return f"{model} · L {address_suffix} + R {partner_suffix}"
     return f"{model} · {address_suffix}"
 
 
@@ -530,6 +539,7 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                 "index": index,
                 "label": _controller_label(entry.identity, entry.alias),
                 "key": entry.identity.to_bytes().hex(),
+                "identity": entry.identity.to_json_object(),
                 "active_profile": entry.active_profile_index + 1,
                 "controller": controller,
                 "alias": entry.alias,
@@ -553,7 +563,7 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
 
     def _read_playtest(self, identity_index: int, profile_index: int) -> dict[str, Any]:
         device = self.profile_server.find_device()
-        _, identity = self._entries_and_identity(device, identity_index)
+        entries, identity = self._entries_and_identity(device, identity_index)
         config_manager.select_profile(device, identity, profile_index)
         playtest = config_manager.read_profile_playtest(device)
         result = playtest.to_json_object()
@@ -570,7 +580,10 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         )
         result["source_controls"] = _source_controls(result["controller"])
         result["label"] = (
-            _controller_label(playtest.identity)
+            _controller_label(
+                playtest.identity,
+                entries[identity_index].alias if playtest.identity == identity else "",
+            )
             if playtest.identity is not None
             else None
         )

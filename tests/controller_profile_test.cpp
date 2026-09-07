@@ -39,6 +39,84 @@ bool read_encoded_database(void*, size_t offset, uint8_t* output,
     return true;
 }
 
+void test_pair_identity_wire_and_member_validation() {
+    ControllerIdentity left = identity(1);
+    left.transport = ControllerTransport::kBle;
+    left.product_id = 0x2067;
+    const uint8_t left_address[6] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15};
+    memcpy(left.address, left_address, sizeof(left_address));
+    ControllerIdentity right = left;
+    right.product_id = 0x2066;
+    right.address_type = 1;
+    right.address[0] = 0xc0;
+    ControllerIdentity pair{};
+    uint8_t encoded[CONTROLLER_IDENTITY_ENCODED_SIZE]{};
+    const uint8_t expected[14] = {
+        5, 3, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0xc0, 0x11, 0x12, 0x13, 0x14, 0x15};
+    require(controller_identity_make_joycon_pair(left, right, &pair) &&
+                controller_identity_encode(pair, encoded, sizeof(encoded)) &&
+                memcmp(encoded, expected, sizeof(expected)) == 0,
+            "pair identity did not encode both typed members");
+    ControllerIdentity decoded{};
+    ControllerIdentity decoded_left{};
+    ControllerIdentity decoded_right{};
+    require(controller_identity_decode(encoded, sizeof(encoded), &decoded) &&
+                controller_identity_equal(pair, decoded) &&
+                controller_identity_joycon_pair_members(
+                    decoded, &decoded_left, &decoded_right) &&
+                controller_identity_equal(left, decoded_left) &&
+                controller_identity_equal(right, decoded_right),
+            "pair identity round trip lost a member or its model");
+    decoded.partner_address[5] ^= 1;
+    require(!controller_identity_equal(pair, decoded),
+            "pair equality ignored the right address");
+    for (uint8_t flags = 0; flags < 16; ++flags) {
+        if (flags == 1 || flags == 5) {
+            continue;
+        }
+        memcpy(encoded, expected, sizeof(encoded));
+        encoded[0] = flags;
+        require(!controller_identity_decode(encoded, sizeof(encoded), &decoded),
+                "pair decoder accepted unstable, reserved, or nonstatic flags");
+    }
+    require(!controller_identity_make_joycon_pair(right, left, &decoded),
+            "pair helper accepted reversed models");
+    right.product_id = 0x2069;
+    require(!controller_identity_make_joycon_pair(left, right, &decoded),
+            "pair helper accepted a non-Joy-Con member");
+    right.product_id = 0x2066;
+    right.address_type = 2;
+    require(!controller_identity_make_joycon_pair(left, right, &decoded),
+            "pair helper accepted a noncanonical identity address type");
+    right.address_type = left.address_type;
+    memcpy(right.address, left.address, sizeof(right.address));
+    require(!controller_identity_make_joycon_pair(left, right, &decoded),
+            "pair helper accepted one physical typed address twice");
+    left.address[0] = right.address[0] = 0xc0;
+    right.address_type = 1;
+    require(controller_identity_make_joycon_pair(left, right, &decoded),
+            "pair helper conflated public and static-random address namespaces");
+    left.partner_address[0] = 1;
+    require(!controller_identity_encode(left, encoded, sizeof(encoded)) &&
+                !controller_identity_make_joycon_pair(left, right, &decoded),
+            "ordinary member accepted stray partner fields");
+    left.partner_address[0] = 0;
+    const uint8_t ordinary[14] = {
+        1, 2, 0, 0, 0xc0, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0x7e, 0x05, 0x67, 0x20};
+    require(controller_identity_encode(left, encoded, sizeof(encoded)) &&
+                memcmp(encoded, ordinary, sizeof(encoded)) == 0 &&
+                controller_identity_decode(encoded, sizeof(encoded), &decoded) &&
+                controller_identity_equal(left, decoded),
+            "ordinary identity wire encoding changed");
+    const uint8_t global[14]{};
+    require(controller_identity_encode(controller_identity_global(), encoded,
+                                       sizeof(encoded)) &&
+                memcmp(encoded, global, sizeof(encoded)) == 0,
+            "global identity wire encoding changed");
+}
+
 void test_profile_wire_schema() {
     const ControllerProfile profile =
         controller_profile_default(controller_identity_global(), 0);
@@ -605,6 +683,7 @@ void test_extra_control_schema_round_trip_and_output_limits() {
 
 }  // namespace
 int main() {
+    test_pair_identity_wire_and_member_validation();
     test_profile_wire_schema();
     test_legacy_profile_migration();
     test_database_round_trip_and_capacity();

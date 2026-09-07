@@ -20,6 +20,7 @@ struct FakeFlash {
   uint8_t corrupt_arena = 0;
   size_t corrupt_offset = 0;
   bool corrupt_next_program = false;
+  int fail_read_after_programs = -1;
 };
 
 FakeFlash flash{};
@@ -43,6 +44,10 @@ bool fake_read(void *context, uint8_t arena, size_t offset, uint8_t *output,
   if (arena >= PROFILE_STORAGE_ARENA_COUNT || output == nullptr ||
       offset > PROFILE_STORAGE_ARENA_SIZE ||
       size > PROFILE_STORAGE_ARENA_SIZE - offset) {
+    return false;
+  }
+  if (storage->fail_read_after_programs >= 0 &&
+      storage->programs >= storage->fail_read_after_programs) {
     return false;
   }
   memcpy(output, &storage->bytes[arena][offset], size);
@@ -114,6 +119,22 @@ ControllerIdentity identity(uint8_t suffix) {
   result.vendor_id = 0x1234;
   result.product_id = 0x5678;
   return result;
+}
+
+ControllerIdentity joycon(uint8_t suffix, bool left) {
+  ControllerIdentity result = identity(suffix);
+  result.transport = ControllerTransport::kBle;
+  result.vendor_id = 0x057e;
+  result.product_id = left ? 0x2067 : 0x2066;
+  return result;
+}
+
+ControllerIdentity joycon_pair(const ControllerIdentity &left,
+                              const ControllerIdentity &right) {
+  ControllerIdentity pair{};
+  require(controller_identity_make_joycon_pair(left, right, &pair),
+          "pair fixture identity is invalid");
+  return pair;
 }
 
 void write_u16(uint8_t *output, uint16_t value) {
@@ -279,7 +300,7 @@ void install_populated_catalog(uint16_t version, bool fill_arena = false) {
        index <= CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY; ++index) {
     const ControllerIdentity id = catalog_identity(index);
     for (uint8_t slot = 0; slot < CONTROLLER_PROFILE_COUNT; ++slot) {
-      const ControllerProfile profile = catalog_profile(index, slot, version == 2);
+      const ControllerProfile profile = catalog_profile(index, slot, version != 1);
       uint8_t payload[CONTROLLER_PROFILE_ENCODED_SIZE]{};
       if (version == 1) {
         encode_schema5(profile, payload);
@@ -558,14 +579,14 @@ void test_legacy_migration_is_atomic_and_complete() {
 
 void test_populated_catalog_publication_power_loss() {
   static FakeFlash baseline;
-  for (uint16_t version = 1; version <= 2; ++version) {
+  for (uint16_t version = 1; version <= 3; ++version) {
     erase_all();
     install_populated_catalog(version, true);
     baseline = flash;
     ProfileStorage completed;
     require(completed.initialize(fake_io()), "populated catalog did not load");
-    require_populated_catalog(completed, version == 2);
-    if (version == 2) {
+    require_populated_catalog(completed, version != 1);
+    if (version == 3) {
       require(completed.set_alias(catalog_identity(0), "New", 3) ==
                   ProfileStorageResult::kOk,
               "populated catalog could not compact all 187 live records");
@@ -578,7 +599,7 @@ void test_populated_catalog_publication_power_loss() {
         flash = baseline;
         flash.torn_page_bytes = torn_bytes;
         ProfileStorage interrupted;
-        if (version == 2) {
+        if (version == 3) {
           require(interrupted.initialize(fake_io()),
                   "catalog2 power-loss baseline did not load");
         }
@@ -587,9 +608,9 @@ void test_populated_catalog_publication_power_loss() {
         } else {
           flash.fail_after_programs = cut;
         }
-        if (version == 1) {
+        if (version != 3) {
           require(!interrupted.initialize(fake_io()),
-                  "incomplete catalog1 migration silently initialized empty");
+                  "incomplete old catalog migration silently initialized empty");
         } else {
           require(interrupted.set_alias(catalog_identity(0), "New", 3) ==
                       ProfileStorageResult::kIoError,
@@ -604,7 +625,7 @@ void test_populated_catalog_publication_power_loss() {
         ProfileStorage recovered;
         require(recovered.initialize(fake_io()),
                 "catalog did not recover after an interrupted publication");
-        require_populated_catalog(recovered, version == 2);
+        require_populated_catalog(recovered, version != 1);
         require(recovered.snapshot().generation >= 1248,
                 "catalog publication regressed the stored generation");
       }
@@ -738,7 +759,7 @@ void test_legacy_high_generation_remains_mutable() {
 
 void test_schema6_read_migration_is_lazy_and_edit_preserves_metadata() {
   erase_all();
-  install_populated_catalog(2);
+  install_populated_catalog(3);
   ProfileStorage storage;
   require(storage.initialize(fake_io()), "schema6 catalog did not load");
   require_populated_catalog(storage, true);
@@ -779,6 +800,219 @@ void test_schema6_read_migration_is_lazy_and_edit_preserves_metadata() {
           "editing a schema6 profile lost its active index, alias, or name");
 }
 
+void require_pair_bank(const ProfileStorage &storage,
+                       const ControllerIdentity &owner, uint8_t base,
+                       uint8_t active, char name_prefix) {
+  const auto *entry = storage.find(owner);
+  require(entry != nullptr && entry->active_profile == active,
+          "pair bank active selection changed");
+  for (uint8_t slot = 0; slot < CONTROLLER_PROFILE_COUNT; ++slot) {
+    ControllerProfile actual{};
+    char name[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+    require(storage.get(owner, slot, &actual) == ProfileStorageResult::kOk &&
+                actual.weak_rumble_scale == base + slot &&
+                storage.get_profile_name(owner, slot, name, sizeof(name)) ==
+                    ProfileStorageResult::kOk &&
+                name[0] == name_prefix && name[1] == '0' + slot &&
+                name[2] == '\0',
+            "pair bank profile or name bled into another owner");
+  }
+}
+
+void write_pair_bank(ProfileStorage &storage, const ControllerIdentity &owner,
+                     uint8_t base, char name_prefix) {
+  for (uint8_t slot = 0; slot < CONTROLLER_PROFILE_COUNT; ++slot) {
+    ControllerProfile profile = controller_profile_default(owner, slot);
+    profile.weak_rumble_scale = base + slot;
+    const char name[2] = {name_prefix, static_cast<char>('0' + slot)};
+    require(storage.set(owner, slot, profile) == ProfileStorageResult::kOk &&
+                storage.set_profile_name(owner, slot, name, sizeof(name)) ==
+                    ProfileStorageResult::kOk,
+            "pair bank edit failed");
+  }
+}
+
+void test_pair_seed_independence_reconnect_and_compaction() {
+  erase_all();
+  const auto left = joycon(1, true);
+  const auto right = joycon(2, false);
+  const auto pair = joycon_pair(left, right);
+  ProfileStorage storage;
+  require(storage.initialize(fake_io()), "pair catalog did not initialize");
+  write_pair_bank(storage, left, 20, 'L');
+  write_pair_bank(storage, right, 40, 'R');
+  require(storage.set_alias(left, "Solo", 4) == ProfileStorageResult::kOk &&
+              storage.activate(left, 7) == ProfileStorageResult::kOk &&
+              storage.activate(right, 3) == ProfileStorageResult::kOk,
+          "solo bank setup failed");
+  const int programs = flash.programs;
+  const int erases = flash.erases;
+  require(storage.ensure_joycon_pair(pair) == ProfileStorageResult::kOk &&
+              flash.programs == programs + 2 && flash.erases == erases,
+          "first pair did not seed with one atomic append");
+  require_pair_bank(storage, pair, 20, 7, 'L');
+  char alias[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+  require(storage.get_alias(pair, alias, sizeof(alias)) ==
+                  ProfileStorageResult::kOk && alias[0] == '\0' &&
+              storage.get_alias(left, alias, sizeof(alias)) ==
+                  ProfileStorageResult::kOk && strcmp(alias, "Solo") == 0,
+          "pair inherited or changed the solo alias");
+  write_pair_bank(storage, left, 60, 'S');
+  require(storage.activate(left, 1) == ProfileStorageResult::kOk,
+          "left selection edit failed");
+  ProfileStorage replayed;
+  require(replayed.initialize(fake_io()), "pair seed did not replay");
+  require_pair_bank(replayed, pair, 20, 7, 'L');
+  require_pair_bank(replayed, left, 60, 1, 'S');
+  require_pair_bank(replayed, right, 40, 3, 'R');
+  write_pair_bank(replayed, pair, 80, 'P');
+  require(replayed.activate(pair, 6) == ProfileStorageResult::kOk &&
+              replayed.set_alias(pair, "Together", 8) == ProfileStorageResult::kOk,
+          "pair selection or alias edit failed");
+  const uint32_t generation = replayed.snapshot().generation;
+  require(replayed.ensure_joycon_pair(pair) == ProfileStorageResult::kUnchanged &&
+              replayed.snapshot().generation == generation,
+          "pair reconnect reseeded or wrote the bank");
+  const auto other_pair = joycon_pair(left, joycon(3, false));
+  require(replayed.ensure_joycon_pair(other_pair) == ProfileStorageResult::kOk,
+          "different right member did not receive a separate bank");
+  require_pair_bank(replayed, other_pair, 60, 1, 'S');
+  require_pair_bank(replayed, pair, 80, 6, 'P');
+  require_pair_bank(replayed, left, 60, 1, 'S');
+  require_pair_bank(replayed, right, 40, 3, 'R');
+  const uint8_t old_arena = replayed.snapshot().active_bank;
+  for (size_t write = 0; write <= PROFILE_STORAGE_RECORD_CAPACITY; ++write) {
+    require(replayed.activate(left, (write + 2) % CONTROLLER_PROFILE_COUNT) ==
+                ProfileStorageResult::kOk,
+            "pair compaction trigger failed");
+  }
+  require(replayed.snapshot().active_bank != old_arena,
+          "pair catalog never compacted");
+  ProfileStorage compacted;
+  require(compacted.initialize(fake_io()) &&
+              compacted.ensure_joycon_pair(pair) == ProfileStorageResult::kUnchanged,
+          "materialized pair did not reconnect after compaction");
+  require_pair_bank(compacted, pair, 80, 6, 'P');
+  require_pair_bank(compacted, other_pair, 60, 1, 'S');
+  require_pair_bank(compacted, right, 40, 3, 'R');
+  require(compacted.get_alias(pair, alias, sizeof(alias)) ==
+                  ProfileStorageResult::kOk && strcmp(alias, "Together") == 0,
+          "compaction lost pair-owned alias");
+  require(compacted.reset(pair, CONTROLLER_PROFILE_ALL) ==
+              ProfileStorageResult::kOk,
+          "pair reset failed");
+  require_pair_bank(compacted, other_pair, 60, 1, 'S');
+  require_pair_bank(compacted, right, 40, 3, 'R');
+}
+
+void test_pair_capacity_and_unseeded_mutations() {
+  erase_all();
+  const auto left = joycon(1, true);
+  const auto right = joycon(2, false);
+  const auto pair = joycon_pair(left, right);
+  ProfileStorage storage;
+  require(storage.initialize(fake_io()), "pair capacity catalog did not initialize");
+  ControllerProfile profile = controller_profile_default(pair, 0);
+  profile.weak_rumble_scale = 42;
+  require(storage.ensure_identity(pair) == ProfileStorageResult::kInvalidArgument &&
+              storage.set(pair, 0, profile) == ProfileStorageResult::kInvalidArgument &&
+              storage.activate(pair, 7) == ProfileStorageResult::kInvalidArgument &&
+              storage.set_alias(pair, "Pair", 4) == ProfileStorageResult::kInvalidArgument &&
+              storage.set_profile_name(pair, 7, "Pair", 4) ==
+                  ProfileStorageResult::kInvalidArgument &&
+              storage.reset(pair, CONTROLLER_PROFILE_ALL) ==
+                  ProfileStorageResult::kInvalidArgument &&
+              storage.find(pair) == nullptr,
+          "mutation implicitly created an unseeded pair");
+  for (uint8_t index = 1; index <= 14; ++index) {
+    require(storage.ensure_identity(identity(index)) == ProfileStorageResult::kOk,
+            "capacity setup failed");
+  }
+  const int programs = flash.programs;
+  require(storage.ensure_joycon_pair(pair) == ProfileStorageResult::kFull &&
+              storage.find(left) == nullptr && storage.find(right) == nullptr &&
+              storage.find(pair) == nullptr && flash.programs == programs,
+          "capacity preflight changed owners before rejecting the pair");
+  erase_all();
+  require(storage.initialize(fake_io()), "exact-fit catalog did not initialize");
+  for (uint8_t index = 1; index <= 13; ++index) {
+    require(storage.ensure_identity(identity(index)) == ProfileStorageResult::kOk,
+            "exact-fit setup failed");
+  }
+  require(storage.ensure_joycon_pair(pair) == ProfileStorageResult::kOk &&
+              storage.identity_count() == CONTROLLER_PROFILE_STABLE_IDENTITY_CAPACITY + 1 &&
+              storage.find(left) != nullptr && storage.find(right) != nullptr &&
+              storage.get(pair, 7, &profile) == ProfileStorageResult::kOk &&
+              profile.weak_rumble_scale ==
+                  controller_profile_default(left, 7).weak_rumble_scale &&
+              storage.ensure_joycon_pair(pair) == ProfileStorageResult::kUnchanged,
+          "exact-capacity pair did not create both members and the default bank");
+}
+
+void test_pair_seed_interruption_and_ambiguous_readback() {
+  erase_all();
+  const auto left = joycon(1, true);
+  const auto right = joycon(2, false);
+  const auto pair = joycon_pair(left, right);
+  ProfileStorage initial;
+  require(initial.initialize(fake_io()), "seed fault catalog did not initialize");
+  write_pair_bank(initial, left, 20, 'L');
+  require(initial.activate(left, 7) == ProfileStorageResult::kOk,
+          "seed fault active setup failed");
+  static FakeFlash baseline;
+  baseline = flash;
+  // Right row and seed each use two pages. Exercise every cut, including a
+  // fully committed header whose program call nevertheless reports failure.
+  for (size_t torn_bytes : {size_t{0}, size_t{64}, size_t{256}}) {
+    for (int cut = 0; cut < 4; ++cut) {
+      flash = baseline;
+      ProfileStorage interrupted;
+      require(interrupted.initialize(fake_io()), "seed fault baseline did not load");
+      flash.fail_after_programs = flash.programs + cut;
+      flash.torn_page_bytes = torn_bytes;
+      require(interrupted.ensure_joycon_pair(pair) == ProfileStorageResult::kIoError &&
+                  interrupted.find(pair) == nullptr,
+              "interrupted seed exposed a partially initialized bank");
+      flash.fail_after_programs = -1;
+      require(interrupted.ensure_joycon_pair(pair) == ProfileStorageResult::kIoError &&
+                  interrupted.activate(left, 0) == ProfileStorageResult::kIoError,
+              "ambiguous seed allowed retry or source mutation before replay");
+      flash.torn_page_bytes = 0;
+      ProfileStorage recovered;
+      require(recovered.initialize(fake_io()), "interrupted seed did not recover");
+      const auto result = recovered.ensure_joycon_pair(pair);
+      require(result == ProfileStorageResult::kOk ||
+                  result == ProfileStorageResult::kUnchanged,
+              "seed retry failed after durable replay");
+      require_pair_bank(recovered, pair, 20, 7, 'L');
+      require_pair_bank(recovered, left, 20, 7, 'L');
+    }
+  }
+  flash = baseline;
+  ProfileStorage ambiguous;
+  require(ambiguous.initialize(fake_io()) &&
+              ambiguous.ensure_identity(right) == ProfileStorageResult::kOk,
+          "readback fault setup failed");
+  flash.fail_read_after_programs = flash.programs + 2;
+  require(ambiguous.ensure_joycon_pair(pair) == ProfileStorageResult::kIoError &&
+              ambiguous.find(pair) == nullptr,
+          "unacknowledged seed was published in memory");
+  ProfileStorage unreadable;
+  require(!unreadable.initialize(fake_io()), "unreadable seed replay failed open");
+  flash.fail_read_after_programs = -1;
+  require(ambiguous.activate(left, 0) == ProfileStorageResult::kIoError,
+          "unacknowledged seed did not freeze source changes");
+  ProfileStorage recovered;
+  require(recovered.initialize(fake_io()) &&
+              recovered.ensure_joycon_pair(pair) == ProfileStorageResult::kUnchanged,
+          "committed unacknowledged seed was reseeded");
+  require_pair_bank(recovered, pair, 20, 7, 'L');
+  write_pair_bank(recovered, left, 60, 'S');
+  require(recovered.ensure_joycon_pair(pair) == ProfileStorageResult::kUnchanged,
+          "recovered pair was reseeded after source edits");
+  require_pair_bank(recovered, pair, 20, 7, 'L');
+}
+
 } // namespace
 
 int main() {
@@ -795,6 +1029,9 @@ int main() {
   test_late_second_page_program_is_not_reused();
   test_unreadable_legacy_data_is_not_erased();
   test_schema6_read_migration_is_lazy_and_edit_preserves_metadata();
+  test_pair_seed_independence_reconnect_and_compaction();
+  test_pair_capacity_and_unseeded_mutations();
+  test_pair_seed_interruption_and_ambiguous_readback();
   std::cout << "profile storage tests passed\n";
   return 0;
 }

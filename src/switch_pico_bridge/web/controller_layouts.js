@@ -116,7 +116,7 @@ const ControllerLayouts = (() => {
         left_sl: back("Left SL · rail", "L SL"), left_sr: back("Left SR · rail", "L SR"),
         right_sl: back("Right SL · rail", "R SL"), right_sr: back("Right SR · rail", "R SR"),
       },
-      note: "Paired inputs use the left controller's profile. The grip is illustrative, not detected. Rear triggers and rails are not visible in this front view. C and rail inputs are source-only; GL/GR belong to Switch 2 Pro, not Joy-Con 2.",
+      note: "Select the L+R profile owner for paired settings; its eight profiles are independent of both solo banks. If no L+R owner is listed, update firmware and connect both members. The grip is illustrative, not detected. Rear triggers and rails are not visible in this front view. C and rail inputs are source-only; GL/GR belong to Switch 2 Pro, not Joy-Con 2.",
     },
     "joycon2-left": {
       name: "Joy-Con 2 left · sideways solo", style: "switch", asset: "switch-2-joycon-left.svg",
@@ -145,7 +145,7 @@ const ControllerLayouts = (() => {
         right_trigger: back("ZR · rear", "ZR"),
         right_sl: back("SL · rail extra", "SL extra"), right_sr: back("SR · rail extra", "SR extra"),
       },
-      note: "Solo firmware rotates ABXY sources; the right stick becomes LEFT axes and left-stick click. Output labels do not rotate. When paired, select the left controller's profile to edit the pair. " + railNote,
+      note: "Solo firmware rotates ABXY sources; the right stick becomes LEFT axes and left-stick click. Output labels do not rotate. Select the separate L+R profile owner for paired settings, not this solo bank. " + railNote,
     },
     "wii-remote": {
       name: "Wii Remote · orientation unknown", style: "switch", asset: "wii-remote-simple.svg",

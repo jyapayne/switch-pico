@@ -63,6 +63,24 @@ bool valid_identity(const ControllerIdentity &identity) {
          controller_identity_encode(identity, encoded, sizeof(encoded));
 }
 
+bool valid_owner_locked(const ControllerIdentity &identity) {
+  if (!valid_identity(identity)) {
+    return false;
+  }
+  if (!controller_identity_is_joycon_pair(identity)) {
+    return true;
+  }
+  if (g_metadata.state != ProfileServiceState::kReady) {
+    return false;
+  }
+  for (uint8_t index = 0; index < g_list.count; ++index) {
+    if (controller_identity_equal(g_list.rows[index].identity, identity)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void refresh_list_locked() {
   g_list = ProfileServiceListSnapshot{};
   g_list.metadata = g_metadata;
@@ -119,6 +137,17 @@ void refresh_selected_locked() {
 
 void refresh_metadata_locked(ProfileServiceState state) {
   const ProfileStorageSnapshot &stored = g_storage.snapshot();
+  if (state == ProfileServiceState::kStorageError) {
+    // Keep the last committed publication usable by already-connected slots.
+    // In particular, a rejected pair setup must not replace either solo's
+    // profile with defaults or expose newly appended member rows.
+    g_metadata.state = state;
+    g_list.metadata = g_metadata;
+    g_selected.metadata = g_metadata;
+    g_selected.valid = false;
+    g_selected.status = ConfigurationTransactionStatus::kStorageError;
+    return;
+  }
   g_metadata.state = state;
   g_metadata.generation = stored.valid ? stored.generation : 0;
   g_metadata.payload_crc = stored.valid ? stored.payload_crc : 0;
@@ -216,7 +245,8 @@ void profile_service_initialize_on_storage_core() {
 bool profile_service_observe_identity_on_storage_core(
     const ControllerIdentity &identity) {
   if (!g_prepared || !identity.stable ||
-      controller_identity_is_global(identity) || !valid_identity(identity)) {
+      controller_identity_is_global(identity) || !valid_identity(identity) ||
+      controller_identity_is_joycon_pair(identity)) {
     return false;
   }
   critical_section_enter_blocking(&g_lock);
@@ -228,6 +258,39 @@ bool profile_service_observe_identity_on_storage_core(
   const ProfileStorageResult result = g_storage.ensure_identity(identity);
   if (result != ProfileStorageResult::kOk &&
       result != ProfileStorageResult::kUnchanged) {
+    if (result == ProfileStorageResult::kIoError) {
+      critical_section_enter_blocking(&g_lock);
+      refresh_metadata_locked(ProfileServiceState::kStorageError);
+      critical_section_exit(&g_lock);
+    }
+    return false;
+  }
+  critical_section_enter_blocking(&g_lock);
+  refresh_metadata_locked(ProfileServiceState::kReady);
+  critical_section_exit(&g_lock);
+  return true;
+}
+
+bool profile_service_observe_joycon_pair_on_storage_core(
+    const ControllerIdentity &pair) {
+  if (!g_prepared || !controller_identity_is_joycon_pair(pair)) {
+    return false;
+  }
+  critical_section_enter_blocking(&g_lock);
+  const bool ready = g_metadata.state == ProfileServiceState::kReady;
+  critical_section_exit(&g_lock);
+  if (!ready) {
+    return false;
+  }
+  // Flash writes and the seed snapshot must not hold either core's state lock.
+  const ProfileStorageResult result = g_storage.ensure_joycon_pair(pair);
+  if (result != ProfileStorageResult::kOk &&
+      result != ProfileStorageResult::kUnchanged) {
+    if (result == ProfileStorageResult::kIoError) {
+      critical_section_enter_blocking(&g_lock);
+      refresh_metadata_locked(ProfileServiceState::kStorageError);
+      critical_section_exit(&g_lock);
+    }
     return false;
   }
   critical_section_enter_blocking(&g_lock);
@@ -309,7 +372,7 @@ profile_service_select(const ControllerIdentity &identity,
   critical_section_enter_blocking(&g_lock);
   ConfigurationTransactionStatus status =
       ConfigurationTransactionStatus::kCommitted;
-  if (!valid_identity(identity) || profile_index >= CONTROLLER_PROFILE_COUNT) {
+  if (!valid_owner_locked(identity) || profile_index >= CONTROLLER_PROFILE_COUNT) {
     status = ConfigurationTransactionStatus::kMalformed;
     g_selected.metadata = g_metadata;
     g_selected.identity = identity;
@@ -359,7 +422,7 @@ profile_service_begin(uint32_t transaction_id,
   g_transaction.profile_index = profile_index;
   if (transaction_id == 0 ||
       (transaction_id & kInternalTransactionIdMask) != 0 ||
-      !valid_identity(identity) || profile_index >= CONTROLLER_PROFILE_COUNT ||
+      !valid_owner_locked(identity) || profile_index >= CONTROLLER_PROFILE_COUNT ||
       payload_size == 0) {
     g_transaction.snapshot.status = ConfigurationTransactionStatus::kMalformed;
   } else if (schema_version != CONTROLLER_PROFILE_SCHEMA_VERSION) {
@@ -459,7 +522,7 @@ profile_service_reset(uint32_t transaction_id,
   g_transaction.profile_index = profile_index;
   if (transaction_id == 0 ||
       (transaction_id & kInternalTransactionIdMask) != 0 ||
-      !valid_identity(identity) ||
+      !valid_owner_locked(identity) ||
       (profile_index != CONTROLLER_PROFILE_ALL &&
        profile_index >= CONTROLLER_PROFILE_COUNT)) {
     g_transaction.snapshot.status = ConfigurationTransactionStatus::kMalformed;
@@ -498,7 +561,7 @@ profile_service_activate(uint32_t transaction_id,
   g_transaction.profile_index = profile_index;
   if (transaction_id == 0 ||
       (transaction_id & kInternalTransactionIdMask) != 0 ||
-      !valid_identity(identity) || profile_index >= CONTROLLER_PROFILE_COUNT) {
+      !valid_owner_locked(identity) || profile_index >= CONTROLLER_PROFILE_COUNT) {
     g_transaction.snapshot.status = ConfigurationTransactionStatus::kMalformed;
     critical_section_exit(&g_lock);
     return ConfigurationTransactionStatus::kMalformed;
@@ -535,7 +598,7 @@ ConfigurationTransactionStatus profile_service_set_metadata(
   bool malformed =
       transaction_id == 0 ||
       (transaction_id & kInternalTransactionIdMask) != 0 ||
-      !valid_identity(identity) ||
+      !valid_owner_locked(identity) ||
       (profile_index != CONTROLLER_PROFILE_ALL &&
        profile_index >= CONTROLLER_PROFILE_COUNT) ||
       value_size > PROFILE_SERVICE_METADATA_MAX_BYTES ||
@@ -582,7 +645,7 @@ profile_service_activate_internal(uint32_t transaction_id,
     return ConfigurationTransactionStatus::kBusy;
   }
   if ((transaction_id & kInternalTransactionIdMask) == 0 ||
-      !valid_identity(identity) || profile_index >= CONTROLLER_PROFILE_COUNT) {
+      !valid_owner_locked(identity) || profile_index >= CONTROLLER_PROFILE_COUNT) {
     critical_section_exit(&g_lock);
     return ConfigurationTransactionStatus::kMalformed;
   }
@@ -673,9 +736,12 @@ void profile_service_active_profile_snapshot(
 
   critical_section_enter_blocking(&g_lock);
   output->metadata = g_metadata;
-  if (g_metadata.state == ProfileServiceState::kReady &&
+  if ((g_metadata.state == ProfileServiceState::kReady ||
+       g_metadata.state == ProfileServiceState::kStorageError) &&
       g_active_profile_count != 0) {
-    const PublishedActiveProfile *active = &g_active_profiles[0];
+    const PublishedActiveProfile *active =
+        controller_identity_is_joycon_pair(identity) ? nullptr
+                                                    : &g_active_profiles[0];
     for (uint8_t index = 1; index < g_active_profile_count; ++index) {
       if (controller_identity_equal(g_active_profiles[index].identity,
                                     identity)) {
@@ -683,9 +749,11 @@ void profile_service_active_profile_snapshot(
         break;
       }
     }
-    output->profile_index = active->profile_index;
-    output->profile = active->profile;
-    output->valid = true;
+    if (active != nullptr) {
+      output->profile_index = active->profile_index;
+      output->profile = active->profile;
+      output->valid = true;
+    }
   }
   critical_section_exit(&g_lock);
 }

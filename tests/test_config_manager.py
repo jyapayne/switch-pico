@@ -819,7 +819,7 @@ def test_native_rumble_configuration_rejects_invalid_lists(malformation: str) ->
 
 
 @pytest.mark.parametrize(
-    "malformation", ("duplicate", "overflow", "global", "ble", "vendor", "product")
+    "malformation", ("duplicate", "overflow", "global", "ble", "pair", "vendor", "product")
 )
 def test_native_rumble_write_rejects_invalid_approvals_before_transaction(
     malformation: str,
@@ -833,6 +833,11 @@ def test_native_rumble_write_rejects_invalid_approvals_before_transaction(
         ),
         "global": (config_manager.ControllerIdentity.global_fallback(),),
         "ble": (replace(identity, transport=config_manager.TRANSPORT_BLE),),
+        "pair": (
+            config_manager.ControllerIdentity.from_bytes(
+                bytes.fromhex("0503102030405060C12233445566")
+            ),
+        ),
         "vendor": (replace(identity, vendor_id=0x045E),),
         "product": (replace(identity, product_id=0x2019),),
     }[malformation]
@@ -1476,6 +1481,129 @@ def test_requested_and_active_mode_response_validation() -> None:
     device.capabilities = config_manager.CAPABILITY_RUMBLE
     with pytest.raises(config_manager.ConfigManagerError, match="omit required input"):
         config_manager.read_info(device)
+
+
+@pytest.mark.parametrize(
+    ("left_type", "right_type", "flags"), [(0, 0, 1), (1, 0, 3), (0, 1, 5), (1, 1, 7)]
+)
+def test_joycon_pair_wire_round_trip_preserves_both_typed_members(
+    left_type: int, right_type: int, flags: int,
+) -> None:
+    left = config_manager.ControllerIdentity(
+        True, config_manager.TRANSPORT_BLE, left_type,
+        bytes.fromhex("C10203040506"), 0x057E, 0x2067,
+    )
+    right = config_manager.ControllerIdentity(
+        True, config_manager.TRANSPORT_BLE, right_type,
+        bytes.fromhex("D11213141516"), 0x057E, 0x2066,
+    )
+    pair = config_manager.ControllerIdentity.make_joycon_pair(left, right)
+    wire = bytes((flags, 3)) + left.address + right.address
+    assert pair.to_bytes() == wire
+    assert config_manager.ControllerIdentity.from_bytes(wire) == pair
+    assert pair.joycon_pair_members() == (left, right)
+    assert pair.to_bytes() not in (left.to_bytes(), right.to_bytes())
+    other_right = replace(right, address=bytes.fromhex("D11213141517"))
+    assert config_manager.ControllerIdentity.make_joycon_pair(left, other_right) != pair
+
+
+def test_joycon_pair_distinguishes_address_types_without_normalizing_members() -> None:
+    left = config_manager.ControllerIdentity(
+        True, config_manager.TRANSPORT_BLE, 0,
+        bytes.fromhex("C10203040506"), 0x057E, 0x2067,
+    )
+    right = replace(left, address_type=1, product_id=0x2066)
+    pair = config_manager.ControllerIdentity.make_joycon_pair(left, right)
+    assert pair.to_bytes() == bytes.fromhex("0503C10203040506C10203040506")
+    assert pair.joycon_pair_members() == (left, right)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerIdentity.make_joycon_pair(left, replace(right, address_type=0))
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerIdentity.make_joycon_pair(right, left)
+
+
+@pytest.mark.parametrize("wire", [
+    "0003102030405060C12233445566",  # Stable flag missing.
+    "0D03102030405060C12233445566",  # Reserved flag.
+    "0303102030405060C12233445566",  # Left random address is not static.
+    "0503C12233445566102030405060",  # Right random address is not static.
+    "0103102030405060102030405060",  # Duplicate typed members.
+])
+def test_joycon_pair_rejects_malformed_wire(wire: str) -> None:
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerIdentity.from_bytes(bytes.fromhex(wire))
+
+
+@pytest.mark.parametrize("malformation", [
+    "global", "classic", "vendor", "model", "address_type", "random_address",
+])
+def test_joycon_pair_requires_legitimate_ble_members(malformation: str) -> None:
+    pair = config_manager.ControllerIdentity.from_bytes(
+        bytes.fromhex("0503102030405060C12233445566")
+    )
+    left, right = pair.joycon_pair_members()
+    invalid = {
+        "global": config_manager.ControllerIdentity.global_fallback(),
+        "classic": replace(right, transport=config_manager.TRANSPORT_CLASSIC),
+        "vendor": replace(right, vendor_id=0x045E),
+        "model": replace(right, product_id=0x2069),
+        "address_type": replace(right, address_type=3),
+        "random_address": replace(right, address=bytes.fromhex("412233445566")),
+    }[malformation]
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerIdentity.make_joycon_pair(left, invalid)
+
+
+@pytest.mark.parametrize("fields", [
+    {"stable": False},
+    {"vendor_id": 0x045E},
+    {"product_id": 0x2066},
+    {"address_type": 2},
+    {"partner_address_type": 3},
+])
+def test_joycon_pair_rejects_inconsistent_in_memory_identity(fields: dict[str, object]) -> None:
+    pair = config_manager.ControllerIdentity.from_bytes(
+        bytes.fromhex("0503102030405060C12233445566")
+    )
+    with pytest.raises(config_manager.ConfigManagerError):
+        replace(pair, **fields)
+
+
+@pytest.mark.parametrize("fields", [
+    {"partner_address_type": 1},
+    {"partner_address": bytes.fromhex("C12233445566")},
+])
+def test_physical_identity_cannot_hide_pair_members(fields: dict[str, object]) -> None:
+    with pytest.raises(config_manager.ConfigManagerError):
+        replace(native_rumble_identity(), **fields)
+
+
+def test_pairing_inventory_rejects_logical_profile_owners() -> None:
+    device = FakeDevice()
+    device.records = [(config_manager.TRANSPORT_JOYCON_PAIR, 0, bytes.fromhex("102030405060"))]
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.read_pairings(device)
+
+
+def test_profile_cli_lists_both_pair_addresses_but_native_inventory_omits_pair(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    device = FakeDevice()
+    pair = config_manager.ControllerIdentity.from_bytes(
+        bytes.fromhex("0503102030405060C12233445566")
+    )
+    device.profile_identities.append(pair)
+    device.active_profiles[pair.to_bytes()] = 4
+    monkeypatch.setattr(config_manager, "find_pico", lambda *_: device)
+    assert config_manager.main(["profiles", "list"]) == 0
+    listing = capsys.readouterr().out
+    assert pair.address_text in listing
+    assert pair.partner_address_text in listing
+    assert pair.transport_text in listing
+    assert config_manager.main(["config", "native-rumble", "list"]) == 0
+    physical = capsys.readouterr().out
+    assert pair.partner_address_text not in physical
+    assert device.stable_identity.address_text in physical
 
 
 def test_identity_and_profile_binary_json_round_trip() -> None:

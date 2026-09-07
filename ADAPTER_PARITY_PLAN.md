@@ -639,8 +639,29 @@ Chromium checks covered all assets, ten layout/orientation views, mobile
 panning and non-overlapping hotspots, remapping, and simulated live topology
 transitions without losing focus or draft data. The connected real Joy-Con pair
 reported its paired layout on the flashed firmware. All 293 tests and all five
-firmware builds passed. Pair profiles still share the left bank at this
-checkpoint; independent pair banks are separate work.
+firmware builds passed at checkpoint `8451b1e`.
+
+Joy-Con 2 L + R now has a distinct persistent owner keyed by both typed
+Bluetooth addresses. Its first bank atomically snapshots the left bank's eight
+profiles, names and active slot; the new alias is empty. Both solo banks remain
+unchanged. Later edits are copy-on-write, reconnect never reseeds, and a
+different member combination gets a different owner. The first-ready USB slot
+and existing input/rumble generation barriers remain intact. Failed seed
+initialization leaves the first solo active.
+
+Indexed catalog 3 migrates catalog 1/2 atomically at boot. Tagged pair identities
+remain 14 bytes and cannot enter physical Bluetooth approval inventories.
+Regression coverage includes pair/solo edits and activation, both connection
+orders, member replacement, capacity, compaction, interrupted publication and
+committed-but-unacknowledged seeds. All 321 tests passed; the physical catalog
+migration preserved the seven existing owners and all 56 profiles, metadata,
+active selections and adapter settings.
+The real pair subsequently created its separate L + R owner: eight owners and
+64 profiles, with all eight initial pair profiles/names matching the left bank.
+An inactive pair-profile edit and rename survived reboot without touching either
+solo bank; independent activation was checked and all test settings restored.
+Studio's selected pair key matched the live firmware owner, and Identify
+produced two physical dispatches.
 
 | Priority | Candidate | Intended scope | Dependency or principal risk |
 |---|---|---|---|
@@ -733,7 +754,7 @@ Set B delivery evidence:
   fork changes. Dynamic GATT discovery, matched acknowledgements, calibration,
   normalized motion and retained finite/stateful rumble replace the unsafe
   fixed-handle/timeout-advance behavior in that proposal.
-- Joy-Con 2 pairs retain the first-ready USB slot and left profile identity;
+- Joy-Con 2 pairs retain the first-ready USB slot and use an independent pair identity;
   either connection order works. Right-half motion, both-half feedback,
   sideways solo operation and neutral detach transitions are implemented.
   A pair still consumes two of the four physical Bluetooth connections.
@@ -814,7 +835,7 @@ Current constraints:
   precedence, earliest deadlines, rotating ties, periodic credit reservations,
   and generation-bound grant completion. Radio power policy is unchanged.
 - Adapter configuration schema 3 persists up to 16 explicit physical approvals.
-  Profile schema 7/catalog 2 preserves prior settings; bonds and wake identity are unchanged.
+  Profile schema 7/catalog 3 preserves prior settings; bonds and wake identity are unchanged.
 - Original Switch Joy-Cons remain separate, horizontally mapped controllers.
   Joy-Con 2 logical pairing is a distinct BLE implementation described above.
 

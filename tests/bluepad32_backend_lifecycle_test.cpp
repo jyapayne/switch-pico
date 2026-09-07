@@ -14,6 +14,8 @@
 #include "parser/uni_switch2_pairing.h"
 #include "platform/pico/controller_color_config.h"
 #include "input/switch2_wake.h"
+#include "pico/critical_section.h"
+#include "profile/profile_storage.h"
 
 namespace {
 
@@ -648,7 +650,26 @@ void switch2_wake_diagnostics(Switch2WakeDiagnostics*) {
 }
 
 #include "core/controller_identity.cpp"
+namespace {
+unsigned state_lock_depth = 0;
+
+void tracked_state_lock_enter(critical_section_t* lock) {
+    critical_section_enter_blocking(lock);
+    ++state_lock_depth;
+}
+
+void tracked_state_lock_exit(critical_section_t* lock) {
+    require(state_lock_depth != 0, "state lock exit must match an enter");
+    --state_lock_depth;
+    critical_section_exit(lock);
+}
+}  // namespace
+
+#define critical_section_enter_blocking tracked_state_lock_enter
+#define critical_section_exit tracked_state_lock_exit
 #include "input/bluepad32_input_backend.cpp"
+#undef critical_section_enter_blocking
+#undef critical_section_exit
 
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 namespace {
@@ -701,6 +722,61 @@ void haptics_transport_probe_send(uint32_t, uint32_t, bool) {}
 #endif
 
 namespace {
+uint8_t profile_flash[PROFILE_STORAGE_ARENA_COUNT][PROFILE_STORAGE_ARENA_SIZE]{};
+ProfileStorage runtime_profile_storage;
+bool runtime_profile_storage_initialized = false;
+bool fail_profile_program = false;
+unsigned pair_observation_count = 0;
+void (*before_pair_seed)(const ControllerIdentity&) = nullptr;
+
+bool runtime_profile_read(void*, uint8_t arena, size_t offset,
+                          uint8_t* output, size_t size) {
+    require(state_lock_depth == 0, "profile reads must not hold the input state lock");
+    if (arena >= PROFILE_STORAGE_ARENA_COUNT ||
+        offset > PROFILE_STORAGE_ARENA_SIZE ||
+        size > PROFILE_STORAGE_ARENA_SIZE - offset) {
+        return false;
+    }
+    memcpy(output, &profile_flash[arena][offset], size);
+    return true;
+}
+
+bool runtime_profile_erase(void*, uint8_t arena) {
+    require(state_lock_depth == 0, "profile erases must not hold the input state lock");
+    if (arena >= PROFILE_STORAGE_ARENA_COUNT) return false;
+    memset(profile_flash[arena], 0xff, PROFILE_STORAGE_ARENA_SIZE);
+    return true;
+}
+
+bool runtime_profile_program(void*, uint8_t arena, size_t offset,
+                             const uint8_t* page, size_t size) {
+    require(state_lock_depth == 0, "profile writes must not hold the input state lock");
+    if (fail_profile_program || arena >= PROFILE_STORAGE_ARENA_COUNT ||
+        size != PROFILE_STORAGE_PAGE_SIZE ||
+        offset % PROFILE_STORAGE_PAGE_SIZE != 0 ||
+        offset > PROFILE_STORAGE_ARENA_SIZE - size) {
+        return false;
+    }
+    for (size_t index = 0; index < size; ++index) {
+        profile_flash[arena][offset + index] &= page[index];
+    }
+    return memcmp(&profile_flash[arena][offset], page, size) == 0;
+}
+
+ProfileStorageIo runtime_profile_io() {
+    return {nullptr, PROFILE_STORAGE_ARENA_SIZE,
+            PROFILE_STORAGE_SECTOR_SIZE, PROFILE_STORAGE_PAGE_SIZE,
+            runtime_profile_read, runtime_profile_erase, runtime_profile_program};
+}
+
+void initialize_runtime_profile_storage() {
+    if (runtime_profile_storage_initialized) return;
+    memset(profile_flash, 0xff, sizeof(profile_flash));
+    require(runtime_profile_storage.initialize(runtime_profile_io()),
+            "runtime profile catalog must initialize");
+    runtime_profile_storage_initialized = true;
+}
+
 void require_clear_completion_pending() {
     if (expected_pending_clear_token != 0) {
         require(!bluepad32_input_backend_clear_pairings_completed(
@@ -752,7 +828,22 @@ bool profile_service_observe_identity_on_storage_core(
             "profile identity observation fixture overflow");
     observed_profile_identities[observed_profile_identity_count++] =
         identity;
+    if (runtime_profile_storage_initialized) {
+        const ProfileStorageResult result = runtime_profile_storage.ensure_identity(identity);
+        return result == ProfileStorageResult::kOk ||
+               result == ProfileStorageResult::kUnchanged;
+    }
     return true;
+}
+bool profile_service_observe_joycon_pair_on_storage_core(
+    const ControllerIdentity& identity) {
+    require(state_lock_depth == 0, "pair admission must release the input state lock");
+    ++pair_observation_count;
+    if (before_pair_seed != nullptr) before_pair_seed(identity);
+    initialize_runtime_profile_storage();
+    const ProfileStorageResult result = runtime_profile_storage.ensure_joycon_pair(identity);
+    return result == ProfileStorageResult::kOk ||
+           result == ProfileStorageResult::kUnchanged;
 }
 void configuration_service_snapshot(ConfigurationServiceSnapshot* output) {
     *output = {};
@@ -840,6 +931,10 @@ void dispatch_identity_event(uint8_t event_type,
     packet[2] = static_cast<uint8_t>(controller.conn.handle);
     packet[3] = static_cast<uint8_t>(controller.conn.handle >> 8);
     switch (event_type) {
+        case SM_EVENT_IDENTITY_RESOLVING_STARTED:
+        case SM_EVENT_IDENTITY_RESOLVING_FAILED:
+            packet_size = 11;
+            break;
         case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:
             packet_size = sizeof(packet);
             packet[4] = BD_ADDR_TYPE_LE_RANDOM;
@@ -966,6 +1061,32 @@ Bluepad32SlotSnapshot slot_snapshot(uint8_t index) {
     Bluepad32SlotSnapshot result{};
     bluepad32_input_backend_snapshot(index, &result);
     return result;
+}
+
+void require_pair_owner(const ControllerIdentity& identity,
+                        const uni_hid_device_t& left,
+                        const uni_hid_device_t& right) {
+    ControllerIdentity left_member{};
+    ControllerIdentity right_member{};
+    require(controller_identity_is_joycon_pair(identity) &&
+                controller_identity_joycon_pair_members(
+                    identity, &left_member, &right_member) &&
+                controller_identity_equal(left_member, identity_for_device(&left)) &&
+                controller_identity_equal(right_member, identity_for_device(&right)) &&
+                !controller_identity_equal(identity, left_member) &&
+                !controller_identity_equal(identity, right_member),
+            "logical owner must distinguish both typed physical members from their solo owners");
+}
+
+void require_active_profile(const ControllerIdentity& identity,
+                            uint8_t expected_index, uint8_t expected_scale) {
+    const ProfileStorageIdentityIndex* owner = runtime_profile_storage.find(identity);
+    ControllerProfile profile{};
+    require(owner != nullptr && owner->active_profile == expected_index &&
+                runtime_profile_storage.get(identity, owner->active_profile, &profile) ==
+                    ProfileStorageResult::kOk &&
+                profile.weak_rumble_scale == expected_scale,
+            "live owner must resolve its independent persisted active profile");
 }
 
 ControllerRumbleOutput ordered_switch2_hd(uint8_t frequency = 40) {
@@ -1315,6 +1436,18 @@ void test_switch2_pair_lifecycle(bool right_first) {
         right_first ? 1 : 0, UNI_SW2_JOYCON_L_PID);
     uni_hid_device_t right = switch2_device(
         right_first ? 0 : 1, UNI_SW2_JOYCON_R_PID);
+    left.conn.btaddr[0] = 0xc1;
+    left.switch2_identity_address_type = BD_ADDR_TYPE_LE_RANDOM;
+    initialize_runtime_profile_storage();
+    const ControllerIdentity left_identity = identity_for_device(&left);
+    const ControllerIdentity right_identity = identity_for_device(&right);
+    ControllerProfile left_profile = controller_profile_default(left_identity, 2);
+    left_profile.weak_rumble_scale = 37;
+    require(runtime_profile_storage.set(left_identity, 2, left_profile) ==
+                ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(left_identity, 2) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(right_identity, 5) == ProfileStorageResult::kOk,
+            "solo owners must have independently selected profiles before pairing");
     uni_hid_device_t& first = right_first ? right : left;
     uni_hid_device_t& second = right_first ? left : right;
     ready_switch2(first);
@@ -1366,13 +1499,23 @@ void test_switch2_pair_lifecycle(bool right_first) {
 
     Bluepad32SlotSnapshot merged = slot_snapshot(0);
     require(merged.active && !slot_snapshot(1).active &&
-                merged.connection_generation != solo.connection_generation &&
-                controller_identity_equal(merged.identity, identity_for_device(&left)),
-            "either connection order must merge into first output with left profile owner");
+                merged.connection_generation != solo.connection_generation,
+            "either connection order must merge into the first-ready output");
+    require_pair_owner(merged.identity, left, right);
+    require_active_profile(merged.identity, 2, 37);
+    ControllerProfile pair_profile = controller_profile_default(merged.identity, 7);
+    pair_profile.weak_rumble_scale = 95;
+    require(runtime_profile_storage.set(merged.identity, 7, pair_profile) ==
+                ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(merged.identity, 7) == ProfileStorageResult::kOk,
+            "the merged bank must be independently editable");
+    require_active_profile(left_identity, 2, 37);
+    require_active_profile(right_identity, 5, UINT8_MAX);
     bluepad32_input_backend_playtest_snapshot(0, &playtest);
     require(playtest.controller_layout ==
                 Bluepad32ControllerLayout::kJoyCon2MergedPair &&
-                playtest.state.motion_sample_count == 0,
+                playtest.state.motion_sample_count == 0 &&
+                controller_identity_equal(playtest.identity, merged.identity),
             "playtest must detect a live companion before any merged motion report");
     Bluepad32CaptureSnapshot capture{};
     require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
@@ -1391,6 +1534,28 @@ void test_switch2_pair_lifecycle(bool right_first) {
     require(left.rumble_calls + right.rumble_calls == calls_after_merge &&
                 left.player_leds == 1 && right.player_leds == 1,
             "old-generation solo feedback must not reach the pair");
+    require(!bluepad32_input_backend_identify(left_identity) &&
+                !bluepad32_input_backend_identify(right_identity) &&
+                bluepad32_input_backend_identify(merged.identity),
+            "identify must match the pair owner, not either physical solo owner");
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_low == UINT8_MAX && right.last_low == UINT8_MAX &&
+                left.player_leds == 1 && right.player_leds == 1,
+            "identifying the pair owner must reach both physical halves");
+    now_ms += 150;
+    process_rumble_timer(&g_rumble_timer);
+    dispatch_identity_event(SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED, left,
+                            left.switch2_identity_address_type, left.conn.btaddr);
+    dispatch_identity_event(SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED, right,
+                            right.switch2_identity_address_type, right.conn.btaddr);
+    require(controller_identity_equal(slot_snapshot(0).identity, merged.identity),
+            "physical identity publication must not replace an enrolled composite owner");
+    dispatch_identity_event(SM_EVENT_IDENTITY_RESOLVING_FAILED, left,
+                            left.switch2_identity_address_type, left.conn.btaddr);
+    dispatch_identity_event(SM_EVENT_IDENTITY_RESOLVING_STARTED, right,
+                            right.switch2_identity_address_type, right.conn.btaddr);
+    require(controller_identity_equal(slot_snapshot(0).identity, merged.identity),
+            "physical identity resolution resets must not demote a live pair to global");
     platform_on_controller_data(&left, &left_data);
     platform_on_controller_data(&right, &right_data);
     merged = slot_snapshot(0);
@@ -1456,6 +1621,10 @@ void test_switch2_pair_lifecycle(bool right_first) {
                 !detached.state.dpad_up && !detached.state.button_east &&
                 (right_first ? detached.state.button_south : detached.state.button_west),
             "either half detach must immediately publish only the rotated survivor and own profile");
+    require_active_profile(detached.identity, right_first ? 5 : 2,
+                           right_first ? UINT8_MAX : 37);
+    require(!bluepad32_input_backend_identify(merged.identity),
+            "an offline pair bank must not identify its surviving solo member");
     bluepad32_input_backend_playtest_snapshot(0, &playtest);
     require(playtest.controller_layout ==
                 (right_first ? Bluepad32ControllerLayout::kJoyCon2RightSolo
@@ -1477,12 +1646,21 @@ void test_switch2_pair_lifecycle(bool right_first) {
                 slot_snapshot(0).state.extra_buttons == survivor.switch2_extra_buttons,
             "late detached input and generation-bound feedback must be ignored");
     uni_hid_device_t replacement = switch2_device(lost.idx, lost.product_id);
+    memcpy(replacement.conn.btaddr, lost.conn.btaddr, sizeof(bd_addr_t));
+    replacement.switch2_identity_address_type = lost.switch2_identity_address_type;
+    left_profile.weak_rumble_scale = 61;
+    require(runtime_profile_storage.set(left_identity, 2, left_profile) ==
+                ProfileStorageResult::kOk,
+            "changing the source solo must remain independent while detached");
     ready_switch2(replacement);
     platform_on_device_disconnected(&lost);
     require(slot_snapshot(0).active && !slot_snapshot(1).active &&
                 slot_snapshot(0).state.extra_buttons == survivor.switch2_extra_buttons &&
                 slot_snapshot(0).connection_generation != detached.connection_generation,
             "replacement must re-pair without stale presses or a late old disconnect");
+    require(controller_identity_equal(slot_snapshot(0).identity, merged.identity),
+            "rejoining the same typed physical members must restore the same pair owner");
+    require_active_profile(slot_snapshot(0).identity, 7, 95);
     const uint32_t clear_token = bluepad32_input_backend_clear_pairings();
     process_rumble_timer(&g_rumble_timer);
     Bluepad32PairingSnapshot cleared{};
@@ -1506,11 +1684,11 @@ void test_switch2_multiple_pairs() {
     ready_switch2(left1);
     require(slot_snapshot(0).active && slot_snapshot(1).active &&
                 !slot_snapshot(2).active && !slot_snapshot(3).active &&
-                controller_identity_equal(slot_snapshot(0).identity, identity_for_device(&left0)) &&
-                controller_identity_equal(slot_snapshot(1).identity, identity_for_device(&left1)) &&
                 g_connection_policy_state == ConnectionPolicyState::Paused &&
                 !scanning_enabled && !incoming_connections,
             "two deterministic pairs must consume four physical resources but only two outputs");
+    require_pair_owner(slot_snapshot(0).identity, left0, right0);
+    require_pair_owner(slot_snapshot(1).identity, left1, right1);
     uni_controller_t data{};
     data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
     data.gamepad.buttons = BUTTON_A;
@@ -1550,6 +1728,128 @@ void test_switch2_multiple_pairs() {
                 slot_snapshot(1).connection_generation == other_pair.connection_generation &&
                 slot_snapshot(1).state.button_north,
             "remapped ordinary physical index must isolate input and feedback from both pairs");
+}
+
+void test_switch2_pair_admission_failure(bool right_first) {
+    start_pairing_backend();
+    initialize_runtime_profile_storage();
+    auto left = switch2_device(right_first ? 1 : 0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(right_first ? 0 : 1, UNI_SW2_JOYCON_R_PID);
+    auto& first = right_first ? right : left;
+    auto& second = right_first ? left : right;
+    ready_switch2(first);
+    const ControllerIdentity solo_identity = identity_for_device(&first);
+    require(runtime_profile_storage.activate(solo_identity, 3) == ProfileStorageResult::kOk,
+            "the first solo must have an existing independent active profile");
+    uni_controller_t data{};
+    data.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    data.gamepad.buttons = BUTTON_TRIGGER_L | BUTTON_TRIGGER_R;
+    platform_on_controller_data(&first, &data);
+    const auto solo = slot_snapshot(0);
+    require(bluepad32_input_backend_capture_start(
+                0, solo.connection_generation, CaptureOptions{}),
+            "the first solo must remain recordable during pair admission");
+    bluepad32_input_backend_queue_profile_feedback(
+        0, solo.connection_generation, 2, ControllerProfileConfirmationPolicy::kRumble);
+    const int initial_rumble_calls = first.rumble_calls;
+    platform_on_device_connected(&second);
+    second.switch2_identity_valid = false;
+    require(platform_on_device_ready(&second) == UNI_ERROR_INIT_FAILED &&
+                pair_observation_count == 0 &&
+                first.rumble_calls == initial_rumble_calls,
+            "an unstable member must reject pairing before storage or solo output changes");
+    second.switch2_identity_valid = true;
+    first.switch2_identity_valid = false;
+    require(platform_on_device_ready(&second) == UNI_ERROR_INIT_FAILED &&
+                pair_observation_count == 0 &&
+                controller_identity_equal(slot_snapshot(0).identity, solo_identity),
+            "an unresolved first-ready member must not merge using its stale solo owner");
+    first.switch2_identity_valid = true;
+    require(runtime_profile_storage.ensure_identity(identity_for_device(&second)) ==
+                ProfileStorageResult::kOk,
+            "preexisting member rows must allow exercising failure of the actual pair seed");
+    before_pair_seed = [](const ControllerIdentity&) {
+        const auto first_solo = slot_snapshot(0);
+        Bluepad32CaptureSnapshot capture{};
+        require(first_solo.active &&
+                    first_solo.identity.transport == ControllerTransport::kBle &&
+                    !slot_snapshot(1).active &&
+                    bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                    capture.state == CaptureState::kRecording,
+                "persistent pair setup must precede any visible solo topology change");
+    };
+    fail_profile_program = true;
+    require(platform_on_device_ready(&second) == UNI_ERROR_INIT_FAILED &&
+                pair_observation_count == 1,
+            "pair seed I/O failure must explicitly reject the second ready callback");
+    const auto rejected = slot_snapshot(0);
+    require(rejected.active && !slot_snapshot(1).active &&
+                rejected.connection_generation == solo.connection_generation &&
+                controller_identity_equal(rejected.identity, solo_identity) &&
+                rejected.state.left_trigger == solo.state.left_trigger &&
+                first.rumble_calls == initial_rumble_calls &&
+                first.player_leds == 1 && second.player_leds == 0,
+            "seed failure must leave the first solo's owner, input, generation and outputs intact");
+    ControllerIdentity pair_identity{};
+    require(controller_identity_make_joycon_pair(
+                identity_for_device(&left), identity_for_device(&right), &pair_identity) &&
+                runtime_profile_storage.find(pair_identity) == nullptr,
+            "a failed pair seed must not expose a partial persistent owner");
+    process_rumble_timer(&g_rumble_timer);
+    require(first.last_low == UINT8_MAX && second.rumble_calls == 0,
+            "a rejected merge must retain the first solo's queued generation-bound feedback");
+    fail_profile_program = false;
+    require(platform_on_device_ready(&second) == UNI_ERROR_INIT_FAILED,
+            "a retry before catalog replay must not expose a failed seed");
+    require(runtime_profile_storage.initialize(runtime_profile_io()),
+            "storage replay must recover intact member banks after admission failure");
+    require_active_profile(solo_identity, 3, UINT8_MAX);
+    require(platform_on_device_ready(&second) == UNI_ERROR_SUCCESS,
+            "a replayed catalog must allow the pending physical member to merge on retry");
+    before_pair_seed = nullptr;
+    require_pair_owner(slot_snapshot(0).identity, left, right);
+    require_active_profile(slot_snapshot(0).identity, right_first ? 0 : 3, UINT8_MAX);
+}
+
+void test_switch2_pair_member_replacement() {
+    start_pairing_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    right.conn.btaddr[0] = 0xc2;
+    ready_switch2(left);
+    ready_switch2(right);
+    const ControllerIdentity original = slot_snapshot(0).identity;
+    require(runtime_profile_storage.activate(original, 6) == ProfileStorageResult::kOk,
+            "the original physical pair must have a distinct saved selection");
+    platform_on_device_disconnected(&right);
+    auto replacement = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    replacement.conn.btaddr[5] = 0x35;
+    ready_switch2(replacement);
+    const ControllerIdentity replaced = slot_snapshot(0).identity;
+    require_pair_owner(replaced, left, replacement);
+    require(!controller_identity_equal(original, replaced) &&
+                !bluepad32_input_backend_identify(original),
+            "swapping only the right member must select a different pair bank and owner");
+    require_active_profile(replaced, 0, UINT8_MAX);
+    require(runtime_profile_storage.activate(replaced, 4) == ProfileStorageResult::kOk,
+            "the replacement pair bank must be independently selectable");
+    platform_on_device_disconnected(&replacement);
+    ready_switch2(right);
+    require(controller_identity_equal(slot_snapshot(0).identity, original),
+            "restoring the original right member must restore the original pair key");
+    require_active_profile(slot_snapshot(0).identity, 6, UINT8_MAX);
+    require_active_profile(replaced, 4, UINT8_MAX);
+    platform_on_device_disconnected(&right);
+    auto typed_right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    memcpy(typed_right.conn.btaddr, right.conn.btaddr, sizeof(bd_addr_t));
+    typed_right.switch2_identity_address_type = BD_ADDR_TYPE_LE_RANDOM;
+    ready_switch2(typed_right);
+    const ControllerIdentity retyped = slot_snapshot(0).identity;
+    require_pair_owner(retyped, left, typed_right);
+    require(!controller_identity_equal(retyped, original),
+            "a member's address type must participate in the pair key even with the same MAC");
+    require_active_profile(retyped, 0, UINT8_MAX);
+    require_active_profile(original, 6, UINT8_MAX);
 }
 
 void test_switch2_admission() {
@@ -1763,9 +2063,9 @@ void test_switch2_mate_reconnect() {
             "mate setup must pause background scanning while reserving physical capacity");
     require(platform_on_device_ready(&left) == UNI_ERROR_SUCCESS &&
                 slot_snapshot(0).active && !slot_snapshot(1).active &&
-                controller_identity_equal(slot_snapshot(0).identity, identity_for_device(&left)) &&
                 !scanning_enabled && !classic_scanning_enabled,
             "ready remembered mate must merge without a pairing window and stop background scanning");
+    require_pair_owner(slot_snapshot(0).identity, left, right);
     auto ordinary = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
     platform_on_device_connected(&ordinary);
     require(platform_on_device_ready(&ordinary) == UNI_ERROR_SUCCESS &&
@@ -4001,6 +4301,12 @@ int main(int argc, char** argv) {
         test_switch2_pair_lifecycle(true);
     } else if (scenario == "switch2-multiple-pairs") {
         test_switch2_multiple_pairs();
+    } else if (scenario == "switch2-pair-failure-left") {
+        test_switch2_pair_admission_failure(false);
+    } else if (scenario == "switch2-pair-failure-right") {
+        test_switch2_pair_admission_failure(true);
+    } else if (scenario == "switch2-pair-replacement") {
+        test_switch2_pair_member_replacement();
     } else if (scenario == "switch2-admission") {
         test_switch2_admission();
     } else if (scenario == "switch2-radio-policy") {

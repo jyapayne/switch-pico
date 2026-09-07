@@ -132,6 +132,7 @@ PAIRING_RECORD_CAPACITY = 16
 TRANSPORT_UNKNOWN = 0
 TRANSPORT_CLASSIC = 1
 TRANSPORT_BLE = 2
+TRANSPORT_JOYCON_PAIR = 3
 PROFILE_LEGACY_SCHEMA_VERSION = 1
 PROFILE_TRIGGER_THRESHOLD_SCHEMA_VERSION = 2
 PROFILE_CONTROL_MAPPING_SCHEMA_VERSION = 3
@@ -622,6 +623,10 @@ class PairingRecord:
     address_type: int
     address: bytes
 
+    def __post_init__(self) -> None:
+        if self.transport not in (TRANSPORT_CLASSIC, TRANSPORT_BLE):
+            raise ConfigManagerError("pairing record must identify a physical Bluetooth peer")
+
     @property
     def address_text(self) -> str:
         return ":".join(f"{octet:02X}" for octet in self.address)
@@ -767,15 +772,39 @@ class ControllerIdentity:
     address: bytes
     vendor_id: int
     product_id: int
+    partner_address_type: int = 0
+    partner_address: bytes = bytes(6)
 
     def __post_init__(self) -> None:
         _require_bool(self.stable, "identity stable")
-        _require_int(self.transport, "identity transport", 0, 2)
+        _require_int(self.transport, "identity transport", 0, TRANSPORT_JOYCON_PAIR)
         _require_int(self.address_type, "identity address_type", 0, 0xFF)
         if type(self.address) is not bytes or len(self.address) != 6:
             raise ConfigManagerError("identity address must contain six bytes")
         _require_int(self.vendor_id, "identity vendor_id", 0, 0xFFFF)
         _require_int(self.product_id, "identity product_id", 0, 0xFFFF)
+        _require_int(self.partner_address_type, "identity partner_address_type", 0, 0xFF)
+        if type(self.partner_address) is not bytes or len(self.partner_address) != 6:
+            raise ConfigManagerError("identity partner_address must contain six bytes")
+        if self.is_joycon_pair:
+            if (
+                not self.stable
+                or self.vendor_id != 0x057E
+                or self.product_id != 0x2067
+                or self.address_type not in (0, 1)
+                or self.partner_address_type not in (0, 1)
+                or (self.address_type == 1 and self.address[0] & 0xC0 != 0xC0)
+                or (
+                    self.partner_address_type == 1
+                    and self.partner_address[0] & 0xC0 != 0xC0
+                )
+                or (self.address_type, self.address)
+                == (self.partner_address_type, self.partner_address)
+            ):
+                raise ConfigManagerError("invalid Joy-Con 2 pair identity")
+            return
+        if self.partner_address_type != 0 or self.partner_address != bytes(6):
+            raise ConfigManagerError("physical identity cannot contain a partner address")
         if self.stable:
             if self.transport not in (TRANSPORT_CLASSIC, TRANSPORT_BLE):
                 raise ConfigManagerError(
@@ -797,10 +826,52 @@ class ControllerIdentity:
         return cls(False, TRANSPORT_UNKNOWN, 0, bytes(6), 0, 0)
 
     @classmethod
+    def make_joycon_pair(
+        cls, left: ControllerIdentity, right: ControllerIdentity
+    ) -> ControllerIdentity:
+        for member, product_id in ((left, 0x2067), (right, 0x2066)):
+            if (
+                not isinstance(member, ControllerIdentity)
+                or not member.stable
+                or member.transport != TRANSPORT_BLE
+                or member.vendor_id != 0x057E
+                or member.product_id != product_id
+                or member.address_type not in (0, 1)
+            ):
+                raise ConfigManagerError(
+                    "pair members must be stable BLE Joy-Con 2 (L) and (R) identities"
+                )
+        return cls(
+            True, TRANSPORT_JOYCON_PAIR, left.address_type, left.address,
+            0x057E, 0x2067, right.address_type, right.address,
+        )
+
+    def joycon_pair_members(self) -> tuple[ControllerIdentity, ControllerIdentity]:
+        if not self.is_joycon_pair:
+            raise ConfigManagerError("identity is not a Joy-Con 2 pair")
+        return (
+            ControllerIdentity(
+                True, TRANSPORT_BLE, self.address_type, self.address, 0x057E, 0x2067,
+            ),
+            ControllerIdentity(
+                True, TRANSPORT_BLE, self.partner_address_type, self.partner_address,
+                0x057E, 0x2066,
+            ),
+        )
+
+    @classmethod
     def from_bytes(cls, payload: bytes) -> ControllerIdentity:
         payload = bytes(payload)
         if len(payload) != CONTROLLER_IDENTITY_SIZE:
             raise ConfigManagerError("invalid controller identity size")
+        if payload[1] == TRANSPORT_JOYCON_PAIR:
+            flags = payload[0]
+            if flags & ~0x07 or not flags & 1:
+                raise ConfigManagerError("invalid Joy-Con 2 pair flags")
+            return cls(
+                True, TRANSPORT_JOYCON_PAIR, (flags >> 1) & 1, payload[2:8],
+                0x057E, 0x2067, (flags >> 2) & 1, payload[8:14],
+            )
         stable, transport, address_type, reserved = payload[:4]
         if stable not in (0, 1) or reserved != 0:
             raise ConfigManagerError("invalid controller identity encoding")
@@ -815,6 +886,15 @@ class ControllerIdentity:
         )
 
     def to_bytes(self) -> bytes:
+        if self.is_joycon_pair:
+            return (
+                bytes((
+                    1 | (self.address_type << 1) | (self.partner_address_type << 2),
+                    TRANSPORT_JOYCON_PAIR,
+                ))
+                + self.address
+                + self.partner_address
+            )
         return (
             bytes(
                 [
@@ -833,8 +913,16 @@ class ControllerIdentity:
         return not self.stable
 
     @property
+    def is_joycon_pair(self) -> bool:
+        return self.transport == TRANSPORT_JOYCON_PAIR
+
+    @property
     def address_text(self) -> str:
         return ":".join(f"{octet:02X}" for octet in self.address)
+
+    @property
+    def partner_address_text(self) -> str:
+        return ":".join(f"{octet:02X}" for octet in self.partner_address)
 
     @property
     def transport_text(self) -> str:
@@ -842,7 +930,28 @@ class ControllerIdentity:
             return "Classic"
         if self.transport == TRANSPORT_BLE:
             return "BLE"
+        if self.is_joycon_pair:
+            return "BLE pair"
         return "Unknown"
+
+    def to_json_object(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "stable": self.stable,
+            "address": self.address_text,
+            "address_type": self.address_type,
+            "transport": self.transport_text,
+            "vendor_id": self.vendor_id,
+            "product_id": self.product_id,
+            "is_joycon_pair": self.is_joycon_pair,
+        }
+        if self.is_joycon_pair:
+            left, right = self.joycon_pair_members()
+            result.update(
+                partner_address=self.partner_address_text,
+                partner_address_type=self.partner_address_type,
+                members={"left": left.to_json_object(), "right": right.to_json_object()},
+            )
+        return result
 
 
 @dataclass(frozen=True)
@@ -919,12 +1028,7 @@ class ProfilePlaytest:
             "connection_generation": self.connection_generation,
             "state_generation": self.state_generation,
             "identity": (
-                {
-                    "address": self.identity.address_text,
-                    "transport": self.identity.transport_text,
-                    "vendor_id": self.identity.vendor_id,
-                    "product_id": self.identity.product_id,
-                }
+                self.identity.to_json_object()
                 if self.identity is not None
                 else None
             ),
@@ -4142,11 +4246,22 @@ def _print_pairings(snapshot: PairingSnapshot) -> None:
         print("Warning: additional pairings did not fit in the response.")
 
 
-def _print_profiles(entries: Sequence[ProfileListEntry]) -> None:
+def _print_profiles(
+    entries: Sequence[ProfileListEntry], *, physical_only: bool = False
+) -> None:
     for index, entry in enumerate(entries):
         identity = entry.identity
+        if physical_only and (identity.is_global_fallback or identity.is_joycon_pair):
+            continue
         if identity.is_global_fallback:
             description = "global fallback"
+        elif identity.is_joycon_pair:
+            description = (
+                f"Nintendo Joy-Con 2 (L+R) · {identity.transport_text} "
+                f"L {identity.address_text} address-type {identity.address_type}; "
+                f"R {identity.partner_address_text} "
+                f"address-type {identity.partner_address_type}"
+            )
         else:
             description = (
                 f"{identity.transport_text} {identity.address_text} "
@@ -4550,7 +4665,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(NATIVE_SWITCH_RUMBLE_APPROVAL_NOTE)
                     if configuration.schema_version != CONFIGURATION_SCHEMA_VERSION:
                         print("Native rumble approval requires schema 3 firmware.")
-                    _print_profiles(entries)
+                    _print_profiles(entries, physical_only=True)
                     for index, entry in enumerate(entries):
                         if entry.identity in configuration.native_switch_controllers:
                             print(

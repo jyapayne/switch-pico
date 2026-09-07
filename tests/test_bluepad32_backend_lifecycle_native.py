@@ -83,6 +83,8 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                 f"-I{root / 'src' / 'firmware'}",
                 f"-I{root / 'bluepad32_config'}",
                 str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
+                str(root / "src" / "firmware" / "profile" / "controller_profile.cpp"),
+                str(root / "src" / "firmware" / "profile" / "profile_storage.cpp"),
                 str(root / "bluepad32_config" / "parser" / "uni_switch2_haptics.c"),
                 str(
                     root / "src" / "firmware" / "input" / "controller_macro_capture.cpp"
@@ -97,6 +99,9 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "switch2-forward",
             "switch2-reverse",
             "switch2-multiple-pairs",
+            "switch2-pair-failure-left",
+            "switch2-pair-failure-right",
+            "switch2-pair-replacement",
             "switch2-admission",
             "switch2-radio-policy",
             "switch2-radio-settling",

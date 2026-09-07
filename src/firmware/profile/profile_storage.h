@@ -93,6 +93,7 @@ class ProfileStorage {
 public:
   bool initialize(const ProfileStorageIo &io);
   ProfileStorageResult ensure_identity(const ControllerIdentity &identity);
+  ProfileStorageResult ensure_joycon_pair(const ControllerIdentity &pair);
   ProfileStorageResult get(const ControllerIdentity &identity,
                            uint8_t profile_index,
                            ControllerProfile *output) const;
@@ -130,8 +131,10 @@ private:
     kActivate = 4,
     kAlias = 5,
     kProfileNames = 6,
+    kSeedJoyConPair = 7,
   };
 
+  bool valid_owner(const ControllerIdentity &identity) const;
   ProfileStorageResult scan_arena(
       uint8_t arena, uint16_t *version, uint32_t *epoch,
       uint32_t *generation, uint32_t *payload_crc, size_t *next_offset,
@@ -154,7 +157,7 @@ private:
                     const ControllerIdentity &identity, uint8_t profile_index,
                     uint32_t generation, const uint8_t *payload,
                     size_t payload_size) const;
-  void apply_record(ProfileStorageIdentityIndex *index, uint8_t *identity_count,
+  bool apply_record(ProfileStorageIdentityIndex *index, uint8_t *identity_count,
                     RecordType type, const ControllerIdentity &identity,
                     uint8_t profile_index, uint32_t generation,
                     uint32_t record) const;

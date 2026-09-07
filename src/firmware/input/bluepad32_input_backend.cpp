@@ -179,8 +179,8 @@ struct BackendSlot {
     ControllerIdentity identity;
     // Non-null with active=false is a connected device still becoming ready.
     uni_hid_device_t* device;
-    // A pair occupies one output/profile, but still consumes two of the four
-    // Bluepad32 physical device indices. The left half always owns identity.
+    // A pair occupies one logical profile owner and output, but still consumes
+    // two Bluepad32 physical device indices. device is always the left half.
     uni_hid_device_t* companion;
     uni_gamepad_t gamepad;
     uni_gamepad_t companion_gamepad;
@@ -698,7 +698,7 @@ void publish_ble_identity(const BleIdentityMapping& mapping) {
     bool observe_identity = false;
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
-        if (slot.device != nullptr &&
+        if (slot.device != nullptr && slot.companion == nullptr &&
             gap_get_connection_type(slot.device->conn.handle) ==
                 GAP_CONNECTION_LE &&
             slot.device->conn.handle == mapping.connection_handle &&
@@ -748,7 +748,7 @@ void clear_ble_identity_for_handle(hci_con_handle_t connection_handle) {
 
     critical_section_enter_blocking(&g_state_lock);
     for (BackendSlot& slot : g_slots) {
-        if (slot.device != nullptr &&
+        if (slot.device != nullptr && slot.companion == nullptr &&
             gap_get_connection_type(slot.device->conn.handle) ==
                 GAP_CONNECTION_LE &&
             slot.device->conn.handle == connection_handle) {
@@ -2326,6 +2326,35 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         }
         if (partner_index >= 0) {
             BackendSlot& partner = g_slots[partner_index];
+            const uint32_t partner_generation = partner.connection_generation;
+            const uint32_t pending_generation = pending.connection_generation;
+            uni_hid_device_t* const partner_device = partner.device;
+            const ControllerIdentity partner_identity =
+                identity_for_device(partner_device);
+            critical_section_exit(&g_state_lock);
+
+            ControllerIdentity pair_identity{};
+            if (!controller_identity_make_joycon_pair(
+                    side < 0 ? connection_identity : partner_identity,
+                    side < 0 ? partner_identity : connection_identity,
+                    &pair_identity) ||
+                !profile_service_observe_joycon_pair_on_storage_core(
+                    pair_identity)) {
+                return UNI_ERROR_INIT_FAILED;
+            }
+
+            // Storage can publish the complete bank without blocking Core 0.
+            // Only then replace the first-ready solo's topology and generation.
+            critical_section_enter_blocking(&g_state_lock);
+            if (!partner.active || partner.device != partner_device ||
+                partner.companion != nullptr ||
+                partner.connection_generation != partner_generation ||
+                pending.active ||
+                pending.connection_generation != pending_generation ||
+                reserve_device_slot(device) != slot_index) {
+                critical_section_exit(&g_state_lock);
+                return UNI_ERROR_INIT_FAILED;
+            }
             invalidate_slot(partner);
             if (side < 0) {
                 partner.companion = partner.device;
@@ -2340,8 +2369,8 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
                 partner.companion_extra_buttons = 0;
             }
             // Preserve the existing player's output index regardless of
-            // physical connection order, with the left identity as profile owner.
-            partner.identity = identity_for_device(partner.device);
+            // physical connection order, with a separately seeded pair owner.
+            partner.identity = pair_identity;
             refresh_topology_input(partner);
             release_slot(pending);
             slot_index = partner_index;
@@ -2399,7 +2428,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
                 apply_slot_lighting(static_cast<uint8_t>(slot_index), companion);
             }
         }
-        if (connection_identity.stable) {
+        if (!paired && connection_identity.stable) {
             profile_service_observe_identity_on_storage_core(
                 connection_identity);
         }
