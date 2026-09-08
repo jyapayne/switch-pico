@@ -320,6 +320,15 @@ h4 { font-size: 1rem; }
 .controller-live[data-state="live"] { color: var(--mint); }
 .layout-picker { margin-block: 16px 8px; }
 .layout-picker .select { width: 100%; margin-top: 6px; }
+.wii-orientation-control { margin-block: 14px 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(14, 23, 42, 0.6); }
+.wii-orientation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; align-items: center; }
+.wii-orientation-actions .select { flex: 1 1 220px; }
+.wii-orientation-actions .button { flex: 0 0 auto; }
+.wii-orientation-status { margin-top: 8px; font-size: 0.74rem; line-height: 1.5; overflow-wrap: anywhere; color: var(--mint); }
+.wii-orientation-status[data-state="idle"] { display: none; }
+.wii-orientation-status[data-state="pending"], .wii-orientation-status[data-state="unsupported"] { color: var(--amber); }
+.wii-orientation-status[data-state="error"] { color: var(--rose); }
+.wii-orientation-status[data-state="locked"] { color: var(--muted); }
 .controller-viewport { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 16px 0; scrollbar-color: var(--subtle) var(--surface-2); }
 .controller-viewport:focus-visible { outline: 2px solid var(--sky); outline-offset: 2px; }
 .controller-photo-wrap { --diagram-min: 640px; --diagram-max: 900px; position: relative; width: 100%; min-width: var(--diagram-min); max-width: var(--diagram-max); margin: 0 auto; aspect-ratio: var(--diagram-ratio, 800 / 552); }

@@ -567,7 +567,14 @@ void test_profile_vendor_requests() {
                 control_payload[kResponseHeaderSize + 55] == 3,
             "profile playtest response lost live controller state");
     current_playtest[2].controller_layout =
-        static_cast<Bluepad32ControllerLayout>(6);
+        Bluepad32ControllerLayout::kWiiVertical;
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                control_payload[10] == 5 &&
+                control_payload[kResponseHeaderSize + 55] == 7,
+            "Wii orientation must be available through schema-5 playtest");
+    current_playtest[2].controller_layout =
+        static_cast<Bluepad32ControllerLayout>(8);
     uint8_t invalid_playtest[kMaximumResponseSize]{};
     require(encode_profile_playtest(
                 2, current_playtest[2], invalid_playtest, sizeof(invalid_playtest)) == 0,
@@ -628,6 +635,25 @@ void test_profile_vendor_requests() {
     perform_out(Operation::kProfileIdentify, identify);
     require(identify_requested,
             "controller Identify request was not dispatched");
+
+    std::vector<uint8_t> orientation = identify;
+    orientation.resize(CONTROLLER_IDENTITY_ENCODED_SIZE + 5);
+    write_u32(&orientation, CONTROLLER_IDENTITY_ENCODED_SIZE, 0x11223344);
+    orientation.back() = 1;
+    perform_out(Operation::kWiiOrientation, orientation);
+    orientation.back() = 2;
+    next_out_payload = make_request(Operation::kWiiOrientation, orientation);
+    request = setup_request(Operation::kWiiOrientation, TUSB_DIR_OUT,
+                            static_cast<uint16_t>(next_out_payload.size()));
+    require(usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request) &&
+                !usb_configuration_management_vendor_control(
+                    0, CONTROL_STAGE_ACK, &request),
+            "invalid Wii orientation was treated as vertical");
+    request.wLength--;
+    require(!usb_configuration_management_vendor_control(
+                0, CONTROL_STAGE_SETUP, &request),
+            "truncated Wii orientation request was accepted");
 
     current_profile_transaction = {};
     current_profile_transaction.metadata.state =
@@ -1128,6 +1154,11 @@ void profile_service_metadata_snapshot(
 bool bluepad32_input_backend_identify(
     const ControllerIdentity&) {
     identify_requested = true;
+    return true;
+}
+
+bool bluepad32_input_backend_set_wii_orientation(
+    const ControllerIdentity&, uint32_t, bool) {
     return true;
 }
 

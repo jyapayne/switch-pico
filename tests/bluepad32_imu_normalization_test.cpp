@@ -75,14 +75,6 @@ void set_accel_calibration(
     }
 }
 
-void test_wii_accelerometer() {
-    int32_t output[3]{};
-    uni_imu_normalize_wii_accel(100, -50, 25, output);
-    expect(output[0] == -8192 && output[1] == 2048 &&
-               output[2] == -4096,
-           "Wii accelerometer scale or SDL axis mapping is wrong");
-}
-
 void test_zcm1_calibration_and_normalization() {
     constexpr auto model = UNI_PSMOVE_IMU_MODEL_ZCM1;
     std::array<uint8_t, UNI_PSMOVE_ZCM1_CALIBRATION_SIZE> blob{};
@@ -200,7 +192,6 @@ void test_uncalibrated_psmove_is_suppressed() {
 }  // namespace
 
 int main() {
-    test_wii_accelerometer();
     test_zcm1_calibration_and_normalization();
     test_zcm2_calibration_and_normalization();
     test_uncalibrated_psmove_is_suppressed();

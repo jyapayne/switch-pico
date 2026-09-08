@@ -1105,7 +1105,16 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_switch.c b/src/compo
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/components/bluepad32/parser/uni_hid_parser_wii.c
 --- a/src/components/bluepad32/parser/uni_hid_parser_wii.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_wii.c
-@@ -19,6 +19,7 @@
+@@ -5,6 +5,8 @@
+ // Technical info taken from:
+ // http://wiibrew.org/wiki/Wiimote
+ // https://github.com/dvdhrm/xwiimote/blob/master/doc/PROTOCOL
++// https://wiibrew.org/wiki/Wiimote/Extension_Controllers/Wii_Motion_Plus
++// Calibration signs: Dolphin WiimoteEmu/MotionPlus.cpp; axes: SDL_hidapi_wii.c.
+ 
+ #include <assert.h>
+ #include <stdbool.h>
+@@ -19,6 +21,7 @@
  #endif  // ENABLE_EEPROM_DUMP
  
  #include "parser/uni_hid_parser_wii.h"
@@ -1113,17 +1122,1202 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  
  #include "controller/uni_controller.h"
  #include "hid_usage.h"
-@@ -585,9 +586,7 @@
+@@ -82,6 +85,16 @@
+     WII_FSM_EXT_DID_INIT,             // Extension initialized
+     WII_FSM_EXT_DID_NO_ENCRYPTION,    // Extension no encryption
+     WII_FSM_EXT_DID_READ_REGISTER,    // Extension read register
++    WII_FSM_NUNCHUK_CALIBRATION,
++    WII_FSM_ACCEL_CALIBRATION,
++    WII_FSM_ACCEL_CALIBRATION_BACKUP,
++    WII_FSM_MP_PROBE,
++    WII_FSM_MP_INIT,
++    WII_FSM_MP_CALIBRATION_FAST,
++    WII_FSM_MP_CALIBRATION_SLOW,
++    WII_FSM_MP_ACTIVATE,
++    WII_FSM_MP_VERIFY,
++    WII_FSM_TOPOLOGY_STATUS,
+     WII_FSM_BALANCE_BOARD_READ_CALIBRATION,
+     WII_FSM_BALANCE_BOARD_READ_CALIBRATION2,
+     WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION,
+@@ -104,16 +117,6 @@
+     WII_READ_FROM_REGISTERS = 0x04,
+ } wii_read_type_t;
  
-     uni_controller_t* ctl = &d->controller;
+-// nunchuk_t represents the data provided by the Nunchuk.
+-typedef struct nunchuk_s {
+-    int sx;   // Analog stick X
+-    int sy;   // Analog stick Y
+-    int ax;   // Accelerometer X
+-    int ay;   // Accelerometer Y
+-    int az;   // Accelerometer Z
+-    bool bc;  // Button C
+-    bool bz;  // Button Z
+-} nunchuk_t;
  
+ // balance_board_t represents the data provided by the Balance Board.
+ typedef struct balance_board_s {
+@@ -144,7 +147,6 @@
+ // wii_instance_t represents data used by the Wii driver instance.
+ typedef struct wii_instance_s {
+     uint8_t state;
+-    uint8_t register_address;
+     wii_mode_t mode; /* horizontal, accel, vertical, rumble, etc.. */
+     enum wii_devtype dev_type;
+     enum wii_exttype ext_type;
+@@ -159,6 +161,29 @@
+     uint16_t rumble_duration_ms;
+ 
+     balance_board_calibration_t balance_board_calibration;
++
++    uint16_t read_address;
++    uint8_t read_size;
++    uint8_t report_type;
++    bool motion_setup_done;
++    bool accel_calibrated;
++    bool mp_calibrated;
++    bool mp_active;
++    bool ready;
++    bool ext_connected;
++    bool topology_pending;
++    uint8_t ext_retries;
++    uint16_t accel_zero[3];
++    uint16_t accel_span[3];
++    // Two factory blocks, fast then slow; preserve all 16 bits of calibration.
++    uint8_t mp_calibration[32];
++    int32_t accel[3];
++    int32_t gyro[3];
++    int16_t nunchuk_x;
++    int16_t nunchuk_y;
++    uint16_t nunchuk_buttons;
++    // Per-axis factory max/min/center, read before MotionPlus maps A4.
++    uint8_t nunchuk_stick_calibration[6];
+ 
+     // Debug only
+     int debug_fd;         // File descriptor where dump is saved
+@@ -177,7 +202,6 @@
+ static void process_drm_kae(uni_hid_device_t* d, const uint8_t* report, uint16_t len);
+ static void process_drm_kee(uni_hid_device_t* d, const uint8_t* report, uint16_t len);
+ static void process_drm_e(uni_hid_device_t* d, const uint8_t* report, uint16_t len);
+-static nunchuk_t process_nunchuk(const uint8_t* e, uint16_t len);
+ static udraw_tablet_t process_udraw_tablet(const uint8_t* e, uint16_t len);
+ static balance_board_t process_balance_board(uni_hid_device_t* d, const uint8_t* e, uint16_t len);
+ 
+@@ -196,6 +220,8 @@
+ static void on_wii_set_rumble_on(btstack_timer_source_t* ts);
+ static void on_wii_set_rumble_off(btstack_timer_source_t* ts);
+ static void wii_play_dual_rumble_now(struct uni_hid_device_s* d, uint16_t duration_ms);
++
++static void wii_write_register(uni_hid_device_t* d, uint32_t address, uint8_t value);
+ 
+ // Constants
+ static const char* wii_devtype_names[] = {
+@@ -217,124 +243,258 @@
+ 
+ // process_ functions
+ 
+-// Defined here: http://wiibrew.org/wiki/Wiimote#0x20:_Status
++static void wii_setup_read(uni_hid_device_t* d, enum wii_fsm state, wii_read_type_t type,
++                           uint32_t address, uint8_t size) {
++    get_wii_instance(d)->state = state;
++    wii_read_mem(d, type, address, size);
++}
++
++static bool wii_is_motion_plus(const uint8_t* id) {
++    // Like SDL/Linux, identify the data format/type suffix, not a vendor prefix.
++    return (id[4] == 0 || id[4] == 4 || id[4] == 5 || id[4] == 7) && id[5] == 5;
++}
++
++static void wii_clear_extension(uni_hid_device_t* d) {
++    wii_instance_t* ins = get_wii_instance(d);
++    d->controller.gamepad.axis_x = 0;
++    d->controller.gamepad.axis_y = 0;
++    d->controller.gamepad.axis_rx = 0;
++    d->controller.gamepad.axis_ry = 0;
++    d->controller.gamepad.buttons &= ~ins->nunchuk_buttons;
++    ins->nunchuk_x = 0;
++    ins->nunchuk_y = 0;
++    ins->nunchuk_buttons = 0;
++    // Documented typical physical gate: center 128, travel +/-96.
++    // Keep clones with unreadable calibration usable; never learn from a held stick.
++    static const uint8_t nominal_stick[] = {224, 32, 128, 224, 32, 128};
++    memcpy(ins->nunchuk_stick_calibration, nominal_stick, sizeof(nominal_stick));
++    ins->ext_type = WII_EXT_NONE;
++    d->controller_subtype = ins->mode == WII_MODE_VERTICAL ?
++                               CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL : CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
++}
++
++static void wii_discover_extension(uni_hid_device_t* d) {
++    wii_instance_t* ins = get_wii_instance(d);
++    wii_clear_extension(d);
++    ins->topology_pending = false;
++    ins->ext_retries = 0;
++    ins->motion_setup_done = false;
++    // A400F0 unmaps an active MP and exposes its downstream extension.
++    // Do not decode in-flight extension bytes until the new topology is ready.
++    ins->mp_active = false;
++    wii_fsm_ext_init(d);
++}
++
++static bool wii_retry_extension(uni_hid_device_t* d) {
++    wii_instance_t* ins = get_wii_instance(d);
++    // Reply-paced transactions allow an initializing/partially inserted
++    // extension to settle without a timer that could outlive this device.
++    // Re-read after successful initialization rather than repeatedly resetting
++    // it, which could restart the initialization on each attempt.
++    if (ins->ext_connected && ins->ext_retries++ < 3) {
++        if (ins->state == WII_FSM_EXT_DID_READ_REGISTER)
++            wii_fsm_ext_read_register(d);
++        else
++            wii_fsm_ext_init(d);
++        return true;
++    }
++    return false;
++}
++
++static void wii_confirm_topology(uni_hid_device_t* d) {
++    wii_instance_t* ins = get_wii_instance(d);
++    if (!ins->mp_active) {
++        memset(ins->gyro, 0, sizeof(ins->gyro));
++        memset(d->controller.gamepad.gyro, 0, sizeof(d->controller.gamepad.gyro));
++    }
++    ins->state = WII_FSM_TOPOLOGY_STATUS;
++    const uint8_t report[] = {0xa2, WIIPROTO_REQ_SREQ, ins->rumble_state == WII_STATE_RUMBLE_IN_PROGRESS};
++    uni_hid_device_send_intr_report(d, report, sizeof(report));
++}
++
++static void wii_finish_motion_setup(uni_hid_device_t* d) {
++    wii_instance_t* ins = get_wii_instance(d);
++    ins->motion_setup_done = true;
++    ins->read_size = 0;
++    logi("Wii: factory accel=%d, MotionPlus calibrated=%d active=%d, Nunchuk=%d\n",
++         ins->accel_calibrated, ins->mp_calibrated, ins->mp_active, ins->ext_type == WII_EXT_NUNCHUK);
++    wii_confirm_topology(d);
++}
++
++static void wii_probe_motion_plus(uni_hid_device_t* d) {
++    // An inactive built-in or external MP does NOT set the status extension bit.
++    wii_setup_read(d, WII_FSM_MP_PROBE, WII_READ_FROM_REGISTERS, 0xa600fa, 6);
++}
++
++static bool wii_read_accel_calibration(wii_instance_t* ins, const uint8_t* c) {
++    uint8_t checksum = 0x55;
++    for (int i = 0; i < 9; i++)
++        checksum += c[i];
++    if (checksum != c[9])
++        return false;
++    for (int i = 0; i < 3; i++) {
++        int shift = 4 - 2 * i;
++        int zero = (c[i] << 2) | ((c[3] >> shift) & 3);
++        int one = (c[i + 4] << 2) | ((c[7] >> shift) & 3);
++        // Factory sensitivity is approximately 100 counts/g at 10-bit precision.
++        if (zero == 0 || zero == 1023 || one - zero < 16 || one - zero > 512)
++            return false;
++        ins->accel_zero[i] = zero;
++        ins->accel_span[i] = one - zero;
++    }
++    return true;
++}
++
++static uint16_t wii_be16(const uint8_t* p) {
++    return ((uint16_t)p[0] << 8) | p[1];
++}
++
++static bool wii_check_mp_calibration(const uint8_t* c) {
++    // IEEE CRC32 over both 14-byte payloads, excluding the split checksum.
++    uint32_t crc = UINT32_MAX;
++    for (int block = 0; block < 2; block++) {
++        const uint8_t* b = c + block * 16;
++        for (int i = 0; i < 14; i++) {
++            crc ^= b[i];
++            for (int bit = 0; bit < 8; bit++)
++                crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320u : 0);
++        }
++        if (b[12] == 0 || b[12] == 0xff)
++            return false;
++        for (int axis = 0; axis < 3; axis++) {
++            int zero = wii_be16(b + axis * 2);
++            int scale = wii_be16(b + 6 + axis * 2);
++            int span = scale - zero;
++            if (zero == 0 || zero == 65535 || scale == 0 || scale == 65535 ||
++                (span > -256 && span < 256))
++                return false;
++        }
++    }
++    uint32_t expected = ((uint32_t)wii_be16(c + 14) << 16) | wii_be16(c + 30);
++    return ~crc == expected;
++}
++
++static void wii_setup_read_error(uni_hid_device_t* d) {
++    wii_instance_t* ins = get_wii_instance(d);
++    logi("Wii: setup read failed in state %u\n", ins->state);
++    switch (ins->state) {
++        case WII_FSM_NUNCHUK_CALIBRATION:
++            // Retain nominal stick calibration, but still initialize remote motion.
++            ins->state = WII_FSM_DEV_GUESSED;
++            wii_process_fsm(d);
++            return;
++        case WII_FSM_ACCEL_CALIBRATION:
++            wii_setup_read(d, WII_FSM_ACCEL_CALIBRATION_BACKUP, WII_READ_FROM_MEM, 0x20, 10);
++            return;
++        case WII_FSM_ACCEL_CALIBRATION_BACKUP:
++            wii_probe_motion_plus(d);
++            return;
++        case WII_FSM_EXT_DID_READ_REGISTER:
++            if (wii_retry_extension(d))
++                return;
++            ins->ext_type = WII_EXT_NONE;
++            ins->state = WII_FSM_DEV_GUESSED;
++            wii_process_fsm(d);
++            return;
++        case WII_FSM_MP_VERIFY:
++            // A real MP removal differs from its synthetic disconnect status:
++            // its mapped ID is no longer readable.
++            memset(ins->gyro, 0, sizeof(ins->gyro));
++            memset(d->controller.gamepad.gyro, 0, sizeof(d->controller.gamepad.gyro));
++            wii_discover_extension(d);
++            return;
++        case WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION:
++        case WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION2:
++            // Never run the weight interpolator with incomplete calibration.
++            ins->ext_type = WII_EXT_NONE;
++            break;
++        default:
++            break;
++    }
++    wii_finish_motion_setup(d);
++}
++
+ static void process_req_status(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+-    if (len < 7) {
+-        loge("Wii: Unexpected report length; got %d, want >= 7\n", len);
+-        return;
+-    }
+-    wii_instance_t* ins = get_wii_instance(d);
+-    uint8_t flags = report[3] & 0x0f;  // LF (leds / flags)
++    if (len < 7)
++        return;
++    wii_instance_t* ins = get_wii_instance(d);
++    bool connected = (report[3] & 2) != 0;
+     if (ins->state == WII_FSM_DID_REQ_STATUS) {
+-        if (d->product_id == 0x0306) {
+-            // We are positive that this is a Wii Remote 1st gen
+-            ins->state = WII_FSM_DEV_GUESSED;
+-            ins->dev_type = WII_DEVTYPE_REMOTE;
+-        } else if (d->product_id == 0x0330) {
+-            // It can be either a Wii Remote 2nd gen or a Wii U Pro Controller
+-            if ((flags & 0x02) == 0) {
+-                // If there are no extensions, then we are sure it is a Wii Remote MP.
+-                ins->state = WII_FSM_DEV_GUESSED;
+-                ins->dev_type = WII_DEVTYPE_REMOTE_MP;
+-            } else {
+-                // Otherwise, it can be either a Wii Remote MP with a Nunchuk or a
+-                // Wii U Pro controller.
+-                ins->state = WII_FSM_DEV_UNK;
+-            }
++        ins->dev_type = d->product_id == 0x0330 ? WII_DEVTYPE_REMOTE_MP : WII_DEVTYPE_REMOTE;
++        ins->ext_connected = connected;
++        // Motion is always enabled; only "+" selects a different orientation.
++        if (report[1] & 0x10)
++            ins->mode = WII_MODE_VERTICAL;
++        // Also reset/probe A4 when the status bit is clear: inactive MP does
++        // not set it, and an attachment can race the initial status request.
++        wii_discover_extension(d);
++    } else if (ins->state == WII_FSM_TOPOLOGY_STATUS) {
++        // Reconcile status after the serialized setup, not while F0/FE writes
++        // are producing their own unplug/plug notifications.
++        if (!ins->mp_active && ins->ext_connected != connected &&
++            ins->dev_type != WII_DEVTYPE_PRO_CONTROLLER) {
++            ins->ext_connected = connected;
++            wii_discover_extension(d);
++        } else {
++            wii_fsm_assign_device(d);
+         }
+-
+-        if ((flags & 0x02) != 0) {
+-            // Extension detected: Nunchuk?
+-            // Regardless of the previous FSM state, we overwrite it with "query
+-            // extension".
+-            logi("Wii: extension found.\n");
+-            ins->state = WII_FSM_EXT_UNK;
+-            ins->ext_type = WII_EXT_UNK;
+-        } else {
+-            logi("Wii: No extensions found.\n");
+-            ins->ext_type = WII_EXT_NONE;
++    } else if (ins->state == WII_FSM_LED_UPDATED) {
++        // Every status stops the input stream, even when topology is unchanged.
++        uni_hid_parser_wii_request_report_type(d, ins->report_type);
++        if (ins->dev_type == WII_DEVTYPE_PRO_CONTROLLER)
++            return;
++        if (ins->mp_active) {
++            // A late activation or deactivation status is not proof of removal.
++            wii_setup_read(d, WII_FSM_MP_VERIFY, WII_READ_FROM_REGISTERS, 0xa400fa, 6);
++        } else if (ins->ext_connected != connected) {
++            ins->ext_connected = connected;
++            wii_discover_extension(d);
+         }
+-
+-        if (report[2] & 0x08) {
+-            // Wii Remote only: Enter "accel mode" if "A" is pressed.
+-            ins->mode = WII_MODE_ACCEL;
+-        } else if (report[1] & 0x10) {
+-            // Wii Remote only: Enter "vertical mode" if "+" is pressed.
+-            ins->mode = WII_MODE_VERTICAL;
+-        }
+-
+-        wii_process_fsm(d);
+-    }
++    }
++    // All other states own a pending read/write. Never replace their FSM state
++    // or start a second transaction in response to a transitional status.
+ }
+ 
+ // Defined here: http://wiibrew.org/wiki/Wiimote#0x21:_Read_Memory_Data
+ static void process_req_data_read_register(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+-    uint8_t se = report[3];  // SE: size and error
+-    uint8_t s = se >> 4;     // size
+-    uint8_t e = se & 0x0f;   // error
+-    if (e) {
+-        loge("Wii: error reading memory: 0x%02x\n.", e);
+-        return;
+-    }
+-
+-    wii_instance_t* ins = get_wii_instance(d);
+-
+-    // We are expecting to read 6 bytes from 0xXX00fa
+-    if (s == 5 && report[4] == 0x00 && report[5] == 0xfa) {
+-        // This contains the read memory from register 0xa?00fa
+-        // Data is in report[6]..report[11]
+-
+-        // Try to guess device type.
+-        if (report[10] == 0x01 && report[11] == 0x20) {
+-            // Pro Controller: 00 00 a4 20 01 20
+-            ins->dev_type = WII_DEVTYPE_PRO_CONTROLLER;
+-            ins->ext_type = WII_EXT_U_PRO_CONTROLLER;
+-        } else if (ins->dev_type == WII_DEVTYPE_UNK) {
+-            if (d->product_id == 0x0330) {
+-                ins->dev_type = WII_DEVTYPE_REMOTE_MP;
+-            } else if (d->product_id == 0x0306) {
+-                ins->dev_type = WII_DEVTYPE_REMOTE;
+-            } else {
+-                loge("Wii: Unknown product id: 0x%04x\n", d->product_id);
+-            }
+-        }
+-
+-        // Try to guess extension type.
+-        if (ins->ext_type == WII_EXT_UNK) {
+-            if (report[10] == 0x00 && report[11] == 0x00) {
+-                // Nunchuck: 00 00 a4 20 00 00
+-                ins->ext_type = WII_EXT_NUNCHUK;
+-                // If a Nunchuck is attached, WiiMode is treated as vertical mode
+-                ins->mode = WII_MODE_VERTICAL;
+-            } else if (report[10] == 0x04 && report[11] == 0x02) {
+-                // Balance Board: 00 00 a4 20 04 02
+-                ins->ext_type = WII_EXT_BALANCE_BOARD;
+-            } else if (report[10] == 0x01 && report[11] == 0x01) {
+-                // Classic / Classic Pro: 0? 00 a4 20 01 01
+-                ins->ext_type = WII_EXT_CLASSIC_CONTROLLER;
+-            } else if (report[10] == 0x01 && report[11] == 0x12) {
+-                // Wii uDraw Tablet:  FF 00 A4 20 01 12
+-                ins->ext_type = WII_EXT_UDRAW_TABLET;
+-                // WiiMote is attached vertically to the uDraw Tablet
+-                ins->mode = WII_MODE_VERTICAL;
+-            } else {
+-                loge("Wii: Unknown extension: %#x %#x\n", report[10], report[11]);
+-                printf_hexdump(report, len);
+-            }
+-        }
+-
+-        if (ins->ext_type == WII_EXT_BALANCE_BOARD) {
+-            ins->state = WII_FSM_BALANCE_BOARD_READ_CALIBRATION;
+-        } else {
+-            ins->state = WII_FSM_DEV_GUESSED;
+-        }
+-
+-        logi("Wii: Device: %s, Extension: %s\n", wii_devtype_names[ins->dev_type], wii_exttype_names[ins->ext_type]);
+-        wii_process_fsm(d);
+-    } else {
+-        loge("Wii: invalid response");
+-        printf_hexdump(report, len);
+-    }
++    ARG_UNUSED(len);
++    wii_instance_t* ins = get_wii_instance(d);
++    const uint8_t* c = report + 6;
++    ins->ext_type = WII_EXT_NONE;
++    if (c[4] == 0xff && c[5] == 0xff) {
++        if (wii_retry_extension(d))
++            return;
++    } else if (c[4] == 0 && c[5] == 0) {
++        // Vendor/version bytes vary. The upstream parser, SDL, and Linux all
++        // recognize Nunchuk from the format/type suffix after initialization.
++        ins->ext_type = WII_EXT_NUNCHUK;
++    } else if (c[4] == 1 && c[5] == 0x20) {
++        ins->dev_type = WII_DEVTYPE_PRO_CONTROLLER;
++        ins->ext_type = WII_EXT_U_PRO_CONTROLLER;
++    } else if (c[4] == 4 && c[5] == 2) {
++        ins->ext_type = WII_EXT_BALANCE_BOARD;
++    } else if (c[4] == 1 && c[5] == 1) {
++        ins->ext_type = WII_EXT_CLASSIC_CONTROLLER;
++    } else if (c[4] == 1 && c[5] == 0x12) {
++        ins->ext_type = WII_EXT_UDRAW_TABLET;
++    } else if (wii_is_motion_plus(c)) {
++        // A previously active MP can still be remapping A4 after F0 was acked.
++        if (wii_retry_extension(d))
++            return;
++    }
++    if (ins->ext_type != WII_EXT_NONE)
++        ins->ext_connected = true;
++    else
++        logi("Wii: unidentified extension %02x %02x %02x %02x %02x %02x\n",
++             c[0], c[1], c[2], c[3], c[4], c[5]);
++    if (ins->ext_type == WII_EXT_NUNCHUK) {
++        wii_setup_read(d, WII_FSM_NUNCHUK_CALIBRATION, WII_READ_FROM_REGISTERS, 0xa40020, 16);
++        return;
++    }
++    ins->state = ins->ext_type == WII_EXT_BALANCE_BOARD ?
++                     WII_FSM_BALANCE_BOARD_READ_CALIBRATION : WII_FSM_DEV_GUESSED;
++    logi("Wii: Device: %s, Extension: %s\n", wii_devtype_names[ins->dev_type], wii_exttype_names[ins->ext_type]);
++    wii_process_fsm(d);
+ }
+ 
+ static void process_req_data_read_calibration_data(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+@@ -444,17 +604,83 @@
+ 
+ // Defined here: http://wiibrew.org/wiki/Wiimote#0x21:_Read_Memory_Data
+ static void process_req_data(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+-    if (len < 22) {
+-        loge("Wii: invalid req_data length: got %d, want >= 22\n", len);
+-        printf_hexdump(report, len);
+-        return;
+-    }
+-
+-    wii_instance_t* ins = get_wii_instance(d);
++    if (len < 22)
++        return;
++    wii_instance_t* ins = get_wii_instance(d);
++    uint16_t address = wii_be16(report + 4);
++    uint8_t size = (report[3] >> 4) + 1;
++    uint8_t error = report[3] & 0x0f;
++    // Read replies omit the address bank, so allow only one outstanding read.
++    // An error reply has no meaningful payload size, but still echoes address.
++    if (!ins->read_size || address != ins->read_address || (!error && size != ins->read_size))
++        return;
++    ins->read_size = 0;
++    if (error) {
++        wii_setup_read_error(d);
++        return;
++    }
++    const uint8_t* c = report + 6;
+     switch (ins->state) {
+         case WII_FSM_EXT_DID_READ_REGISTER:
+             process_req_data_read_register(d, report, len);
+             break;
++        case WII_FSM_NUNCHUK_CALIBRATION: {
++            uint8_t checksum = 0x55;
++            for (int i = 0; i < 14; i++)
++                checksum += c[i];
++            bool valid = c[14] == checksum && c[15] == (uint8_t)(checksum + 0x55);
++            for (int i = 8; i <= 11; i += 3)
++                valid = valid && c[i + 2] - c[i + 1] >= 16 && c[i] - c[i + 2] >= 16;
++            if (valid)
++                memcpy(ins->nunchuk_stick_calibration, c + 8, sizeof(ins->nunchuk_stick_calibration));
++            else
++                logi("Wii: invalid Nunchuk stick calibration; using nominal gate\n");
++            ins->state = WII_FSM_DEV_GUESSED;
++            wii_process_fsm(d);
++            break;
++        }
++        case WII_FSM_MP_VERIFY:
++            if (!wii_is_motion_plus(c) || c[4] == 0) {
++                memset(ins->gyro, 0, sizeof(ins->gyro));
++                memset(d->controller.gamepad.gyro, 0, sizeof(d->controller.gamepad.gyro));
++                wii_discover_extension(d);
++            } else if (ins->topology_pending) {
++                wii_discover_extension(d);
++            } else {
++                wii_fsm_assign_device(d);
++            }
++            break;
++        case WII_FSM_ACCEL_CALIBRATION:
++        case WII_FSM_ACCEL_CALIBRATION_BACKUP:
++            ins->accel_calibrated = wii_read_accel_calibration(ins, c);
++            if (!ins->accel_calibrated && ins->state == WII_FSM_ACCEL_CALIBRATION)
++                wii_setup_read(d, WII_FSM_ACCEL_CALIBRATION_BACKUP, WII_READ_FROM_MEM, 0x20, 10);
++            else
++                wii_probe_motion_plus(d);
++            break;
++        case WII_FSM_MP_PROBE:
++            if (wii_is_motion_plus(c)) {
++                ins->state = WII_FSM_MP_INIT;
++                wii_write_register(d, 0xa600f0, 0x55);
++            } else {
++                wii_finish_motion_setup(d);
++            }
++            break;
++        case WII_FSM_MP_CALIBRATION_FAST:
++            memcpy(ins->mp_calibration, c, 16);
++            wii_setup_read(d, WII_FSM_MP_CALIBRATION_SLOW, WII_READ_FROM_REGISTERS, 0xa60030, 16);
++            break;
++        case WII_FSM_MP_CALIBRATION_SLOW:
++            memcpy(ins->mp_calibration + 16, c, 16);
++            ins->mp_calibrated = wii_check_mp_calibration(ins->mp_calibration);
++            if (ins->mp_calibrated) {
++                ins->state = WII_FSM_MP_ACTIVATE;
++                wii_write_register(d, 0xa600fe, ins->ext_type == WII_EXT_NUNCHUK ? 5 : 4);
++            } else {
++                loge("Wii: invalid MotionPlus factory calibration; gyro disabled\n");
++                wii_finish_motion_setup(d);
++            }
++            break;
+         case WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION:
+             process_req_data_read_calibration_data(d, report, len);
+             break;
+@@ -465,7 +691,6 @@
+             process_req_data_dump_eeprom(d, report, len);
+             break;
+         default:
+-            loge("process_req_data. Unknown FSM state: 0x%02x\n", ins->state);
+             break;
+     }
+ }
+@@ -473,29 +698,38 @@
+ // Defined here:
+ // http://wiibrew.org/wiki/Wiimote#0x22:_Acknowledge_output_report.2C_return_function_result
+ static void process_req_return(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+-    if (len < 5) {
+-        loge("Invalid len report for process_req_return: got %d, want >= 5\n", len);
+-    }
+-    if (report[3] == WIIPROTO_REQ_WMEM) {
+-        wii_instance_t* ins = get_wii_instance(d);
+-        // Status != 0: Error. Probably invalid register
+-        if (report[4] != 0) {
+-            if (ins->register_address == 0xa6) {
+-                loge("Failed to read registers from 0xa6... mmmm\n");
+-                ins->state = WII_FSM_SETUP;
+-            } else {
+-                // If it failed to read registers with 0xa4, then try with 0xa6.
+-                // If 0xa6 works Ok, it is safe to assume it is a Wii Remote MP, but
+-                // for the sake of finishing the "read extension" (might be useful in the future),
+-                // we continue with it.
+-                logi("Probably a Remote MP device. Switching to 0xa60000 address for registers.\n");
+-                ins->state = WII_FSM_DEV_UNK;
+-                ins->register_address = 0xa6;  // Register address used for Wii Remote MP.
+-            }
+-        } else {
+-            // Status Ok. Good
+-        }
+-        wii_process_fsm(d);
++    if (len < 5)
++        return;
++    wii_instance_t* ins = get_wii_instance(d);
++    if (report[3] == WIIPROTO_REQ_RMEM && report[4] && ins->read_size) {
++        ins->read_size = 0;
++        wii_setup_read_error(d);
++        return;
++    }
++    if (report[3] != WIIPROTO_REQ_WMEM)
++        return;
++    // Acks contain no register address. Only a pending write may consume one.
++    switch (ins->state) {
++        case WII_FSM_EXT_DID_INIT:
++        case WII_FSM_EXT_DID_NO_ENCRYPTION:
++            if (report[4] && wii_retry_extension(d))
++                break;
++            // FB can fail on an empty MP passthrough port; still identify A4
++            // and probe A6 instead of treating an ACK as an extension identity.
++            wii_process_fsm(d);
++            break;
++        case WII_FSM_MP_INIT:
++            if (report[4])
++                wii_finish_motion_setup(d);
++            else
++                wii_setup_read(d, WII_FSM_MP_CALIBRATION_FAST, WII_READ_FROM_REGISTERS, 0xa60020, 16);
++            break;
++        case WII_FSM_MP_ACTIVATE:
++            ins->mp_active = report[4] == 0;
++            wii_finish_motion_setup(d);
++            break;
++        default:
++            break;
+     }
+ }
+ 
+@@ -514,15 +748,26 @@
+     const uint8_t* data = &report[1];
+     wii_instance_t* ins = get_wii_instance(d);
+ 
+-    switch (ins->mode) {
+-        case WII_MODE_HORIZONTAL:
+-            process_drm_k_horizontal(ctl, data);
+-            break;
+-        case WII_MODE_VERTICAL:
+-            process_drm_k_vertical(ctl, data);
+-            break;
+-        default:
+-            break;
++    if (ins->ext_type == WII_EXT_NUNCHUK || ins->ext_type == WII_EXT_UDRAW_TABLET) {
++        // Preserve the existing extension mapping: C/Z -> X/Y, 1/2 -> L/R.
++        ctl->gamepad.dpad |= (data[0] & 0x01) ? DPAD_LEFT : 0;
++        ctl->gamepad.dpad |= (data[0] & 0x02) ? DPAD_RIGHT : 0;
++        ctl->gamepad.dpad |= (data[0] & 0x04) ? DPAD_DOWN : 0;
++        ctl->gamepad.dpad |= (data[0] & 0x08) ? DPAD_UP : 0;
++        ctl->gamepad.buttons |= (data[1] & 0x04) ? BUTTON_A : 0;
++        ctl->gamepad.buttons |= (data[1] & 0x08) ? BUTTON_B : 0;
++        ctl->gamepad.buttons |= (data[1] & 0x02) ? BUTTON_SHOULDER_L : 0;
++        ctl->gamepad.buttons |= (data[1] & 0x01) ? BUTTON_SHOULDER_R : 0;
++        if (ins->ext_type == WII_EXT_NUNCHUK) {
++            ctl->gamepad.axis_x = ins->nunchuk_x;
++            ctl->gamepad.axis_y = ins->nunchuk_y;
++            ctl->gamepad.buttons |= ins->nunchuk_buttons;
++        }
++    } else if (ins->mode == WII_MODE_VERTICAL) {
++        process_drm_k_vertical(ctl, data);
++    } else {
++        // WII_MODE_ACCEL was historically horizontal; motion no longer owns orientation.
++        process_drm_k_horizontal(ctl, data);
+     }
+     // Process misc buttons
+     ctl->gamepad.misc_buttons |= (data[1] & 0x80) ? MISC_BUTTON_SYSTEM : 0;  // Button "home"
+@@ -563,46 +808,97 @@
+ // Used for WiiMote in Accelerometer Mode. Defined here:
+ // http://wiibrew.org/wiki/Wiimote#0x31:_Core_Buttons_and_Accelerometer
+ static void process_drm_ka(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+-    // Process Wiimote in "accelerator mode".
+-    /* DRM_KA: BB*2 AA*3*/
+-    // Expecting something like:
+-    // 31 20 60 82 7F 99
+-    if (len < 6) {
+-        loge("wii remote drm_ka: invalid report len %d\n", len);
+-        return;
+-    }
+-
+-    uint16_t x = (report[3] << 2) | ((report[1] >> 5) & 0x3);
+-    uint16_t y = (report[4] << 2) | ((report[2] >> 4) & 0x2);
+-    uint16_t z = (report[5] << 2) | ((report[2] >> 5) & 0x2);
+-
+-    int16_t sx = x - 0x200;
+-    int16_t sy = y - 0x200;
+-    int16_t sz = z - 0x200;
+-
+-    // printf_hexdump(report, len);
+-    // logi("Wii: x=%d, y=%d, z=%d\n", sx, sy, sz);
+-
+-    uni_controller_t* ctl = &d->controller;
+-
 -    ctl->gamepad.accel[0] = sx;
 -    ctl->gamepad.accel[1] = sy;
 -    ctl->gamepad.accel[2] = sz;
-+    uni_imu_normalize_wii_accel(sx, sy, sz, ctl->gamepad.accel);
+-
+-    // Dpad works as dpad, useful to navigate menus.
+-    ctl->gamepad.dpad |= (report[1] & 0x01) ? DPAD_DOWN : 0;
+-    ctl->gamepad.dpad |= (report[1] & 0x02) ? DPAD_UP : 0;
+-    ctl->gamepad.dpad |= (report[1] & 0x04) ? DPAD_RIGHT : 0;
+-    ctl->gamepad.dpad |= (report[1] & 0x08) ? DPAD_LEFT : 0;
+-
+-    ctl->gamepad.buttons |= (report[2] & 0x02) ? BUTTON_A : 0;  // Button "1"
+-    ctl->gamepad.buttons |= (report[2] & 0x01) ? BUTTON_B : 0;  // Button "2"
+-    ctl->gamepad.buttons |= (report[2] & 0x08) ? BUTTON_X : 0;  // Big button "A"
+-    ctl->gamepad.buttons |= (report[2] & 0x04) ? BUTTON_Y : 0;  // Button Shoulder
+-
+-    ctl->gamepad.misc_buttons |= (report[2] & 0x80) ? MISC_BUTTON_SYSTEM : 0;  // Button "home"
+-    ctl->gamepad.misc_buttons |= (report[2] & 0x10) ? MISC_BUTTON_SELECT : 0;  // Button "-"
+-    ctl->gamepad.misc_buttons |= (report[1] & 0x10) ? MISC_BUTTON_START : 0;   // Button "+"
++    if (len < 6)
++        return;
++    process_drm_k(d, report, len);
++    wii_instance_t* ins = get_wii_instance(d);
++    if (!ins->accel_calibrated)
++        return;
++    int32_t x = (report[3] << 2) | ((report[1] >> 5) & 3);
++    int32_t y = (report[4] << 2) | ((report[2] >> 4) & 2);
++    int32_t z = (report[5] << 2) | ((report[2] >> 5) & 2);
++    // SDL Wii axes: (-X, Z, Y), independent of the button orientation.
++    ins->accel[0] = uni_imu_scale(ins->accel_zero[0] - x, ins->accel_span[0], UNI_IMU_ACCEL_RES_PER_G);
++    ins->accel[1] = uni_imu_scale(z - ins->accel_zero[2], ins->accel_span[2], UNI_IMU_ACCEL_RES_PER_G);
++    ins->accel[2] = uni_imu_scale(y - ins->accel_zero[1], ins->accel_span[1], UNI_IMU_ACCEL_RES_PER_G);
++    for (int i = 0; i < 3; i++)
++        d->controller.gamepad.accel[i] = ins->accel[i];
++}
++
++static int16_t wii_nunchuk_axis(uint8_t raw, const uint8_t* calibration, bool invert) {
++    int center = calibration[2];
++    int delta = (int)raw - center;
++    int span = delta < 0 ? center - calibration[1] : calibration[0] - center;
++    int value = (invert ? -delta : delta) * (AXIS_NORMALIZE_RANGE / 2) / span;
++    if (value < -AXIS_NORMALIZE_RANGE / 2)
++        return -AXIS_NORMALIZE_RANGE / 2;
++    if (value >= AXIS_NORMALIZE_RANGE / 2)
++        return AXIS_NORMALIZE_RANGE / 2 - 1;
++    return value;
++}
++
++static void wii_update_nunchuk(wii_instance_t* ins, const uint8_t* e, bool passthrough) {
++    ins->nunchuk_x = wii_nunchuk_axis(e[0], ins->nunchuk_stick_calibration, false);
++    ins->nunchuk_y = wii_nunchuk_axis(e[1], ins->nunchuk_stick_calibration + 3, true);
++    // MP moves C/Z from bits 1/0 to bits 3/2. Its accelerometer is deliberately
++    // not mixed into the remote's sensor stream.
++    uint8_t buttons = e[5] >> (passthrough ? 2 : 0);
++    ins->nunchuk_buttons = (!(buttons & 2) ? BUTTON_X : 0) | (!(buttons & 1) ? BUTTON_Y : 0);
++}
++
++static int32_t wii_calibrate_gyro(const wii_instance_t* ins, int axis, int32_t raw, bool slow) {
++    const uint8_t* c = ins->mp_calibration + (slow ? 16 : 0);
++    int32_t zero = wii_be16(c + 2 * axis);
++    int32_t span = wii_be16(c + 6 + 2 * axis) - zero;
++    int32_t delta = raw * 4 - zero;  // 14-bit sample versus 16-bit factory points.
++    if (span < 0) {
++        span = -span;
++        delta = -delta;
++    }
++    return uni_imu_scale(delta, span, c[12] * 6 * UNI_IMU_GYRO_RES_PER_DEG_S);
++}
++
++static void wii_process_motion_extension(uni_hid_device_t* d, const uint8_t* e) {
++    wii_instance_t* ins = get_wii_instance(d);
++    if (ins->state != WII_FSM_LED_UPDATED && ins->state != WII_FSM_MP_VERIFY)
++        return;
++    if (!ins->mp_active) {
++        if (ins->ext_type == WII_EXT_NUNCHUK)
++            wii_update_nunchuk(ins, e, false);
++        return;
++    }
++    // Bit zero is reserved in both MP and passthrough frames. In particular,
++    // ignore the FF-filled extension buffer while activation is settling.
++    if (e[5] & 1)
++        return;
++    bool connected = (e[4] & 1) != 0;
++    if (connected != ins->ext_connected) {
++        ins->ext_connected = connected;
++        ins->topology_pending = true;
++        wii_clear_extension(d);
++    }
++    if (!(e[5] & 2)) {
++        if (ins->ext_type == WII_EXT_NUNCHUK && (e[4] & 1))
++            wii_update_nunchuk(ins, e, true);
++        if (ins->topology_pending && ins->state == WII_FSM_LED_UPDATED)
++            wii_discover_extension(d);
++        return;
++    }
++    if (!ins->mp_calibrated)
++        return;
++    int32_t yaw = e[0] | ((e[3] & 0xfc) << 6);
++    int32_t roll = e[1] | ((e[4] & 0xfc) << 6);
++    int32_t pitch = e[2] | ((e[5] & 0xfc) << 6);
++    // WiiBrew factory points have signed spans; Dolphin applies native
++    // right-hand-rule signs (-pitch,+roll,-yaw). SDL's (-X,Z,Y) then gives
++    // (+pitch,-yaw,+roll). Each axis has its OWN slow/fast selector.
++    ins->gyro[0] = wii_calibrate_gyro(ins, 2, pitch, e[3] & 1);
++    ins->gyro[1] = -wii_calibrate_gyro(ins, 0, yaw, e[3] & 2);
++    ins->gyro[2] = wii_calibrate_gyro(ins, 1, roll, e[4] & 2);
++    for (int i = 0; i < 3; i++)
++        d->controller.gamepad.gyro[i] = ins->gyro[i];
++    if (ins->topology_pending && ins->state == WII_FSM_LED_UPDATED)
++        wii_discover_extension(d);
+ }
  
-     // Dpad works as dpad, useful to navigate menus.
-     ctl->gamepad.dpad |= (report[1] & 0x01) ? DPAD_DOWN : 0;
+ // Used in WiiMote + Nunchuk Mode
+@@ -617,31 +913,17 @@
+     }
+ 
+     wii_instance_t* ins = get_wii_instance(d);
+-    if (ins->ext_type != WII_EXT_NUNCHUK && ins->ext_type != WII_EXT_UDRAW_TABLET) {
+-        loge("Wii: unexpected Wii extension: got %d, want: %d or %d", ins->ext_type, WII_EXT_NUNCHUK,
+-             WII_EXT_UDRAW_TABLET);
+-        return;
+-    }
++    if (ins->ext_type == WII_EXT_NUNCHUK || ins->mp_active) {
++        wii_process_motion_extension(d, report + 3);
++        process_drm_k(d, report, len);
++        return;
++    }
++    if (ins->ext_type != WII_EXT_UDRAW_TABLET)
++        return;
+ 
+     uni_controller_t* ctl = &d->controller;
+ 
+-    if (ins->mode != WII_MODE_VERTICAL) {
+-        loge("Wii: When Nunchuk or uDraw Tablet is attached, only vertical mode is supported. Found: %d\n", ins->mode);
+-        return;
+-    }
+-
+-    if (ins->ext_type == WII_EXT_NUNCHUK) {
+-        //
+-        // Process Nunchuk: Right axis, buttons X and Y
+-        //
+-        nunchuk_t n = process_nunchuk(&report[3], len - 3);
+-        const int factor = (AXIS_NORMALIZE_RANGE / 2) / 128;
+-
+-        ctl->gamepad.axis_rx = n.sx * factor;
+-        ctl->gamepad.axis_ry = n.sy * factor;
+-        ctl->gamepad.buttons |= n.bc ? BUTTON_X : 0;
+-        ctl->gamepad.buttons |= n.bz ? BUTTON_Y : 0;
+-    } else if (ins->ext_type == WII_EXT_UDRAW_TABLET) {
++    {
+         // Better if uDraw reports its own "type", but for the moment
+         // it gets reported and the 2nd half of a gamepad.
+ 
+@@ -668,59 +950,20 @@
+         ctl->gamepad.buttons |= n.button_lower ? BUTTON_Y : 0;
+     }
+ 
+-    //
+-    // Process Wii remote: DPAD, buttons A, B, Shoulder L & R, and misc.
+-    //
+-
+-    // dpad
+-    ctl->gamepad.dpad |= (report[1] & 0x01) ? DPAD_LEFT : 0;
+-    ctl->gamepad.dpad |= (report[1] & 0x02) ? DPAD_RIGHT : 0;
+-    ctl->gamepad.dpad |= (report[1] & 0x04) ? DPAD_DOWN : 0;
+-    ctl->gamepad.dpad |= (report[1] & 0x08) ? DPAD_UP : 0;
+-
+-    ctl->gamepad.buttons |= (report[2] & 0x04) ? BUTTON_A : 0;  // Shoulder button
+-    ctl->gamepad.buttons |= (report[2] & 0x08) ? BUTTON_B : 0;  // Big button "A"
+-
+-    ctl->gamepad.buttons |= (report[2] & 0x02) ? BUTTON_SHOULDER_L : 0;  // Button "1"
+-    ctl->gamepad.buttons |= (report[2] & 0x01) ? BUTTON_SHOULDER_R : 0;  // Button "2"
+-
+-    ctl->gamepad.misc_buttons |= (report[2] & 0x80) ? MISC_BUTTON_SYSTEM : 0;  // Button "home"
+-    ctl->gamepad.misc_buttons |= (report[2] & 0x10) ? MISC_BUTTON_SELECT : 0;  // Button "-"
+-    ctl->gamepad.misc_buttons |= (report[1] & 0x10) ? MISC_BUTTON_START : 0;   // Button "+"
++    process_drm_k(d, report, len);
+ }
+ 
+ // Defined here:
+ // http://wiibrew.org/wiki/Wiimote#0x35:_Core_Buttons_and_Accelerometer_with_16_Extension_Bytes
+ static void process_drm_kae(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+-    // Expecting something like:
+-    // (a1) 35 BB BB AA AA AA EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE EE
+-    ARG_UNUSED(d);
+-    ARG_UNUSED(report);
+-    ARG_UNUSED(len);
+-    loge("Wii: drm_kae not supported yet\n");
+-}
+-
+-static nunchuk_t process_nunchuk(const uint8_t* e, uint16_t len) {
+-    // Nunchuk format here:
+-    // http://wiibrew.org/wiki/Wiimote/Extension_Controllers/Nunchuck
+-    nunchuk_t n = {0};
+-    if (len < 6) {
+-        loge("Wii: unexpected len; got %d, want >= 6\n", len);
+-        return n;
+-    }
+-    n.sx = e[0] - 0x80;
+-    // Invert polarity to match virtual gamepad.
+-    n.sy = -(e[1] - 0x80);
+-    n.ax = (e[2] << 2) | ((e[5] & 0b00001100) >> 2);
+-    n.ay = (e[3] << 2) | ((e[5] & 0b00110000) >> 4);
+-    n.az = (e[4] << 2) | ((e[5] & 0b11000000) >> 6);
+-    n.ax -= AXIS_NORMALIZE_RANGE / 2;
+-    n.ay -= AXIS_NORMALIZE_RANGE / 2;
+-    n.az -= AXIS_NORMALIZE_RANGE / 2;
+-    n.bc = !(e[5] & 0b00000010);
+-    n.bz = !(e[5] & 0b00000001);
+-    return n;
+-}
++    // 35 BB BB AA AA AA EE*16
++    if (len < 22)
++        return;
++    // Update an interleaved extension before applying its cached controls.
++    wii_process_motion_extension(d, report + 6);
++    process_drm_ka(d, report, len);
++}
++
+ 
+ static udraw_tablet_t process_udraw_tablet(const uint8_t* e, uint16_t len) {
+     // uDraw Tablet format here:
+@@ -1002,52 +1245,18 @@
+     logi("fsm: req_status\n");
+     wii_instance_t* ins = get_wii_instance(d);
+     ins->state = WII_FSM_DID_REQ_STATUS;
+-    const uint8_t status[] = {0xa2, WIIPROTO_REQ_SREQ, 0x00 /* LEDS & rumble off */};
++    const uint8_t status[] = {0xa2, WIIPROTO_REQ_SREQ, ins->rumble_state == WII_STATE_RUMBLE_IN_PROGRESS};
+     uni_hid_device_send_intr_report(d, status, sizeof(status));
+ }
+ 
+ static void wii_fsm_ext_init(uni_hid_device_t* d) {
+-    logi("fsm: ext_init\n");
+-    wii_instance_t* ins = get_wii_instance(d);
+-    ins->state = WII_FSM_EXT_DID_INIT;
+-    // Init Wii
+-    uint8_t report[] = {
+-        // clang-format off
+-      0xa2, WIIPROTO_REQ_WMEM,
+-      0x04,             // Control registers
+-      0xa4, 0x00, 0xf0, // register init extension
+-      0x01, 0x55,       // # bytes, byte to write
+-      // Padding, since at least 16 bytes must be sent
+-      0x00, 0x00, 0x00, 0x00,
+-      0x00, 0x00, 0x00, 0x00,
+-      0x00, 0x00, 0x00, 0x00,
+-      0x00, 0x00, 0x00,
+-        // clang-format on
+-    };
+-    report[3] = ins->register_address;
+-    uni_hid_device_send_intr_report(d, report, sizeof(report));
++    get_wii_instance(d)->state = WII_FSM_EXT_DID_INIT;
++    wii_write_register(d, 0xa400f0, 0x55);
+ }
+ 
+ static void wii_fsm_ext_encrypt_off(uni_hid_device_t* d) {
+-    logi("fsm: ext_encrypt_off\n");
+-    wii_instance_t* ins = get_wii_instance(d);
+-    ins->state = WII_FSM_EXT_DID_NO_ENCRYPTION;
+-    // Init Wii
+-    uint8_t report[] = {
+-        // clang-format off
+-      0xa2, WIIPROTO_REQ_WMEM,
+-      0x04,             // Control registers
+-      0xa4, 0x00, 0xfb, // register disable encryption
+-      0x01, 0x00,       // # bytes, byte to write
+-      // Padding, since at least 16 bytes must be sent
+-      0x00, 0x00, 0x00, 0x00,
+-      0x00, 0x00, 0x00, 0x00,
+-      0x00, 0x00, 0x00, 0x00,
+-      0x00, 0x00, 0x00,
+-        // clang-format on
+-    };
+-    report[3] = ins->register_address;
+-    uni_hid_device_send_intr_report(d, report, sizeof(report));
++    get_wii_instance(d)->state = WII_FSM_EXT_DID_NO_ENCRYPTION;
++    wii_write_register(d, 0xa400fb, 0);
+ }
+ 
+ static void wii_fsm_ext_read_register(uni_hid_device_t* d) {
+@@ -1055,8 +1264,7 @@
+     wii_instance_t* ins = get_wii_instance(d);
+     ins->state = WII_FSM_EXT_DID_READ_REGISTER;
+ 
+-    // Addr is either 0xA400FA or 0xA600FA
+-    uint32_t offset = 0x0000fa | (ins->register_address << 16);
++    uint32_t offset = 0xa400fa;
+     uint16_t bytes_to_read = 6;
+     wii_read_mem(d, WII_READ_FROM_REGISTERS, offset, bytes_to_read);
+ }
+@@ -1066,8 +1274,7 @@
+     wii_instance_t* ins = get_wii_instance(d);
+     ins->state = WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION;
+ 
+-    // Addr is either 0xA40024 or 0xA60024
+-    uint32_t offset = 0x000024 | (ins->register_address << 16);
++    uint32_t offset = 0xa40024;
+     uint16_t bytes_to_read = 16;
+     wii_read_mem(d, WII_READ_FROM_REGISTERS, offset, bytes_to_read);
+ }
+@@ -1077,8 +1284,7 @@
+     wii_instance_t* ins = get_wii_instance(d);
+     ins->state = WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION2;
+ 
+-    // Addr is either 0xA40024 or 0xA60024
+-    uint32_t offset = 0x000034 | (ins->register_address << 16);
++    uint32_t offset = 0xa40034;
+     uint16_t bytes_to_read = 8;
+     wii_read_mem(d, WII_READ_FROM_REGISTERS, offset, bytes_to_read);
+ }
+@@ -1100,18 +1306,8 @@
+             }
+             uint8_t report_type = 0xff;
+             if (ins->ext_type == WII_EXT_NUNCHUK) {
+-                // Request Nunchuk data
+-                if (ins->mode == WII_MODE_ACCEL) {
+-                    // Request Core buttons + Accel + extension (nunchuk)
+-                    report_type = WII_REPORT_TYPE_KAE;
+-                    logi("Wii: requesting Core buttons + Accelerometer + E (Nunchuk)\n");
+-                    d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL;
+-                } else {
+-                    // Request Core buttons + extension (nunchuk)
+-                    report_type = WII_REPORT_TYPE_KE;
+-                    logi("Wii: requesting Core buttons + E (Nunchuk)\n");
+-                    d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK;
+-                }
++                report_type = WII_REPORT_TYPE_KAE;
++                d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL;
+             } else if (ins->ext_type == WII_EXT_CLASSIC_CONTROLLER) {
+                 logi("Wii: requesting E (Classic Controller)\n");
+                 d->controller_subtype = CONTROLLER_SUBTYPE_WII_CLASSIC;
+@@ -1125,20 +1321,11 @@
+                 d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_UDRAW_TABLET;
+                 report_type = WII_REPORT_TYPE_KE;
+             } else {
+-                if (ins->mode == WII_MODE_ACCEL) {
+-                    // Request Core buttons + accel
+-                    report_type = WII_REPORT_TYPE_KA;
+-                    logi("Wii: requesting Core buttons + Accelerometer\n");
+-                    d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_ACCEL;
+-                } else {
+-                    report_type = WII_REPORT_TYPE_K;
+-                    logi("Wii: requesting Core buttons\n");
+-                    if (ins->mode == WII_MODE_VERTICAL) {
+-                        d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL;
+-                    } else {
+-                        d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+-                    }
+-                }
++                report_type = ins->mp_active ? WII_REPORT_TYPE_KAE : WII_REPORT_TYPE_KA;
++                if (ins->mode == WII_MODE_VERTICAL)
++                    d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL;
++                else
++                    d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+             }
+             uni_hid_parser_wii_request_report_type(d, report_type);
+             break;
+@@ -1164,7 +1351,10 @@
+     ins->state = WII_FSM_LED_UPDATED;
+     wii_process_fsm(d);
+ 
+-    uni_hid_device_set_ready_complete(d);
++    if (!ins->ready) {
++        ins->ready = true;
++        uni_hid_device_set_ready_complete(d);
++    }
+ }
+ 
+ static void wii_fsm_dump_eeprom(struct uni_hid_device_s* d) {
+@@ -1218,7 +1408,15 @@
+             // Do nothing
+             break;
+         case WII_FSM_DEV_GUESSED:
+-            wii_fsm_assign_device(d);
++            if (!ins->motion_setup_done && ins->dev_type != WII_DEVTYPE_PRO_CONTROLLER &&
++                (ins->ext_type == WII_EXT_NONE || ins->ext_type == WII_EXT_NUNCHUK)) {
++                if (ins->accel_calibrated)
++                    wii_probe_motion_plus(d);
++                else
++                    wii_setup_read(d, WII_FSM_ACCEL_CALIBRATION, WII_READ_FROM_MEM, 0x16, 10);
++            } else {
++                wii_confirm_topology(d);
++            }
+             break;
+         case WII_FSM_BALANCE_BOARD_READ_CALIBRATION:
+             wii_fsm_balance_board_read_calibration(d);
+@@ -1234,6 +1432,16 @@
+             wii_fsm_update_led(d);
+             break;
+         case WII_FSM_LED_UPDATED:
++        case WII_FSM_NUNCHUK_CALIBRATION:
++        case WII_FSM_ACCEL_CALIBRATION:
++        case WII_FSM_ACCEL_CALIBRATION_BACKUP:
++        case WII_FSM_MP_PROBE:
++        case WII_FSM_MP_INIT:
++        case WII_FSM_MP_CALIBRATION_FAST:
++        case WII_FSM_MP_CALIBRATION_SLOW:
++        case WII_FSM_MP_ACTIVATE:
++        case WII_FSM_MP_VERIFY:
++        case WII_FSM_TOPOLOGY_STATUS:
+             break;
+         default:
+             loge("Wii: wii_process_fsm() unexpected state: %d\n", ins->state);
+@@ -1250,9 +1458,6 @@
+     ins->mode = WII_MODE_HORIZONTAL;
+     ins->state = WII_FSM_SETUP;
+ 
+-    // Start with 0xa40000 (all Wii devices, except for the Wii Remote Plus)
+-    // If it fails it will use 0xa60000
+-    ins->register_address = 0xa4;
+ 
+     // Dump EEPROM
+ #if ENABLE_EEPROM_DUMP
+@@ -1267,13 +1472,18 @@
+ }
+ 
+ void uni_hid_parser_wii_init_report(uni_hid_device_t* d) {
+-    // Reset old state. Each report contains a full-state.
++    wii_instance_t* ins = get_wii_instance(d);
+     memset(&d->controller, 0, sizeof(d->controller));
+     d->controller.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
++    // Status/ack and Nunchuk interleaves do not contain new motion samples.
++    for (int i = 0; i < 3; i++) {
++        d->controller.gamepad.accel[i] = ins->accel[i];
++        d->controller.gamepad.gyro[i] = ins->gyro[i];
++    }
+ }
+ 
+ void uni_hid_parser_wii_parse_input_report(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+-    if (len == 0)
++    if (!report || len == 0)
+         return;
+     switch (report[0]) {
+         case WIIPROTO_REQ_STATUS:
+@@ -1307,6 +1517,9 @@
+             logi("Wii parser: unknown report type: 0x%02x\n", report[0]);
+             printf_hexdump(report, len);
+     }
++    if (len >= 3 && report[0] >= WIIPROTO_REQ_STATUS && report[0] <= WIIPROTO_REQ_RETURN &&
++        get_wii_instance(d)->dev_type != WII_DEVTYPE_PRO_CONTROLLER)
++        process_drm_k(d, report, len);
+ }
+ 
+ void uni_hid_parser_wii_set_player_leds(uni_hid_device_t* d, uint8_t leds) {
+@@ -1371,29 +1584,21 @@
+ 
+ void uni_hid_parser_wii_set_mode(uni_hid_device_t* d, wii_mode_t mode) {
+     wii_instance_t* ins = get_wii_instance(d);
+-
++    if (mode != WII_MODE_HORIZONTAL && mode != WII_MODE_VERTICAL && mode != WII_MODE_ACCEL)
++        return;
++    // Extension mappings are vertical independently of the selected standalone
++    // orientation. Preserve the user's choice through attachment and removal.
+     ins->mode = mode;
+-    switch (ins->mode) {
+-        case WII_MODE_HORIZONTAL:
+-            d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+-            break;
+-        case WII_MODE_VERTICAL:
+-            d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL;
+-            break;
+-        case WII_MODE_ACCEL:
+-            // TODO: request Accel report. As it is, it doesn't work.
+-            if (ins->ext_type == WII_EXT_NONE)
+-                d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_ACCEL;
+-            else if (ins->ext_type == WII_EXT_NUNCHUK)
+-                d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL;
+-            break;
+-        default:
+-            break;
+-    }
++    if (ins->state == WII_FSM_LED_UPDATED)
++        wii_fsm_assign_device(d);
+ }
+ 
+ void uni_hid_parser_wii_request_report_type(struct uni_hid_device_s* d, wii_report_type_t report_type) {
+-    uint8_t report[] = {0xa2, WIIPROTO_REQ_DRM, 0x00, report_type};
++    wii_instance_t* ins = get_wii_instance(d);
++    ins->report_type = report_type;
++    uint8_t continuous = (report_type == WII_REPORT_TYPE_KA || report_type == WII_REPORT_TYPE_KAE) ? 4 : 0;
++    uint8_t report[] = {0xa2, WIIPROTO_REQ_DRM,
++                        continuous | (ins->rumble_state == WII_STATE_RUMBLE_IN_PROGRESS), report_type};
+     uni_hid_device_send_intr_report(d, report, sizeof(report));
+ }
+ 
+@@ -1480,10 +1685,13 @@
+ 
+ static void wii_read_mem(uni_hid_device_t* d, wii_read_type_t t, uint32_t offset, uint16_t size) {
+     logi("****** read_mem: offset=0x%04x, size=%d from=%d\n", offset, size, t);
++    wii_instance_t* ins = get_wii_instance(d);
++    ins->read_address = offset & 0xffff;
++    ins->read_size = size;
+     uint8_t report[] = {
+         // clang-format off
+       0xa2, WIIPROTO_REQ_RMEM,
+-      t, // Read from registers or memory
++      t | (ins->rumble_state == WII_STATE_RUMBLE_IN_PROGRESS),
+       (offset & 0xff0000) >> 16, (offset & 0xff00) >> 8, (offset & 0xff), // Offset
+       (size & 0xff00) >> 8, (size & 0xff), // Size in bytes
+         // clang-format on
+@@ -1491,6 +1699,15 @@
+     uni_hid_device_send_intr_report(d, report, sizeof(report));
+ }
+ 
++static void wii_write_register(uni_hid_device_t* d, uint32_t address, uint8_t value) {
++    wii_instance_t* ins = get_wii_instance(d);
++    uint8_t report[23] = {
++        0xa2, WIIPROTO_REQ_WMEM, 0x04 | (ins->rumble_state == WII_STATE_RUMBLE_IN_PROGRESS),
++        address >> 16, address >> 8, address, 1, value,
++    };
++    uni_hid_device_send_intr_report(d, report, sizeof(report));
++}
++
+ void uni_hid_parser_wii_device_dump(uni_hid_device_t* d) {
+     wii_instance_t* ins = get_wii_instance(d);
+     logi("\tWii: device '%s', extension '%s'\n", wii_devtype_names[ins->dev_type], wii_exttype_names[ins->ext_type]);
 diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad32/uni_hid_device.c
 --- a/src/components/bluepad32/uni_hid_device.c
 +++ b/src/components/bluepad32/uni_hid_device.c

@@ -84,6 +84,11 @@ enum {
 };
 
 typedef enum {
+    CONTROLLER_TYPE_UnknownController = 0,
+    CONTROLLER_TYPE_WiiController = 35,
+} uni_controller_type_t;
+
+typedef enum {
     CONTROLLER_SUBTYPE_NONE = 0,
     CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL,
     CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL,
@@ -163,6 +168,7 @@ inline uint8_t uni_circular_buffer_is_empty(const uni_circular_buffer_t* buffer)
 struct uni_hid_device_s {
     uint16_t vendor_id;
     uint16_t product_id;
+    uni_controller_type_t controller_type;
     uni_controller_subtype_t controller_subtype;
     uni_bt_conn_t conn;
     int idx;

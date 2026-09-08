@@ -155,6 +155,8 @@ def _controller_presentation(
         "joycon2-right": ("Nintendo Joy-Con 2 (R)", "switch", {0x2066}),
         "joycon2-pair": ("Nintendo Joy-Con 2 pair", "switch", {0x2067, 0x2066}),
         "wii-remote": ("Nintendo Wii Remote", "wii", {0x0306, 0x0330}),
+        "wii-horizontal": ("Nintendo Wii Remote (horizontal)", "wii", {0x0306, 0x0330}),
+        "wii-vertical": ("Nintendo Wii Remote (vertical)", "wii", {0x0306, 0x0330}),
         "wii-nunchuk": ("Nintendo Wii Remote + Nunchuk", "wii", {0x0306, 0x0330}),
     }
     live = live_layouts.get(layout)
@@ -208,7 +210,7 @@ def _source_controls(controller: dict[str, str]) -> list[str]:
             if layout == "joycon2-left"
             else ("start", "system", "right_trigger", "c", "right_sl", "right_sr")
         )
-    elif layout in {"wii-remote", "wii-nunchuk"}:
+    elif layout in {"wii-remote", "wii-horizontal", "wii-vertical", "wii-nunchuk"}:
         controls = (
             "south", "east", "west", "north", "select", "start", "system",
             "dpad_up", "dpad_down", "dpad_left", "dpad_right",
@@ -443,6 +445,9 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
             identity_index, action = identity_selection
             if action == "identify":
                 self._api_call(lambda: self._identify(identity_index))
+                return
+            if action == "wii-orientation":
+                self._api_call(lambda: self._set_wii_orientation(identity_index))
                 return
         selection = self._parse_profile_path(path)
         if selection is not None:
@@ -965,6 +970,25 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
         _, identity = self._entries_and_identity(device, identity_index)
         config_manager.identify_controller(device, identity)
         return {"identified": True}
+
+    def _set_wii_orientation(self, identity_index: int) -> dict[str, Any]:
+        body = self._read_json_object()
+        orientation = body.get("orientation")
+        generation = body.get("connection_generation")
+        if (
+            not isinstance(orientation, str)
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or not 0 <= generation <= 0xFFFFFFFF
+        ):
+            raise config_manager.ConfigManagerError(
+                "request must contain orientation ('horizontal' or 'vertical') "
+                "and a valid connection_generation"
+            )
+        device = self.profile_server.find_device()
+        _, identity = self._entries_and_identity(device, identity_index)
+        config_manager.set_wii_orientation(device, identity, generation, orientation)
+        return {"queued": True}
 
     def _copy_profile(self, identity_index: int, profile_index: int) -> dict[str, Any]:
         destination = self._read_json_object()

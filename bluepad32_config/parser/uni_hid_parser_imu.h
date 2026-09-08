@@ -229,14 +229,3 @@ static inline bool uni_psmove_normalize_imu(
     }
     return true;
 }
-
-static inline void uni_imu_normalize_wii_accel(int32_t x, int32_t y,
-                                                int32_t z,
-                                                int32_t output[3]) {
-    if (output == NULL) {
-        return;
-    }
-    output[0] = uni_imu_scale(-x, 100, UNI_IMU_ACCEL_RES_PER_G);
-    output[1] = uni_imu_scale(z, 100, UNI_IMU_ACCEL_RES_PER_G);
-    output[2] = uni_imu_scale(y, 100, UNI_IMU_ACCEL_RES_PER_G);
-}

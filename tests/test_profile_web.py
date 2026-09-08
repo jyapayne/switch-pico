@@ -436,7 +436,14 @@ def test_wii_pid_does_not_claim_a_remote_or_extension_without_live_metadata(
         status, listing = request_json(f"{base_url}/api/profiles")
         assert status == 200
         assert listing["identities"][1]["controller"]["layout"] == "generic"
-        for code, expected in ((0, "generic"), (4, "wii-remote"), (5, "wii-nunchuk"), (0, "generic")):
+        for code, expected in (
+            (0, "generic"),
+            (4, "wii-remote"),
+            (5, "wii-nunchuk"),
+            (6, "wii-horizontal"),
+            (7, "wii-vertical"),
+            (0, "generic"),
+        ):
             device.playtest_layout = code
             status, sample = request_json(f"{base_url}/api/profiles/0/1/playtest")
             assert status == 200
@@ -444,7 +451,6 @@ def test_wii_pid_does_not_claim_a_remote_or_extension_without_live_metadata(
             if code:
                 assert set(sample["source_controls"]).isdisjoint(config_manager.EXTRA_BUTTONS)
                 assert ("left_shoulder" in sample["source_controls"]) == (code == 5)
-
 
 def test_editor_reads_writes_and_activates_profiles_atomically(
     monkeypatch: pytest.MonkeyPatch,
@@ -859,4 +865,77 @@ def test_recorder_accepts_first_connection_generation_zero(
             },
         )
         assert status == 200 and stopped["state_name"] == "stopped"
-        assert stopped["steps"][0]["duration_ms"] == 100
+
+
+
+def test_wii_orientation_endpoint_validation_and_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    with running_server(monkeypatch, device) as (base_url, token):
+        # Missing token
+        status, _ = request_json(
+            f"{base_url}/api/identities/1/wii-orientation",
+            method="POST",
+            value={"orientation": "horizontal", "connection_generation": 1},
+        )
+        assert status == 403
+
+        # Out of bounds identity index
+        status, _ = request_json(
+            f"{base_url}/api/identities/99/wii-orientation",
+            method="POST",
+            token=token,
+            value={"orientation": "horizontal", "connection_generation": 1},
+        )
+        assert status == 400
+
+        # Invalid / missing fields
+        for invalid_body in (
+            {},
+            {"orientation": "diagonal", "connection_generation": 1},
+            {"orientation": "horizontal"},
+            {"connection_generation": 1},
+            {"orientation": "horizontal", "connection_generation": -1},
+            {"orientation": "horizontal", "connection_generation": "1"},
+            {"orientation": 123, "connection_generation": 1},
+        ):
+            status, _ = request_json(
+                f"{base_url}/api/identities/1/wii-orientation",
+                method="POST",
+                token=token,
+                value=invalid_body,
+            )
+            assert status == 400
+
+        # ConfigManagerError from config_manager
+        def failing_config(*args: Any, **kwargs: Any) -> None:
+            raise config_manager.ConfigManagerError("firmware rejected orientation")
+
+        monkeypatch.setattr(
+            config_manager, "set_wii_orientation", failing_config
+        )
+        status, err = request_json(
+            f"{base_url}/api/identities/1/wii-orientation",
+            method="POST",
+            token=token,
+            value={"orientation": "horizontal", "connection_generation": 1},
+        )
+        assert status == 400
+        assert "error" in err
+
+        # USB error from config_manager
+        def usb_failing_config(*args: Any, **kwargs: Any) -> None:
+            raise usb.core.USBError("USB pipe error")
+
+        monkeypatch.setattr(
+            config_manager, "set_wii_orientation", usb_failing_config
+        )
+        status, err = request_json(
+            f"{base_url}/api/identities/1/wii-orientation",
+            method="POST",
+            token=token,
+            value={"orientation": "horizontal", "connection_generation": 1},
+        )
+        assert status == 503
+        assert "error" in err

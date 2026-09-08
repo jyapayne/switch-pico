@@ -154,6 +154,18 @@
                 </select>
                 <p class="field-help" id="controllerLayoutHelp">Preview changes only this editor's source labels and diagram, never firmware topology or saved mappings.</p>
               </div>
+              <div class="wii-orientation-control" id="wiiOrientationControl" hidden>
+                <label class="field-label" for="wiiOrientationSelect">Wii orientation</label>
+                <div class="wii-orientation-actions">
+                  <select class="select" id="wiiOrientationSelect" aria-describedby="wiiOrientationHelp wiiOrientationStatus" disabled>
+                    <option value="horizontal">Horizontal · sideways D-pad &amp; 1/2 buttons</option>
+                    <option value="vertical">Vertical · upright pointer orientation</option>
+                  </select>
+                  <button class="button button-secondary" id="applyWiiOrientationButton" type="button" disabled>Apply orientation</button>
+                </div>
+                <p class="field-help" id="wiiOrientationHelp">Applies to the active connection only (not saved in profile slots). Nunchuk automatically locks orientation to vertical.</p>
+                <p class="wii-orientation-status" id="wiiOrientationStatus" data-state="idle" role="status" aria-live="polite"></p>
+              </div>
               <div class="controller-viewport" tabindex="0" role="region" aria-label="Controller diagram; scroll horizontally on narrow screens">
                 <div class="controller-photo-wrap" id="controllerPhotoWrap">
                   <div class="controller-stage" id="controllerStage">

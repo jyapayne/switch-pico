@@ -37,6 +37,24 @@ const joyconMode = {
   readError: "",
   applyError: "",
 };
+const wiiOrientation = {
+  current: null,
+  selected: "horizontal",
+  pending: false,
+  applying: false,
+  applyError: "",
+  submittedGeneration: null,
+  desiredLayout: null,
+  ownerKey: null,
+  applyTimer: 0,
+};
+function resetWiiOrientationDraft() {
+  wiiOrientation.pending = false;
+  wiiOrientation.applyError = "";
+  if (wiiOrientation.current) {
+    wiiOrientation.selected = wiiOrientation.current;
+  }
+}
 const state = {
   schema: null,
   identities: [],
@@ -93,6 +111,11 @@ const elements = {
   controllerLayoutPreview: document.querySelector("#controllerLayoutPreview"),
   controllerLayoutHelp: document.querySelector("#controllerLayoutHelp"),
   controllerLayoutNote: document.querySelector("#controllerLayoutNote"),
+  wiiOrientationControl: document.querySelector("#wiiOrientationControl"),
+  wiiOrientation: document.querySelector("#wiiOrientationSelect"),
+  applyWiiOrientation: document.querySelector("#applyWiiOrientationButton"),
+  wiiOrientationStatus: document.querySelector("#wiiOrientationStatus"),
+  wiiOrientationHelp: document.querySelector("#wiiOrientationHelp"),
   controllerPhotoWrap: document.querySelector("#controllerPhotoWrap"),
   controllerStage: document.querySelector("#controllerStage"),
   selectedSource: document.querySelector("#selectedSource"),
@@ -246,8 +269,9 @@ function syncControllerPresentation() {
   const reported = live?.source_controls || owner?.source_controls || state.schema.controls;
   const sources = preview ? Object.keys(layout.controls) : reported.filter(control =>
     layout.generic || Object.hasOwn(layout.controls, control));
-  const topologyKnown = !layoutId.startsWith("joycon2-") || live?.layout === layoutId;
-  const liveDiagram = Boolean(live && !preview && topologyKnown && layoutId !== "wii-remote" && !layout.generic);
+  const topologyKnown = layoutId !== "wii-remote" &&
+    (!(layoutId.startsWith("joycon2-") || layoutId.startsWith("wii-")) || live?.layout === layoutId);
+  const liveDiagram = Boolean(live && !preview && topologyKnown && !layout.generic);
   const style = preview ? layout.style : controller.style || layout.style;
   const key = [owner?.key, layoutId, style, preview, liveDiagram, Boolean(live), live?.identity_key, controller.model, sources.join(",")].join("|");
   if (state.presentationKey === key) return false;
@@ -356,6 +380,17 @@ function clearPlaytest(message, stateName = "waiting") {
     refreshSourceControls();
   }
   renderCapture();
+  if (wiiOrientation.applying) {
+    window.clearTimeout(wiiOrientation.applyTimer);
+    wiiOrientation.applying = false;
+    wiiOrientation.submittedGeneration = null;
+    wiiOrientation.desiredLayout = null;
+    wiiOrientation.ownerKey = null;
+    setBusy(false);
+  }
+  wiiOrientation.current = null;
+  resetWiiOrientationDraft();
+  renderWiiOrientation();
 }
 
 function renderPlaytest(sample) {
@@ -466,12 +501,48 @@ function renderPlaytest(sample) {
   elements.playtestHelp.textContent =
     "Yellow is raw input; blue is the output produced by this unsaved draft.";
   renderCapture();
+  if (wiiOrientation.applying) {
+    const submittedGen = wiiOrientation.submittedGeneration;
+    const nextGen = ((submittedGen + 1) >>> 0);
+    const gen = sample.connection_generation;
+    const desired = wiiOrientation.desiredLayout;
+    const matchesOwner = owner && wiiOrientation.ownerKey === owner.key;
+    if (matchesOwner && sample.layout === desired && (gen === submittedGen || gen === nextGen)) {
+      window.clearTimeout(wiiOrientation.applyTimer);
+      wiiOrientation.applying = false;
+      wiiOrientation.submittedGeneration = null;
+      wiiOrientation.desiredLayout = null;
+      wiiOrientation.ownerKey = null;
+      wiiOrientation.current = desired === "wii-horizontal" ? "horizontal" : "vertical";
+      wiiOrientation.selected = wiiOrientation.current;
+      wiiOrientation.pending = false;
+      wiiOrientation.applyError = "";
+      setBusy(false);
+      toast(`${label(wiiOrientation.current)} orientation applied.`);
+    } else if (!matchesOwner || (gen !== submittedGen && gen !== nextGen)) {
+      window.clearTimeout(wiiOrientation.applyTimer);
+      wiiOrientation.applying = false;
+      wiiOrientation.submittedGeneration = null;
+      wiiOrientation.desiredLayout = null;
+      wiiOrientation.ownerKey = null;
+      resetWiiOrientationDraft();
+      setBusy(false);
+    }
+  }
+  if (sample.layout === "wii-horizontal" || sample.layout === "wii-vertical") {
+    const confirmed = sample.layout === "wii-horizontal" ? "horizontal" : "vertical";
+    wiiOrientation.current = confirmed;
+    if (!wiiOrientation.pending && !wiiOrientation.applying) {
+      wiiOrientation.selected = confirmed;
+    }
+  }
+  renderWiiOrientation();
 }
 
 async function pollPlaytest() {
   window.clearTimeout(state.playtestTimer);
   if (
-    document.hidden || state.busy || state.playtestRequestActive ||
+    document.hidden || (state.busy && !wiiOrientation.applying) || state.playtestRequestActive ||
     captureBlocking() || macroCapture.requestActive || !state.schema || !state.profile
   ) {
     state.playtestTimer = window.setTimeout(pollPlaytest, 250);
@@ -634,6 +705,92 @@ async function refreshJoyconMode(showLoading = false) {
   }
 }
 
+function isWiiController(owner = currentOwner(), live = matchingLiveSample() ? state.liveSample : null) {
+  const vid = owner?.identity?.vendor_id;
+  const pid = owner?.identity?.product_id;
+  const isWiiPid = vid === 0x057E && (pid === 0x0306 || pid === 0x0330);
+  const liveLayout = live?.layout;
+  const isWiiLayout = liveLayout === "wii-remote" || liveLayout === "wii-nunchuk" ||
+    liveLayout === "wii-horizontal" || liveLayout === "wii-vertical";
+  return Boolean(isWiiPid || isWiiLayout);
+}
+
+function renderWiiOrientation() {
+  const owner = currentOwner();
+  const live = matchingLiveSample() ? state.liveSample : null;
+  const visible = isWiiController(owner, live);
+  elements.wiiOrientationControl.hidden = !visible;
+  if (!visible) return;
+
+  const isNunchuk = live?.layout === "wii-nunchuk";
+  const isLegacy = live?.layout === "wii-remote";
+  const isSupported = Boolean(
+    live && (live.layout === "wii-horizontal" || live.layout === "wii-vertical") &&
+    owner && owner.index !== 0
+  );
+  const locked = (state.busy && !wiiOrientation.applying) || captureBlocking() ||
+    macroCapture.requestActive || wiiOrientation.applying || !state.adapterConnected || !live;
+  if (isNunchuk) {
+    elements.wiiOrientation.value = "vertical";
+    elements.wiiOrientation.disabled = true;
+    elements.applyWiiOrientation.disabled = true;
+    elements.wiiOrientationStatus.dataset.state = "locked";
+    elements.wiiOrientationStatus.textContent = "Nunchuk attached: orientation is locked to vertical.";
+    return;
+  }
+
+  if (!live) {
+    elements.wiiOrientation.disabled = true;
+    elements.applyWiiOrientation.disabled = true;
+    elements.wiiOrientationStatus.dataset.state = "idle";
+    elements.wiiOrientationStatus.textContent = "";
+    return;
+  }
+
+  if (isLegacy) {
+    elements.wiiOrientation.disabled = true;
+    elements.applyWiiOrientation.disabled = true;
+    elements.wiiOrientationStatus.dataset.state = "unsupported";
+    elements.wiiOrientationStatus.textContent = "Legacy firmware detected. Update firmware to configure Wii orientation.";
+    return;
+  }
+
+  if (owner?.index === 0) {
+    elements.wiiOrientation.disabled = true;
+    elements.applyWiiOrientation.disabled = true;
+    elements.wiiOrientationStatus.dataset.state = "unsupported";
+    elements.wiiOrientationStatus.textContent = "Default profile owner cannot set orientation. Select the connected Wii Remote.";
+    return;
+  }
+
+  elements.wiiOrientation.disabled = locked || !isSupported;
+  const hasChanged = wiiOrientation.selected !== wiiOrientation.current;
+  elements.applyWiiOrientation.disabled = elements.wiiOrientation.disabled ||
+    wiiOrientation.applying || !hasChanged;
+  if (elements.wiiOrientation.value !== wiiOrientation.selected) {
+    elements.wiiOrientation.value = wiiOrientation.selected;
+  }
+
+  let statusText = "";
+  let statusState = "idle";
+  if (wiiOrientation.applying) {
+    statusState = "pending";
+    statusText = `Applying ${wiiOrientation.selected} orientation…`;
+  } else if (wiiOrientation.applyError) {
+    statusState = "error";
+    statusText = wiiOrientation.applyError;
+  } else if (hasChanged) {
+    statusState = "pending";
+    statusText = `Selected: ${label(wiiOrientation.selected)} — not applied.`;
+  } else if (wiiOrientation.current) {
+    statusState = "idle";
+    statusText = `Current: ${label(wiiOrientation.current)}.`;
+  }
+
+  elements.wiiOrientationStatus.dataset.state = statusState;
+  elements.wiiOrientationStatus.textContent = statusText;
+}
+
 
 function setBusy(busy) {
   state.busy = busy;
@@ -660,6 +817,7 @@ function setBusy(busy) {
     button.disabled = busy;
   });
   renderCapture();
+  renderWiiOrientation();
 }
 
 function updateDirtyState() {
@@ -965,7 +1123,9 @@ function renderButtonMap() {
   elements.controllerLayoutHelp.textContent = preview
     ? `Manual preview only${live ? `; connected input is ${live.controller.model}` : ""}. No topology or saved mapping is changed. Physical highlighting is off.`
     : live && !topologyKnown
-      ? "Legacy firmware does not report Joy-Con pair/solo topology. This is an owner reference, not detected solo mode. Choose a preview or update firmware."
+      ? layoutId === "wii-remote"
+        ? "Legacy firmware does not report Wii orientation. This reference shows the default horizontal mapping; physical highlighting is off. Choose a preview or update firmware."
+        : "Legacy firmware does not report Joy-Con pair/solo topology. This is an owner reference, not detected solo mode. Choose a preview or update firmware."
       : "Auto uses only the selected owner's metadata. Preview changes this editor's source labels and diagram, never firmware topology or saved mappings.";
   elements.controllerLayoutNote.textContent =
     !preview && live?.layout === "joycon2-pair" && !live.identity?.is_joycon_pair
@@ -1037,6 +1197,7 @@ function renderButtonMap() {
   elements.selectedControlDescription.textContent =
     `${sourceAvailable(selected) ? "Source" : "Stored / unavailable source"} ${sourceLabel(selected)} [${selected}] produces ${mappedOutput == null ? "no output" : controlLabel(mappedOutput)}.${sourceAvailable(selected) ? "" : " Its mapping is retained; change the preview to locate it."}`;
   elements.selectedMapping.innerHTML = buttonOptions(mappedOutput, true, state.schema.output_controls, style);
+  renderWiiOrientation();
 }
 
 elements.controllerCanvas.addEventListener("click", event => {
@@ -2354,9 +2515,10 @@ elements.identity.addEventListener("change", async () => {
   if (owner) persistOwnerKey(owner.key);
   state.profileIndex = 0;
   state.profileNames = Array(state.schema.profile_capacity).fill("");
+  wiiOrientation.current = null;
+  resetWiiOrientationDraft();
   await loadProfile();
 });
-
 elements.refresh.addEventListener("click", async () => {
   await loadLibrary(true);
 });
@@ -2395,6 +2557,63 @@ elements.applyJoyconMode.addEventListener("click", async () => {
   }
 });
 
+elements.wiiOrientation.addEventListener("change", () => {
+  if (elements.wiiOrientation.disabled) return;
+  wiiOrientation.selected = elements.wiiOrientation.value;
+  wiiOrientation.pending = wiiOrientation.selected !== wiiOrientation.current;
+  wiiOrientation.applyError = "";
+  renderWiiOrientation();
+});
+
+elements.applyWiiOrientation.addEventListener("click", async () => {
+  const owner = currentOwner();
+  const live = matchingLiveSample() ? state.liveSample : null;
+  if (elements.applyWiiOrientation.disabled || (state.busy && !wiiOrientation.applying) ||
+      captureBlocking() || macroCapture.requestActive || !owner || owner.index === 0 || !live) return;
+
+  const targetOrientation = wiiOrientation.selected;
+  const targetLayout = targetOrientation === "horizontal" ? "wii-horizontal" : "wii-vertical";
+  const gen = live.connection_generation;
+  wiiOrientation.applying = true;
+  wiiOrientation.applyError = "";
+  wiiOrientation.submittedGeneration = gen;
+  wiiOrientation.desiredLayout = targetLayout;
+  wiiOrientation.ownerKey = owner.key;
+  window.clearTimeout(wiiOrientation.applyTimer);
+  wiiOrientation.applyTimer = window.setTimeout(() => {
+    if (wiiOrientation.applying) {
+      wiiOrientation.applying = false;
+      wiiOrientation.submittedGeneration = null;
+      wiiOrientation.desiredLayout = null;
+      wiiOrientation.ownerKey = null;
+      wiiOrientation.applyError = "Orientation confirmation timed out. Check controller connection.";
+      setBusy(false);
+      renderWiiOrientation();
+    }
+  }, 5000);
+  setBusy(true);
+  try {
+    await api(`/api/identities/${owner.index}/wii-orientation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        orientation: targetOrientation,
+        connection_generation: gen,
+      }),
+    });
+  } catch (error) {
+    window.clearTimeout(wiiOrientation.applyTimer);
+    wiiOrientation.applying = false;
+    wiiOrientation.submittedGeneration = null;
+    wiiOrientation.desiredLayout = null;
+    wiiOrientation.ownerKey = null;
+    wiiOrientation.applyError = `Could not set orientation: ${error.message}`;
+    toast(wiiOrientation.applyError, true);
+    setBusy(false);
+    renderWiiOrientation();
+  }
+  pollPlaytest();
+});
 elements.resetDraft.addEventListener("click", () => {
   if (!state.schema || !window.confirm("Replace this draft with the default profile? Nothing is saved until you choose Save to Pico.")) return;
   state.profile = clone(state.schema.default_profile);

@@ -12,6 +12,7 @@
 #include "parser/uni_hid_parser_switch2.h"
 #include "parser/uni_switch2_haptics.h"
 #include "parser/uni_switch2_pairing.h"
+#include "parser/uni_hid_parser_wii.h"
 #include "platform/pico/controller_color_config.h"
 #include "input/switch2_wake.h"
 #include "pico/critical_section.h"
@@ -102,6 +103,13 @@ struct LocalRumbleEvent {
     uint8_t low;
 };
 std::vector<LocalRumbleEvent> local_rumble_events;
+
+struct WiiModeEvent {
+    uni_hid_device_t* device;
+    wii_mode_t mode;
+};
+std::vector<WiiModeEvent> wii_mode_events;
+bool wii_dispatch_active = false;
 
 struct CoreStopped {};
 
@@ -682,6 +690,19 @@ void tracked_state_lock_exit(critical_section_t* lock) {
 #include "input/bluepad32_input_backend.cpp"
 #undef critical_section_enter_blocking
 #undef critical_section_exit
+
+extern "C" void uni_hid_parser_wii_set_mode(
+    uni_hid_device_t* device, wii_mode_t mode) {
+    require(wii_dispatch_active && state_lock_depth == 0,
+            "Wii parser mode changes must run in the Bluetooth timer without the state lock");
+    wii_mode_events.push_back({device, mode});
+    device->controller_subtype = mode == WII_MODE_VERTICAL
+        ? CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL
+        : CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+    // The real parser's report reconfiguration can synchronously announce ready.
+    require(platform_on_device_ready(device) == UNI_ERROR_SUCCESS,
+            "Wii mode reconfiguration must retain the ready connection");
+}
 
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 namespace {
@@ -3493,9 +3514,9 @@ void test_rejections() {
         Bluepad32ControllerLayout layout;
     };
     const LayoutCase layouts[] = {
-        {CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL, Bluepad32ControllerLayout::kWiiRemote},
-        {CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL, Bluepad32ControllerLayout::kWiiRemote},
-        {CONTROLLER_SUBTYPE_WIIMOTE_ACCEL, Bluepad32ControllerLayout::kWiiRemote},
+        {CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL, Bluepad32ControllerLayout::kWiiHorizontal},
+        {CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL, Bluepad32ControllerLayout::kWiiVertical},
+        {CONTROLLER_SUBTYPE_WIIMOTE_ACCEL, Bluepad32ControllerLayout::kWiiHorizontal},
         {CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK, Bluepad32ControllerLayout::kWiiNunchuk},
         {CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL, Bluepad32ControllerLayout::kWiiNunchuk},
         {CONTROLLER_SUBTYPE_WII_CLASSIC, Bluepad32ControllerLayout::kUnspecified},
@@ -5415,6 +5436,222 @@ void test_native_second_slot_selection() {
 }
 #endif
 
+uni_hid_device_t wii_device(int index) {
+    auto result = device(index, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    result.vendor_id = 0x057e;
+    result.product_id = 0x0330;
+    result.controller_type = CONTROLLER_TYPE_WiiController;
+    result.controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+    return result;
+}
+
+void dispatch_wii_requests() {
+    wii_dispatch_active = true;
+    now_ms += g_rumble_timer.timeout_ms;
+    g_rumble_timer.handler(&g_rumble_timer);
+    wii_dispatch_active = false;
+}
+
+void test_wii_orientation() {
+    start_pairing_backend();
+    initialize_runtime_profile_storage();
+    auto remote = wii_device(0);
+    auto ordinary = device(1, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    ready_switch2(remote);
+    ready_switch2(ordinary);
+    const auto identity = slot_snapshot(0).identity;
+    const auto ordinary_identity = slot_snapshot(1).identity;
+    configure_gesture_profile(identity, 2, 37);
+    configure_gesture_profile(ordinary_identity, 5, 63);
+    controller_profile_runtime_reset();
+    for (uint8_t index = 0; index < 2; ++index) {
+        controller_profile_runtime_transform(
+            index, slot_snapshot(index), now_ms, AdapterUsbMode::kXInput);
+    }
+    uni_controller_t report{};
+    report.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    report.gamepad.buttons = BUTTON_A;
+    ++now_ms;
+    platform_on_controller_data(&remote, &report);
+    platform_on_controller_data(&ordinary, &report);
+    for (uint8_t index = 0; index < 2; ++index) {
+        require(controller_profile_runtime_transform(
+                    index, slot_snapshot(index), now_ms, AdapterUsbMode::kXInput)
+                    .state.button_system,
+                "both controllers need active toggle macros before changing only Wii orientation");
+    }
+    report.gamepad.buttons = BUTTON_Y;
+    report.gamepad.dpad = DPAD_UP;
+    report.gamepad.axis_x = 511;
+    report.gamepad.brake = 1023;
+    platform_on_controller_data(&remote, &report);
+    const auto before = slot_snapshot(0);
+    const auto ordinary_before = slot_snapshot(1);
+    require(bluepad32_input_backend_capture_start(
+                0, before.connection_generation, CaptureOptions{}),
+            "orientation transition must have an active recorder to retire");
+    bluepad32_input_backend_queue_rumble(0, ControllerRumbleOutput{91, 101});
+    bluepad32_input_backend_queue_profile_feedback(
+        0, before.connection_generation, 8, ControllerProfileConfirmationPolicy::kRumbleAndLed);
+    const unsigned writes_before = profile_write_attempts;
+    const size_t observations_before = observed_profile_identity_count;
+    require(bluepad32_input_backend_set_wii_orientation(
+                identity, before.connection_generation, true),
+            "live standalone Wii must accept a vertical request");
+    Bluepad32PlaytestSnapshot playtest{};
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(wii_mode_events.empty() &&
+                playtest.controller_layout == Bluepad32ControllerLayout::kWiiHorizontal &&
+                playtest.connection_generation == before.connection_generation &&
+                playtest.state.button_north && playtest.state.dpad_up,
+            "enqueue must not call the parser or claim a new mapping on the management core");
+    dispatch_wii_requests();
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(wii_mode_events.size() == 1 && wii_mode_events[0].device == &remote &&
+                wii_mode_events[0].mode == WII_MODE_VERTICAL &&
+                playtest.active &&
+                playtest.controller_layout == Bluepad32ControllerLayout::kWiiVertical &&
+                playtest.connection_generation == before.connection_generation + 1u &&
+                controller_identity_equal(playtest.identity, identity) &&
+                playtest.physical_button_mask == 0 && !playtest.state.button_north &&
+                !playtest.state.dpad_up && playtest.state.left_stick_x == 0 &&
+                playtest.state.left_trigger == 0 && playtest.state.motion_sample_count == 0,
+            "timer dispatch must atomically retire old input and publish the new live mapping epoch");
+    Bluepad32CaptureSnapshot capture{};
+    require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kDisconnected &&
+                !controller_profile_runtime_transform(
+                    0, slot_snapshot(0), now_ms, AdapterUsbMode::kXInput).state.button_system &&
+                controller_profile_runtime_transform(
+                    1, slot_snapshot(1), now_ms, AdapterUsbMode::kXInput).state.button_system &&
+                slot_snapshot(1).connection_generation == ordinary_before.connection_generation &&
+                remote.last_high == 0 && remote.last_low == 0 &&
+                !bluepad32_input_backend_toggle_motion(0, before.connection_generation),
+            "mapping changes must cancel old macro/capture/hotkey/feedback epochs without disturbing peers");
+    report.gamepad = {};
+    report.gamepad.buttons = BUTTON_B;
+    platform_on_controller_data(&remote, &report);
+    require(slot_snapshot(0).state.button_east && !slot_snapshot(0).state.button_north,
+            "fresh input must use the new mapping without reviving old controls");
+    const uint32_t vertical_generation = playtest.connection_generation;
+    require(bluepad32_input_backend_set_wii_orientation(
+                identity, vertical_generation, false),
+            "current vertical mapping must be reversible without reconnecting");
+    dispatch_wii_requests();
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(playtest.controller_layout == Bluepad32ControllerLayout::kWiiHorizontal &&
+                playtest.connection_generation == vertical_generation + 1u &&
+                wii_mode_events.size() == 2 && wii_mode_events[1].mode == WII_MODE_HORIZONTAL,
+            "horizontal selection must return the real parser and metadata to horizontal");
+    const uint32_t horizontal_generation = playtest.connection_generation;
+    require(bluepad32_input_backend_set_wii_orientation(
+                identity, horizontal_generation, false),
+            "reselection must still reach a parser with a potentially deferred opposite choice");
+    dispatch_wii_requests();
+    require(wii_mode_events.size() == 3 && wii_mode_events[2].mode == WII_MODE_HORIZONTAL &&
+                slot_snapshot(0).connection_generation == horizontal_generation + 1u &&
+                profile_write_attempts == writes_before &&
+                observed_profile_identity_count == observations_before &&
+                device_disconnect_calls == 0,
+            "reselection and orientation roundtrip must preserve profiles, flash and physical connections");
+    require_active_profile(identity, 2, 37);
+    require_active_profile(ordinary_identity, 5, 63);
+}
+
+void test_wii_orientation_races() {
+    auto remote = wii_device(0);
+    const auto identity = identity_for_device(&remote);
+    require(!bluepad32_input_backend_set_wii_orientation(identity, 0, true),
+            "orientation requests must reject an uninitialized backend");
+    start_pairing_backend();
+    platform_on_device_connected(&remote);
+    require(!bluepad32_input_backend_set_wii_orientation(
+                identity, slot_snapshot(0).connection_generation, true),
+            "orientation requests must reject connections that are not ready");
+    require(platform_on_device_ready(&remote) == UNI_ERROR_SUCCESS,
+            "Wii race fixture must become ready");
+    const auto before = slot_snapshot(0);
+    auto ordinary = device(1, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    ordinary.controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+    ready_switch2(ordinary);
+    auto unstable = wii_device(2);
+    unstable.conn.protocol = UNI_BT_CONN_PROTOCOL_NONE;
+    gap_connection_types[unstable.conn.handle] = GAP_CONNECTION_INVALID;
+    ready_switch2(unstable);
+    auto wrong_identity = identity;
+    wrong_identity.product_id ^= 1u;
+    require(!bluepad32_input_backend_set_wii_orientation(
+                identity, before.connection_generation - 1u, true) &&
+                !bluepad32_input_backend_set_wii_orientation(
+                    wrong_identity, before.connection_generation, true) &&
+                !bluepad32_input_backend_set_wii_orientation(
+                    slot_snapshot(1).identity, slot_snapshot(1).connection_generation, true) &&
+                !bluepad32_input_backend_set_wii_orientation(
+                    slot_snapshot(2).identity, slot_snapshot(2).connection_generation, true),
+            "stale generation, wrong owner, non-Wii and global fallback must not target a parser");
+    const uni_controller_subtype_t extensions[] = {
+        CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK,
+        CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL,
+        CONTROLLER_SUBTYPE_WII_CLASSIC,
+    };
+    for (auto subtype : extensions) {
+        remote.controller_subtype = subtype;
+        require(!bluepad32_input_backend_set_wii_orientation(
+                    identity, before.connection_generation, false),
+                "Nunchuk and other extension mappings cannot be changed by standalone orientation");
+    }
+    remote.controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+    require(bluepad32_input_backend_set_wii_orientation(
+                identity, before.connection_generation, true),
+            "race fixture must enqueue while still standalone");
+    remote.controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK;
+    dispatch_wii_requests();
+    Bluepad32PlaytestSnapshot playtest{};
+    bluepad32_input_backend_playtest_snapshot(0, &playtest);
+    require(wii_mode_events.empty() &&
+                playtest.controller_layout == Bluepad32ControllerLayout::kWiiNunchuk &&
+                playtest.connection_generation == before.connection_generation,
+            "extension attachment before dispatch must reject the queued request without changing topology");
+    remote.controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL;
+    dispatch_wii_requests();
+    require(wii_mode_events.empty(),
+            "a request rejected during attachment must not revive when the Nunchuk detaches");
+    require(bluepad32_input_backend_set_wii_orientation(
+                identity, before.connection_generation, true),
+            "standalone connection must accept another request after detach");
+    const WiiOrientationRequest stale = g_slots[0].pending_wii_orientation;
+    platform_on_device_disconnected(&remote);
+    remote = wii_device(0);
+    ready_switch2(remote);
+    dispatch_wii_requests();
+    require(wii_mode_events.empty() &&
+                !bluepad32_input_backend_set_wii_orientation(
+                    identity, before.connection_generation, true),
+            "physical object reuse with the same identity must discard old pending requests and reject its old epoch");
+    // Exercise the dispatch guard even if an already accepted old envelope
+    // survives a future mailbox refactor.
+    g_slots[0].pending_wii_orientation = stale;
+    g_slots[0].wii_orientation_pending = true;
+    dispatch_wii_requests();
+    g_slots[0].pending_wii_orientation = {
+        wrong_identity, slot_snapshot(0).connection_generation, true};
+    g_slots[0].wii_orientation_pending = true;
+    dispatch_wii_requests();
+    require(wii_mode_events.empty() &&
+                slot_snapshot(0).connection_generation == before.connection_generation + 1u,
+            "dispatch must independently revalidate both connection generation and identity");
+    const auto replacement = slot_snapshot(0);
+    require(bluepad32_input_backend_set_wii_orientation(
+                replacement.identity, replacement.connection_generation, true) &&
+                bluepad32_input_backend_set_wii_orientation(
+                    replacement.identity, replacement.connection_generation, false),
+            "rapid standalone choices must coalesce before dispatch");
+    dispatch_wii_requests();
+    require(wii_mode_events.size() == 1 && wii_mode_events[0].mode == WII_MODE_HORIZONTAL &&
+                slot_snapshot(0).connection_generation == replacement.connection_generation + 1u,
+            "coalescing back to the current mapping must not apply an obsolete intermediate choice");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -5430,6 +5667,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 #endif
+    if (scenario == "wii-orientation") {
+        test_wii_orientation();
+        return 0;
+    }
+    if (scenario == "wii-orientation-races") {
+        test_wii_orientation_races();
+        return 0;
+    }
     if (scenario == "switch2-hd-pro") {
         test_switch2_hd_pro();
     } else if (scenario == "switch2-gesture-timing") {

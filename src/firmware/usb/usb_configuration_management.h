@@ -23,7 +23,7 @@ constexpr size_t kProfileListRowSize =
     16 + PROFILE_SERVICE_METADATA_MAX_BYTES + 1;
 constexpr size_t kProfileListPayloadSize =
     1 + PROFILE_SERVICE_LIST_CAPACITY * kProfileListRowSize;
-constexpr uint16_t kProfilePlaytestSchemaVersion = 4;
+constexpr uint16_t kProfilePlaytestSchemaVersion = 5;
 constexpr size_t kProfilePlaytestPayloadSize = 56;
 constexpr size_t kProfileMetadataPayloadSize =
     (CONTROLLER_PROFILE_COUNT + 1) *
@@ -74,6 +74,7 @@ enum class Operation : uint8_t {
     kProfileMetadataRead = 0x3a,
     kProfileMetadataSet = 0x3b,
     kProfileIdentify = 0x3c,
+    kWiiOrientation = 0x3d,
     kHapticsExperiment = 0x40,
     kHapticsTransportProbe = 0x41,
     kMacroCapture = 0x42,

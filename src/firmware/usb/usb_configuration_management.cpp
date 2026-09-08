@@ -121,6 +121,9 @@ bool valid_out_size(Operation operation, size_t size) {
         case Operation::kProfileIdentify:
             return size == kRequestHeaderSize +
                                CONTROLLER_IDENTITY_ENCODED_SIZE;
+        case Operation::kWiiOrientation:
+            return size == kRequestHeaderSize +
+                               CONTROLLER_IDENTITY_ENCODED_SIZE + 5;
         case Operation::kPairingRefresh:
         case Operation::kPairingClear:
             return size == kRequestHeaderSize;
@@ -518,7 +521,7 @@ size_t encode_profile_playtest(
                 CONTROLLER_MOTION_SAMPLE_CAPACITY ||
             (snapshot.state.extra_buttons & 0x80u) != 0 ||
             static_cast<uint8_t>(snapshot.controller_layout) >
-                static_cast<uint8_t>(Bluepad32ControllerLayout::kWiiNunchuk)) {
+                static_cast<uint8_t>(Bluepad32ControllerLayout::kWiiVertical)) {
             return 0;
         }
         payload[0] = 1;
@@ -898,6 +901,15 @@ bool process_out_request() {
                        payload, CONTROLLER_IDENTITY_ENCODED_SIZE,
                        &identity) &&
                    bluepad32_input_backend_identify(identity);
+        }
+        case Operation::kWiiOrientation: {
+            ControllerIdentity identity{};
+            constexpr size_t offset = CONTROLLER_IDENTITY_ENCODED_SIZE;
+            return payload[offset + 4] <= 1 &&
+                   controller_identity_decode(payload, offset, &identity) &&
+                   bluepad32_input_backend_set_wii_orientation(
+                       identity, UsbConfigurationManagement::read_u32(payload + offset),
+                       payload[offset + 4] != 0);
         }
         case Operation::kPairingRefresh:
             bluepad32_input_backend_request_pairing_snapshot();

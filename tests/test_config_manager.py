@@ -2396,6 +2396,9 @@ def test_playtest_layout_and_extra_inputs_preserve_legacy_firmware() -> None:
     assert current.to_json_object()["buttons"] == ["south", "dpad_up", "dpad_right"]
     assert parse(payload[:55], 3) == replace(current, layout=None)
     assert parse(payload[:54], 2) == replace(current, extra_buttons=0, layout=None)
+    assert parse(payload, 5) == current
+    assert parse(payload[:55] + b"\x06", 5).layout == "wii-horizontal"
+    assert parse(payload[:55] + b"\x07", 5).layout == "wii-vertical"
     assert parse(payload[:55] + b"\x00", 4).layout is None
     for data, schema in (
         (payload[:54] + b"\x80", 3),
@@ -2406,7 +2409,9 @@ def test_playtest_layout_and_extra_inputs_preserve_legacy_firmware() -> None:
         (payload, 3),
         (payload[:55], 4),
         (payload + b"\x00", 4),
-        (payload, 5),
+        (payload[:55] + b"\x08", 5),
+        (payload[:55], 5),
+        (payload, 6),
     ):
         with pytest.raises(config_manager.ConfigManagerError):
             parse(data, schema)

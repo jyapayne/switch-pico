@@ -71,6 +71,8 @@ enum class Bluepad32ControllerLayout : uint8_t {
     kJoyCon2MergedPair = 3,
     kWiiRemote = 4,
     kWiiNunchuk = 5,
+    kWiiHorizontal = 6,
+    kWiiVertical = 7,
 };
 
 // Side-effect-free raw input snapshot for management telemetry. Unlike the
@@ -133,6 +135,12 @@ void bluepad32_input_backend_queue_rumble(
     uint8_t slot, const ControllerRumbleOutput& rumble);
 bool bluepad32_input_backend_identify(
     const ControllerIdentity& identity);
+// Queue a connection-local standalone Wii mapping change for Core 1's 5 ms
+// timer. Acceptance is not application; dispatch advances the logical
+// connection generation once, including reselection. Nunchuk is ineligible.
+bool bluepad32_input_backend_set_wii_orientation(
+    const ControllerIdentity& identity, uint32_t connection_generation,
+    bool vertical);
 // Enqueue bounded local profile confirmation for the matching live connection
 // generation. The two-entry per-slot FIFO preserves initial-then-switch
 // ordering. Profile lighting is transient and restored to the steady slot

@@ -23,6 +23,9 @@
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 #include <uni.h>
+extern "C" {
+#include "parser/uni_hid_parser_wii.h"
+}
 #include "parser/uni_hid_parser_switch2.h"
 #include "parser/uni_switch2_haptics.h"
 #include "parser/uni_switch2_pairing.h"
@@ -162,6 +165,12 @@ struct ProfileFeedbackSequence {
     bool rumble_enabled;
     bool led_enabled;
 };
+struct WiiOrientationRequest {
+    ControllerIdentity identity;
+    uint32_t connection_generation;
+    bool vertical;
+};
+
 
 
 // Security Manager identity events arrive before Bluepad32 publishes a ready
@@ -192,6 +201,8 @@ struct BackendSlot {
     uint32_t state_generation;
     uint32_t connection_generation;
     bool active;
+    bool wii_orientation_pending;
+    WiiOrientationRequest pending_wii_orientation;
     bool rumble_pending;
     bool motion_enabled;
     bool feedback_pending;
@@ -1097,6 +1108,8 @@ void publish_all_neutral() {
         slot.extra_buttons = 0;
         slot.companion_extra_buttons = 0;
         slot.active = false;
+        slot.wii_orientation_pending = false;
+        slot.pending_wii_orientation = {};
         slot.rumble_pending = false;
         slot.retained_host_rumble_valid = false;
         slot.retained_host_rumble = {};
@@ -1490,6 +1503,8 @@ void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
 void reset_slot_hotkeys(BackendSlot& slot) {
     g_macro_capture.disconnect(static_cast<uint8_t>(&slot - g_slots),
                                slot.connection_generation, time_us_32());
+    slot.wii_orientation_pending = false;
+    slot.pending_wii_orientation = {};
     slot.motion_enabled = kDefaultMotionEnabled;
     slot.pre_hotkey_button_mask = 0;
     slot.feedback_pending = false;
@@ -1526,6 +1541,21 @@ void release_slot(BackendSlot& slot) {
     slot.extra_buttons = 0;
     slot.companion_extra_buttons = 0;
     slot.active = false;
+}
+
+bool is_solo_wii_remote(const BackendSlot& slot) {
+    if (!slot.active || slot.device == nullptr || slot.companion != nullptr ||
+        slot.device->controller_type != CONTROLLER_TYPE_WiiController) {
+        return false;
+    }
+    switch (slot.device->controller_subtype) {
+        case CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL:
+        case CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL:
+        case CONTROLLER_SUBTYPE_WIIMOTE_ACCEL:
+            return true;
+        default:
+            return false;
+    }
 }
 
 
@@ -2033,6 +2063,44 @@ void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
     device->report_parser.play_dual_rumble(device, 0, duration_ms, weak, strong);
 }
 
+// Core 1 only. The mailbox carries values, never a parser pointer supplied by
+// Core 0. Revalidate after lifecycle/topology work and before touching the parser.
+void process_wii_orientation(uint8_t slot_index) {
+    critical_section_enter_blocking(&g_state_lock);
+    BackendSlot& slot = g_slots[slot_index];
+    if (!slot.wii_orientation_pending) {
+        critical_section_exit(&g_state_lock);
+        return;
+    }
+    const WiiOrientationRequest request = slot.pending_wii_orientation;
+    slot.wii_orientation_pending = false;
+    slot.pending_wii_orientation = {};
+    if (!is_solo_wii_remote(slot) ||
+        slot.connection_generation != request.connection_generation ||
+        !controller_identity_equal(slot.identity, request.identity)) {
+        critical_section_exit(&g_state_lock);
+        return;
+    }
+    uni_hid_device_t* device = slot.device;
+    // Subtype publication can lag set_mode during extension discovery. Even a
+    // reselection must reach the parser to replace a deferred opposite choice.
+    // A new logical epoch retires profile macros, hotkey holds, capture and
+    // feedback without touching this connection's identity or saved profiles.
+    invalidate_slot(slot);
+    slot.gamepad = {};
+    slot.extra_buttons = 0;
+    critical_section_exit(&g_state_lock);
+
+    // The setter can synchronously re-enter the platform ready callback, so
+    // release the lock first. Lifecycle and parser callbacks share this core.
+    if (device->report_parser.play_dual_rumble != nullptr) {
+        dispatch_rumble(device, 0, 0, 0);
+    }
+    uni_hid_parser_wii_set_mode(
+        device, request.vertical ? WII_MODE_VERTICAL : WII_MODE_HORIZONTAL);
+    apply_slot_lighting(slot_index, device);
+}
+
 uint8_t xbox_trigger_magnitude(const SwitchHapticsActuatorFrame& frame) {
     uint16_t peak = 0;
     for (uint8_t i = 0; i < frame.sample_count && i < 3; ++i) {
@@ -2133,6 +2201,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 #endif
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
+        process_wii_orientation(slot_index);
         drain_switch2_ingress(slot_index, now_ms);
         RumbleEnvelope envelope{};
         FeedbackEnvelope feedback{};
@@ -3407,10 +3476,13 @@ void bluepad32_input_backend_playtest_snapshot(
             } else {
                 switch (slot.device->controller_subtype) {
                     case CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL:
-                    case CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL:
                     case CONTROLLER_SUBTYPE_WIIMOTE_ACCEL:
                         out->controller_layout =
-                            Bluepad32ControllerLayout::kWiiRemote;
+                            Bluepad32ControllerLayout::kWiiHorizontal;
+                        break;
+                    case CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL:
+                        out->controller_layout =
+                            Bluepad32ControllerLayout::kWiiVertical;
                         break;
                     case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK:
                     case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL:
@@ -3548,6 +3620,30 @@ void bluepad32_input_backend_queue_rumble(
         }
     }
 #endif
+}
+
+bool bluepad32_input_backend_set_wii_orientation(
+    const ControllerIdentity& identity, uint32_t connection_generation,
+    bool vertical) {
+    if (!g_initialized || !identity.stable ||
+        controller_identity_is_global(identity)) {
+        return false;
+    }
+    bool queued = false;
+    critical_section_enter_blocking(&g_state_lock);
+    for (BackendSlot& slot : g_slots) {
+        if (!is_solo_wii_remote(slot) ||
+            slot.connection_generation != connection_generation ||
+            !controller_identity_equal(slot.identity, identity)) {
+            continue;
+        }
+        slot.pending_wii_orientation = {identity, connection_generation, vertical};
+        slot.wii_orientation_pending = true;
+        queued = true;
+        break;
+    }
+    critical_section_exit(&g_state_lock);
+    return queued;
 }
 
 bool bluepad32_input_backend_identify(

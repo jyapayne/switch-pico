@@ -99,6 +99,8 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         subprocess.run(command, check=True, cwd=root)
         subprocess.run([str(executable), "xbox-rumble"], check=True, cwd=root)
         for scenario in (
+            "wii-orientation",
+            "wii-orientation-races",
             "switch2-individual-core-start",
             "switch2-individual-forward",
             "switch2-individual-reverse",

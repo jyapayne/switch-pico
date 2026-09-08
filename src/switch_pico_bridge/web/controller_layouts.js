@@ -149,12 +149,17 @@ const ControllerLayouts = (() => {
     },
     "wii-remote": {
       name: "Wii Remote · orientation unknown", style: "switch", asset: "wii-remote-simple.svg",
-      viewBox: [0, 0, 200, 632], minWidth: 240, maxWidth: 260,
+      viewBox: [0, 0, 200, 632], rotation: -90, minWidth: 760,
       controls: {
         ...wiiCommon,
-        ...Object.fromEntries(["south", "east", "west", "north", "dpad_up", "dpad_right", "dpad_down", "dpad_left"].map(id => [id, back("Logical " + id.replaceAll("_", " "), id.startsWith("dpad") ? id.slice(5) : id)])),
+        south: point(100, 445, "1 (horizontal default)", "1"), east: point(100, 495, "2 (horizontal default)", "2"),
+        west: point(100, 216, "A (horizontal default)", "A"), north: back("B · underside", "B"),
+        dpad_left: point(100, 103, "D-pad physical Up → Left (horizontal default)", "◀"),
+        dpad_up: point(125, 128, "D-pad physical Right → Up (horizontal default)", "▲"),
+        dpad_right: point(100, 153, "D-pad physical Down → Right (horizontal default)", "▶"),
+        dpad_down: point(75, 128, "D-pad physical Left → Down (horizontal default)", "▼"),
       },
-      note: "Firmware reports a Wii Remote, not its orientation. Only Minus, Plus and Home can be placed unambiguously. Choose an explicit horizontal/accelerometer or vertical preview to place the other sources. Power is not remappable.",
+      note: "Legacy firmware reports a Wii Remote without detected orientation. Controls default to standard horizontal positions. Select an explicit preview to compare layouts. B is underneath; Power is not remappable.",
     },
     "wii-horizontal": {
       name: "Wii Remote · horizontal / accelerometer", style: "switch", asset: "wii-remote-simple.svg",
@@ -168,12 +173,12 @@ const ControllerLayouts = (() => {
         dpad_right: point(100, 153, "D-pad physical Down → Right", "▶"),
         dpad_down: point(75, 128, "D-pad physical Left → Down", "▼"),
       },
-      note: "Explicit orientation preview, not detected: 1→south, 2→east, A→west, B→north. D-pad sources rotate counterclockwise. B is underneath; Power is not remappable.",
+      note: "1→south, 2→east, A→west, B→north. D-pad sources rotate counterclockwise for horizontal grip. B is underneath; Power is not remappable.",
     },
     "wii-vertical": {
       name: "Wii Remote · vertical", style: "switch", asset: "wii-remote-simple.svg",
       viewBox: [0, 0, 200, 632], minWidth: 240, maxWidth: 260, controls: wiiVertical,
-      note: "Explicit orientation preview, not detected: B→south, A→east, 1→west, 2→north. D-pad directions stay upright. B is underneath; Power is not remappable.",
+      note: "B→south, A→east, 1→west, 2→north. D-pad directions stay upright. B is underneath; Power is not remappable.",
     },
     "wii-nunchuk": {
       name: "Wii Remote + Nunchuk", style: "switch", asset: "wii-remote-nunchuk-simple.svg",
@@ -184,8 +189,8 @@ const ControllerLayouts = (() => {
         left_shoulder: point(420, 455, "1", "1"), right_shoulder: point(420, 505, "2", "2"),
         west: back("Nunchuk C · rear", "C"), north: back("Nunchuk Z · rear", "Z"),
       },
-      annotations: [{ x: 233, y: 220.4, label: "Stick → RIGHT axes (no click)" }],
-      note: "Nunchuk stick uses RIGHT axes and has no click. B→south, A→east, 1/2→left/right shoulder, Nunchuk C→west and Z→north. Nunchuk C is a normal face source, not the Switch 2 C extra. Power is not remappable.",
+      annotations: [{ x: 233, y: 220.4, label: "Stick → LEFT axes (no click)" }],
+      note: "Nunchuk stick uses LEFT axes with calibrated travel and has no click. B→south, A→east, 1/2→left/right shoulder, Nunchuk C→west and Z→north. Nunchuk C is a normal face source, not the Switch 2 C extra. Power is not remappable.",
     },
   };
   return layouts;

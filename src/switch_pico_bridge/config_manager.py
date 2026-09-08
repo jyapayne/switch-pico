@@ -64,6 +64,7 @@ OP_PROFILE_PLAYTEST = 0x39
 OP_PROFILE_METADATA_READ = 0x3A
 OP_PROFILE_METADATA_SET = 0x3B
 OP_PROFILE_IDENTIFY = 0x3C
+OP_WII_ORIENTATION = 0x3D
 OP_HAPTICS_EXPERIMENT = 0x40
 OP_HAPTICS_TRANSPORT_PROBE = 0x41
 OP_MACRO_CAPTURE = 0x42
@@ -172,7 +173,8 @@ PROFILE_PLAYTEST_LEGACY_SCHEMA_VERSION = 2
 PROFILE_PLAYTEST_LEGACY_SIZE = 54
 PROFILE_PLAYTEST_EXTRA_BUTTON_SCHEMA_VERSION = 3
 PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE = 55
-PROFILE_PLAYTEST_SCHEMA_VERSION = 4
+PROFILE_PLAYTEST_TOPOLOGY_SCHEMA_VERSION = 4
+PROFILE_PLAYTEST_SCHEMA_VERSION = 5
 PROFILE_PLAYTEST_SIZE = 56
 PROFILE_PLAYTEST_LAYOUTS = (
     None,
@@ -181,6 +183,8 @@ PROFILE_PLAYTEST_LAYOUTS = (
     "joycon2-pair",
     "wii-remote",
     "wii-nunchuk",
+    "wii-horizontal",
+    "wii-vertical",
 )
 PROFILE_PLAYTEST_SLOT_COUNT = 4
 PROFILE_METADATA_SCHEMA_VERSION = 1
@@ -3774,19 +3778,38 @@ def identify_controller(device: UsbDevice, identity: ControllerIdentity) -> None
     _control_out(device, OP_PROFILE_IDENTIFY, identity.to_bytes())
 
 
+def set_wii_orientation(
+    device: UsbDevice,
+    identity: ControllerIdentity,
+    connection_generation: int,
+    orientation: str,
+) -> None:
+    if identity.is_global_fallback or not identity.stable:
+        raise ConfigManagerError("select a connected Wii Remote to change orientation")
+    _require_int(connection_generation, "connection generation", 0, 0xFFFFFFFF)
+    mode = _require_enum(orientation, ("horizontal", "vertical"), "Wii orientation")
+    _control_out(
+        device,
+        OP_WII_ORIENTATION,
+        identity.to_bytes() + struct.pack("<IB", connection_generation, mode),
+    )
+
+
 def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
     _raise_status(envelope)
     expected_size = {
         PROFILE_PLAYTEST_LEGACY_SCHEMA_VERSION: PROFILE_PLAYTEST_LEGACY_SIZE,
         PROFILE_PLAYTEST_EXTRA_BUTTON_SCHEMA_VERSION: PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE,
+        PROFILE_PLAYTEST_TOPOLOGY_SCHEMA_VERSION: PROFILE_PLAYTEST_SIZE,
         PROFILE_PLAYTEST_SCHEMA_VERSION: PROFILE_PLAYTEST_SIZE,
     }.get(envelope.schema_version)
     if len(envelope.payload) != expected_size:
         raise ConfigManagerError("invalid profile playtest payload")
     payload = envelope.payload
     extra_buttons = payload[54] if len(payload) >= PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE else 0
-    layout_code = payload[55] if envelope.schema_version == PROFILE_PLAYTEST_SCHEMA_VERSION else 0
-    if layout_code >= len(PROFILE_PLAYTEST_LAYOUTS):
+    layout_code = payload[55] if len(payload) >= PROFILE_PLAYTEST_SIZE else 0
+    layout_count = 6 if envelope.schema_version == PROFILE_PLAYTEST_TOPOLOGY_SCHEMA_VERSION else len(PROFILE_PLAYTEST_LAYOUTS)
+    if layout_code >= layout_count:
         raise ConfigManagerError("invalid playtest controller layout")
     if extra_buttons & ~0x7F:
         raise ConfigManagerError("invalid playtest extra buttons")
