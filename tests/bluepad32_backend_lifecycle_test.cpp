@@ -1385,10 +1385,9 @@ void test_switch2_mode_roundtrip(bool right_first) {
                 slot_snapshot(2).connection_generation == classic_before.connection_generation &&
                 slot_snapshot(2).state.button_north &&
                 classic.rumble_calls == classic_calls && classic.last_low == 71 &&
-                negotiated_intervals[left.conn.handle] == 24 &&
-                negotiated_intervals[right.conn.handle] == 24 &&
-                interval_requests[left.conn.handle] == 1 && interval_requests[right.conn.handle] == 1,
-            "mode roundtrip must preserve unrelated Classic state, haptics and physical mixed-link intervals");
+                negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6,
+            "mode roundtrip must preserve unrelated Classic state, haptics and fast Joy-Con links");
     ControllerProfile inactive{};
     require(runtime_profile_storage.get(pair_identity, 2, &inactive) == ProfileStorageResult::kOk &&
                 inactive.weak_rumble_scale == 37,
@@ -3046,25 +3045,25 @@ void test_switch2_radio_policy(bool individual) {
             "a single Switch2 link must retain fast scheduling");
     ready_switch2(right);
     require(incoming_connections &&
-                negotiated_intervals[left.conn.handle] == 24 &&
-                negotiated_intervals[right.conn.handle] == 24,
-            "two Switch2 links must reserve Classic reconnect airtime before a Classic device exists");
+                negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6,
+            "paired and individual Joy-Cons must retain fast links before Classic arrival");
     platform_on_device_connected(&other_ble);
     require(platform_on_device_ready(&other_ble) == UNI_ERROR_SUCCESS,
             "unrelated BLE controller must join");
     platform_on_device_connected(&classic);
-    require(negotiated_intervals[left.conn.handle] == 24 &&
-                negotiated_intervals[right.conn.handle] == 24 &&
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6 &&
                 negotiated_intervals[other_ble.conn.handle] == 6,
-            "Classic setup must retain reconnect airtime without retiming unrelated BLE");
+            "Classic setup must not slow Joy-Cons or retime unrelated BLE");
     require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
             "Classic controller must complete setup alongside the pair");
     const auto pair = slot_snapshot(0);
     platform_on_device_disconnected(&classic);
-    require(negotiated_intervals[left.conn.handle] == 24 &&
-                negotiated_intervals[right.conn.handle] == 24 &&
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6 &&
                 slot_snapshot(0).connection_generation == pair.connection_generation,
-            "Classic departure must preserve reconnect airtime without rebinding the pair");
+            "Classic departure must preserve fast Joy-Con links without rebinding the pair");
     platform_on_device_connected(&classic);
     require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
             "Classic reconnect must complete");
@@ -3073,16 +3072,29 @@ void test_switch2_radio_policy(bool individual) {
             "a single surviving Switch2 link must return to fast scheduling even with Classic");
     left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
     ready_switch2(left);
-    require(negotiated_intervals[left.conn.handle] == 24 &&
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6,
+            "physical index and handle reuse must retain fast Joy-Con links");
+    negotiated_intervals[left.conn.handle] = 24;
+    negotiated_intervals[right.conn.handle] = 24;
+    now_ms += 1000;
+    process_configuration_timer(&g_configuration_timer);
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6,
+            "peer-negotiated slow Joy-Con links must reconcile to the fast default");
+    platform_on_device_disconnected(&right);
+    right = switch2_device(1, UNI_SW2_PRO_PID);
+    ready_switch2(right);
+    require(negotiated_intervals[left.conn.handle] == 6 &&
                 negotiated_intervals[right.conn.handle] == 24,
-            "physical index and handle reuse must negotiate mixed intervals on the new connection");
+            "Joy-Con preference must not remove the existing Switch2 Pro coexistence policy");
 }
 
 void test_switch2_radio_settling() {
     start_backend();
     auto classic = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
-    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
-    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    auto left = switch2_device(0, UNI_SW2_PRO_PID);
+    auto right = switch2_device(1, UNI_SW2_PRO_PID);
     platform_on_device_connected(&classic);
     require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
             "Classic-first connection must become ready");

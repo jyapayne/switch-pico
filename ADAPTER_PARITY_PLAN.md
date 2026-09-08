@@ -819,26 +819,40 @@ from 197 host requests without queue drops; the user confirmed both sides.
 Normal GATT-client busy responses now retain queued output instead of
 disconnecting the controller.
 
-Two or more Switch 2 BLE links now select 30 ms connection intervals even
-before Classic connects; a single Switch 2 link retains 7.5 ms. Paired and
-Individual Joy-Cons use the same physical-link policy. This trades Switch 2
-delivery latency for Classic paging and streaming airtime without changing
-HD encoding or bonds. The earlier policy waited for a Classic link and passed
-one physical power-off/reconnect check, but subsequent use exposed intermittent
-DualSense connection failures with two Joy-Cons already active. Regression
-coverage now requires airtime before Classic admission and after its departure.
-The user confirmed reconnects and actuator output/clean stops at 30 ms.
-A same-workload 15/30 ms comparison at 300 MHz rejected 15 ms for native
-haptics: it timed out around four seconds, with 111 PCM sends, 38 skips and
-one send failure. At 30 ms the full 30-second run retained all three links
-and native streaming: 1,384 PCM sends, 47 skips, no send failures or host-update/
-Switch 2 ingress drops, and seven Joy-Con output-stage drops. The isolated
-DualSense fixture delivered all 288 packets without skips. Release images keep
-30 ms; long-duration reliability remains unqualified. All 349 tests and four
-affected firmware builds passed for the preconnection policy.
-A prior 30-second production mixed-rumble run kept native DualSense streaming,
-with no send failures or ingress drops, 14 Joy-Con output-stage discards and
-nine PCM skips. It is not lossless.
+Joy-Con 2 links now retain 7.5 ms BLE intervals in Paired and Individual modes,
+including when a Classic controller connects. This intentionally removes their
+automatic 30 ms slowdown while preserving the idle-neutral sending fix. Other
+Switch 2 models retain 30 ms when multiple physical Switch 2 links are present,
+otherwise 7.5 ms; unrelated BLE controllers are untouched. Lifecycle coverage
+checks modes, Classic arrival/departure, handle reuse, slow-interval correction,
+and the remaining Switch 2 Pro coexistence/retry policy.
+
+Idle-neutral output ends after three successful neutral submissions/completions.
+Late non-neutral completion re-arms stops even after a logical reset; failed or
+pending writes do not consume the budget. Native subframes, expiry and normal
+active-output cadence remain unchanged. The direct lab fixtures and unqualified
+shared Classic/GATT admission experiment are excluded from this checkpoint.
+
+Measured limits remain important:
+- At 30 ms, idle suppression reduced outgoing HCI ACL writes from 974 to 469 per
+  ten seconds with the same 469 DualSense PCM sends. Total HCI transactions did
+  not decrease because receive-credit traffic increased.
+- The optimized 30-second mixed run sent 1,431 PCM packets without skips/send
+  failures, but had two Switch 2 ingress drops and nine output-stage drops.
+  The user later clarified that 30 ms Joy-Con rumble was weak; activity and
+  clean stops were not full quality approval. DualSense was weak/inconsistent.
+- A single right-Joy-Con direct-packet reference confirmed clear tone and good
+  feel at a nominal 7.5 ms packet cadence: 267 packets per two-second burst,
+  7.504 ms average submission spacing, same 320 Hz/amplitude as the weak 20 ms
+  one-/three-sample trials. This is distinct from the BLE link interval.
+- Adding DualSense PCM to the fast fixture timed out in about 0.66 seconds,
+  with one or both Joy-Cons vibrating (both links connected in either case).
+  Both runs sent only 11 PCM packets; the two-vibrating run also had Joy-Con
+  submission gaps up to 32 ms. Explicit stop writes completed after abort.
+
+The requested fast-link default is not a claim of reliable mixed native PCM,
+lossless transport or qualified endurance. DualSense buffer/cadence work remains
+separate; no hidden gain or compatibility fallback change is included.
 
 The native-HD checkpoint passed 289 tests and all five firmware builds; its
 40 pre-existing profiles and metadata survived. Its inventory then contained

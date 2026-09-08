@@ -481,43 +481,59 @@ results do **not** establish lossless arbitrary workloads or perceptual
 equivalence. All 40 profiles, names, active selections and adapter
 configuration were preserved during this upgrade.
 
-**Automatic mixed-controller scheduling:** whenever at least two physical
-Switch 2 BLE links are present, the firmware requests a 30 ms connection
-interval for those links, even before a Classic Bluetooth controller connects.
-A single Switch 2 link uses 7.5 ms. A merged Joy-Con pair counts as two links;
-Individual mode uses the same physical-link policy. Unrelated BLE controllers
-are not retimed; bonds, profiles, HD encoding and the DualSense timeout stay
-unchanged. The policy reconciles asynchronous negotiation and topology changes.
-Waiting for a Classic connection before reserving its airtime left a reconnect
-timing hole: DualSense could fail to connect with both Joy-Cons already active.
-Keeping 30 ms after Classic disconnect also leaves airtime for its next attempt.
+**Joy-Con 2 connection timing:** both halves now request **7.5 ms BLE connection
+intervals**, in Paired and Individual modes, including while Classic controllers
+are connected. This deliberately replaces their earlier automatic 30 ms slowdown
+to favor Joy-Con responsiveness and rumble quality. Other Switch 2 models retain
+the existing coexistence policy: 30 ms when at least two physical Switch 2 links
+are present, otherwise 7.5 ms. Unrelated BLE controllers are not retimed. Bonds,
+profiles, HD encoding and the DualSense timeout are unchanged. Negotiated
+intervals are reconciled after asynchronous updates and topology changes.
 
-This trades additional Switch 2 input, gyro and rumble delivery latency for
-Classic radio time. Multiple reports can travel per connection event, so
-30 ms does not impose a 33-report/s limit. Two Joy-Con 2 links at 7.5 ms caused
-native DualSense PCM timeouts in hardware testing. With the automatic policy,
-both negotiated 30 ms and DualSense started without manual re-arming.
-A production-firmware 30-second simultaneous rumble run retained all three
-connections and native streaming: zero ingress drops or send failures,
-14 Joy-Con output-stage discards and nine DualSense PCM skips. This is not
-a lossless or long-duration qualification. Lifecycle regressions cover airtime
-reservation before Classic arrival in Paired and Individual modes, Classic
-departure/reconnect, a missing half, handle reuse, late negotiation completion,
-clock wrap and transient request rejection.
-The earlier policy passed one physical DualSense power-off/reconnect check,
-but subsequent use exposed intermittent connection failures. The preconnection
-airtime regression fails under that policy and passes with the current one.
-The user confirmed reconnects and correct actuator output/stops with the
-preconnection 30 ms policy. A 15 ms trial also reconnected, but its native
-DualSense stream timed out even while sending silence. Under the same
-125 Hz-per-slot held-effect/silence workload at 300 MHz, 15 ms failed around
-four seconds (111 PCM packets sent, 38 skipped, one send failure); 30 ms
-completed 30 seconds (1,384 sent, 47 skipped, no send failures). All three
-controllers remained connected. The 30 ms run had zero host-update or Switch 2
-ingress drops and seven Joy-Con output-stage drops; its separate DualSense
-fixture delivered all 288 packets without skips. This supports keeping 30 ms,
-not a lossless or long-duration claim. The 15 ms trial is not the release default.
-The preconnection policy passed all 349 tests and four affected firmware builds.
+The BLE connection interval is not the rumble packet cadence: multiple packets
+can travel per connection event. The normal active-output algorithm is unchanged
+by this checkpoint; the direct-packet lab fixtures are not release features.
+Lifecycle coverage includes Paired/Individual mode changes, Classic arrival and
+departure, handle reuse, correcting a slow negotiated Joy-Con interval, unrelated
+BLE isolation, and the retained Switch 2 Pro interval/retry policy.
+
+**Idle Switch 2 rumble traffic:** the parser sends three successful neutral
+writes, then suppresses further idle output. Any successful non-neutral packet
+re-arms that stop budget, including a late completion from an older logical
+epoch. Failed or pending ATT writes do not count as completed stops. Repeated
+host stops still discard queued history without restarting settled idle traffic.
+Active-effect cadence, native subframes and watchdogs are unchanged; the parser
+timer remains available for control and expiry work.
+
+**Qualification and known mixed-radio limitation:** this default does not claim
+reliable native DualSense PCM alongside two fast Joy-Con links.
+
+- Earlier 15/30 ms trials favored 30 ms for transport continuity: at 15 ms the
+  same 125 Hz-per-slot workload timed out around four seconds; at 30 ms it
+  completed 30 seconds with 1,384 PCM sends, 47 skips and no send failures.
+  All three links stayed connected, but the user later clarified that Joy-Con
+  rumble felt weak at 30 ms and DualSense rumble was also weak/inconsistent.
+- Idle suppression was measured at 30 ms: outgoing HCI ACL writes fell from 974
+  to 469 per ten-second idle sample, while both samples sent 469 DualSense PCM
+  packets without skips. Total HCI writes did not fall because receive-credit
+  traffic increased. A subsequent 30-second workload sent 1,431 PCM packets
+  with zero skips/failures, two Switch 2 ingress drops and nine output-stage
+  drops. This was a transport improvement, not full perceptual qualification.
+- In the isolated right-Joy-Con fixture, one- and three-sample packets at a
+  20 ms packet cadence both felt weak. One-sample packets at a nominal 7.5 ms
+  cadence, with the same 320 Hz frequency and amplitude, produced user-confirmed
+  clear tone and good feel. Each two-second burst sent 267 packets with a
+  7.504 ms average submission gap, not a measured on-air or actuator interval.
+- Adding native DualSense PCM to that fast fixture failed in about 0.66 seconds,
+  both with one Joy-Con vibrating and with both vibrating. Both Joy-Cons remained
+  connected in each test. DualSense sent 11 PCM packets before timing out; with
+  both vibrating, Joy-Con submission gaps reached 32 ms. The fixture aborted and
+  completed explicit stop writes.
+
+The shared Classic/GATT scheduler trial was not qualified and is excluded from
+this checkpoint. Temporary packet fixtures are also excluded. Native DualSense
+buffer/cadence qualification remains separate; no gain increase or fallback mode
+is silently applied to conceal transport loss.
 
 ### Rumble per controller
 
@@ -982,15 +998,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 833,320 bytes | 4 MiB |
+| Executable flash image | 833,672 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds and Switch 2 application authorizations | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 151,804 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 151,820 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,115,944 bytes of flash,
-leaving 3,078,360 bytes. Allocated SRAM sections leave 380,676 bytes of link-time
+The executable plus persistent reservations consume 1,116,296 bytes of flash,
+leaving 3,078,008 bytes. Allocated SRAM sections leave 380,660 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.

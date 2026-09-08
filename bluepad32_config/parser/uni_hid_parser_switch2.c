@@ -22,6 +22,7 @@
 
 #define SW2_TIMEOUT_MS 2000
 #define SW2_OUTPUT_INTERVAL_MS 13
+#define SW2_NEUTRAL_WRITE_BUDGET 3
 #define SW2_HAPTICS_CAPACITY 16
 #define SW2_REPORT_SIZE 63
 #define SW2_ACK 0x78
@@ -112,6 +113,8 @@ typedef struct {
     uint32_t pending_serial, pending_epoch, pending_revision;
     uint32_t playback_until;
     uint8_t pending_guard_ms;
+    uint8_t neutral_writes;
+    bool pending_neutral;
     bool pending_host, pending_barrier, barrier_pending, output_urgent;
     bool feedback_active, playback_guard;
     uint32_t sensor_start, sensor_host_start, sensor_last;
@@ -1147,6 +1150,12 @@ void uni_hid_parser_switch2_reset_haptics(uni_hid_device_t* d) {
 static void sw2_rumble_complete(sw2_instance_t* ins) {
     uint32_t now = btstack_run_loop_get_time_ms();
     ++ins->rumble_id; // Only a successful write consumes the physical sequence.
+    // Track transport success even for an old logical epoch: a late active
+    // packet invalidates prior silence and must be followed by fresh stops.
+    if (!ins->pending_neutral)
+        ins->neutral_writes = 0;
+    else if (ins->neutral_writes < SW2_NEUTRAL_WRITE_BUDGET)
+        ++ins->neutral_writes;
     ins->playback_until = now + ins->pending_guard_ms;
     ins->playback_guard = true;
     sw2_update_haptics(ins, now);
@@ -1203,6 +1212,16 @@ static bool sw2_send_rumble(sw2_instance_t* ins, uint32_t now) {
             ins->pending_serial = command->serial;
             break;
         }
+    }
+    ins->pending_neutral = sw2_physical_stop(ins, &frame);
+    if (ins->pending_neutral && !ins->pending_host &&
+        ins->neutral_writes == SW2_NEUTRAL_WRITE_BUDGET) {
+        // Three successful neutral writes settle idle output. Repeated host
+        // stops still discard queued history, but need no further radio work.
+        // Never suppress a queued native sequence, even if its endpoint is zero.
+        ins->barrier_pending = false;
+        ins->output_urgent = false;
+        return false;
     }
     ins->pending_epoch = ins->haptics_epoch;
     ins->pending_revision = ins->output_revision;

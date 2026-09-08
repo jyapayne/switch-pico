@@ -48,7 +48,7 @@ constexpr uint32_t kDefaultPairingWindowDurationMs =
 constexpr uint32_t kPairingResetFeedbackDurationMs = 2000;
 // Bluetooth Classic units are 0.625 ms: 0x1900 = 4 seconds.
 constexpr uint16_t kClassicLinkSupervisionTimeout = 0x1900;
-// LE units are 1.25 ms. Reserve airtime for Classic paging and native PCM.
+// LE units are 1.25 ms. Joy-Cons retain the fast interval even with Classic.
 constexpr uint16_t kSwitch2FastInterval = 6;
 constexpr uint16_t kSwitch2MixedInterval = 24;
 constexpr uint32_t kSwitch2IntervalSettleMs = 1000;
@@ -591,9 +591,9 @@ void stop_background_scan() {
         g_background_scan_active = false;
     }
 }
-// Core 1 only. Count physical links, not logical players: a merged Joy-Con
-// pair still consumes two LE connections. Reserve Classic airtime before an
-// incoming connection exists; waiting for its ACL handle is too late for paging.
+// Core 1 only. Count physical links, not logical players. Joy-Cons always keep
+// their fast default; retain preconnection coexistence timing for other Switch 2
+// models when multiple physical Switch 2 links share the radio.
 void apply_radio_connection_policy() {
     unsigned switch2_links = 0;
     uni_hid_device_t* ready[kSlotCount]{};
@@ -612,9 +612,6 @@ void apply_radio_connection_policy() {
             }
         }
     }
-    const uint16_t desired = switch2_links >= 2
-                                 ? kSwitch2MixedInterval
-                                 : kSwitch2FastInterval;
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
     for (uint8_t index = 0; index < kSlotCount; ++index) {
         auto& request = g_switch2_interval_requests[index];
@@ -622,6 +619,9 @@ void apply_radio_connection_policy() {
             request = {};
             continue;
         }
+        const uint16_t desired = switch2_links >= 2 && joycon_side(ready[index]) == 0
+                                     ? kSwitch2MixedInterval
+                                     : kSwitch2FastInterval;
         const auto handle = ready[index]->conn.handle;
         if (request.handle != handle) request = {};
         const uint16_t actual = gap_le_connection_interval(handle);

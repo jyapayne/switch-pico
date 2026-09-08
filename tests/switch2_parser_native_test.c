@@ -1149,6 +1149,79 @@ static void test_immediate_connection_failure_preserves_reconnect_discovery(void
     assert(!scan_running && !peers[0].used); // Explicit stop must not be overridden.
 }
 
+static void test_idle_neutral_output_quiesces_and_resumes(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_JOYCON_L_PID, false);
+    advance(100);
+    assert(peer->rumbles == 3 && !rumble_active(peer));
+    unsigned idle_writes = peer->rumbles;
+    advance(1300);
+    assert(peer->rumbles == idle_writes);
+    // Repeated host stops must not restart an already completed neutral burst.
+    for (unsigned i = 0; i < 20; ++i) {
+        assert(uni_hid_parser_switch2_queue_rumble(&peer->device, 0, 0, 0, now_ms));
+        advance(8);
+    }
+    assert(peer->rumbles == idle_writes);
+    // Quiet output must not delay a future effect or a finite watchdog stop.
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 20, 50, 40, 80);
+    advance(19);
+    assert(peer->rumbles == idle_writes);
+    advance(1);
+    assert(rumble_active(peer));
+    advance(20);
+    assert(peer->rumbles > idle_writes + 1 && rumble_active(peer));
+    advance(30);
+    assert(!rumble_active(peer));
+    advance(100);
+    idle_writes = peer->rumbles;
+    advance(1300);
+    assert(peer->rumbles == idle_writes);
+    uni_switch2_haptics_frame_t frame = native_frame(3, 0, 8);
+    assert(uni_hid_parser_switch2_queue_haptics(&peer->device, &frame, now_ms));
+    advance(1);
+    assert_block(peer, 0, &frame.sides[0]);
+    advance(100);
+    assert_silent(peer, 0);
+    idle_writes = peer->rumbles;
+    advance(1300);
+    assert(peer->rumbles == idle_writes);
+}
+
+static void test_neutral_budget_waits_for_success_and_stale_active_completion(void) {
+    struct fixture_peer* peer = ready_peer(UNI_SW2_JOYCON_R_PID, true);
+    next_write_error = BTSTACK_ACL_BUFFERS_FULL;
+    advance(1);
+    assert(peer->rumbles == 0);
+    advance(13);
+    assert(peer->rumbles == 1 && peer->query == QUERY_WRITE);
+    advance(100);
+    assert(peer->rumbles == 1); // Pending ATT writes cannot count as repeated stops.
+    query_done(peer, 0);
+    advance(13);
+    assert(peer->rumbles == 2);
+    query_done(peer, 0);
+    advance(13);
+    assert(peer->rumbles == 3);
+    query_done(peer, 0);
+    advance(100);
+    assert(peer->rumbles == 3 && peer->query == QUERY_NONE);
+    // Reset while an active write borrows its buffer. Its stale completion must
+    // invalidate the earlier idle state and require a fresh stop burst.
+    uni_hid_parser_switch2_play_dual_rumble(&peer->device, 0, UINT16_MAX, 40, 80);
+    advance(1);
+    assert(rumble_active(peer) && peer->query == QUERY_WRITE);
+    uni_hid_parser_switch2_reset_haptics(&peer->device);
+    query_done(peer, 0);
+    for (unsigned i = 0; i < 3; ++i) {
+        advance(i ? 13 : 1);
+        assert(peer->rumbles == 5 + i && peer->query == QUERY_WRITE);
+        assert_silent(peer, 0);
+        query_done(peer, 0);
+    }
+    advance(100);
+    assert(peer->rumbles == 7 && peer->query == QUERY_NONE);
+}
+
 int main(void) {
     test_connected_callback_rejection();
     test_advertisement_bounds_and_admission();
@@ -1171,6 +1244,8 @@ int main(void) {
     test_hold_coalescing_requires_identical_samples_and_side_masks();
     test_expired_history_does_not_starve_fresh_sequences();
     test_gatt_busy_retries_without_disconnect_or_sequence_loss();
+    test_idle_neutral_output_quiesces_and_resumes();
+    test_neutral_budget_waits_for_success_and_stale_active_completion();
     reset();
     puts("Switch2 protocol boundaries, setup failure, pairing, calibration, physical input, motion and rumble passed");
     return 0;
