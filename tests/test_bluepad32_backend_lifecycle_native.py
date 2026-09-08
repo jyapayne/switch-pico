@@ -127,6 +127,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "switch2-pair-replacement",
             "switch2-admission",
             "switch2-radio-policy",
+            "switch2-radio-individual",
             "switch2-radio-settling",
             "switch2-mate-reconnect",
             "switch2-mate-pending",

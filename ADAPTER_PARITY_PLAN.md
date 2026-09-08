@@ -819,13 +819,26 @@ from 197 host requests without queue drops; the user confirmed both sides.
 Normal GATT-client busy responses now retain queued output instead of
 disconnecting the controller.
 
-Two Switch 2 BLE links plus Classic now select 30 ms Switch 2 connection
-intervals automatically; other topologies retain 7.5 ms. This trades Switch 2
-delivery latency for Classic airtime without changing HD encoding or bonds.
-Physical DualSense power-off/reconnect verified both interval transitions
-without losing the Joy-Con links. A 30-second production mixed-rumble run
-kept native DualSense streaming, with no send failures or ingress drops,
-14 Joy-Con output-stage discards and nine PCM skips. It is not lossless.
+Two or more Switch 2 BLE links now select 30 ms connection intervals even
+before Classic connects; a single Switch 2 link retains 7.5 ms. Paired and
+Individual Joy-Cons use the same physical-link policy. This trades Switch 2
+delivery latency for Classic paging and streaming airtime without changing
+HD encoding or bonds. The earlier policy waited for a Classic link and passed
+one physical power-off/reconnect check, but subsequent use exposed intermittent
+DualSense connection failures with two Joy-Cons already active. Regression
+coverage now requires airtime before Classic admission and after its departure.
+The user confirmed reconnects and actuator output/clean stops at 30 ms.
+A same-workload 15/30 ms comparison at 300 MHz rejected 15 ms for native
+haptics: it timed out around four seconds, with 111 PCM sends, 38 skips and
+one send failure. At 30 ms the full 30-second run retained all three links
+and native streaming: 1,384 PCM sends, 47 skips, no send failures or host-update/
+Switch 2 ingress drops, and seven Joy-Con output-stage drops. The isolated
+DualSense fixture delivered all 288 packets without skips. Release images keep
+30 ms; long-duration reliability remains unqualified. All 349 tests and four
+affected firmware builds passed for the preconnection policy.
+A prior 30-second production mixed-rumble run kept native DualSense streaming,
+with no send failures or ingress drops, 14 Joy-Con output-stage discards and
+nine PCM skips. It is not lossless.
 
 The native-HD checkpoint passed 289 tests and all five firmware builds; its
 40 pre-existing profiles and metadata survived. Its inventory then contained

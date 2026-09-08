@@ -481,13 +481,16 @@ results do **not** establish lossless arbitrary workloads or perceptual
 equivalence. All 40 profiles, names, active selections and adapter
 configuration were preserved during this upgrade.
 
-**Automatic mixed-controller scheduling:** when at least two physical Switch 2
-BLE links coexist with a Classic Bluetooth link, the firmware requests a
-30 ms connection interval for the Switch 2 links. Otherwise it requests
-7.5 ms. A merged Joy-Con pair counts as two links. Unrelated BLE controllers
+**Automatic mixed-controller scheduling:** whenever at least two physical
+Switch 2 BLE links are present, the firmware requests a 30 ms connection
+interval for those links, even before a Classic Bluetooth controller connects.
+A single Switch 2 link uses 7.5 ms. A merged Joy-Con pair counts as two links;
+Individual mode uses the same physical-link policy. Unrelated BLE controllers
 are not retimed; bonds, profiles, HD encoding and the DualSense timeout stay
-unchanged. The policy runs during connection setup, before native DualSense
-attachment, and reconciles asynchronous negotiation and topology changes.
+unchanged. The policy reconciles asynchronous negotiation and topology changes.
+Waiting for a Classic connection before reserving its airtime left a reconnect
+timing hole: DualSense could fail to connect with both Joy-Cons already active.
+Keeping 30 ms after Classic disconnect also leaves airtime for its next attempt.
 
 This trades additional Switch 2 input, gyro and rumble delivery latency for
 Classic radio time. Multiple reports can travel per connection event, so
@@ -497,13 +500,24 @@ both negotiated 30 ms and DualSense started without manual re-arming.
 A production-firmware 30-second simultaneous rumble run retained all three
 connections and native streaming: zero ingress drops or send failures,
 14 Joy-Con output-stage discards and nine DualSense PCM skips. This is not
-a lossless or long-duration qualification. Lifecycle regressions cover
-Classic arrival/departure, a missing half, handle reuse, late negotiation
-completion, clock wrap and transient request rejection.
-In the physical power-off/reconnect check, both Joy-Cons negotiated 7.5 ms
-after DualSense shut down, then 30 ms after it reconnected with PS. Their
-Bluetooth handles stayed unchanged; native DualSense streaming restarted
-automatically and sent 1,715 packets without skips at the observation point.
+a lossless or long-duration qualification. Lifecycle regressions cover airtime
+reservation before Classic arrival in Paired and Individual modes, Classic
+departure/reconnect, a missing half, handle reuse, late negotiation completion,
+clock wrap and transient request rejection.
+The earlier policy passed one physical DualSense power-off/reconnect check,
+but subsequent use exposed intermittent connection failures. The preconnection
+airtime regression fails under that policy and passes with the current one.
+The user confirmed reconnects and correct actuator output/stops with the
+preconnection 30 ms policy. A 15 ms trial also reconnected, but its native
+DualSense stream timed out even while sending silence. Under the same
+125 Hz-per-slot held-effect/silence workload at 300 MHz, 15 ms failed around
+four seconds (111 PCM packets sent, 38 skipped, one send failure); 30 ms
+completed 30 seconds (1,384 sent, 47 skipped, no send failures). All three
+controllers remained connected. The 30 ms run had zero host-update or Switch 2
+ingress drops and seven Joy-Con output-stage drops; its separate DualSense
+fixture delivered all 288 packets without skips. This supports keeping 30 ms,
+not a lossless or long-duration claim. The 15 ms trial is not the release default.
+The preconnection policy passed all 349 tests and four affected firmware builds.
 
 ### Rumble per controller
 

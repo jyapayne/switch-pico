@@ -48,7 +48,7 @@ constexpr uint32_t kDefaultPairingWindowDurationMs =
 constexpr uint32_t kPairingResetFeedbackDurationMs = 2000;
 // Bluetooth Classic units are 0.625 ms: 0x1900 = 4 seconds.
 constexpr uint16_t kClassicLinkSupervisionTimeout = 0x1900;
-// LE units are 1.25 ms. Two fast Switch 2 links starve Classic native PCM.
+// LE units are 1.25 ms. Reserve airtime for Classic paging and native PCM.
 constexpr uint16_t kSwitch2FastInterval = 6;
 constexpr uint16_t kSwitch2MixedInterval = 24;
 constexpr uint32_t kSwitch2IntervalSettleMs = 1000;
@@ -591,11 +591,11 @@ void stop_background_scan() {
         g_background_scan_active = false;
     }
 }
-// Core 1 only. Count physical links, including Classic setup, rather than
-// logical players: a merged Joy-Con pair still consumes two LE connections.
+// Core 1 only. Count physical links, not logical players: a merged Joy-Con
+// pair still consumes two LE connections. Reserve Classic airtime before an
+// incoming connection exists; waiting for its ACL handle is too late for paging.
 void apply_radio_connection_policy() {
     unsigned switch2_links = 0;
-    bool classic_link = false;
     uni_hid_device_t* ready[kSlotCount]{};
     for (const BackendSlot& slot : g_slots) {
         uni_hid_device_t* targets[] = {slot.device, slot.companion};
@@ -609,12 +609,10 @@ void apply_radio_connection_policy() {
                 // The parser requests its initial interval during setup.
                 // Do not race that request by changing a pending device here.
                 if (slot.active) ready[index] = target;
-            } else if (type == GAP_CONNECTION_ACL) {
-                classic_link = true;
             }
         }
     }
-    const uint16_t desired = switch2_links >= 2 && classic_link
+    const uint16_t desired = switch2_links >= 2
                                  ? kSwitch2MixedInterval
                                  : kSwitch2FastInterval;
     const uint32_t now_ms = btstack_run_loop_get_time_ms();

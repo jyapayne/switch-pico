@@ -3034,33 +3034,37 @@ void test_switch2_admission() {
             "Pro2 must preserve vertical normal controls and ingest remappable extras");
 }
 
-void test_switch2_radio_policy() {
+void test_switch2_radio_policy(bool individual) {
     start_backend();
+    if (individual) set_runtime_joycon_mode(JoyConMode::kIndividual);
     auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
     auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
     auto classic = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
     auto other_ble = device(3, true, UNI_BT_CONN_PROTOCOL_BLE);
     ready_switch2(left);
+    require(negotiated_intervals[left.conn.handle] == 6,
+            "a single Switch2 link must retain fast scheduling");
     ready_switch2(right);
+    require(incoming_connections &&
+                negotiated_intervals[left.conn.handle] == 24 &&
+                negotiated_intervals[right.conn.handle] == 24,
+            "two Switch2 links must reserve Classic reconnect airtime before a Classic device exists");
     platform_on_device_connected(&other_ble);
     require(platform_on_device_ready(&other_ble) == UNI_ERROR_SUCCESS,
             "unrelated BLE controller must join");
-    require(negotiated_intervals[left.conn.handle] == 6 &&
-                negotiated_intervals[right.conn.handle] == 6,
-            "a pair without Classic must retain fast intervals");
     platform_on_device_connected(&classic);
     require(negotiated_intervals[left.conn.handle] == 24 &&
                 negotiated_intervals[right.conn.handle] == 24 &&
                 negotiated_intervals[other_ble.conn.handle] == 6,
-            "Classic setup must relax both physical halves before native attachment, not unrelated BLE");
+            "Classic setup must retain reconnect airtime without retiming unrelated BLE");
     require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
             "Classic controller must complete setup alongside the pair");
     const auto pair = slot_snapshot(0);
     platform_on_device_disconnected(&classic);
-    require(negotiated_intervals[left.conn.handle] == 6 &&
-                negotiated_intervals[right.conn.handle] == 6 &&
+    require(negotiated_intervals[left.conn.handle] == 24 &&
+                negotiated_intervals[right.conn.handle] == 24 &&
                 slot_snapshot(0).connection_generation == pair.connection_generation,
-            "Classic departure must restore fast intervals without rebinding the pair");
+            "Classic departure must preserve reconnect airtime without rebinding the pair");
     platform_on_device_connected(&classic);
     require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
             "Classic reconnect must complete");
@@ -3090,22 +3094,20 @@ void test_switch2_radio_settling() {
             "pending Switch2 setup must retain ownership of its initial interval");
     require(platform_on_device_ready(&right) == UNI_ERROR_SUCCESS,
             "second Switch2 connection must become ready");
-    platform_on_device_disconnected(&classic);
-    // The controller completes the old update after the topology reversed.
+    platform_on_device_disconnected(&right);
+    // The surviving controller completes the old update after losing its mate.
     for (auto* half : {&left, &right}) {
         negotiated_intervals[half->conn.handle] = pending_intervals[half->conn.handle];
     }
     now_ms += 50;
     process_configuration_timer(&g_configuration_timer);
-    for (auto* half : {&left, &right}) {
-        negotiated_intervals[half->conn.handle] = pending_intervals[half->conn.handle];
-        require(negotiated_intervals[half->conn.handle] == 6,
-                "late mixed-mode completion must not strand a pair at slow intervals across clock wrap");
-    }
+    negotiated_intervals[left.conn.handle] = pending_intervals[left.conn.handle];
+    require(negotiated_intervals[left.conn.handle] == 6,
+            "late coexistence update must not strand a solo at slow intervals across clock wrap");
     process_configuration_timer(&g_configuration_timer);
     defer_interval_updates = false;
     reject_interval_updates = true;
-    platform_on_device_connected(&classic);
+    ready_switch2(right);
     const unsigned attempts = interval_requests[left.conn.handle];
     now_ms += 999;
     process_configuration_timer(&g_configuration_timer);
@@ -5477,7 +5479,9 @@ int main(int argc, char** argv) {
     } else if (scenario == "switch2-admission") {
         test_switch2_admission();
     } else if (scenario == "switch2-radio-policy") {
-        test_switch2_radio_policy();
+        test_switch2_radio_policy(false);
+    } else if (scenario == "switch2-radio-individual") {
+        test_switch2_radio_policy(true);
     } else if (scenario == "switch2-radio-settling") {
         test_switch2_radio_settling();
     } else if (scenario == "switch2-mate-reconnect") {
