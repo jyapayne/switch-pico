@@ -237,6 +237,9 @@ uv run switch-pico-config joycon-mode paired --json
   pulse, then **release all four buttons**.
 
 Two solo halves join; an existing pair splits. Other controllers are untouched.
+An explicit join keeps the lower of the two participating player slots, not
+whichever slot belongs to the left half. Both LEDs follow that retained slot;
+the other slot is neutralized. It never takes a slot from an unrelated player.
 The shortcut does not change the saved default: its connection-only override
 ends when either participating half disconnects, or when the adapter default
 changes. Existing solo/pair banks and active selections are reused.

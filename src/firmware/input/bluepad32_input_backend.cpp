@@ -2665,8 +2665,14 @@ void process_joycon_gestures(uint32_t now_ms) {
         if (!mature) continue;
         // Latch success AND failure before any enrollment I/O. A failed seed
         // must not retry at the timer cadence or undo either participant.
+        // Player-slot ownership is independent of physical handedness.
+        // Keep the lower occupied slot, even when the left half owns the higher one.
+        const bool keep_left_slot = owner_slot < right_slot;
         const bool changed = joining
-            ? merge_joycon_slots(owner_slot, right_slot, right, true)
+            ? merge_joycon_slots(
+                  keep_left_slot ? owner_slot : right_slot,
+                  keep_left_slot ? right_slot : owner_slot,
+                  keep_left_slot ? right : gesture.device, true)
             : split_joycon_slot(static_cast<uint8_t>(owner_slot), true);
         if (changed) recompute_connection_status();
     }

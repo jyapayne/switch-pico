@@ -678,6 +678,13 @@ all chord buttons must release before retry. Confirmation is bounded to the
 participating halves. Disconnect/reuse or a changed saved default clears the
 override, without writing a per-pair preference.
 
+Explicit gesture joins retain the lower participating player slot rather than
+always retaining the left half's slot. A regression reproduced the old player-2
+result with the left half ready first but occupying the higher transport/player
+index. Both ready orders and an earlier unrelated player are covered. Hardware
+with right on player 1 and left on player 2 now joins on player 1; all profile
+banks remain unchanged.
+
 All 349 tests and all five builds passed. Real hardware exercised both live
 mode transitions, Individual boot persistence, physical join/split pulses,
 unchanged configuration generations during gestures, and automatic default

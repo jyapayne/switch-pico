@@ -1679,6 +1679,41 @@ void test_switch2_gesture_timing() {
             "connection gestures must never write the saved adapter preference");
 }
 
+void test_switch2_gesture_slot_order(bool left_first, uint8_t lower_slot) {
+    runtime_configuration.joycon_mode = JoyConMode::kIndividual;
+    start_backend();
+    auto ordinary = device(0, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
+    auto left = switch2_device(lower_slot + 1, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(lower_slot, UNI_SW2_JOYCON_R_PID);
+    if (lower_slot != 0) ready_switch2(ordinary);
+    // Transport indices can put the left half in the higher player slot,
+    // even when its ready callback arrives first.
+    ready_switch2(left_first ? left : right);
+    ready_switch2(left_first ? right : left);
+    const auto lower_before = slot_snapshot(lower_slot);
+    const auto higher_before = slot_snapshot(lower_slot + 1);
+    const auto unrelated_before = slot_snapshot(0);
+    hold_gesture(left, right, 2000);
+    require(live_pair_slot(left, right) == lower_slot &&
+                !slot_snapshot(lower_slot + 1).active,
+            "gesture join must retain the lower participating player slot regardless of side or ready order");
+    const auto joined = slot_snapshot(lower_slot);
+    require_pair_owner(joined.identity, left, right);
+    require(joined.connection_generation != lower_before.connection_generation &&
+                slot_snapshot(lower_slot + 1).connection_generation != higher_before.connection_generation &&
+                slot_snapshot(lower_slot + 1).state.left_stick_x == 0 &&
+                slot_snapshot(lower_slot + 1).state.right_stick_x == 0 &&
+                left.player_leds == (1u << lower_slot) &&
+                right.player_leds == (1u << lower_slot),
+            "join must invalidate old player epochs, neutralize the retired slot and light both halves for the retained player");
+    if (lower_slot != 0) {
+        require(slot_snapshot(0).active &&
+                    slot_snapshot(0).connection_generation == unrelated_before.connection_generation &&
+                    controller_identity_equal(slot_snapshot(0).identity, unrelated_before.identity),
+                "gesture join must not take an earlier slot occupied by an unrelated controller");
+    }
+}
+
 void test_switch2_gesture_stale() {
     runtime_configuration.joycon_mode = JoyConMode::kIndividual;
     start_backend();
@@ -5377,6 +5412,12 @@ int main(int argc, char** argv) {
         test_switch2_hd_pro();
     } else if (scenario == "switch2-gesture-timing") {
         test_switch2_gesture_timing();
+    } else if (scenario == "switch2-gesture-slot-left-first") {
+        test_switch2_gesture_slot_order(true, 0);
+    } else if (scenario == "switch2-gesture-slot-right-first") {
+        test_switch2_gesture_slot_order(false, 0);
+    } else if (scenario == "switch2-gesture-slot-occupied") {
+        test_switch2_gesture_slot_order(true, 1);
     } else if (scenario == "switch2-gesture-stale") {
         test_switch2_gesture_stale();
     } else if (scenario == "switch2-gesture-clock-wrap") {
