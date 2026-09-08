@@ -854,6 +854,18 @@ The requested fast-link default is not a claim of reliable mixed native PCM,
 lossless transport or qualified endurance. DualSense buffer/cadence work remains
 separate; no hidden gain or compatibility fallback change is included.
 
+DualSense native startup/format correction now defaults to the physically
+accepted 32-frame/3-kHz path: a state-only AudioControl-enable report followed by
+the full control header and one 64-byte PCM block. Captures verified independent
+left/right PCM peaks, and the user confirmed strong output and clean stops at
+96/127 without a global gain change. The compact 64-frame/buffer-16 candidate
+felt worse despite zero skips and remains an explicit unqualified experiment.
+The accepted trial still skipped ten slots across its strong-pulse run, with
+no send failures. Mixed-controller and endurance qualification remain open.
+The default finite fixture retains its 6.144-second timeline using 576 reports;
+host metadata follows the reported packet size. Temporary tuning controls and
+wire-capture hooks are not included in production.
+
 The native-HD checkpoint passed 289 tests and all five firmware builds; its
 40 pre-existing profiles and metadata survived. Its inventory then contained
 56 profiles across seven identities. Temporary measurement hooks were removed,

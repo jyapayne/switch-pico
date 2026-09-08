@@ -547,7 +547,9 @@ The standard AIO and XInput builds use **300 MHz at 1.3 V**, packet-level CYW43 
 
 In Switch mode, that stream preserves decoded left/right, low/high-band HD commands. In XInput mode, strong/low magnitude drives the left 160 Hz carrier and weak/high drives the right 320 Hz carrier; these commands stay active until changed or stopped. XInput does not supply Nintendo frequency/substep detail. USB reset, unmount, and suspend stop held host rumble. Auto-mode XInput additionally reboots to Switch probe after unmount, by the existing one-attachment policy; manual XInput is exempt.
 
-Standard native gameplay uses **64 stereo frames at 3 kHz** per Bluetooth report (46.875 reports/s), with 21.333 ms causal lookback. The 32-frame mode passed single-controller tests but skipped audio slots under mixed Pro/DualSense load, so it is an explicit experiment: `SWITCH_PICO_HD_PACKET_FRAMES=32` requires the optimized transport and at least 300 MHz. It uses 93.75 reports/s and 10.667 ms lookback but is not the mixed-controller default. Native streaming continues silence while idle; no physical actuator-onset bound is claimed. See [HAPTICS_EXPERIMENT.md](HAPTICS_EXPERIMENT.md).
+Standard native gameplay uses **32 stereo frames at 3 kHz** per Bluetooth report (93.75 reports/s), with 10.667 ms causal lookback. Startup first writes a state-only AudioControl-enable report, then sends the full control header and one 64-byte PCM block used by the physically accepted reference. This requires packet-level reads, credit batching and at least 300 MHz; the normal AIO/XInput defaults already provide them. The user confirmed strong, distinct left/right native output and clean stops. The gain curve is unchanged.
+
+`SWITCH_PICO_HD_PACKET_FRAMES=64` retains the compact two-block format only as an explicit, physically unqualified experiment: it felt worse despite clean transport counters. Mixed-controller and long-duration fidelity still need qualification. Native streaming continues silence while idle; no physical actuator-onset bound or lossless-radio claim is made. See [HAPTICS_EXPERIMENT.md](HAPTICS_EXPERIMENT.md) for exact initialization, packet formats, and the distinction between current acceptance and historical measurements.
 
 400 MHz is an explicit experiment: use `SWITCH_PICO_SYS_CLOCK_MHZ=400` and `SWITCH_PICO_OVERCLOCK_MV=1400`. This board did not boot at 400 MHz/1.3 V; 1.4 V booted and passed a short run but did not outperform 300 MHz in the comparison. USB stays at 48 MHz and flash/radio bus dividers remain bounded. UART builds are unchanged; a stock-clock AIO build is an explicit recovery/compatibility option, not the normal default.
 
@@ -998,15 +1000,15 @@ linked binary, not from the larger debug-bearing ELF or UF2 transport file:
 
 | Resource | Used or reserved | Device capacity |
 |---|---:|---:|
-| Executable flash image | 833,672 bytes | 4 MiB |
+| Executable flash image | 833,696 bytes | 4 MiB |
 | Indexed profile arenas | 256 KiB | 4 MiB flash |
 | Adapter configuration | 8 KiB | 4 MiB flash |
 | BTstack bonds and Switch 2 application authorizations | 8 KiB | 4 MiB flash |
 | RP2350 terminal sector | 4 KiB | 4 MiB flash |
-| Allocated/reserved SRAM, including heap and stacks | 151,820 bytes | 520 KiB |
+| Allocated/reserved SRAM, including heap and stacks | 151,844 bytes | 520 KiB |
 
-The executable plus persistent reservations consume 1,116,296 bytes of flash,
-leaving 3,078,008 bytes. Allocated SRAM sections leave 380,660 bytes of link-time
+The executable plus persistent reservations consume 1,116,320 bytes of flash,
+leaving 3,077,984 bytes. Allocated SRAM sections leave 380,636 bytes of link-time
 headroom; this is not a runtime heap high-water measurement. Core 0 has a
 4 KiB stack, and Core 1 uses a dedicated 16 KiB stack in main SRAM for nested
 catalog migration/compaction rather than overflowing its 4 KiB scratch bank.

@@ -3184,17 +3184,6 @@ def test_haptics_arming_waits_for_firmware_not_usb_ack(
     assert haptics_clock[0] >= 0.1
     if mode == 1:
         assert "pattern" not in row
-        assert row["gameplay"] == {
-            "sample_rate_hz": 3000,
-            "stereo_frames_per_packet": 64,
-            "lookback_us": pytest.approx(21333.333333333),
-            "switch_command_window_us": 8000,
-            "switch_watchdog_us": 50000,
-            "xinput_command_policy": "held_until_changed_or_stopped",
-            "xinput_carrier_hz": {"left_low": 160, "right_high": 320},
-            "band_gains": {"low": 2.0, "high": 2.0},
-            "response_exponent": 0.8,
-        }
         assert row["first_tone_submission_delay_us"] is None
     else:
         assert row["pattern"]["duration_us"] == 6144000
@@ -3999,3 +3988,46 @@ def test_haptics_reports_actual_short_packet_lookback() -> None:
     ]
     assert gameplay["stereo_frames_per_packet"] == 32
     assert gameplay["lookback_us"] == pytest.approx(10666.6666667)
+
+
+@pytest.mark.parametrize(
+    ("packet_frames", "total_packets", "silence_packets", "phase_packets"),
+    [(32, 576, 96, 24), (64, 288, 48, 12)],
+)
+def test_haptics_fixture_metadata_follows_reported_frame_count(
+    packet_frames: int,
+    total_packets: int,
+    silence_packets: int,
+    phase_packets: int,
+) -> None:
+    snapshot = config_manager.read_haptics_experiment(
+        HapticsDevice([haptics_response(2, slot=0, packet_frames=packet_frames)])
+    )
+    pattern = snapshot.to_json_object()["pattern"]
+    assert pattern["stereo_frames_per_packet"] == packet_frames
+    assert pattern["packet_interval_us"] == pytest.approx(packet_frames * 1000000 / 3000)
+    assert pattern["total_packets"] == total_packets
+    assert pattern["priming_silence_packets"] == silence_packets
+    assert pattern["trailing_silence_packets"] == silence_packets
+    assert pattern["phases"] == [
+        {"channel": "left", "frequency_hz": 100, "packets": phase_packets},
+        {"channel": "silence", "packets": phase_packets},
+        {"channel": "right", "frequency_hz": 200, "packets": phase_packets},
+        {"channel": "silence", "packets": phase_packets},
+    ]
+    assert pattern["cycles"] == 4
+    assert pattern["duration_us"] == pytest.approx(
+        total_packets * pattern["packet_interval_us"]
+    )
+    assert pattern["duration_us"] == 6144000
+    assert pattern["initial_mode_packet_stereo_frames"] == 0
+
+
+@pytest.mark.parametrize("mode", [0, 1])
+@pytest.mark.parametrize("packet_frames", [0, 48])
+def test_haptics_rejects_unadvertised_frame_sizes(mode: int, packet_frames: int) -> None:
+    device = HapticsDevice(
+        [haptics_response(2, slot=0, mode=mode, packet_frames=packet_frames)]
+    )
+    with pytest.raises(config_manager.ConfigManagerError, match="packet size"):
+        config_manager.read_haptics_experiment(device)

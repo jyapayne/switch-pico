@@ -18,16 +18,13 @@
 
 namespace {
 
-#ifndef SWITCH_PICO_HD_PACKET_FRAMES
-#define SWITCH_PICO_HD_PACKET_FRAMES 64
-#endif
-constexpr uint32_t kGameplayFrames = SWITCH_PICO_HD_PACKET_FRAMES;
-static_assert(kGameplayFrames == 32 || kGameplayFrames == 64);
+constexpr uint32_t kPacketFrames = SWITCH_PICO_HD_PACKET_FRAMES;
+static_assert(kPacketFrames == 32 || kPacketFrames == 64);
 constexpr uint32_t kPacketDenominator = 3;
-constexpr uint32_t kPackets = 288;
-constexpr uint32_t kPrimingPackets = 48;
-constexpr uint32_t kToneEndPacket = 240;
-constexpr uint32_t kPhasePackets = 12;
+constexpr uint32_t kPackets = 18432 / kPacketFrames;
+constexpr uint32_t kPrimingPackets = 3072 / kPacketFrames;
+constexpr uint32_t kToneEndPacket = 15360 / kPacketFrames;
+constexpr uint32_t kPhasePackets = 768 / kPacketFrames;
 constexpr uint32_t kDrainTimeoutUs = 100000;
 // Briefly retain ownership while compatibility output drains. Its parser timer
 // is canceled synchronously; it must not survive a device disconnect/reuse.
@@ -133,7 +130,7 @@ bool gameplay() {
 }
 
 uint32_t packet_numerator_us() {
-    return (gameplay() ? kGameplayFrames : 64u) * 1000u;
+    return kPacketFrames * 1000u;
 }
 
 void drain_host_updates() {
@@ -448,23 +445,35 @@ bool HAPTICS_HOT(generate_packet)(uint8_t* report, uint32_t packet,
     uint16_t sample_offset;
     uint32_t frames;
     if (g_diagnostics.sent_packets == 0) {
-        // Explicitly leave compatibility mode with a sized 0x10 state block.
-        // All other state-write flags remain clear, preserving other outputs.
+        // Enable the controller's audio path before submitting PCM. A zero
+        // SetState block does not write AudioControl. Keep volume, preamp,
+        // microphone mute, triggers and lighting validity flags untouched.
+        report[2] = 0x10;
         report[3] = 0x90;
         report[4] = 63;
-        report[68] = 0x92;
-        report[69] = 64;
-        sample_offset = 70;
-        frames = 32;  // Initial mode handoff occupies the first silent interval.
+        report[5] = 0x80; // AllowAudioControl; default route/MicSelect.
+        sample_offset = 68;
+        frames = 0; // State-only setup, not an audio sample interval.
+    } else if (kPacketFrames == 32) {
+        // Preserve the physically qualified full-control, single-block format.
+        frames = 32;
+        report[3] = 0x91;
+        report[4] = 7;
+        report[5] = 0xfe;
+        report[10] = 0xff;
+        report[11] = static_cast<uint8_t>(g_diagnostics.sent_packets - 1);
+        report[12] = 0x92;
+        report[13] = 64;
+        sample_offset = 14;
     } else {
-        // Compact controls leave room for either one or two 64-byte blocks.
-        frames = gameplay() ? kGameplayFrames : 64u;
+        // Retained only as an explicit, physically unqualified experiment.
+        frames = 64;
         report[3] = 0x91;
         report[4] = 3;
         report[5] = 0x62;
         report[6] = 16;
         report[7] = static_cast<uint8_t>(g_diagnostics.sent_packets * (frames / 32));
-        report[8] = frames == 64 ? 0xd2 : 0x92;
+        report[8] = 0xd2;
         report[9] = 64;
         sample_offset = 10;
     }
@@ -488,14 +497,14 @@ bool HAPTICS_HOT(generate_packet)(uint8_t* report, uint32_t packet,
                 }
             }
         }
-    } else if (!gameplay() && !silence && packet >= kPrimingPackets &&
+    } else if (frames != 0 && !gameplay() && !silence && packet >= kPrimingPackets &&
                packet < kToneEndPacket) {
         const uint32_t relative = packet - kPrimingPackets;
         const uint32_t phase = (relative / kPhasePackets) % 4;
         if (phase == 0 || phase == 2) {
             tone = true;
             const uint32_t stride = phase == 0 ? 1 : 2;
-            uint32_t wave = ((relative % kPhasePackets) * 64 * stride) % 30;
+            uint32_t wave = ((relative % kPhasePackets) * kPacketFrames * stride) % 30;
             const uint32_t channel = phase == 0 ? 0 : 1;
             for (uint32_t frame = 0; frame < frames; ++frame) {
                 report[sample_offset + frame * 2 + channel] =
@@ -760,7 +769,7 @@ void haptics_experiment_snapshot(HapticsExperimentDiagnostics* output) {
     const bool waiting = g_snapshot_waiting;
     const uint32_t requested_us = g_snapshot_request_us;
     critical_section_exit(&g_lock);
-    output->packet_frames = output->mode == 1 ? kGameplayFrames : 64;
+    output->packet_frames = kPacketFrames;
     if (output->state == HapticsExperimentState::kRunning) {
         const uint32_t now_us = static_cast<uint32_t>(time_us_64());
         output->elapsed_us = now_us - output->start_us;

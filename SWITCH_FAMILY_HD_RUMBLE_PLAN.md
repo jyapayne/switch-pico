@@ -14,14 +14,14 @@ Start with a genuine original Switch Pro Controller, then original standalone Jo
 - `44a474e`: roadmap plan for native Switch-family HD rumble.
 - `3c2d9fa`: Set B profiles, catalog migration, recording, optimized transport and native DualSense/XInput work.
 - Other transport qualification/artifact work may still be in progress. Coordinate with the active agent before editing shared files; do not reset, stash, or overwrite its changes. Re-read current code rather than relying on line numbers here.
-- Standard AIO/XInput builds use 300 MHz/1.3 V and optimized CYW43 transport. DualSense retains its separate 64-frame PCM stream. Nintendo native output requires explicit approval of the stable physical Bluetooth identity; unapproved devices keep compatibility output.
+- Standard AIO/XInput builds use 300 MHz/1.3 V and optimized CYW43 transport. DualSense now defaults to its physically accepted 32-frame PCM stream with explicit AudioControl initialization and full controls; compact 64-frame mode is an unqualified experiment. Nintendo native output requires explicit approval of the stable physical Bluetooth identity; unapproved devices keep compatibility output.
 - Profiles are schema 6 / 384 bytes; catalog 2 keeps a 512-byte record stride and two 128 KiB arenas. Preserve migration, identity keys, names, active indices and atomic publication.
 - Adapter configuration is now schema 3 / 232 bytes: up to 16 physical Nintendo approvals, independent of profiles. Old schemas 1/2 migrate with no approvals and preserve their existing settings. No controller is approved merely by its name, VID/PID or parser.
 - Preserve Bluetooth bonds, calibration, the UART wire protocol and the private `src/firmware/platform/pico/switch2_wake_config.h`. Do not expose that file's contents or change the configured wake identity.
 
 ### Important timing qualification caveat
 
-Do not generalize single-controller DualSense results to mixed-controller loads. A 32-frame/93.75-packet-per-second run passed roughly 65 seconds with one controller, but a later Switch Pro + DualSense test with continuous USB motion reads recorded **80 skipped audio slots over 16.6 seconds**, despite receiving all 2,050 USB commands with no command drops or send failures. Maximum permission wait was 17,180 us and the eight outgoing ACL credits were observed exhausted. The standard native cadence is consequently **64 frames / 46.875 packets per second** at the same 300 MHz/1.3 V, with 32 frames an explicit experiment. Preserve the current cadence choice and coordinate before changing it as part of this Nintendo backend task.
+Do not generalize single-controller DualSense results to mixed-controller loads. An earlier 32-frame/93.75-packet-per-second run passed roughly 65 seconds with one controller, but a later Switch Pro + DualSense test with continuous USB motion reads recorded **80 skipped audio slots over 16.6 seconds**, despite receiving all 2,050 USB commands with no command drops or send failures. Maximum permission wait was 17,180 us and the eight outgoing ACL credits were observed exhausted. That led to an earlier 64-frame default based on transport counters. Subsequent physical tests rejected the compact 64-frame format and accepted the 32-frame full-control format with explicit audio initialization, strong separated output and clean stops. Preserve that current choice; mixed-radio physical fidelity is still unqualified.
 
 Nintendo uses no PCM stream. Its small commands still contend for radio scheduling and HCI credits; payload byte rate alone did not predict the measured mixed-controller limit.
 
@@ -284,8 +284,8 @@ Useful next experiments/design directions:
 - Adapt slowly using smoothed demand and hysteresis, rather than issuing
   radio-parameter updates on every 8 ms rumble change. EMBLEM's illustrated
   adaptation takes about four seconds, not a per-haptic-frame response.
-- The application output periods share a **64 ms hyperperiod**: eight 8 ms
-  Pro updates and three 64-frame/3-kHz DualSense reports. A small deadline/phase
+- The default application output periods share a **32 ms hyperperiod**: four 8 ms
+  Pro updates and three 32-frame/3-kHz DualSense reports. A small deadline/phase
   analysis is sufficient; the paper's 1,023-node bitmap tree is unnecessary
   for four slots. This application calendar is not a Bluetooth radio calendar.
 

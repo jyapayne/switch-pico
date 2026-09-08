@@ -409,7 +409,7 @@ def build(
             f"-DSWITCH_PICO_HD_RUMBLE={native}",
             f"-DSWITCH_PICO_SYS_CLOCK_MHZ={300 if native == 'ON' else 150}",
             "-DSWITCH_PICO_OVERCLOCK_MV=1300",
-            "-DSWITCH_PICO_HD_PACKET_FRAMES=64",
+            f"-DSWITCH_PICO_HD_PACKET_FRAMES={32 if native == 'ON' else 64}",
             f"-DSWITCH_PICO_CYW43_PACKET_READ={native}",
             f"-DSWITCH_PICO_HCI_CREDIT_BATCH={native}",
         ]

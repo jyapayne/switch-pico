@@ -5237,10 +5237,18 @@ void require_native_channels(bool left, bool right) {
     require(status.state == HapticsExperimentState::kRunning &&
                 status.mode == 1,
             "stateful host rumble lost native gameplay ownership");
+    require(status.packet_frames == SWITCH_PICO_HD_PACKET_FRAMES,
+            "native gameplay ignored the configured packet frame count");
+    const unsigned sample_offset = status.packet_frames == 32 ? 14 : 10;
+    require(last_native_packet[3] == 0x91 &&
+                last_native_packet[sample_offset - 2] ==
+                    (status.packet_frames == 32 ? 0x92 : 0xd2) &&
+                last_native_packet[sample_offset - 1] == 64,
+            "stateful channel inspection requires a native PCM block");
     unsigned active[2]{};
     for (unsigned frame = 0; frame < status.packet_frames; ++frame) {
-        active[0] += last_native_packet[10 + frame * 2] != 0;
-        active[1] += last_native_packet[11 + frame * 2] != 0;
+        active[0] += last_native_packet[sample_offset + frame * 2] != 0;
+        active[1] += last_native_packet[sample_offset + frame * 2 + 1] != 0;
     }
     require((left ? active[0] > status.packet_frames / 2u : active[0] == 0) &&
                 (right ? active[1] > status.packet_frames / 2u : active[1] == 0),

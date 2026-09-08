@@ -235,8 +235,6 @@ HAPTICS_GAMEPLAY_ARMING_NOTE = (
 )
 HAPTICS_GAMEPLAY_TIMING = {
     "sample_rate_hz": 3000,
-    "stereo_frames_per_packet": 64,
-    "lookback_us": 64000000 / 3000,
     "switch_command_window_us": 8000,
     "switch_watchdog_us": 50000,
     "xinput_command_policy": "held_until_changed_or_stopped",
@@ -257,23 +255,6 @@ HAPTICS_TRANSPORT_PROBE_EVIDENCE_NOTE = (
     "exact occupancy timeline; completion counters select this connection "
     "handle. Running snapshots are correlated to one run, not one instant."
 )
-HAPTICS_EXPERIMENT_PATTERN = {
-    "sample_rate_hz": 3000,
-    "stereo_frames_per_packet": 64,
-    "peak_amplitude": 32,
-    "priming_silence_packets": 48,
-    "cycles": 4,
-    "phases": [
-        {"channel": "left", "frequency_hz": 100, "packets": 12},
-        {"channel": "silence", "packets": 12},
-        {"channel": "right", "frequency_hz": 200, "packets": 12},
-        {"channel": "silence", "packets": 12},
-    ],
-    "trailing_silence_packets": 48,
-    "total_packets": 288,
-    "initial_mode_packet_stereo_frames": 32,
-    "duration_us": 6144000,
-}
 
 LOGICAL_BUTTONS = (
     "south",
@@ -457,7 +438,7 @@ class HapticsExperimentDiagnostics:
     mode: int
     host_updates: int
     dropped_updates: int
-    packet_frames: int = 64
+    packet_frames: int
     last_packet_nonzero: bool = False
 
     @property
@@ -503,7 +484,25 @@ class HapticsExperimentDiagnostics:
             values["evidence_note"] = HAPTICS_GAMEPLAY_EVIDENCE_NOTE
             values["arming_note"] = HAPTICS_GAMEPLAY_ARMING_NOTE
         else:
-            values["pattern"] = HAPTICS_EXPERIMENT_PATTERN
+            phase_packets = 768 // self.packet_frames
+            values["pattern"] = {
+                "sample_rate_hz": 3000,
+                "stereo_frames_per_packet": self.packet_frames,
+                "packet_interval_us": self.packet_frames * 1000000 / 3000,
+                "peak_amplitude": 32,
+                "priming_silence_packets": 3072 // self.packet_frames,
+                "cycles": 4,
+                "phases": [
+                    {"channel": "left", "frequency_hz": 100, "packets": phase_packets},
+                    {"channel": "silence", "packets": phase_packets},
+                    {"channel": "right", "frequency_hz": 200, "packets": phase_packets},
+                    {"channel": "silence", "packets": phase_packets},
+                ],
+                "trailing_silence_packets": 3072 // self.packet_frames,
+                "total_packets": 18432 // self.packet_frames,
+                "initial_mode_packet_stereo_frames": 0,
+                "duration_us": 6144000,
+            }
             values["evidence_note"] = HAPTICS_EXPERIMENT_EVIDENCE_NOTE
         return values
 
@@ -2926,7 +2925,7 @@ def parse_haptics_experiment(envelope: Envelope) -> HapticsExperimentDiagnostics
     state, slot, last_error, reserved = struct.unpack_from("<4B", envelope.payload, 68)
     mode = envelope.payload[72]
     packet_frames = envelope.payload[73]
-    if packet_frames not in (32, 64) or (mode == 0 and packet_frames != 64):
+    if packet_frames not in (32, 64):
         raise ConfigManagerError("invalid haptics packet size")
     host_updates, dropped_updates = struct.unpack_from("<2I", envelope.payload, 76)
     if envelope.payload[74] not in (0, 1):
@@ -3139,20 +3138,25 @@ def _print_haptics_experiment(
     )
     if snapshot.mode == 1:
         print(
-            "Gameplay: continuous 3 kHz, 64 stereo frames/packet; "
-            "21333.333 us lookback, 8000 us command window, "
+            f"Gameplay: continuous 3 kHz, {snapshot.packet_frames} stereo frames/packet; "
+            f"{values['gameplay']['lookback_us']:.3f} us lookback, 8000 us command window, "
             "50000 us host-effect watchdog; balanced 2x gameplay gain with a "
             "0.8-power response curve, jointly headroom-limited. "
             "Silence continues without commands."
         )
         print(HAPTICS_GAMEPLAY_ARMING_NOTE)
     else:
+        pattern = values["pattern"]
         print(
-            "Pattern: 3 kHz, 64 stereo frames/packet, peak 32/127; "
-            "48 packets priming silence (1.024 s), 4 cycles of "
+            f"Pattern: 3 kHz, {pattern['stereo_frames_per_packet']} stereo frames/packet, "
+            f"peak {pattern['peak_amplitude']}/127; "
+            f"{pattern['priming_silence_packets']} packets priming silence (1.024 s), "
+            f"{pattern['cycles']} cycles of "
             "left 100 Hz / silence / right 200 Hz / silence "
-            "(12 packets = 256 ms each), 48 packets trailing silence (1.024 s); "
-            "288 packets / 6.144 s total. Initial mode handoff carries 32 silent frames."
+            f"({pattern['phases'][0]['packets']} packets = 256 ms each), "
+            f"{pattern['trailing_silence_packets']} packets trailing silence (1.024 s); "
+            f"{pattern['total_packets']} packets / 6.144 s total. "
+            "Initial state-only mode handoff carries no PCM frames and counts as one packet."
         )
     print(
         "Timestamp fields are low 32-bit Pico uptime microseconds; "

@@ -43,6 +43,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                     "-DSWITCH_PICO_HAPTICS_EXPERIMENT=1",
                     "-DSWITCH_PICO_HD_RUMBLE=1",
                     "-DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM=0",
+                    f"-DSWITCH_PICO_HD_PACKET_FRAMES={32 if short_packets else 64}",
                     str(root / "src" / "firmware" / "input" / "haptics_experiment.cpp"),
                     str(
                         root
@@ -74,7 +75,6 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                     "-DSWITCH_PICO_CYW43_PACKET_READ=1",
                     "-DSWITCH_PICO_HCI_CREDIT_BATCH=1",
                     "-DSWITCH_PICO_SYS_CLOCK_MHZ=300",
-                    "-DSWITCH_PICO_HD_PACKET_FRAMES=32",
                 ]
             )
         command.extend(

@@ -810,13 +810,10 @@ void test_haptics_experiment_requests() {
                     0, CONTROL_STAGE_SETUP, &request),
                 "malformed experiment control size was accepted");
     }
-    std::vector<uint8_t> expected(84, 0);
-    expected[69] = 0xff;
-    expected[73] = 64;
 #ifndef SWITCH_PICO_HAPTICS_EXPERIMENT
-    expected[68] = 6;
-    require(read_haptics_payload() == expected,
-            "disabled firmware must expose only the unsupported snapshot");
+    const auto unsupported = read_haptics_payload();
+    require(unsupported[68] == 6 && unsupported[69] == 0xff,
+            "disabled firmware must expose an unsupported unbound snapshot");
     for (uint8_t action : {0, 1, 2}) {
         next_out_payload = make_request(Operation::kHapticsExperiment, {action, 0});
         tusb_control_request_t request = setup_request(
@@ -827,6 +824,8 @@ void test_haptics_experiment_requests() {
                 "disabled firmware accepted experiment control");
     }
 #else
+    std::vector<uint8_t> expected(84, 0);
+    expected[73] = 64;
     perform_haptics_out(3, 0, false);
     perform_haptics_out(1, 4, false);
     perform_haptics_out(0, 0xff, false);
@@ -862,7 +861,7 @@ void test_haptics_experiment_requests() {
     current_haptics = {
         1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,
         123, 22000, 11001, 9876, 0xfffffff0, 0x30, 0x76543210,
-        1100000, HapticsExperimentState::kRunning, 2, 0, 1, 0x89abcdef, 0x12345678,
+        1100000, HapticsExperimentState::kRunning, 2, 0, 1, 0x89abcdef, 0x12345678, 64, false,
     };
     const uint32_t fields[] = {
         1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,

@@ -21,6 +21,14 @@ namespace {
 enum class Delivery { kImmediate, kDeferred, kNever };
 enum class GenericKind { kCompatibility, kLed };
 
+constexpr uint32_t kPacketFrames = SWITCH_PICO_HD_PACKET_FRAMES;
+static_assert(kPacketFrames == 32 || kPacketFrames == 64);
+constexpr uint32_t kPackets = 18432 / kPacketFrames;
+constexpr uint32_t kPrimingPackets = 3072 / kPacketFrames;
+constexpr uint32_t kToneEndPacket = 15360 / kPacketFrames;
+constexpr uint32_t kPhasePackets = 768 / kPacketFrames;
+constexpr unsigned kSampleOffset = kPacketFrames == 32 ? 14 : 10;
+
 struct Pcm {
     uint64_t at_us;
     uint16_t cid;
@@ -227,41 +235,68 @@ uint64_t start(uint8_t slot = 0) {
     return now_us;
 }
 
-uint64_t due(uint64_t started, uint32_t packet, uint32_t frames = 64) {
-    return started + (static_cast<uint64_t>(packet) * frames * 1000 + 2) / 3;
+uint64_t due(uint64_t started, uint32_t packet) {
+    return started + (static_cast<uint64_t>(packet) * kPacketFrames * 1000 + 2) / 3;
 }
 
-void verify_block(const Pcm& packet, uint32_t index, bool forced_silence = false) {
+const uint8_t* samples(const Pcm& packet) {
     const auto& b = packet.bytes;
-    assert(b[0] == 0xa2 && b[1] == 0x32 && b[2] == 0);
-    unsigned sample_offset = 10;
-    unsigned frames = 64;
-    if (b[3] == 0x90) {
-        assert(b[4] == 63);
-        for (unsigned i = 5; i < 68; ++i) assert(b[i] == 0);
-        assert(b[68] == 0x92 && b[69] == 64);
-        sample_offset = 70;
-        frames = 32;
-    } else {
-        assert(b[3] == 0x91 && b[4] == 3 && b[5] == 0x62);
-        assert(b[6] == 16 && b[8] == 0xd2 && b[9] == 64);
+    assert(b[3] == 0x91);
+    assert(b[kSampleOffset - 2] == (kPacketFrames == 32 ? 0x92 : 0xd2));
+    assert(b[kSampleOffset - 1] == 64);
+    return b.data() + kSampleOffset;
+}
+
+void verify_report(const Pcm& packet, uint32_t sent_index) {
+    const auto& b = packet.bytes;
+    assert(b[0] == 0xa2 && b[1] == 0x32);
+    if (sent_index == 0) {
+        // Enable only AudioControl, with its route/MicSelect byte left zero.
+        // Initialization carries no PCM, volume, preamp, mute, trigger or LED writes.
+        assert(b[2] == 0x10 && b[3] == 0x90 && b[4] == 63 && b[5] == 0x80);
+        for (unsigned i = 6; i < 139; ++i) assert(b[i] == 0);
+        return;
     }
-    for (unsigned i = sample_offset + frames * 2; i < 139; ++i) {
+    assert(b[2] == 0 && b[3] == 0x91);
+    if (kPacketFrames == 32) {
+        assert(b[4] == 7 && b[5] == 0xfe);
+        for (unsigned i = 6; i < 10; ++i) assert(b[i] == 0);
+        assert(b[10] == 0xff && b[11] == static_cast<uint8_t>(sent_index - 1));
+    } else {
+        assert(b[4] == 3 && b[5] == 0x62 && b[6] == 16);
+        assert(b[7] == static_cast<uint8_t>(sent_index * 2));
+    }
+    samples(packet);
+    for (unsigned i = kSampleOffset + kPacketFrames * 2; i < 139; ++i) {
         assert(b[i] == 0);
     }
-    const bool pattern_tone = index >= 48 && index < 240 &&
-                              ((index - 48) / 12) % 2 == 0;
+}
+
+void verify_silence(const Pcm& packet) {
+    const auto* block = samples(packet);
+    for (unsigned byte = 0; byte < kPacketFrames * 2; ++byte) assert(block[byte] == 0);
+}
+
+void verify_block(const Pcm& packet, uint32_t index, uint32_t sent_index,
+                  bool forced_silence = false) {
+    verify_report(packet, sent_index);
+    if (sent_index == 0) return;  // State-only initialization has no PCM block.
+    const auto* block = samples(packet);
+    const bool pattern_tone = index >= kPrimingPackets && index < kToneEndPacket &&
+                              ((index - kPrimingPackets) / kPhasePackets) % 2 == 0;
     const bool tone = pattern_tone && !forced_silence;
-    const unsigned phase = tone ? ((index - 48) / 12) % 4 : 0;
+    const unsigned phase =
+        tone ? ((index - kPrimingPackets) / kPhasePackets) % 4 : 0;
     const unsigned side = phase == 0 ? 0 : 1;
     const double hz = phase == 0 ? 100.0 : 200.0;
-    for (unsigned frame = 0; frame < frames; ++frame) {
+    for (unsigned frame = 0; frame < kPacketFrames; ++frame) {
         for (unsigned channel = 0; channel < 2; ++channel) {
-            const int value = static_cast<int8_t>(b[sample_offset + frame * 2 + channel]);
+            const int value = static_cast<int8_t>(block[frame * 2 + channel]);
             if (!tone || channel != side) {
                 assert(value == 0);
             } else {
-                const unsigned sample = ((index - 48) % 12) * 64 + frame;
+                const unsigned sample =
+                    ((index - kPrimingPackets) % kPhasePackets) * kPacketFrames + frame;
                 const int expected = static_cast<int>(std::lround(
                     32.0 * std::sin(2.0 * 3.14159265358979323846 * hz * sample / 3000.0)));
                 assert(std::abs(value - expected) <= 1);
@@ -284,16 +319,17 @@ void nominal_run(const char* corpus_path) {
     run_until(started + 6148000);
     const auto done = snapshot();
     assert(done.state == HapticsExperimentState::kCompleted);
-    assert(done.sent_packets == 288 && done.generated_packets == 288);
+    assert(done.packet_frames == kPacketFrames);
+    assert(done.sent_packets == kPackets && done.generated_packets == kPackets);
     assert(done.skipped_packets == 0 && done.send_failures == 0);
-    assert(done.can_send_requests == 288 && done.synchronous_callbacks == 288);
-    assert(max_request_depth == 1 && request_calls == 288);
+    assert(done.can_send_requests == kPackets && done.synchronous_callbacks == kPackets);
+    assert(max_request_depth == 1 && request_calls == kPackets);
     assert(timer_calls < 1250);  // No permanent 1 ms poll for this 6.144 s run.
-    assert(pcm.size() == 288);
+    assert(pcm.size() == kPackets);
     assert(done.first_tone_due_us == static_cast<uint32_t>(started + 1024000));
-    assert(done.first_tone_sent_us == static_cast<uint32_t>(pcm[48].at_us));
+    assert(done.first_tone_sent_us == static_cast<uint32_t>(pcm[kPrimingPackets].at_us));
     assert(done.last_sent_us == static_cast<uint32_t>(pcm.back().at_us));
-    assert(done.max_send_gap_us <= 22000 && done.max_lateness_us < 1000);
+    assert(done.max_send_gap_us <= due(0, 1) + 1000 && done.max_lateness_us < 1000);
     assert(done.elapsed_us >= 6147000 && done.elapsed_us < 6148000);
     assert(done.max_generate_us == 0);
     assert(!haptics_experiment_owns(&devices[0]) && timers.empty());
@@ -309,37 +345,34 @@ void nominal_run(const char* corpus_path) {
     for (uint32_t i = 0; i < pcm.size(); ++i) {
         assert(pcm[i].at_us >= due(started, i));
         assert(pcm[i].at_us - due(started, i) < 1000);
-        if (i != 0) assert(pcm[i].bytes[7] == static_cast<uint8_t>(i * 2));
-        verify_block(pcm[i], i);
+        verify_block(pcm[i], i, i);
         corpus.write(reinterpret_cast<const char*>(pcm[i].bytes.data()), 143);
     }
-    // Reference-sized 0x10 native-mode state followed by a silent PCM block.
-    // Independent known answer computed with Python zlib over the A2 prefix.
-    assert(pcm[0].bytes[3] == 0x90);
-    assert(pcm[0].bytes[139] == 0x00 && pcm[0].bytes[140] == 0x41 &&
-           pcm[0].bytes[141] == 0xfd && pcm[0].bytes[142] == 0x53);
     corpus.close();
     run_until(now_us + 200000);
-    assert(snapshot().elapsed_us == done.elapsed_us && pcm.size() == 288);
+    assert(snapshot().elapsed_us == done.elapsed_us && pcm.size() == kPackets);
 }
 
 void stalled_deadlines() {
     reset();
     const uint64_t started = start();
-    run_until(due(started, 102) + 1000);
+    // Stall midway through the second left phase, crossing into its silence.
+    const uint32_t tone_packet = kPrimingPackets + 4 * kPhasePackets + kPhasePackets / 2;
+    run_until(due(started, tone_packet) + 1000);
     const unsigned before = static_cast<unsigned>(pcm.size());
     const uint32_t next = snapshot().sent_packets;
     now_us += 250000;  // The main loop did not run at all during this stall.
-    const uint32_t current = static_cast<uint32_t>((now_us - started) * 3 / 64000);
+    const uint32_t current =
+        static_cast<uint32_t>((now_us - started) * 3 / (kPacketFrames * 1000));
     run_until(now_us);
     assert(pcm.size() == before + 1);  // No catch-up replay burst.
     assert(snapshot().skipped_packets == current - next);
-    verify_block(pcm.back(), current);
+    verify_block(pcm.back(), current, before);
     assert(snapshot().max_send_gap_us >= 250000);
     run_until(started + 6148000);
     const auto done = snapshot();
     assert(done.state == HapticsExperimentState::kCompleted);
-    assert(done.sent_packets + done.skipped_packets == 288);
+    assert(done.sent_packets + done.skipped_packets == kPackets);
     assert(done.elapsed_us < 6148000);
 }
 
@@ -357,12 +390,13 @@ void deferred_and_missing_callbacks() {
     assert(pcm.size() == 1);
     assert(snapshot().max_request_wait_us == 2300000);
     assert(snapshot().synchronous_callbacks == 0);
-    assert(snapshot().skipped_packets == 107);
-    verify_block(pcm.back(), 107);
+    const uint32_t current = 2300000u * 3 / (kPacketFrames * 1000);
+    assert(snapshot().skipped_packets == current);
+    verify_block(pcm.back(), current, 0);  // Even a late first report is state-only.
     delivery = Delivery::kImmediate;
     run_until(started + 6148000);
     assert(snapshot().state == HapticsExperimentState::kCompleted);
-    assert(snapshot().sent_packets + snapshot().skipped_packets == 288);
+    assert(snapshot().sent_packets + snapshot().skipped_packets == kPackets);
 
     reset();
     delivery = Delivery::kNever;
@@ -371,7 +405,7 @@ void deferred_and_missing_callbacks() {
     const auto missing = snapshot();
     assert(missing.state == HapticsExperimentState::kError);
     assert(missing.last_error == 4 && missing.send_failures == 1);
-    assert(missing.sent_packets == 0 && missing.skipped_packets == 288);
+    assert(missing.sent_packets == 0 && missing.skipped_packets == kPackets);
     assert(missing.max_request_wait_us >= 6244000);
     assert(request_calls == 1 && timer_calls < 10 && timers.empty());
     assert(!haptics_experiment_owns(&devices[0]));
@@ -382,9 +416,10 @@ void deferred_and_missing_callbacks() {
 void stop_preemption_and_restore() {
     reset();
     const uint64_t started = start();
-    run_until(due(started, 98) + 1000);
+    const uint32_t tone_packet = kPrimingPackets + 4 * kPhasePackets + kPhasePackets / 4;
+    run_until(due(started, tone_packet - 1) + 1000);
     delivery = Delivery::kDeferred;
-    run_until(due(started, 99) + 1000);
+    run_until(due(started, tone_packet) + 1000);
     assert(devices[0].notification_pending);
     const auto before = snapshot();
     assert(!haptics_experiment_request(0, 1));
@@ -394,7 +429,7 @@ void stop_preemption_and_restore() {
     const unsigned sent_before = static_cast<unsigned>(pcm.size());
     assert(dispatch(&devices[0], devices[0].conn.interrupt_cid));
     assert(pcm.size() == sent_before + 1);
-    verify_block(pcm.back(), 99, true);  // Pending tone permission now sends silence.
+    verify_block(pcm.back(), tone_packet, sent_before, true);  // Pending tone becomes silence.
     assert(!haptics_experiment_request(1, 0));  // Compatibility is still settling.
     run_until(now_us + 4000);
     assert(snapshot().state == HapticsExperimentState::kStopped);
@@ -556,13 +591,13 @@ void support_and_transport_errors() {
 
     reset();
     fail_requests = 1;
-    start();
+    const uint64_t retry_start = start();
     assert(pcm.empty());
-    run_until(now_us + 24000);
+    run_until(due(retry_start, 1) + 1000);
     assert(pcm.size() == 1 && snapshot().send_failures == 1);
     assert(snapshot().skipped_packets == 1);
     fail_sends = 1;
-    run_until(now_us + 24000);
+    run_until(due(retry_start, 2) + 1000);
     assert(snapshot().send_failures == 2);
     run_until(static_cast<uint64_t>(snapshot().start_us) + 6148000);
     assert(snapshot().state == HapticsExperimentState::kError);
@@ -581,7 +616,7 @@ void timing_cost_reentrancy_and_wrap() {
     run_until(started + 6148000);
     const auto done = snapshot();
     assert(done.state == HapticsExperimentState::kCompleted);
-    assert(done.sent_packets == 288 && send_calls == 288);
+    assert(done.sent_packets == kPackets && send_calls == kPackets);
     assert(done.max_generate_us == 0);  // Neither request nor send is generation.
     assert(done.max_request_wait_us == 200 && max_request_depth == 1);
     for (unsigned i = 0; i < pcm.size(); ++i) {
@@ -596,10 +631,12 @@ void timing_cost_reentrancy_and_wrap() {
     assert(wrapped.state == HapticsExperimentState::kCompleted);
     assert(wrapped.start_us == static_cast<uint32_t>(wrap_start));
     assert(wrapped.first_tone_due_us == static_cast<uint32_t>(wrap_start + 1024000));
-    assert(wrapped.first_tone_sent_us == static_cast<uint32_t>(pcm[48].at_us));
+    assert(wrapped.first_tone_sent_us ==
+           static_cast<uint32_t>(pcm[kPrimingPackets].at_us));
     assert(wrapped.last_sent_us == static_cast<uint32_t>(pcm.back().at_us));
     assert(wrapped.elapsed_us >= 6147000 && wrapped.elapsed_us < 6148000);
-    assert(wrapped.max_send_gap_us <= 22000 && wrapped.sent_packets == 288);
+    assert(wrapped.max_send_gap_us <= due(0, 1) + 1000 &&
+           wrapped.sent_packets == kPackets);
 }
 void synchronous_teardown_releases_admission() {
     reset();
@@ -630,7 +667,7 @@ void gameplay_led_yield_releases_admission() {
     haptics_experiment_poll();
     const uint64_t started = snapshot().start_us;
     delivery = Delivery::kDeferred;
-    run_until(due(started, 1, snapshot().packet_frames) + 1000);
+    run_until(due(started, 1) + 1000);
     assert(devices[0].notification_pending);
     devices[0].credit = false;
     emit_generic(&devices[0], GenericKind::kLed);
@@ -666,19 +703,19 @@ void gameplay_timeline_and_lifecycle() {
     haptics_experiment_poll();
     assert(snapshot().mode == 1 && snapshot().state == HapticsExperimentState::kRunning);
     assert(haptics_experiment_gameplay_owns(&devices[0]));
+    assert(snapshot().packet_frames == kPacketFrames);
+    verify_report(pcm.front(), 0);
     now_us = started + 8000;
     feed(false);
     const uint32_t frames = snapshot().packet_frames;
-    run_until(due(started, 1, frames) + 1000);
+    run_until(due(started, 1) + 1000);
     assert(pcm.size() == 2 && snapshot().host_updates == 2);
-    assert(pcm[1].bytes[7] == frames / 32);
-    assert(pcm[1].bytes[8] == (frames == 32 ? 0x92 : 0xd2));
-    for (unsigned byte = 10 + frames * 2; byte < 139; ++byte)
-        assert(pcm[1].bytes[byte] == 0);
+    verify_report(pcm[1], 1);
+    const auto* block = samples(pcm[1]);
     unsigned left_nonzero = 0, right_nonzero = 0;
     for (unsigned frame = 0; frame < frames; ++frame) {
-        const auto left = pcm[1].bytes[10 + frame * 2];
-        const auto right = pcm[1].bytes[11 + frame * 2];
+        const auto left = block[frame * 2];
+        const auto right = block[frame * 2 + 1];
         if (frame < 24) {
             assert(right == 0);
             left_nonzero += left != 0;
@@ -694,8 +731,8 @@ void gameplay_timeline_and_lifecycle() {
     assert(!haptics_experiment_submit(0, 101, now_us, stale));
     run_until(started + 6300000);
     assert(snapshot().state == HapticsExperimentState::kRunning);
-    assert(snapshot().sent_packets > 288 && snapshot().skipped_packets == 0);
-    for (unsigned byte = 10; byte < 138; ++byte) assert(pcm.back().bytes[byte] == 0);
+    assert(snapshot().sent_packets > kPackets && snapshot().skipped_packets == 0);
+    verify_silence(pcm.back());
     assert(snapshot().dropped_updates == 0 && generic_sent.empty());
     assert(haptics_experiment_feedback(&devices[0], 100, 60, 30));
     run_until(now_us + 22000);
@@ -764,9 +801,10 @@ void stateful_rumble_prepare_feedback_and_zero() {
     const auto assert_channels = [](bool left, bool right) {
         const uint32_t frames = snapshot().packet_frames;
         unsigned active[2]{};
+        const auto* block = samples(pcm.back());
         for (uint32_t frame = 0; frame < frames; ++frame) {
-            active[0] += pcm.back().bytes[10 + frame * 2] != 0;
-            active[1] += pcm.back().bytes[11 + frame * 2] != 0;
+            active[0] += block[frame * 2] != 0;
+            active[1] += block[frame * 2 + 1] != 0;
         }
         assert(left ? active[0] > frames / 2 : active[0] == 0);
         assert(right ? active[1] > frames / 2 : active[1] == 0);
@@ -793,7 +831,7 @@ void stateful_rumble_prepare_feedback_and_zero() {
     assert(haptics_experiment_request(1, 0));
     assert(!haptics_experiment_submit_rumble(0, 100, now_us, 255, 255));
     haptics_experiment_poll();
-    assert(snapshot().mode == 0 && snapshot().packet_frames == 64);
+    assert(snapshot().mode == 0 && snapshot().packet_frames == kPacketFrames);
 }
 
 void stateful_rumble_generation_and_overflow() {
@@ -808,16 +846,14 @@ void stateful_rumble_generation_and_overflow() {
     assert(haptics_experiment_request(2, 0));
     haptics_experiment_poll();
     run_until(now_us + 100000);
-    for (unsigned byte = 10; byte < 138; ++byte)
-        assert(pcm.back().bytes[byte] == 0);
+    verify_silence(pcm.back());
     for (unsigned command = 0; command < 17; ++command) {
         assert(haptics_experiment_submit_rumble(
             0, 101, now_us, command == 16 ? 0 : 255, 0));
     }
     run_until(now_us + 80000);
     assert(snapshot().host_updates == 17 && snapshot().dropped_updates == 1);
-    for (unsigned byte = 10; byte < 138; ++byte)
-        assert(pcm.back().bytes[byte] == 0);
+    verify_silence(pcm.back());
     assert(generic_sent.empty());
 }
 

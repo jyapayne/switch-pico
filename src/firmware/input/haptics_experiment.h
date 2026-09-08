@@ -2,6 +2,10 @@
 
 #include <stdint.h>
 
+#ifndef SWITCH_PICO_HD_PACKET_FRAMES
+#define SWITCH_PICO_HD_PACKET_FRAMES 32
+#endif
+
 struct uni_hid_device_s;
 typedef struct uni_hid_device_s uni_hid_device_t;
 struct SwitchHapticsFrame;
@@ -41,7 +45,7 @@ struct HapticsExperimentDiagnostics {
     uint8_t mode = 0;
     uint32_t host_updates = 0;
     uint32_t dropped_updates = 0;
-    uint8_t packet_frames = 64;
+    uint8_t packet_frames = SWITCH_PICO_HD_PACKET_FRAMES;
     bool last_packet_nonzero = false;
 };
 

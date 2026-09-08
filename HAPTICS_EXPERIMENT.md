@@ -25,15 +25,33 @@ Sources:
 - Reconstructed substep reference: https://github.com/HandHeldLegend/NS-LIB-HID/blob/becc24f0841bbb875da24ea622cc1ada00cb8492/docs/hd-rumble-implementation-guide.md
 - Eight-millisecond playback-window reference: https://github.com/HandHeldLegend/HOJA-LIB-RP2040/blob/238f66d1c4aae87fc320d94d8abd38229e7da2d0/src/utilities/pcm.c
 
+## Current accepted native format
+
+The current default is **32 stereo frames at 3 kHz**, with explicit state-only
+audio initialization and the full SAxense-style control header described below.
+Isolated hardware capture verified independent left/right PCM peaks of 32, 63
+and 96, with the opposite channel zero and no compatibility-selector reports
+during the tones. The user confirmed strong, distinct sides and clean stops at
+peak 96/127. The gain curve was not increased to obtain this result.
+
+The compact 64-frame/buffer-16 candidate felt worse despite zero skipped packets.
+It is retained only as an explicit, physically unqualified experiment. That
+comparison changed the control header and buffer field as well as frame count;
+it does not establish that batching alone caused the difference. The accepted
+32-frame trial had ten skipped slots across its strong-pulse run and no send
+failures, so mixed-radio and long-duration qualification remain outstanding.
+Earlier results below are historical transport measurements, not approval of
+the current or rejected formats' physical fidelity.
+
 ## Implementation contract
 
 1. AIO/XInput defaults enable `SWITCH_PICO_HAPTICS_EXPERIMENT`, `SWITCH_PICO_HD_RUMBLE`, packet-level CYW43 reads and bounded HCI credit batching at 300 MHz/1.3 V. UART is unchanged. Preserve wake identity, pairing storage and USB modes. Incoming flow control and FIFO capacities remain unchanged; the controller's advertised outgoing capacity is eight ACL packets on this hardware.
 2. One selected Sony DualSense/DualSense Edge, Bluetooth Classic, sufficient negotiated MTU. Auto-arm chooses the first eligible ready controller, not necessarily slot 0, and later controllers do not steal an active stream. The fixture requires explicit start. Idle native output remains silent. Other devices use compatibility output unless explicitly approved for the separate Nintendo-native backend described in `SWITCH_FAMILY_HD_RUMBLE_PLAN.md`.
-3. Report 0x32 plus A2 remains a 143-byte L2CAP SDU. The first report selects native mode with sized state block 0x90/63 and one silent 0x92/64 haptic block. Subsequent reports use compact controls `{0x91,3,0x62,16,counter}`. Standard gameplay and the fixture carry two blocks (64 stereo frames, descriptor 0xd2). Explicit `SWITCH_PICO_HD_PACKET_FRAMES=32` carries one 64-byte block (descriptor 0x92) for single-controller qualification only. The counter advances by the number of blocks. Padding and Bluetooth CRC remain deterministic. No speaker, microphone, USB audio endpoint, Opus or resampler.
+3. Report 0x32 plus A2 remains a 143-byte L2CAP SDU. The first report is state-only: sequence/tag byte 0x10, sized state block 0x90/63, and valid flag0 0x80 to write AudioControl with default route/MicSelect. Other state validity flags stay clear: no volume, preamp, mute, trigger or LED change. It carries no PCM. Default subsequent controls are `{0x91,7,0xfe,0,0,0,0,0xff,counter}`, followed by `{0x92,64}` and one 64-byte PCM block (32 stereo frames). The data counter begins at zero after initialization and advances by one. The 0xff field is a reference parameter, not an established millisecond duration. Explicit 64-frame mode retains compact controls `{0x91,3,0x62,16,counter}`, two blocks under 0xd2, and a counter advancing by two; it is not the accepted default. Padding and Bluetooth CRC remain deterministic. No speaker/microphone stream, USB audio endpoint, Opus or resampler is added.
 4. At 3 kHz, 32/64 stereo frames require 93.75/46.875 reports/s. Absolute rational deadlines preserve fractional time and skip obsolete packets after stalls rather than burst-replaying them. Timer wakeups account for SDK +1 tick. Can-send permission and audio deadlines remain separate; flags are armed before requests and synchronous callbacks cannot recursively generate a stream.
-5. The deterministic fixture remains a finite 288-report / 6.144-second sequence: 48 priming intervals, four cycles of left 100 Hz / silence / right 200 Hz / silence (12 reports = 256 ms per phase), then 48 trailing-silence reports. Its peak remains 32/127. Gameplay is continuous, has no one-second priming pattern, and uses timestamped Switch commands instead. Stop restores compatibility output; disconnect cancels without stale-pointer use.
+5. The default deterministic fixture is 576 reports over 6.144 seconds: 96 priming slots, four cycles of left 100 Hz / silence / right 200 Hz / silence (24 reports = 256 ms per phase), then 96 trailing-silence reports. The state-only initialization occupies the first priming slot and counts as one report, with zero PCM frames. Explicit 64-frame mode preserves the same timeline with 288 total reports, 48 priming/trailing slots and 12 reports per phase. Peak remains 32/127, not full-strength rumble or a calibrated physical-force percentage. Gameplay has no one-second priming pattern and uses timestamped Switch commands. Stop restores compatibility output; disconnect cancels without stale-pointer use.
 6. No historical PCM FIFO. Generate only the current due block when transmission is permitted; bounded control mailbox across cores. Record packet counts, skipped blocks, failed sends, synchronous callbacks, generation cost, send gaps, lateness, request wait and first-tone timestamps. HCI submission is not physical actuator onset.
-7. Host `haptics-experiment start`, `gameplay`, `status`, `stop`, and `profile` retain USB management framing. AIO builds enable these operations; explicitly disabled/UART builds do not. Operation 0x40 uses schema 5 and transport profiling uses schema 3. Update firmware and host tools together.
+7. Host `haptics-experiment start`, `gameplay`, `status`, `stop`, and `profile` retain USB management framing. AIO builds enable these operations; explicitly disabled/UART builds do not. Operation 0x40 uses schema 5 and transport profiling uses schema 3. Both fixture and gameplay diagnostics report the actual configured frame count; host metadata derives packet counts and timing from it. Update firmware and host tools together.
 8. Regression coverage must include synchronous callback delivery, rational clock and late wakeups, reference packet interpretation, finite completion/stop, disconnect/reconnect and compatibility restoration. Native probes cannot prove controller acceptance or physical latency.
 
 ## Gameplay mode
@@ -46,7 +64,7 @@ cmake -S . -B build-hd-rumble -DPICO_BOARD=pico2_w \
   -DSWITCH_PICO_HD_RUMBLE=ON \
   -DSWITCH_PICO_SYS_CLOCK_MHZ=300 -DSWITCH_PICO_OVERCLOCK_MV=1300 \
   -DSWITCH_PICO_CYW43_PACKET_READ=ON -DSWITCH_PICO_HCI_CREDIT_BATCH=ON \
-  -DSWITCH_PICO_HD_PACKET_FRAMES=64 \
+  -DSWITCH_PICO_HD_PACKET_FRAMES=32 \
   -DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM=ON -DSWITCH_PICO_LOG=OFF
 cmake --build build-hd-rumble
 ```
@@ -57,7 +75,7 @@ The decoder preserves each actuator's one-to-three ordered substeps and frequenc
 
 The synthesizer has independent left/right low/high phase accumulators. Frequencies are `40 * 2^(index/32)` and `80 * 2^(index/32)` Hz. Each Switch command occupies an 8 ms window, split into 24/12/8 PCM samples per substep for counts 1/2/3. New reports supersede unplayed old substeps; identical compressed words hold final state rather than replaying deltas. Each Switch-updated side expires after 50 ms, matching the existing conservative timeout policy.
 
-Standard gameplay uses 21.333 ms causal lookback; the explicit 32-frame experiment uses 10.667 ms. Fixed 16-entry cross-core and synthesis histories contain commands, not PCM. Overflow is counted and obsolete sample intervals are not replayed. XInput holds use a distinct persistent command: strong/low magnitude drives the left 160 Hz band, weak/high magnitude drives the right 320 Hz band, until a new command or zero stop. They do not fake refreshes to evade the 50 ms Switch watchdog. Retained XInput state is seeded once per native run, including manual re-arming after compatibility output.
+Standard gameplay uses 10.667 ms causal lookback. The explicitly selected, unqualified 64-frame experiment uses 21.333 ms. Fixed 16-entry cross-core and synthesis histories contain commands, not PCM. Overflow is counted and obsolete sample intervals are not replayed. XInput holds use a distinct persistent command: strong/low magnitude drives the left 160 Hz band, weak/high magnitude drives the right 320 Hz band, until a new command or zero stop. They do not fake refreshes to evade the 50 ms Switch watchdog. Retained XInput state is seeded once per native run, including manual re-arming after compatibility output.
 
 Native gameplay uses balanced **2x low/high gain after profile scaling**, followed by a gentle **0.8-power curve** on the combined amplitude. This lifts quiet and medium effects while retaining their low/high ratio. The curve is a 257-entry lookup with integer interpolation, not per-sample floating-point math. Combined weights are capped at 65535 to avoid overflow and clipping. Zero remains zero. The amplitude curve does not alter carrier frequencies or local-confirmation gain; packet timing follows the transport configuration above. This response replaced the initial 1.5x and low-band-only experiments after user comparison.
 
@@ -289,7 +307,7 @@ profiles were compared with the pre-migration backup; the temporary editor
 profile and name were restored. No configuration, bond, or wake-identity reset
 was part of the transport work.
 
-### Mixed-controller cadence limit
+### Historical mixed-controller cadence limit
 
 Final testing with a Switch Pro plus a DualSense and continuous USB motion
 reads changed the cadence decision. Rumble commands targeted only the
@@ -299,8 +317,9 @@ host commands but skipped **80 audio slots in 16.6 s**. Maximum permission
 wait reached **17,180 us**, exceeding its 10,667 us interval, with all eight
 outgoing credits observed in use. CPU clock remained 300 MHz/1.3 V.
 
-The standard build therefore uses **64 frames / 46.875 reports per second**,
-without reverting its CPU or transport improvements. The same 2,050-command
+Those measurements led the earlier standard build to use **64 frames / 46.875
+reports per second**, without reverting its CPU or transport improvements.
+The same 2,050-command
 mixed-controller comparison passed with zero drops/skips/send failures and
 778 audio reports. Its worst observed report gap was 26,588 us. A subsequent
 roughly 65-second mixed-controller stress run received all **8,194 commands**
@@ -308,15 +327,15 @@ and submitted **3,082 audio reports**, with **zero drops, skipped audio slots,
 or send failures**. It processed 41,738 input reports and its worst observed
 audio report gap was 26,655 us.
 
-The 32-frame path remains an explicit single-controller experiment and is
-covered by the same native protocol/lifecycle tests; it is not advertised as
-sustainable for mixed/four-controller operation.
+That earlier transport-only choice is superseded by the current accepted
+32-frame format and explicit audio initialization above. Neither configuration
+is advertised as qualified for mixed/four-controller physical fidelity.
 
 The later Nintendo-native implementation adds output traffic that was absent
 from this cadence comparison. Its Pro-only controlled run delivered all 1,025
 commands at 125 Hz, but early mixed Pro/DualSense runs exposed shared-radio
 congestion. Nintendo can-send-driven delivery and held-state coalescing are
-separate from the unchanged DualSense 64-frame policy. Consult
+separate from that earlier DualSense 64-frame policy. Consult
 [SWITCH_FAMILY_HD_RUMBLE_PLAN.md](SWITCH_FAMILY_HD_RUMBLE_PLAN.md) for measured
 results and outstanding qualification; do not treat the DualSense-only output
 benchmark above as proof that simultaneous native streams are lossless.
