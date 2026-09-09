@@ -14,7 +14,49 @@ diff --git a/src/components/bluepad32/bt/uni_bt.c b/src/components/bluepad32/bt/
  // globals
  bd_addr_t uni_local_bd_addr;
  
-@@ -473,6 +479,10 @@
+@@ -100,17 +106,21 @@
+ };
+ 
+ static void bluetooth_del_keys(void) {
+-    if (IS_ENABLED(UNI_ENABLE_BREDR))
+-        uni_bt_bredr_delete_bonded_keys();
+-    if (IS_ENABLED(UNI_ENABLE_BLE))
+-        uni_bt_le_delete_bonded_keys();
++#ifdef ENABLE_CLASSIC
++    uni_bt_bredr_delete_bonded_keys();
++#endif
++#ifdef ENABLE_BLE
++    uni_bt_le_delete_bonded_keys();
++#endif
+ }
+ 
+ static void bluetooth_list_keys(void) {
+-    if (IS_ENABLED(UNI_ENABLE_BREDR))
+-        uni_bt_bredr_list_bonded_keys();
+-    if (IS_ENABLED(UNI_ENABLE_BLE))
+-        uni_bt_le_list_bonded_keys();
++#ifdef ENABLE_CLASSIC
++    uni_bt_bredr_list_bonded_keys();
++#endif
++#ifdef ENABLE_BLE
++    uni_bt_le_list_bonded_keys();
++#endif
+ }
+ 
+ static void start_scan(void) {
+@@ -172,9 +182,9 @@
+         // Device cannot be used after delete.
+         d = NULL;
+ 
+-        if (IS_ENABLED(UNI_ENABLE_BLE) && type == GAP_CONNECTION_LE)
++        if (IS_ENABLED(ENABLE_BLE) && type == GAP_CONNECTION_LE)
+             uni_bt_le_on_hci_disconnection_complete(channel, packet, size);
+-        else if (IS_ENABLED(UNI_ENABLE_BREDR) && type == GAP_CONNECTION_ACL)
++        else if (IS_ENABLED(ENABLE_CLASSIC) && type == GAP_CONNECTION_ACL)
+             uni_bt_bredr_on_hci_disconnection_complete(channel, packet, size);
+         else
+             loge("on_hci_disconnection_complete: Unknown GAP connection type: %d\n", type);
+@@ -473,6 +483,10 @@
                      if (device == NULL) {
                          loge("--->>> CANNOT FIND DEVICE");
                      } else {
@@ -28,7 +70,43 @@ diff --git a/src/components/bluepad32/bt/uni_bt.c b/src/components/bluepad32/bt/
 diff --git a/src/components/bluepad32/bt/uni_bt_bredr.c b/src/components/bluepad32/bt/uni_bt_bredr.c
 --- a/src/components/bluepad32/bt/uni_bt_bredr.c
 +++ b/src/components/bluepad32/bt/uni_bt_bredr.c
-@@ -423,13 +423,14 @@
+@@ -28,7 +28,7 @@
+ #define INQUIRY_REMOTE_NAME_TIMEOUT_MS 4500
+ _Static_assert(INQUIRY_REMOTE_NAME_TIMEOUT_MS < HID_DEVICE_CONNECTION_TIMEOUT_MS, "Timeout too big");
+ 
+-static bool bt_bredr_enabled = true;
++static bool bt_bredr_enabled = IS_ENABLED(UNI_ENABLE_BREDR);
+ 
+ static void l2cap_create_control_connection(uni_hid_device_t* d) {
+     uint8_t status;
+@@ -62,6 +62,8 @@
+ }
+ 
+ void uni_bt_bredr_scan_start(void) {
++    if (!bt_bredr_enabled)
++        return;
+     uint8_t status;
+ 
+     status = gap_inquiry_periodic_start(uni_bt_get_gap_inquiry_length(), uni_bt_get_gap_max_periodic_length(),
+@@ -147,6 +149,8 @@
+ }
+ 
+ void uni_bt_bredr_setup(void) {
++    if (!bt_bredr_enabled)
++        return;
+     int security_level = uni_bt_get_gap_security_level();
+     gap_set_security_level(security_level);
+ 
+@@ -183,7 +187,7 @@
+ }
+ 
+ void uni_bt_bredr_set_enabled(bool enabled) {
+-    bt_bredr_enabled = enabled;
++    bt_bredr_enabled = enabled && IS_ENABLED(UNI_ENABLE_BREDR);
+ }
+ 
+ bool uni_bt_bredr_is_enabled(void) {
+@@ -423,13 +427,14 @@
      status = l2cap_event_channel_opened_get_status(packet);
      if (status) {
          logi("L2CAP Connection failed: 0x%02x.\n", status);
@@ -191,19 +269,22 @@ diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/
  }
  
  void uni_bt_le_list_bonded_keys(void) {
-@@ -872,6 +912,11 @@
-         gap_delete_bonding((bd_addr_type_t)entry_address_type, entry_address);
-     }
+@@ -874,7 +914,14 @@
      logi(".\n");
-+}
-+
+ }
+ 
 +void uni_bt_le_set_background_scan(bool enabled) {
 +    gap_set_scan_parameters(0 /* type: passive */, enabled ? 160 : 48 /* interval */,
 +                            enabled ? 16 : 48 /* window */);
- }
- 
++}
++
  void uni_bt_le_setup(void) {
-@@ -921,7 +966,7 @@
++    if (!IS_ENABLED(UNI_ENABLE_BLE))
++        return;
+     // register for events from Security Manager
+     sm_event_callback_registration.callback = &uni_sm_packet_handler;
+     sm_add_event_handler(&sm_event_callback_registration);
+@@ -921,11 +968,11 @@
      // scan_parameters_service_client_init();
      device_information_service_client_init();
  
@@ -212,6 +293,58 @@ diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/
  }
  
  void uni_bt_le_scan_start(void) {
+-    if (!ble_enabled)
++    if (!IS_ENABLED(UNI_ENABLE_BLE) || !ble_enabled)
+         return;
+ 
+     gap_start_scan();
+@@ -950,6 +997,9 @@
+ 
+ void uni_bt_le_set_enabled(bool enabled) {
+     // Called from different Task. Don't call BTstack functions.
++    // A build-time radio exclusion must not rewrite the saved mixed-mode preference.
++    if (!IS_ENABLED(UNI_ENABLE_BLE))
++        return;
+     uni_property_value_t val;
+ 
+     val.u8 = enabled;
+@@ -959,6 +1009,8 @@
+ }
+ 
+ bool uni_bt_le_is_enabled() {
++    if (!IS_ENABLED(UNI_ENABLE_BLE))
++        return false;
+     // Expensive call. Avoid calling it from this same file.
+     // Called from "uni_bt_setup"
+     uni_property_value_t val;
+diff --git a/src/components/bluepad32/bt/uni_bt_service.c b/src/components/bluepad32/bt/uni_bt_service.c
+--- a/src/components/bluepad32/bt/uni_bt_service.c
++++ b/src/components/bluepad32/bt/uni_bt_service.c
+@@ -12,6 +12,7 @@
+ #include "bt/uni_bt_service.gatt.h"
+ #include "controller/uni_gamepad.h"
+ #include "uni_common.h"
++#include "uni_config.h"
+ #include "uni_log.h"
+ #include "uni_system.h"
+ #include "uni_version.h"
+@@ -433,6 +434,8 @@
+  * Finally, it configures the advertisements.
+  */
+ void uni_bt_service_init(void) {
++    if (!IS_ENABLED(UNI_ENABLE_BLE))
++        return;
+     logi("Starting Bluepad32 BLE service UUID: 4627C4A4-AC00-46B9-B688-AFC5C1BF7F63\n");
+ 
+     // Setup ATT server.
+@@ -464,6 +467,7 @@
+ }
+ 
+ void uni_bt_service_set_enabled(bool enabled) {
++    enabled = enabled && IS_ENABLED(UNI_ENABLE_BLE);
+     if (enabled == service_enabled)
+         return;
+ 
 diff --git a/src/components/bluepad32/controller/uni_gamepad.c b/src/components/bluepad32/controller/uni_gamepad.c
 --- a/src/components/bluepad32/controller/uni_gamepad.c
 +++ b/src/components/bluepad32/controller/uni_gamepad.c
@@ -322,6 +455,27 @@ diff --git a/src/components/bluepad32/include/uni.h b/src/components/bluepad32/i
  #include "parser/uni_hid_parser_xboxone.h"
  #include "platform/uni_platform.h"
  #include "uni_circular_buffer.h"
+diff --git a/src/components/bluepad32/include/uni_config.h b/src/components/bluepad32/include/uni_config.h
+--- a/src/components/bluepad32/include/uni_config.h
++++ b/src/components/bluepad32/include/uni_config.h
+@@ -7,8 +7,15 @@
+ 
+ #include "sdkconfig.h"
+ 
+-#if defined(CONFIG_TARGET_POSIX) || defined(CONFIG_TARGET_PICO_W) || defined(CONFIG_IDF_TARGET_ESP32)
+-// Pico W, original ESP32 and Posix all support both BR/EDR and BLE
++#if defined(CONFIG_TARGET_PICO_W)
++#if SWITCH_PICO_ENABLE_CLASSIC
++#define UNI_ENABLE_BREDR 1
++#endif
++#if SWITCH_PICO_ENABLE_BLE
++#define UNI_ENABLE_BLE 1
++#endif
++#elif defined(CONFIG_TARGET_POSIX) || defined(CONFIG_IDF_TARGET_ESP32)
++// Original ESP32 and Posix support both BR/EDR and BLE.
+ #define UNI_ENABLE_BREDR 1
+ #define UNI_ENABLE_BLE 1
+ #elif defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3) || \
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds4.c b/src/components/bluepad32/parser/uni_hid_parser_ds4.c
 --- a/src/components/bluepad32/parser/uni_hid_parser_ds4.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_ds4.c
@@ -2341,6 +2495,18 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
      // Disconnect child first
      if (d->child)
          uni_hid_device_disconnect(d->child);
+@@ -465,9 +471,9 @@
+     // Cleanup
+     if (!uni_hid_device_is_virtual_device(d)) {
+         type = gap_get_connection_type(d->conn.handle);
+-        if (IS_ENABLED(UNI_ENABLE_BLE) && type == GAP_CONNECTION_LE)
++        if (IS_ENABLED(ENABLE_BLE) && type == GAP_CONNECTION_LE)
+             uni_bt_le_disconnect(d);
+-        else if (IS_ENABLED(UNI_ENABLE_BREDR) && type == GAP_CONNECTION_ACL)
++        else if (IS_ENABLED(ENABLE_CLASSIC) && type == GAP_CONNECTION_ACL)
+             uni_bt_bredr_disconnect(d);
+         else
+             loge("uni_hid_device_disconnect: Unknown GAP connection type: %d\n", type);
 @@ -490,6 +496,11 @@
          loge("uni_hid_device_delete: invalid hid device: NULL\n");
          return;

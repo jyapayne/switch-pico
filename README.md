@@ -66,6 +66,53 @@ The default `python3 build.py` command and `firmware/switch-pico.*` artifacts re
 
 Both `build.py --aio` and direct AIO CMake configuration copy the pinned Bluepad32 source into the active build directory and apply `patches/bluepad32-sdl3-imu.patch` there before compiling. The patch makes supported motion controllers use SDL3-equivalent axes and fixed-point units before conversion to Nintendo samples. The `external/bluepad32` submodule remains pristine; patch or source-revision drift fails configuration.
 
+### Bluetooth transport selection
+
+`SWITCH_PICO_BLUETOOTH_MODE` selects the active radio transports at build time:
+
+| CMake value | Active radio behavior |
+| --- | --- |
+| `MIXED` (default) | Bluetooth Classic and BLE |
+| `BLE` | BLE only; no Classic inquiry, page scanning, or controller admission |
+| `CLASSIC` | Classic only; no BLE scanning, controller admission, or wake advertising |
+
+To **build without flashing**, use a separate directory for each mode:
+
+```sh
+cmake -S . -B build-aio-ble \
+  -DPICO_BOARD=pico2_w \
+  -DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32 \
+  -DSWITCH_PICO_BLUETOOTH_MODE=BLE
+cmake --build build-aio-ble
+```
+
+Use `CLASSIC` or `MIXED` and a matching build directory for the other modes.
+Add `-DSWITCH_PICO_ADAPTER_FEASIBILITY=ON` for automatic Switch/XInput output.
+Invalid modes and single-transport selections with the UART backend are rejected.
+
+The build helper also supports the selector; these commands **build and flash**:
+
+```sh
+python3 build.py --aio --bluetooth-mode ble
+python3 build.py --aio --bluetooth-mode classic
+python3 build.py --adapter-feasibility --bluetooth-mode ble
+```
+
+The helper defaults explicitly to `mixed`. Single-transport build directories and
+published `.elf`/`.uf2` names get `-ble` or `-classic` suffixes, so they do not
+overwrite mixed artifacts—for example, `build-aio-ble/` and
+`firmware/switch-pico-aio-ble.uf2`.
+
+These flags select radio activity, not complete removal of the unused host stack:
+shared BTstack code and both pairing databases remain available. Switching modes
+does not erase bonds or profiles; pairing lists still include inactive-transport
+bonds and explicit clear-all still clears both stores. A configured stable public
+Bluetooth address is retained in every mode, including Classic-only, so changing
+modes does not silently change the host identity used by existing bonds.
+Classic-only disables Switch 2 wake advertising regardless of the saved wake
+configuration. Each build remains a standalone USB adapter; no inter-Pico link
+is introduced.
+
 ### Switch 2 wake from L + R + Home, PS, or Xbox
 
 The AIO firmware can wake a sleeping Switch 2 when a connected controller's

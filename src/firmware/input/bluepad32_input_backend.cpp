@@ -1,4 +1,5 @@
 #include "input/bluepad32_input_backend.h"
+#include "bluetooth_transport_config.h"
 #include "input/controller_hotkey_config.h"
 #include "input/switch2_wake.h"
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
@@ -595,6 +596,9 @@ bool waiting_for_joycon_mate(int side = 0) {
 }
 
 void stop_background_scan() {
+    if (!SWITCH_PICO_ENABLE_BLE) {
+        return;
+    }
     if (g_background_scan_active) {
         // Direct LE scans do not update Bluepad32's aggregate scanning flag.
         uni_bt_le_scan_stop();
@@ -604,6 +608,9 @@ void stop_background_scan() {
 // Core 1 only. Reconcile every ready physical Switch 2 link to the fast interval,
 // independently of player grouping, controller count, or Classic connections.
 void apply_radio_connection_policy() {
+    if (!SWITCH_PICO_ENABLE_BLE) {
+        return;
+    }
     uni_hid_device_t* ready[kSlotCount]{};
     for (const BackendSlot& slot : g_slots) {
         uni_hid_device_t* targets[] = {slot.device, slot.companion};
@@ -1586,19 +1593,19 @@ void handle_btstack_event(uint8_t packet_type, uint16_t channel,
         pairing_window_active_at(btstack_run_loop_get_time_ms());
     switch (hci_event_packet_get_type(packet)) {
         case SM_EVENT_IDENTITY_RESOLVING_STARTED:
-            if (size >= 11) {
+            if (SWITCH_PICO_ENABLE_BLE && size >= 11) {
                 clear_ble_identity_for_handle(
                     sm_event_identity_resolving_started_get_handle(packet));
             }
             break;
         case SM_EVENT_IDENTITY_RESOLVING_FAILED:
-            if (size >= 11) {
+            if (SWITCH_PICO_ENABLE_BLE && size >= 11) {
                 clear_ble_identity_for_handle(
                     sm_event_identity_resolving_failed_get_handle(packet));
             }
             break;
         case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:
-            if (size >= 20) {
+            if (SWITCH_PICO_ENABLE_BLE && size >= 20) {
                 connection_handle =
                     sm_event_identity_resolving_succeeded_get_handle(packet);
                 sm_event_identity_resolving_succeeded_get_address(
@@ -1613,7 +1620,7 @@ void handle_btstack_event(uint8_t packet_type, uint16_t channel,
             }
             break;
         case SM_EVENT_IDENTITY_CREATED:
-            if (size >= 20) {
+            if (SWITCH_PICO_ENABLE_BLE && size >= 20) {
                 connection_handle =
                     sm_event_identity_created_get_handle(packet);
                 sm_event_identity_created_get_address(packet, address);
@@ -1628,7 +1635,7 @@ void handle_btstack_event(uint8_t packet_type, uint16_t channel,
             }
             break;
         case SM_EVENT_REENCRYPTION_STARTED:
-            if (size >= 11) {
+            if (SWITCH_PICO_ENABLE_BLE && size >= 11) {
                 connection_handle =
                     sm_event_reencryption_started_get_handle(packet);
                 sm_event_reencryption_started_get_address(
@@ -1643,7 +1650,7 @@ void handle_btstack_event(uint8_t packet_type, uint16_t channel,
             }
             break;
         case SM_EVENT_REENCRYPTION_COMPLETE:
-            if (size >= 12) {
+            if (SWITCH_PICO_ENABLE_BLE && size >= 12) {
                 connection_handle =
                     sm_event_reencryption_complete_get_handle(packet);
                 if (sm_event_reencryption_complete_get_status(packet) ==
@@ -1663,7 +1670,7 @@ void handle_btstack_event(uint8_t packet_type, uint16_t channel,
             }
             break;
         case HCI_EVENT_USER_CONFIRMATION_REQUEST:
-            if (size < 8) {
+            if (!SWITCH_PICO_ENABLE_CLASSIC || size < 8) {
                 break;
             }
             hci_event_user_confirmation_request_get_bd_addr(packet, address);
@@ -1674,7 +1681,7 @@ void handle_btstack_event(uint8_t packet_type, uint16_t channel,
             }
             break;
         case HCI_EVENT_USER_PASSKEY_REQUEST:
-            if (size < 8) {
+            if (!SWITCH_PICO_ENABLE_CLASSIC || size < 8) {
                 break;
             }
             hci_event_user_passkey_request_get_bd_addr(packet, address);
@@ -1709,13 +1716,17 @@ bool update_pairing_window(uint32_t now_ms) {
         g_pairing_window_deadline_ms =
             now_ms + g_pairing_window_duration_ms;
         gap_set_bondable_mode(true);
-        sm_set_accepted_stk_generation_methods(kAllBlePairingMethods);
+        if (SWITCH_PICO_ENABLE_BLE) {
+            sm_set_accepted_stk_generation_methods(kAllBlePairingMethods);
+        }
         g_status_led_tick = 0;
         return true;
     }
     if (g_pairing_window_open && !pairing_window_active_at(now_ms)) {
         g_pairing_window_open = false;
-        sm_set_accepted_stk_generation_methods(0);
+        if (SWITCH_PICO_ENABLE_BLE) {
+            sm_set_accepted_stk_generation_methods(0);
+        }
         g_status_led_tick = 0;
         gap_set_bondable_mode(false);
         return true;
@@ -1839,7 +1850,9 @@ void process_clear_pairings(uint32_t now_ms) {
 
     g_pairing_window_open = false;
     gap_set_bondable_mode(false);
-    sm_set_accepted_stk_generation_methods(0);
+    if (SWITCH_PICO_ENABLE_BLE) {
+        sm_set_accepted_stk_generation_methods(0);
+    }
     const bool proprietary_cleared = uni_switch2_pairing_clear();
     uni_bt_del_keys_unsafe();
     for (uni_hid_device_t* device : devices) {
@@ -1895,8 +1908,8 @@ void apply_connection_policy() {
         pairing_window_active_at(btstack_run_loop_get_time_ms());
     const bool active_scan =
         free_slot && (!active_controller || pairing_open);
-    const bool background_scan = free_slot && !active_scan &&
-        waiting_for_joycon_mate();
+    const bool background_scan = SWITCH_PICO_ENABLE_BLE &&
+        free_slot && !active_scan && waiting_for_joycon_mate();
     const ConnectionPolicyState desired_state =
         !free_slot
             ? ConnectionPolicyState::Paused
@@ -1920,9 +1933,11 @@ void apply_connection_policy() {
 
     // Passive mode permits incoming Classic reconnects, with LE discovery
     // limited to a remembered opposite half for a ready solo Joy-Con2.
-    uni_bt_allow_incoming_connections(true);
+    uni_bt_allow_incoming_connections(SWITCH_PICO_ENABLE_CLASSIC != 0);
     if (active_scan) {
-        uni_bt_le_set_background_scan(false);
+        if (SWITCH_PICO_ENABLE_BLE) {
+            uni_bt_le_set_background_scan(false);
+        }
         uni_bt_start_scanning_and_autoconnect_unsafe();
         g_connection_policy_state = ConnectionPolicyState::Open;
     } else {
@@ -2796,14 +2811,19 @@ void platform_init(int argc, const char** argv) {
 }
 
 void platform_on_init_complete() {
-    gap_set_link_supervision_timeout(kClassicLinkSupervisionTimeout);
+    if (SWITCH_PICO_ENABLE_CLASSIC) {
+        gap_set_link_supervision_timeout(kClassicLinkSupervisionTimeout);
+        gap_ssp_set_auto_accept(false);
+        g_pairing_event_callback.callback = handle_btstack_event;
+        hci_add_event_handler(&g_pairing_event_callback);
+    }
     gap_set_bondable_mode(false);
-    sm_set_accepted_stk_generation_methods(0);
-    gap_ssp_set_auto_accept(false);
-    g_pairing_event_callback.callback = handle_btstack_event;
-    g_identity_event_callback.callback = handle_btstack_event;
-    sm_add_event_handler(&g_identity_event_callback);
-    hci_add_event_handler(&g_pairing_event_callback);
+    if (SWITCH_PICO_ENABLE_BLE) {
+        // Bluepad32 does not initialize SM in Classic-only mode.
+        sm_set_accepted_stk_generation_methods(0);
+        g_identity_event_callback.callback = handle_btstack_event;
+        sm_add_event_handler(&g_identity_event_callback);
+    }
     switch2_wake_initialize();
     refresh_pairing_snapshot();
     btstack_run_loop_set_timer_handler(&g_rumble_timer, process_rumble_timer);
@@ -2823,6 +2843,35 @@ void platform_on_init_complete() {
     }
 }
 
+bool device_transport_enabled(const uni_hid_device_t* device) {
+    if (device == nullptr) {
+        return false;
+    }
+    if (SWITCH_PICO_ENABLE_BLE && SWITCH_PICO_ENABLE_CLASSIC) {
+        return true;
+    }
+    // GAP describes the actual live link. The protocol hint is also available
+    // before an outgoing connection has an HCI handle.
+    switch (gap_get_connection_type(device->conn.handle)) {
+        case GAP_CONNECTION_ACL:
+            return SWITCH_PICO_ENABLE_CLASSIC != 0;
+        case GAP_CONNECTION_LE:
+            return SWITCH_PICO_ENABLE_BLE != 0;
+        default:
+            break;
+    }
+    switch (device->conn.protocol) {
+        case UNI_BT_CONN_PROTOCOL_BR_EDR:
+            return SWITCH_PICO_ENABLE_CLASSIC != 0;
+        case UNI_BT_CONN_PROTOCOL_BLE:
+            return SWITCH_PICO_ENABLE_BLE != 0;
+        default:
+            // Preserve mixed-mode admission; single-transport builds cannot
+            // safely admit a connection whose transport is still unknown.
+            return SWITCH_PICO_ENABLE_BLE && SWITCH_PICO_ENABLE_CLASSIC;
+    }
+}
+
 uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name,
                                           uint16_t cod, uint8_t rssi) {
     (void)name;
@@ -2831,14 +2880,23 @@ uni_error_t platform_on_device_discovered(bd_addr_t addr, const char* name,
     if (!has_free_slot()) {
         return UNI_ERROR_IGNORE_DEVICE;
     }
+    const uni_hid_device_t* candidate =
+        (g_connection_policy_state == ConnectionPolicyState::Passive ||
+         !SWITCH_PICO_ENABLE_BLE || !SWITCH_PICO_ENABLE_CLASSIC)
+            ? uni_hid_device_get_instance_for_address(addr)
+            : nullptr;
+    if (candidate != nullptr && !device_transport_enabled(candidate)) {
+        return UNI_ERROR_IGNORE_DEVICE;
+    }
+    // First discovery can precede device creation, so the transport-specific
+    // Bluepad32 discovery handlers must enforce the mode before this callback.
     if (g_connection_policy_state == ConnectionPolicyState::Open) {
         return UNI_ERROR_SUCCESS;
     }
-    if (g_connection_policy_state != ConnectionPolicyState::Passive) {
+    if (!SWITCH_PICO_ENABLE_BLE ||
+        g_connection_policy_state != ConnectionPolicyState::Passive) {
         return UNI_ERROR_IGNORE_DEVICE;
     }
-    const uni_hid_device_t* candidate =
-        uni_hid_device_get_instance_for_address(addr);
     const int side = joycon_side(candidate);
     uint8_t address_type = BD_ADDR_TYPE_UNKNOWN;
     return side != 0 && waiting_for_joycon_mate(side) &&
@@ -2853,8 +2911,9 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     if (device == nullptr) {
         return;
     }
-    if (g_connection_policy_state != ConnectionPolicyState::Open &&
-        g_connection_policy_state != ConnectionPolicyState::Passive) {
+    if (!device_transport_enabled(device) ||
+        (g_connection_policy_state != ConnectionPolicyState::Open &&
+         g_connection_policy_state != ConnectionPolicyState::Passive)) {
         uni_hid_device_disconnect(device);
         return;
     }
@@ -2937,7 +2996,8 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
 }
 
 uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
-    if (device == nullptr || !uni_hid_device_is_gamepad(device)) {
+    if (!device_transport_enabled(device) ||
+        !uni_hid_device_is_gamepad(device)) {
         return UNI_ERROR_INVALID_CONTROLLER;
     }
     if (g_connection_policy_state == ConnectionPolicyState::FailedClosed) {
@@ -3145,7 +3205,7 @@ uni_platform* get_platform() {
 }  // namespace
 
 extern "C" bool switch_pico_switch2_pairing_allowed(void) {
-    return g_initialized &&
+    return SWITCH_PICO_ENABLE_BLE && g_initialized &&
            pairing_window_active_at(btstack_run_loop_get_time_ms());
 }
 
@@ -3153,6 +3213,12 @@ extern "C" void __real_sm_request_pairing(hci_con_handle_t handle);
 extern "C" void __wrap_sm_request_pairing(hci_con_handle_t handle) {
     uni_hid_device_t* device =
         uni_hid_device_get_instance_for_connection_handle(handle);
+    if (!SWITCH_PICO_ENABLE_BLE) {
+        if (device != nullptr) {
+            uni_hid_device_disconnect(device);
+        }
+        return;
+    }
     if (uni_hid_parser_switch2_is_ble_device(device)) {
         // GATT's implicit authentication retry must not enter standard SMP for
         // this proprietary protocol. Retain storage until HCI teardown.

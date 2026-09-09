@@ -10,11 +10,13 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
 
-    for adapter_feasibility, native, short_packets in (
-        (False, False, False),
-        (True, False, False),
-        (True, True, False),
-        (True, True, True),
+    for bluetooth_mode, adapter_feasibility, native, short_packets in (
+        ("mixed", False, False, False),
+        ("mixed", True, False, False),
+        ("mixed", True, True, False),
+        ("mixed", True, True, True),
+        ("ble", False, False, False),
+        ("classic", False, False, False),
     ):
         suffix = (
             "_native32"
@@ -25,7 +27,9 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             if adapter_feasibility
             else ""
         )
-        executable = tmp_path / f"bluepad32_backend_lifecycle_test{suffix}"
+        executable = (
+            tmp_path / f"bluepad32_backend_lifecycle_test_{bluetooth_mode}{suffix}"
+        )
         command = [
             compiler,
             "-std=c++17",
@@ -34,6 +38,8 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "-Werror",
             "-pedantic",
             "-DSWITCH_PICO_HID_INSTANCE_COUNT=4",
+            f"-DSWITCH_PICO_ENABLE_BLE={int(bluetooth_mode != 'classic')}",
+            f"-DSWITCH_PICO_ENABLE_CLASSIC={int(bluetooth_mode != 'ble')}",
         ]
         if adapter_feasibility:
             command.append("-DSWITCH_PICO_USB_OUTPUT_MODES=1")
@@ -84,9 +90,27 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                 f"-I{root / 'bluepad32_config'}",
                 str(root / "tests" / "bluepad32_backend_lifecycle_test.cpp"),
                 str(root / "src" / "firmware" / "profile" / "controller_profile.cpp"),
-                str(root / "src" / "firmware" / "profile" / "controller_profile_transform.cpp"),
-                str(root / "src" / "firmware" / "profile" / "controller_synthetic_input.cpp"),
-                str(root / "src" / "firmware" / "profile" / "controller_profile_runtime.cpp"),
+                str(
+                    root
+                    / "src"
+                    / "firmware"
+                    / "profile"
+                    / "controller_profile_transform.cpp"
+                ),
+                str(
+                    root
+                    / "src"
+                    / "firmware"
+                    / "profile"
+                    / "controller_synthetic_input.cpp"
+                ),
+                str(
+                    root
+                    / "src"
+                    / "firmware"
+                    / "profile"
+                    / "controller_profile_runtime.cpp"
+                ),
                 str(root / "src" / "firmware" / "profile" / "profile_storage.cpp"),
                 str(root / "bluepad32_config" / "parser" / "uni_switch2_haptics.c"),
                 str(
@@ -97,6 +121,15 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             ]
         )
         subprocess.run(command, check=True, cwd=root)
+        subprocess.run([str(executable), "transport-policy"], check=True, cwd=root)
+        if bluetooth_mode != "classic":
+            subprocess.run(
+                [str(executable), "transport-background"], check=True, cwd=root
+            )
+        # The existing lifecycle matrix intentionally exercises both transports.
+        # Single-radio builds exercise their admission/radio policy above.
+        if bluetooth_mode != "mixed":
+            continue
         subprocess.run([str(executable), "xbox-rumble"], check=True, cwd=root)
         for scenario in (
             "wii-orientation",

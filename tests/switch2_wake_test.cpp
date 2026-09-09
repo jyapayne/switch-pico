@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include <btstack.h>
+#include "bluetooth_transport_config.h"
 
 namespace {
 
@@ -240,10 +241,44 @@ void test_failed_wake_keeps_stable_identity() {
             "wake failure disrupted the stable controller identity");
 }
 
+void test_disabled_transport_wake() {
+    switch2_wake_initialize();
+    switch2_wake_initialize();
+    Switch2WakeDiagnostics diagnostics{};
+    switch2_wake_diagnostics(&diagnostics);
+    require(!diagnostics.configured && !switch2_wake_ready_for_connections() &&
+                !switch2_wake_request(),
+            "Classic-only wake must be unavailable while preserving the paired host identity");
+    run_task();
+    require_opcode(0, 0xfc01);
+    const uint8_t paired_address[] = SWITCH2_WAKE_SOURCE_ADDRESS_BYTES;
+    require(memcmp(submitted[0].address, paired_address, sizeof(paired_address)) == 0,
+            "Classic-only startup changed the address used by existing bonds");
+    complete(0xfc01);
+    run_task();
+    require_opcode(1, 0x1009);
+    complete(0x1009, 0, paired_address);
+    require(switch2_wake_ready_for_connections() && !switch2_wake_request(),
+            "Classic controller startup did not resume after identity verification");
+    now_ms = 10000;
+    run_task();
+    switch2_wake_diagnostics(&diagnostics);
+    require(!diagnostics.configured && !diagnostics.busy &&
+                submitted_count == 2 && command_available &&
+                diagnostics.accepted_requests == 0 &&
+                diagnostics.completed_bursts == 0 && diagnostics.failures == 0 &&
+                !switch2_wake_request(),
+            "Classic-only wake submitted BLE advertising or remained busy");
+}
+
 }  // namespace
 
 int main() {
-    test_stable_identity_wake();
-    test_failed_wake_keeps_stable_identity();
+    if (SWITCH_PICO_ENABLE_BLE) {
+        test_stable_identity_wake();
+        test_failed_wake_keeps_stable_identity();
+    } else {
+        test_disabled_transport_wake();
+    }
     return 0;
 }

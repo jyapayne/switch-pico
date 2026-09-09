@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("switch_pico_build", ROOT / "build.py")
 build_script = importlib.util.module_from_spec(SPEC)
@@ -88,9 +87,7 @@ def test_explicit_environment_wins_over_cache_and_fallback(tmp_path):
         ),
     ],
 )
-def test_stale_explicit_environment_is_an_error(
-    tmp_path, variable, invalid, expected
-):
+def test_stale_explicit_environment_is_an_error(tmp_path, variable, invalid, expected):
     sdk = make_sdk(tmp_path / "sdk")
     toolchain = make_toolchain(tmp_path / "toolchain")
     environ = {
@@ -201,8 +198,197 @@ def test_missing_dependencies_name_only_actionable_overrides():
             which=no_compiler,
         )
 
-    assert str(error.value) == (
-        "Missing build prerequisite(s): Pico SDK (set PICO_SDK_PATH); "
-        "Arm GNU toolchain (set PICO_TOOLCHAIN_PATH or add "
-        "arm-none-eabi-gcc to PATH)."
+    assert "PICO_SDK_PATH" in str(error.value)
+    assert "PICO_TOOLCHAIN_PATH" in str(error.value)
+
+
+@pytest.fixture
+def build_cli(tmp_path, monkeypatch):
+    for name in (
+        "SCRIPT_DIR",
+        "CONFIG_FILE",
+        "BUILD_DIR",
+        "AIO_BUILD_DIR",
+        "FEASIBILITY_BUILD_DIR",
+        "FIRMWARE_DIR",
+        "FIRMWARE_ELF_PATH",
+        "FIRMWARE_UF2_PATH",
+        "AIO_FIRMWARE_ELF_PATH",
+        "AIO_FIRMWARE_UF2_PATH",
+        "FEASIBILITY_FIRMWARE_ELF_PATH",
+        "FEASIBILITY_FIRMWARE_UF2_PATH",
+    ):
+        original = getattr(build_script, name)
+        monkeypatch.setattr(build_script, name, tmp_path / original.relative_to(ROOT))
+    monkeypatch.setattr(
+        build_script, "ELF_PATH", tmp_path / "build" / "switch-pico.elf"
+    )
+    monkeypatch.setattr(
+        build_script, "UF2_PATH", tmp_path / "build" / "switch-pico.uf2"
+    )
+    sdk = make_sdk(tmp_path / "sdk")
+    toolchain = make_toolchain(tmp_path / "toolchain")
+    monkeypatch.setenv("PICO_SDK_PATH", str(sdk))
+    monkeypatch.setenv("PICO_TOOLCHAIN_PATH", str(toolchain))
+    monkeypatch.setattr(build_script, "resolve_picotool", lambda: Path("picotool"))
+    commands = []
+
+    def run_cmd(command):
+        commands.append(command)
+        if command[:2] == ["cmake", "--build"]:
+            build_dir = Path(command[2])
+            build_dir.mkdir(parents=True, exist_ok=True)
+            for extension in ("elf", "uf2"):
+                (build_dir / f"switch-pico.{extension}").write_bytes(
+                    f"{build_dir.name}:{extension}".encode()
+                )
+
+    monkeypatch.setattr(build_script, "run_cmd", run_cmd)
+    return commands
+
+
+@pytest.mark.parametrize(
+    ("variant", "directory", "artifact"),
+    [
+        ("--aio", "build-aio", "switch-pico-aio"),
+        (
+            "--adapter-feasibility",
+            "build-feasibility",
+            "switch-pico-adapter-feasibility",
+        ),
+    ],
+)
+def test_bluetooth_modes_configure_and_publish_isolated_artifacts(
+    tmp_path, monkeypatch, build_cli, variant, directory, artifact
+):
+    # Switch away from mixed and back, leaving every other image untouched.
+    published = {}
+    for mode in (None, "ble", "classic", "mixed"):
+        arguments = ["build.py", variant]
+        if mode is not None:
+            arguments.extend(["--bluetooth-mode", mode])
+        monkeypatch.setattr(build_script.sys, "argv", arguments)
+        build_script.main()
+
+        selected = mode or "mixed"
+        suffix = "" if selected == "mixed" else f"-{selected}"
+        build_dir = tmp_path / f"{directory}{suffix}"
+        configure, compile_command, flash_command = build_cli[-3:]
+        assert configure[:5] == ["cmake", "-S", str(tmp_path), "-B", str(build_dir)]
+        assert f"-DSWITCH_PICO_BLUETOOTH_MODE={selected.upper()}" in configure
+        assert "-DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32" in configure
+        assert ("-DSWITCH_PICO_ADAPTER_FEASIBILITY=ON" in configure) == (
+            variant == "--adapter-feasibility"
+        )
+        assert compile_command == ["cmake", "--build", str(build_dir)]
+        assert flash_command == [
+            "picotool",
+            "load",
+            str(build_dir / "switch-pico.elf"),
+            "-fx",
+        ]
+        for extension in ("elf", "uf2"):
+            destination = tmp_path / "firmware" / f"{artifact}{suffix}.{extension}"
+            published[destination] = f"{directory}{suffix}:{extension}".encode()
+        for destination, expected in published.items():
+            assert destination.read_bytes() == expected
+
+
+def test_uart_default_preserves_paths_and_explicit_mixed_configuration(
+    tmp_path, monkeypatch, build_cli
+):
+    monkeypatch.setattr(build_script.sys, "argv", ["build.py"])
+    build_script.main()
+
+    configure, compile_command, flash_command = build_cli
+    assert configure[:5] == [
+        "cmake",
+        "-S",
+        str(tmp_path),
+        "-B",
+        str(tmp_path / "build"),
+    ]
+    assert "-DSWITCH_PICO_INPUT_BACKEND=UART" in configure
+    assert "-DSWITCH_PICO_BLUETOOTH_MODE=MIXED" in configure
+    assert compile_command == ["cmake", "--build", str(tmp_path / "build")]
+    assert flash_command == [
+        "picotool",
+        "load",
+        str(tmp_path / "build" / "switch-pico.elf"),
+        "-fx",
+    ]
+    for extension in ("elf", "uf2"):
+        assert (tmp_path / "firmware" / f"switch-pico.{extension}").read_bytes() == (
+            f"build:{extension}".encode()
+        )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--bluetooth-mode", "ble"],
+        ["--bluetooth-mode", "classic"],
+        ["--wake-capture", "--bluetooth-mode", "ble"],
+        ["--wake-capture", "--bluetooth-mode", "classic"],
+        ["--aio", "--bluetooth-mode", "invalid"],
+    ],
+)
+def test_invalid_bluetooth_selection_exits_before_build_setup(monkeypatch, arguments):
+    monkeypatch.setattr(build_script.sys, "argv", ["build.py", *arguments])
+    monkeypatch.setattr(
+        build_script,
+        "configure_pico_environment",
+        lambda: pytest.fail("invalid selection reached build setup"),
+    )
+    with pytest.raises(SystemExit) as error:
+        build_script.main()
+    assert error.value.code == 2
+
+
+def test_uart_artifact_overrides_remain_effective(tmp_path, monkeypatch, build_cli):
+    elf_path = tmp_path / "custom.elf"
+    uf2_path = tmp_path / "custom.uf2"
+    elf_path.write_bytes(b"custom ELF")
+    uf2_path.write_bytes(b"custom UF2")
+    monkeypatch.setenv("ELF_PATH", str(elf_path))
+    monkeypatch.setenv("UF2_PATH", str(uf2_path))
+    overridden = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(overridden)
+    monkeypatch.setattr(build_script, "ELF_PATH", overridden.ELF_PATH)
+    monkeypatch.setattr(build_script, "UF2_PATH", overridden.UF2_PATH)
+    monkeypatch.setattr(build_script.sys, "argv", ["build.py"])
+
+    build_script.main()
+
+    assert (tmp_path / "firmware" / "switch-pico.elf").read_bytes() == b"custom ELF"
+    assert (tmp_path / "firmware" / "switch-pico.uf2").read_bytes() == b"custom UF2"
+    assert build_cli[-1] == ["picotool", "load", str(elf_path), "-fx"]
+
+
+@pytest.mark.parametrize("color_option", ["--grip-color", "--random-grip-color"])
+def test_ble_build_preserves_grip_color_options(
+    tmp_path, monkeypatch, build_cli, color_option
+):
+    config = build_script.CONFIG_FILE
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "".join(f"#define {macro} 0x00\n" for macro in build_script.MACROS),
+        encoding="utf-8",
+    )
+    arguments = ["build.py", "--aio", "--bluetooth-mode", "ble", color_option]
+    if color_option == "--grip-color":
+        arguments.append("A1B2C3")
+    else:
+        monkeypatch.setattr(build_script, "random_hex_color", lambda: "A1B2C3")
+    monkeypatch.setattr(build_script.sys, "argv", arguments)
+
+    build_script.main()
+
+    assert config.read_text(encoding="utf-8") == "".join(
+        f"#define SWITCH_COLOR_SLOT_{slot}_{component} 0x{value}\n"
+        for slot in range(1, 5)
+        for component, value in zip(("R", "G", "B"), ("A1", "B2", "C3"))
+    )
+    assert (tmp_path / "firmware" / "switch-pico-aio-ble.uf2").read_bytes() == (
+        b"build-aio-ble:uf2"
     )

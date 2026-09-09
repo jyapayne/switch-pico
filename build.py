@@ -44,6 +44,11 @@ CMAKE_CACHE_PATHS = tuple(
         AIO_BUILD_DIR,
         FEASIBILITY_BUILD_DIR,
         WAKE_CAPTURE_BUILD_DIR,
+        *(
+            base.with_name(f"{base.name}-{mode}")
+            for base in (AIO_BUILD_DIR, FEASIBILITY_BUILD_DIR)
+            for mode in ("ble", "classic")
+        ),
     )
 )
 TOOLCHAIN_COMPILER = "arm-none-eabi-gcc.exe" if os.name == "nt" else "arm-none-eabi-gcc"
@@ -287,6 +292,12 @@ def parse_args():
         action="store_true",
         help="Build and flash the automatic Switch 2 wake capture firmware.",
     )
+    parser.add_argument(
+        "--bluetooth-mode",
+        choices=("mixed", "ble", "classic"),
+        default="mixed",
+        help="Select active Bluetooth transports for --aio or --adapter-feasibility.",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--random-grip-color",
@@ -301,6 +312,8 @@ def parse_args():
     args = parser.parse_args()
     if args.wake_capture and (args.random_grip_color or args.grip_color):
         parser.error("wake capture firmware does not use grip-color options")
+    if args.bluetooth_mode != "mixed" and not (args.aio or args.adapter_feasibility):
+        parser.error("--bluetooth-mode requires --aio or --adapter-feasibility")
     return args
 
 
@@ -385,6 +398,8 @@ def build(
     uf2_path,
     firmware_elf_path,
     firmware_uf2_path,
+    *,
+    bluetooth_mode="mixed",
 ):
     if aio or adapter_feasibility:
         definitions = [
@@ -405,6 +420,7 @@ def build(
     native = "ON" if aio or adapter_feasibility else "OFF"
     definitions.extend(
         [
+            f"-DSWITCH_PICO_BLUETOOTH_MODE={bluetooth_mode.upper()}",
             f"-DSWITCH_PICO_HAPTICS_EXPERIMENT={native}",
             f"-DSWITCH_PICO_HD_RUMBLE={native}",
             f"-DSWITCH_PICO_SYS_CLOCK_MHZ={300 if native == 'ON' else 150}",
@@ -532,6 +548,14 @@ def main():
         firmware_elf_path = FIRMWARE_ELF_PATH
         firmware_uf2_path = FIRMWARE_UF2_PATH
 
+    if args.bluetooth_mode != "mixed":
+        suffix = f"-{args.bluetooth_mode}"
+        build_dir = build_dir.with_name(build_dir.name + suffix)
+        elf_path = build_dir / elf_path.name
+        uf2_path = build_dir / uf2_path.name
+        firmware_elf_path = firmware_elf_path.with_stem(firmware_elf_path.stem + suffix)
+        firmware_uf2_path = firmware_uf2_path.with_stem(firmware_uf2_path.stem + suffix)
+
     build(
         args.aio,
         args.adapter_feasibility,
@@ -540,6 +564,7 @@ def main():
         uf2_path,
         firmware_elf_path,
         firmware_uf2_path,
+        bluetooth_mode=args.bluetooth_mode,
     )
     flash(
         elf_path,

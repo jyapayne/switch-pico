@@ -1,10 +1,12 @@
 #pragma once
 
+#include "bluetooth_transport_config.h"
+
 // The AIO firmware exposes one fixed Bluepad32 device slot per USB interface.
 #define CONFIG_BLUEPAD32_MAX_DEVICES 4
 #define CONFIG_BLUEPAD32_MAX_ALLOWLIST 4
 #define CONFIG_BLUEPAD32_GAP_SECURITY 1
-#define CONFIG_BLUEPAD32_ENABLE_BLE_BY_DEFAULT 1
+#define CONFIG_BLUEPAD32_ENABLE_BLE_BY_DEFAULT SWITCH_PICO_ENABLE_BLE
 
 #define CONFIG_BLUEPAD32_PLATFORM_CUSTOM
 #define CONFIG_TARGET_PICO_W

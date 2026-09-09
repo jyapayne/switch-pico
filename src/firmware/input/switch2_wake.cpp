@@ -1,4 +1,5 @@
 #include "input/switch2_wake.h"
+#include "bluetooth_transport_config.h"
 
 #include <string.h>
 
@@ -235,7 +236,7 @@ void handle_command_complete(uint8_t* packet, uint16_t size) {
             }
 #endif
             g_identity_ready = true;
-            g_phase = Phase::kIdle;
+            g_phase = SWITCH_PICO_ENABLE_BLE ? Phase::kIdle : Phase::kDisabled;
             break;
         case Phase::kSetParameters:
             g_phase = Phase::kSetData;
@@ -298,7 +299,9 @@ void switch2_wake_initialize() {
         ++g_failures;
         return;
     }
-    g_configured = true;
+    // Classic bonds also depend on the public address: preserve it across modes,
+    // even when BLE wake advertising is unavailable.
+    g_configured = SWITCH_PICO_ENABLE_BLE;
     g_event_registration.callback = handle_hci_event;
     hci_add_event_handler(&g_event_registration);
     btstack_run_loop_set_timer_handler(&g_timer, task);

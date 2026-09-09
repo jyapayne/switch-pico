@@ -9,6 +9,7 @@
 #endif
 
 #include <uni.h>
+#include "bluetooth_transport_config.h"
 #include "parser/uni_hid_parser_switch2.h"
 #include "parser/uni_switch2_haptics.h"
 #include "parser/uni_switch2_pairing.h"
@@ -192,6 +193,7 @@ void uni_hid_parser_xboxone_play_dual_rumble(
 
 
 extern "C" void __real_sm_request_pairing(hci_con_handle_t) {
+    require(SWITCH_PICO_ENABLE_BLE, "disabled BLE transport entered SMP");
     ++ordinary_smp_requests;
 }
 
@@ -322,27 +324,34 @@ void uni_hid_device_disconnect(uni_hid_device_t* device) {
 }
 
 void uni_bt_allow_incoming_connections(bool enabled) {
+    require(!enabled || SWITCH_PICO_ENABLE_CLASSIC,
+            "disabled Classic transport enabled incoming page scanning");
     incoming_connections = enabled;
 }
 
 
 void uni_bt_bredr_scan_start() {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic inquiry started");
     classic_scanning_enabled = true;
 }
 
 void uni_bt_bredr_scan_stop() {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic inquiry was accessed");
     classic_scanning_enabled = false;
 }
 
 void uni_bt_le_scan_start() {
+    require(SWITCH_PICO_ENABLE_BLE, "disabled BLE scanning started");
     scanning_enabled = true;
 }
 
 void uni_bt_le_scan_stop() {
+    require(SWITCH_PICO_ENABLE_BLE, "disabled BLE scanning was accessed");
     scanning_enabled = false;
 }
 
 void uni_bt_le_set_background_scan(bool enabled) {
+    require(SWITCH_PICO_ENABLE_BLE, "disabled BLE scan parameters were accessed");
     require(!scanning_enabled, "LE scan timing must change only while scanning is stopped");
     background_scan_parameters = enabled;
 }
@@ -354,8 +363,8 @@ void uni_bt_start_scanning_and_autoconnect_unsafe() {
         return;
     }
     aggregate_scanning_enabled = true;
-    uni_bt_bredr_scan_start();
-    uni_bt_le_scan_start();
+    if (SWITCH_PICO_ENABLE_CLASSIC) uni_bt_bredr_scan_start();
+    if (SWITCH_PICO_ENABLE_BLE) uni_bt_le_scan_start();
 }
 
 void uni_bt_stop_scanning_unsafe() {
@@ -363,8 +372,8 @@ void uni_bt_stop_scanning_unsafe() {
         return;
     }
     aggregate_scanning_enabled = false;
-    uni_bt_bredr_scan_stop();
-    uni_bt_le_scan_stop();
+    if (SWITCH_PICO_ENABLE_CLASSIC) uni_bt_bredr_scan_stop();
+    if (SWITCH_PICO_ENABLE_BLE) uni_bt_le_scan_stop();
 }
 void uni_bt_del_keys_unsafe() {
     require_clear_completion_pending();
@@ -444,33 +453,40 @@ void gap_set_bondable_mode(int enabled) {
 }
 
 void gap_set_link_supervision_timeout(uint16_t timeout) {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic link policy was accessed");
     link_supervision_timeout = timeout;
 }
 
 void gap_ssp_set_auto_accept(int auto_accept) {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic SSP was accessed");
     ssp_auto_accept = auto_accept != 0;
 }
 void sm_set_accepted_stk_generation_methods(uint8_t methods) {
+    require(SWITCH_PICO_ENABLE_BLE, "uninitialized SM pairing policy was accessed");
     accepted_stk_methods = methods;
 }
 
 
 int gap_ssp_confirmation_response(const bd_addr_t) {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic confirmation was accepted");
     ++confirmation_accepts;
     return 0;
 }
 
 int gap_ssp_confirmation_negative(const bd_addr_t) {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic confirmation was accessed");
     ++confirmation_rejections;
     return 0;
 }
 
 int gap_ssp_passkey_response(const bd_addr_t, uint32_t) {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic passkey was accepted");
     ++passkey_accepts;
     return 0;
 }
 
 int gap_ssp_passkey_negative(const bd_addr_t) {
+    require(SWITCH_PICO_ENABLE_CLASSIC, "disabled Classic passkey was accessed");
     ++passkey_rejections;
     return 0;
 }
@@ -482,6 +498,7 @@ void hci_add_event_handler(
 
 void sm_add_event_handler(
     btstack_packet_callback_registration_t* callback_handler) {
+    require(SWITCH_PICO_ENABLE_BLE, "event handler added to uninitialized SM");
     identity_event_handler = callback_handler->callback;
 }
 
@@ -654,6 +671,7 @@ uint32_t time_us_32() {
 
 void switch2_wake_initialize() {
     ++switch2_wake_initializations;
+    if (!SWITCH_PICO_ENABLE_BLE) switch2_connections_ready = true;
 }
 bool switch2_wake_ready_for_connections() {
     return switch2_connections_ready;
@@ -950,23 +968,35 @@ bool read_controller_state(uint8_t slot, ControllerState* output) {
 void start_backend() {
     bluepad32_input_backend_init();
     platform_on_init_complete();
-    require(incoming_connections && scanning_enabled &&
-                classic_scanning_enabled &&
-                link_supervision_timeout ==
-                    kClassicLinkSupervisionTimeout &&
-                !bondable && accepted_stk_methods == 0 &&
-                !ssp_auto_accept && pairing_event_handler != nullptr &&
-                identity_event_handler != nullptr &&
-                switch2_wake_initializations == 1,
-            "initialization must register Classic and BLE identity policy");
+    require(incoming_connections == (SWITCH_PICO_ENABLE_CLASSIC != 0) &&
+                scanning_enabled == (SWITCH_PICO_ENABLE_BLE != 0) &&
+                classic_scanning_enabled == (SWITCH_PICO_ENABLE_CLASSIC != 0) &&
+                !bondable && switch2_wake_initializations == 1,
+            "initialization must scan and admit only the selected transports");
+    if (SWITCH_PICO_ENABLE_CLASSIC) {
+        require(link_supervision_timeout == kClassicLinkSupervisionTimeout &&
+                    !ssp_auto_accept && pairing_event_handler != nullptr,
+                "Classic initialization must retain its reconnect and SSP policy");
+    } else {
+        require(pairing_event_handler == nullptr,
+                "BLE-only initialization registered a Classic pairing handler");
+    }
+    if (SWITCH_PICO_ENABLE_BLE) {
+        require(accepted_stk_methods == 0 && identity_event_handler != nullptr,
+                "BLE initialization must reject pairing until its window opens");
+    } else {
+        require(identity_event_handler == nullptr,
+                "Classic-only initialization registered an uninitialized SM handler");
+    }
 }
 void start_pairing_backend() {
     start_backend();
     bluepad32_input_backend_open_pairing_window();
     process_rumble_timer(&g_rumble_timer);
     require(g_connection_policy_state == ConnectionPolicyState::Open &&
-                scanning_enabled && classic_scanning_enabled &&
-                incoming_connections,
+                scanning_enabled == (SWITCH_PICO_ENABLE_BLE != 0) &&
+                classic_scanning_enabled == (SWITCH_PICO_ENABLE_CLASSIC != 0) &&
+                incoming_connections == (SWITCH_PICO_ENABLE_CLASSIC != 0),
             "test connection setup requires an open pairing window");
 }
 void dispatch_pairing_event(uint8_t event_type) {
@@ -5673,11 +5703,230 @@ void test_wii_orientation_races() {
             "coalescing back to the current mapping must not apply an obsolete intermediate choice");
 }
 
+void require_selected_radio(bool active_scan, bool free_slot) {
+    require(scanning_enabled == (active_scan && SWITCH_PICO_ENABLE_BLE) &&
+                classic_scanning_enabled ==
+                    (active_scan && SWITCH_PICO_ENABLE_CLASSIC) &&
+                incoming_connections ==
+                    (free_slot && SWITCH_PICO_ENABLE_CLASSIC),
+            "radio policy activated a disabled transport or lost an enabled one");
+}
+
+void test_transport_mode_policy() {
+    classic_bond_count = 1;
+    classic_bonds[0][5] = 0xa1;
+    ble_bond_count = 1;
+    ble_bond_types[0] = BD_ADDR_TYPE_LE_RANDOM;
+    ble_bonds[0][5] = 0xb1;
+    auto remembered_switch2 = switch2_device(3, UNI_SW2_PRO_PID);
+    remember_switch2(remembered_switch2);
+    initialize_runtime_profile_storage();
+    ControllerIdentity saved_identities[2]{};
+    for (unsigned index = 0; index < 2; ++index) {
+        auto& identity = saved_identities[index];
+        identity.stable = true;
+        identity.transport = index == 0 ? ControllerTransport::kClassic
+                                         : ControllerTransport::kBle;
+        identity.address_type = index == 0 ? BD_ADDR_TYPE_UNKNOWN
+                                            : BD_ADDR_TYPE_LE_RANDOM;
+        memcpy(identity.address, index == 0 ? classic_bonds[0] : ble_bonds[0],
+               sizeof(bd_addr_t));
+        identity.vendor_id = 0x1234;
+        identity.product_id = 0x5678;
+        auto profile = controller_profile_default(identity, 2 + index);
+        profile.weak_rumble_scale = 37 + index;
+        require(runtime_profile_storage.set(identity, 2 + index, profile) ==
+                    ProfileStorageResult::kOk &&
+                    runtime_profile_storage.activate(identity, 2 + index) ==
+                        ProfileStorageResult::kOk,
+                "mode fixture must persist distinct Classic and BLE profiles");
+    }
+    if (!SWITCH_PICO_ENABLE_BLE) switch2_connections_ready = false;
+    start_backend();
+    Bluepad32PairingSnapshot bonds{};
+    bluepad32_input_backend_pairing_snapshot(&bonds);
+    require(bonds.record_count == 3 &&
+                bonds.records[0].transport == Bluepad32PairingTransport::kClassic &&
+                bonds.records[1].transport == Bluepad32PairingTransport::kBle &&
+                bonds.records[2].transport == Bluepad32PairingTransport::kBle &&
+                memcmp(bonds.records[0].address, classic_bonds[0], sizeof(bd_addr_t)) == 0 &&
+                memcmp(bonds.records[1].address, ble_bonds[0], sizeof(bd_addr_t)) == 0 &&
+                memcmp(bonds.records[2].address, remembered_switch2.conn.btaddr,
+                       sizeof(bd_addr_t)) == 0 && delete_key_calls == 0,
+            "boot must expose remembered keys from both transports without deleting them");
+
+    for (bool ble : {false, true}) {
+        const bool enabled = ble ? SWITCH_PICO_ENABLE_BLE
+                                 : SWITCH_PICO_ENABLE_CLASSIC;
+        auto candidate = device(0, true, ble ? UNI_BT_CONN_PROTOCOL_BLE
+                                            : UNI_BT_CONN_PROTOCOL_BR_EDR);
+        lookup_devices[0] = &candidate;
+        lookup_device_count = 1;
+        // A discovery candidate need not have a live GAP handle yet.
+        const auto handle = candidate.conn.handle;
+        candidate.conn.handle = HCI_CON_HANDLE_INVALID;
+        require(platform_on_device_discovered(candidate.conn.btaddr, "candidate", 0, 0) ==
+                    (enabled ? UNI_ERROR_SUCCESS : UNI_ERROR_IGNORE_DEVICE),
+                "discovery admitted a known disabled-transport candidate");
+        candidate.conn.handle = handle;
+        // A stale protocol hint must never overrule the actual live GAP link.
+        candidate.conn.protocol = ble ? UNI_BT_CONN_PROTOCOL_BR_EDR
+                                      : UNI_BT_CONN_PROTOCOL_BLE;
+        const int disconnected_before = device_disconnect_calls;
+        platform_on_device_connected(&candidate);
+        require(device_disconnect_calls == disconnected_before + !enabled,
+                "connected admission failed to tear down a disabled live transport");
+        require(platform_on_device_ready(&candidate) ==
+                    (enabled ? UNI_ERROR_SUCCESS : UNI_ERROR_INVALID_CONTROLLER) &&
+                    slot_snapshot(0).active == enabled,
+                "ready callback bypassed transport admission");
+        uni_controller_t report{};
+        report.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+        report.gamepad.buttons = BUTTON_A;
+        platform_on_controller_data(&candidate, &report);
+        require(slot_snapshot(0).state.button_south == enabled,
+                "rejected transport published controller input");
+        if (enabled) platform_on_device_disconnected(&candidate);
+        require_selected_radio(true, true);
+    }
+    auto ordinary_ble = device(0, true, UNI_BT_CONN_PROTOCOL_BLE);
+    lookup_devices[0] = &ordinary_ble;
+    __wrap_sm_request_pairing(ordinary_ble.conn.handle);
+    __wrap_sm_request_pairing(HCI_CON_HANDLE_INVALID);
+    require(ordinary_smp_requests == (SWITCH_PICO_ENABLE_BLE ? 2u : 0u),
+            "Classic-only mode forwarded an SMP authentication request");
+    lookup_device_count = 0;
+    if (!SWITCH_PICO_ENABLE_BLE || !SWITCH_PICO_ENABLE_CLASSIC) {
+        auto unknown = device(0);
+        const int disconnected_before = device_disconnect_calls;
+        platform_on_device_connected(&unknown);
+        require(device_disconnect_calls == disconnected_before + 1 &&
+                    platform_on_device_ready(&unknown) == UNI_ERROR_INVALID_CONTROLLER &&
+                    !slot_snapshot(0).active,
+                "single-transport mode admitted an unidentified connection");
+    }
+
+    uint8_t confirmation[] = {HCI_EVENT_USER_CONFIRMATION_REQUEST, 6, 1, 2, 3, 4, 5, 6};
+    uint8_t passkey[] = {HCI_EVENT_USER_PASSKEY_REQUEST, 6, 1, 2, 3, 4, 5, 6};
+    handle_btstack_event(HCI_EVENT_PACKET, 0, confirmation, sizeof(confirmation));
+    handle_btstack_event(HCI_EVENT_PACKET, 0, passkey, sizeof(passkey));
+    require(confirmation_accepts == 0 && passkey_accepts == 0 &&
+                confirmation_rejections == SWITCH_PICO_ENABLE_CLASSIC &&
+                passkey_rejections == SWITCH_PICO_ENABLE_CLASSIC,
+            "closed pairing policy must reject only the enabled Classic authentication");
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
+    require(bondable &&
+                switch_pico_switch2_pairing_allowed() == (SWITCH_PICO_ENABLE_BLE != 0) &&
+                (!SWITCH_PICO_ENABLE_BLE || accepted_stk_methods == kAllBlePairingMethods),
+            "pairing window did not enable only the selected authentication policy");
+    handle_btstack_event(HCI_EVENT_PACKET, 0, confirmation, sizeof(confirmation));
+    handle_btstack_event(HCI_EVENT_PACKET, 0, passkey, sizeof(passkey));
+    require(confirmation_accepts == SWITCH_PICO_ENABLE_CLASSIC &&
+                passkey_accepts == SWITCH_PICO_ENABLE_CLASSIC,
+            "pairing window accepted disabled Classic authentication");
+
+    uni_hid_device_t controllers[kSlotCount]{};
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        const bool ble = SWITCH_PICO_ENABLE_BLE &&
+                         (!SWITCH_PICO_ENABLE_CLASSIC || (index & 1u));
+        controllers[index] = device(index, true, ble ? UNI_BT_CONN_PROTOCOL_BLE
+                                                    : UNI_BT_CONN_PROTOCOL_BR_EDR);
+        platform_on_device_connected(&controllers[index]);
+        require(platform_on_device_ready(&controllers[index]) == UNI_ERROR_SUCCESS,
+                "enabled transport failed to fill the available slots");
+    }
+    require_selected_radio(false, false);
+    require(platform_on_device_discovered(controllers[0].conn.btaddr, "full", 0, 0) ==
+                UNI_ERROR_IGNORE_DEVICE,
+            "full slots admitted another discovery");
+    now_ms = g_pairing_window_deadline_ms;
+    process_rumble_timer(&g_rumble_timer);
+    require(!bondable && !switch_pico_switch2_pairing_allowed() &&
+                (!SWITCH_PICO_ENABLE_BLE || accepted_stk_methods == 0),
+            "pairing authentication remained enabled after the deadline");
+    platform_on_device_disconnected(&controllers[3]);
+    require_selected_radio(false, true);
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
+    require_selected_radio(true, true);
+    for (uint8_t index = 0; index < 3; ++index) {
+        platform_on_device_disconnected(&controllers[index]);
+    }
+    require_selected_radio(true, true);
+    require(classic_bond_count == 1 && ble_bond_count == 1 &&
+                switch2_pairing_count == 1 && delete_key_calls == 0,
+            "pairing windows or disconnects erased inactive-mode bonds");
+    for (unsigned index = 0; index < 2; ++index) {
+        require_active_profile(saved_identities[index], 2 + index, 37 + index);
+    }
+    const uint32_t token = bluepad32_input_backend_clear_pairings();
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_pairing_snapshot(&bonds);
+    require(bluepad32_input_backend_clear_pairings_completed(bonds, token) &&
+                bonds.record_count == 0 && classic_bond_count == 0 &&
+                ble_bond_count == 0 && switch2_pairing_count == 0,
+            "explicit clearing must still cover all stored transports");
+    for (unsigned index = 0; index < 2; ++index) {
+        require_active_profile(saved_identities[index], 2 + index, 37 + index);
+    }
+    require_selected_radio(true, true);
+}
+
+void test_transport_background_scan() {
+    start_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    remember_switch2(right);
+    register_lookup_device(&right);
+    negotiated_intervals[left.conn.handle] = 24;
+    ready_switch2(left);
+    require(scanning_enabled && background_scan_parameters &&
+                !classic_scanning_enabled &&
+                incoming_connections == (SWITCH_PICO_ENABLE_CLASSIC != 0) &&
+                negotiated_intervals[left.conn.handle] == 6 &&
+                platform_on_device_discovered(right.conn.btaddr, "mate", 0, 0) ==
+                    UNI_ERROR_SUCCESS,
+            "ready solo must find its remembered mate using only low-duty BLE");
+    platform_on_device_connected(&right);
+    require(!scanning_enabled && !classic_scanning_enabled,
+            "pending mate setup must stop discovery");
+    require(platform_on_device_ready(&right) == UNI_ERROR_SUCCESS &&
+                !scanning_enabled && !classic_scanning_enabled,
+            "a complete pair must not continue background discovery");
+    platform_on_device_disconnected(&right);
+    require(scanning_enabled && background_scan_parameters &&
+                !classic_scanning_enabled,
+            "departed mate must restore low-duty BLE discovery");
+    bluepad32_input_backend_open_pairing_window();
+    process_rumble_timer(&g_rumble_timer);
+    require_selected_radio(true, true);
+    require(!background_scan_parameters,
+            "explicit pairing must replace background scan timing");
+    now_ms = g_pairing_window_deadline_ms;
+    process_rumble_timer(&g_rumble_timer);
+    require(scanning_enabled && background_scan_parameters &&
+                !classic_scanning_enabled,
+            "pairing expiry must restore only remembered-mate BLE discovery");
+    platform_on_device_disconnected(&left);
+    require_selected_radio(true, true);
+    require(!background_scan_parameters,
+            "last disconnect must restore foreground scan timing");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     require(argc == 2, "scenario argument required");
     const std::string scenario = argv[1];
+    if (scenario == "transport-policy") {
+        test_transport_mode_policy();
+        return 0;
+    }
+    if (scenario == "transport-background") {
+        test_transport_background_scan();
+        return 0;
+    }
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) && defined(SWITCH_PICO_USB_OUTPUT_MODES)
     if (scenario == "native-stateful") {
         test_native_stateful_routing();
