@@ -57,10 +57,18 @@ Build and flash a Pico 2 W in BOOTSEL mode:
 python3 build.py --aio
 ```
 
-This uses an isolated `build-aio/` CMake cache and publishes:
+This uses an isolated `build-aio/` CMake cache. The main firmware variants are:
 
-- `firmware/switch-pico-aio.elf`
-- `firmware/switch-pico-aio.uf2`
+| Variant | UF2 image |
+| --- | --- |
+| Regular Pico, UART input | [switch-pico.uf2](firmware/switch-pico.uf2) |
+| Pico 2 W AIO, mixed Bluetooth | [switch-pico-aio.uf2](firmware/switch-pico-aio.uf2) |
+| Pico 2 W AIO, BLE only | [switch-pico-aio-ble.uf2](firmware/switch-pico-aio-ble.uf2) |
+| Pico 2 W AIO, Classic only | [switch-pico-aio-classic.uf2](firmware/switch-pico-aio-classic.uf2) |
+
+Each image has a matching `.elf` in `firmware/`. All AIO variants include the same
+automatic Switch/XInput and manual USB output modes; no separate feasibility
+firmware is needed. The wake-capture image remains a separate setup utility.
 
 The default `python3 build.py` command and `firmware/switch-pico.*` artifacts remain the UART/Pico build. The AIO build requires `PICO_BOARD=pico2_w`; it is not interchangeable with the original non-wireless Pico firmware.
 
@@ -87,7 +95,7 @@ cmake --build build-aio-ble
 ```
 
 Use `CLASSIC` or `MIXED` and a matching build directory for the other modes.
-Add `-DSWITCH_PICO_ADAPTER_FEASIBILITY=ON` for automatic Switch/XInput output.
+Every AIO build includes automatic Switch/XInput and manual USB output modes.
 Invalid modes and single-transport selections with the UART backend are rejected.
 
 The build helper also supports the selector; these commands **build and flash**:
@@ -95,7 +103,7 @@ The build helper also supports the selector; these commands **build and flash**:
 ```sh
 python3 build.py --aio --bluetooth-mode ble
 python3 build.py --aio --bluetooth-mode classic
-python3 build.py --adapter-feasibility --bluetooth-mode ble
+python3 build.py --aio --bluetooth-mode mixed
 ```
 
 The helper defaults explicitly to `mixed`. Single-transport build directories and
@@ -812,7 +820,7 @@ were created, copies the release artifacts into `firmware/`, and flashes the ELF
 with `picotool`.
 
 `build.py` automatically locates the Pico SDK and Arm GNU toolchain from valid
-existing `build/`, `build-aio/`, or `build-feasibility/` CMake caches, then from
+existing regular, AIO (including BLE/Classic), and wake-capture CMake caches, then from
 project-local `build/_deps/pico_sdk-src` and `build/toolchain` installs, and
 finally from conventional user and system locations. A compiler already on
 `PATH` is used without setting a toolchain override. Explicit `PICO_SDK_PATH`

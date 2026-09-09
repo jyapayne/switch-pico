@@ -119,7 +119,8 @@ The final Windows fix uses a distinct probe device revision because Windows cach
 
 Current test artifact:
 
-- `firmware/switch-pico-adapter-feasibility.uf2`
+- `firmware/switch-pico-aio.uf2` (includes the automatic Switch/XInput behavior;
+  the separate feasibility build has been retired).
 
 Windows test command:
 

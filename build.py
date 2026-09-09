@@ -15,7 +15,6 @@ FIRMWARE_SOURCE_DIR = SCRIPT_DIR / "src" / "firmware"
 CONFIG_FILE = FIRMWARE_SOURCE_DIR / "platform" / "pico" / "controller_color_config.h"
 BUILD_DIR = SCRIPT_DIR / "build"
 AIO_BUILD_DIR = SCRIPT_DIR / "build-aio"
-FEASIBILITY_BUILD_DIR = SCRIPT_DIR / "build-feasibility"
 WAKE_CAPTURE_SOURCE_DIR = SCRIPT_DIR / "tools" / "switch2_wake_capture"
 WAKE_CAPTURE_BUILD_DIR = SCRIPT_DIR / "build-wake-capture"
 FIRMWARE_DIR = SCRIPT_DIR / "firmware"
@@ -23,8 +22,6 @@ FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico.elf"
 FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico.uf2"
 AIO_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-aio.elf"
 AIO_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-aio.uf2"
-FEASIBILITY_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-adapter-feasibility.elf"
-FEASIBILITY_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-adapter-feasibility.uf2"
 WAKE_CAPTURE_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-wake-capture.elf"
 WAKE_CAPTURE_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-wake-capture.uf2"
 
@@ -42,11 +39,9 @@ CMAKE_CACHE_PATHS = tuple(
     for build_dir in (
         BUILD_DIR,
         AIO_BUILD_DIR,
-        FEASIBILITY_BUILD_DIR,
         WAKE_CAPTURE_BUILD_DIR,
         *(
-            base.with_name(f"{base.name}-{mode}")
-            for base in (AIO_BUILD_DIR, FEASIBILITY_BUILD_DIR)
+            AIO_BUILD_DIR.with_name(f"{AIO_BUILD_DIR.name}-{mode}")
             for mode in ("ble", "classic")
         ),
     )
@@ -283,11 +278,6 @@ def parse_args():
         help="Build and flash the Pico 2 W Bluepad32 all-in-one firmware.",
     )
     mode_group.add_argument(
-        "--adapter-feasibility",
-        action="store_true",
-        help="Build and flash the Pico 2 W automatic Switch/XInput prototype.",
-    )
-    mode_group.add_argument(
         "--wake-capture",
         action="store_true",
         help="Build and flash the automatic Switch 2 wake capture firmware.",
@@ -296,7 +286,7 @@ def parse_args():
         "--bluetooth-mode",
         choices=("mixed", "ble", "classic"),
         default="mixed",
-        help="Select active Bluetooth transports for --aio or --adapter-feasibility.",
+        help="Select active Bluetooth transports for --aio.",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -312,8 +302,8 @@ def parse_args():
     args = parser.parse_args()
     if args.wake_capture and (args.random_grip_color or args.grip_color):
         parser.error("wake capture firmware does not use grip-color options")
-    if args.bluetooth_mode != "mixed" and not (args.aio or args.adapter_feasibility):
-        parser.error("--bluetooth-mode requires --aio or --adapter-feasibility")
+    if args.bluetooth_mode != "mixed" and not args.aio:
+        parser.error("--bluetooth-mode requires --aio")
     return args
 
 
@@ -392,7 +382,6 @@ def resolve_picotool():
 
 def build(
     aio,
-    adapter_feasibility,
     build_dir,
     elf_path,
     uf2_path,
@@ -401,23 +390,21 @@ def build(
     *,
     bluetooth_mode="mixed",
 ):
-    if aio or adapter_feasibility:
+    if aio:
         definitions = [
             "-DSWITCH_PICO_LOG=OFF",
             "-DPICO_BOARD=pico2_w",
             "-DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32",
         ]
-        if adapter_feasibility:
-            definitions.append("-DSWITCH_PICO_ADAPTER_FEASIBILITY=ON")
     else:
         definitions = [
             "-DSWITCH_PICO_LOG=OFF",
             "-DPICO_BOARD=pico",
             "-DSWITCH_PICO_INPUT_BACKEND=UART",
         ]
-    # AIO and XInput images use the qualified native transport by default.
+    # AIO includes all USB output modes and uses the native transport by default.
     # UART remains unchanged; explicit flags also prevent stale cache choices.
-    native = "ON" if aio or adapter_feasibility else "OFF"
+    native = "ON" if aio else "OFF"
     definitions.extend(
         [
             f"-DSWITCH_PICO_BLUETOOTH_MODE={bluetooth_mode.upper()}",
@@ -529,13 +516,7 @@ def main():
         update_grip_colors(color)
         print(f"Grip color set to #{color} in {CONFIG_FILE.name}")
 
-    if args.adapter_feasibility:
-        build_dir = FEASIBILITY_BUILD_DIR
-        elf_path = FEASIBILITY_BUILD_DIR / "switch-pico.elf"
-        uf2_path = FEASIBILITY_BUILD_DIR / "switch-pico.uf2"
-        firmware_elf_path = FEASIBILITY_FIRMWARE_ELF_PATH
-        firmware_uf2_path = FEASIBILITY_FIRMWARE_UF2_PATH
-    elif args.aio:
+    if args.aio:
         build_dir = AIO_BUILD_DIR
         elf_path = AIO_BUILD_DIR / "switch-pico.elf"
         uf2_path = AIO_BUILD_DIR / "switch-pico.uf2"
@@ -558,7 +539,6 @@ def main():
 
     build(
         args.aio,
-        args.adapter_feasibility,
         build_dir,
         elf_path,
         uf2_path,
@@ -568,7 +548,7 @@ def main():
     )
     flash(
         elf_path,
-        allow_elf_override=not args.aio and not args.adapter_feasibility,
+        allow_elf_override=not args.aio,
     )
 
 

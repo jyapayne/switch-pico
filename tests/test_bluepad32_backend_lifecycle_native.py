@@ -10,23 +10,14 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
 
-    for bluetooth_mode, adapter_feasibility, native, short_packets in (
-        ("mixed", False, False, False),
-        ("mixed", True, False, False),
-        ("mixed", True, True, False),
-        ("mixed", True, True, True),
-        ("ble", False, False, False),
-        ("classic", False, False, False),
+    for bluetooth_mode, native, short_packets in (
+        ("mixed", False, False),
+        ("mixed", True, False),
+        ("mixed", True, True),
+        ("ble", False, False),
+        ("classic", False, False),
     ):
-        suffix = (
-            "_native32"
-            if short_packets
-            else "_native64"
-            if native
-            else "_adapter"
-            if adapter_feasibility
-            else ""
-        )
+        suffix = "_native32" if short_packets else "_native64" if native else ""
         executable = (
             tmp_path / f"bluepad32_backend_lifecycle_test_{bluetooth_mode}{suffix}"
         )
@@ -38,11 +29,10 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             "-Werror",
             "-pedantic",
             "-DSWITCH_PICO_HID_INSTANCE_COUNT=4",
+            "-DSWITCH_PICO_USB_OUTPUT_MODES=1",
             f"-DSWITCH_PICO_ENABLE_BLE={int(bluetooth_mode != 'classic')}",
             f"-DSWITCH_PICO_ENABLE_CLASSIC={int(bluetooth_mode != 'ble')}",
         ]
-        if adapter_feasibility:
-            command.append("-DSWITCH_PICO_USB_OUTPUT_MODES=1")
         if native:
             command.extend(
                 [

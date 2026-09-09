@@ -209,14 +209,11 @@ def build_cli(tmp_path, monkeypatch):
         "CONFIG_FILE",
         "BUILD_DIR",
         "AIO_BUILD_DIR",
-        "FEASIBILITY_BUILD_DIR",
         "FIRMWARE_DIR",
         "FIRMWARE_ELF_PATH",
         "FIRMWARE_UF2_PATH",
         "AIO_FIRMWARE_ELF_PATH",
         "AIO_FIRMWARE_UF2_PATH",
-        "FEASIBILITY_FIRMWARE_ELF_PATH",
-        "FEASIBILITY_FIRMWARE_UF2_PATH",
     ):
         original = getattr(build_script, name)
         monkeypatch.setattr(build_script, name, tmp_path / original.relative_to(ROOT))
@@ -247,24 +244,13 @@ def build_cli(tmp_path, monkeypatch):
     return commands
 
 
-@pytest.mark.parametrize(
-    ("variant", "directory", "artifact"),
-    [
-        ("--aio", "build-aio", "switch-pico-aio"),
-        (
-            "--adapter-feasibility",
-            "build-feasibility",
-            "switch-pico-adapter-feasibility",
-        ),
-    ],
-)
 def test_bluetooth_modes_configure_and_publish_isolated_artifacts(
-    tmp_path, monkeypatch, build_cli, variant, directory, artifact
+    tmp_path, monkeypatch, build_cli
 ):
     # Switch away from mixed and back, leaving every other image untouched.
     published = {}
     for mode in (None, "ble", "classic", "mixed"):
-        arguments = ["build.py", variant]
+        arguments = ["build.py", "--aio"]
         if mode is not None:
             arguments.extend(["--bluetooth-mode", mode])
         monkeypatch.setattr(build_script.sys, "argv", arguments)
@@ -272,14 +258,11 @@ def test_bluetooth_modes_configure_and_publish_isolated_artifacts(
 
         selected = mode or "mixed"
         suffix = "" if selected == "mixed" else f"-{selected}"
-        build_dir = tmp_path / f"{directory}{suffix}"
+        build_dir = tmp_path / f"build-aio{suffix}"
         configure, compile_command, flash_command = build_cli[-3:]
         assert configure[:5] == ["cmake", "-S", str(tmp_path), "-B", str(build_dir)]
         assert f"-DSWITCH_PICO_BLUETOOTH_MODE={selected.upper()}" in configure
         assert "-DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32" in configure
-        assert ("-DSWITCH_PICO_ADAPTER_FEASIBILITY=ON" in configure) == (
-            variant == "--adapter-feasibility"
-        )
         assert compile_command == ["cmake", "--build", str(build_dir)]
         assert flash_command == [
             "picotool",
@@ -288,8 +271,8 @@ def test_bluetooth_modes_configure_and_publish_isolated_artifacts(
             "-fx",
         ]
         for extension in ("elf", "uf2"):
-            destination = tmp_path / "firmware" / f"{artifact}{suffix}.{extension}"
-            published[destination] = f"{directory}{suffix}:{extension}".encode()
+            destination = tmp_path / "firmware" / f"switch-pico-aio{suffix}.{extension}"
+            published[destination] = f"build-aio{suffix}:{extension}".encode()
         for destination, expected in published.items():
             assert destination.read_bytes() == expected
 

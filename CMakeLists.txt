@@ -24,8 +24,6 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 option(SWITCH_PICO_LOG "Enable UART debug logging" OFF)
-option(SWITCH_PICO_ADAPTER_FEASIBILITY
-       "Build the automatic Switch/XInput feasibility prototype" OFF)
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     set(SWITCH_PICO_NATIVE_DEFAULT ON)
     set(SWITCH_PICO_CLOCK_DEFAULT 300)
@@ -118,11 +116,6 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
         AND NOT PICO_BOARD STREQUAL "pico2_w")
     message(FATAL_ERROR
             "SWITCH_PICO_INPUT_BACKEND=BLUEPAD32 requires PICO_BOARD=pico2_w")
-endif()
-if(SWITCH_PICO_ADAPTER_FEASIBILITY
-        AND NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
-    message(FATAL_ERROR
-            "SWITCH_PICO_ADAPTER_FEASIBILITY requires the BLUEPAD32 backend")
 endif()
 if(SWITCH_PICO_HAPTICS_EXPERIMENT
         AND NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
