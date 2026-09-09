@@ -336,6 +336,14 @@ still reads older 32-byte responses and treats their missing counters as
 unreported, not zero. These count firmware queue discards/rejections, not
 physical actuator-delivery receipts.
 
+Receive-credit commands use a separate, word-aligned buffer so pending outgoing
+ACL fragments cannot block receive-credit returns. This is enabled by default
+with credit batching; `-DSWITCH_PICO_HCI_CREDIT_BUFFER=OFF` restores the shared
+buffer for comparison. It does not change radio scheduling, pairing policy, or
+the controller's credit limits. See the
+[credit-buffer results](HAPTICS_EXPERIMENT.md#dedicated-receive-credit-buffer)
+for the distinction between host-side progress and measured gameplay latency.
+
 
 ### Per-controller profiles
 
@@ -496,21 +504,23 @@ results do **not** establish lossless arbitrary workloads or perceptual
 equivalence. All 40 profiles, names, active selections and adapter
 configuration were preserved during this upgrade.
 
-**Joy-Con 2 connection timing:** both halves now request **7.5 ms BLE connection
-intervals**, in Paired and Individual modes, including while Classic controllers
-are connected. This deliberately replaces their earlier automatic 30 ms slowdown
-to favor Joy-Con responsiveness and rumble quality. Other Switch 2 models retain
-the existing coexistence policy: 30 ms when at least two physical Switch 2 links
-are present, otherwise 7.5 ms. Unrelated BLE controllers are not retimed. Bonds,
-profiles, HD encoding and the DualSense timeout are unchanged. Negotiated
-intervals are reconciled after asynchronous updates and topology changes.
+**Switch 2 connection timing:** all supported Switch 2 BLE controllers now request
+**7.5 ms connection intervals**, including Switch 2 Pro and both Joy-Con 2 halves
+in Paired or Individual mode. The earlier 30 ms policy for multiple Switch 2 links
+is removed; additional BLE or Classic controllers do not slow these requests.
+Unrelated BLE controllers are not retimed. Bonds, profiles, HD encoding and the
+DualSense timeout are unchanged. Initial setup retains ownership of its interval
+request; ready links reconcile negotiated intervals with at most one retry per
+second. More frequent connection events favor responsiveness but can increase
+shared-radio contention; this does not establish lower measured gameplay latency.
 
 The BLE connection interval is not the rumble packet cadence: multiple packets
 can travel per connection event. The normal active-output algorithm is unchanged
 by this checkpoint; the direct-packet lab fixtures are not release features.
 Lifecycle coverage includes Paired/Individual mode changes, Classic arrival and
-departure, handle reuse, correcting a slow negotiated Joy-Con interval, unrelated
-BLE isolation, and the retained Switch 2 Pro interval/retry policy.
+departure, handle reuse, multiple Switch 2 Pro links, correcting slow negotiated
+intervals, unrelated BLE isolation, asynchronous settlement across clock wrap
+and bounded retries after rejected requests.
 
 **Idle Switch 2 rumble traffic:** the parser sends three successful neutral
 writes, then suppresses further idle output. Any successful non-neutral packet

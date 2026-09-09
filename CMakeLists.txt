@@ -61,6 +61,11 @@ option(SWITCH_PICO_CYW43_PACKET_READ
        "Use packet-level CYW43 receive transactions" ${SWITCH_PICO_NATIVE_DEFAULT})
 option(SWITCH_PICO_HCI_CREDIT_BATCH
        "Batch incoming HCI credit returns" ${SWITCH_PICO_NATIVE_DEFAULT})
+option(SWITCH_PICO_HCI_CREDIT_BUFFER
+       "Return receive credits independently of the ACL packet buffer" ${SWITCH_PICO_HCI_CREDIT_BATCH})
+if(SWITCH_PICO_HCI_CREDIT_BUFFER AND NOT SWITCH_PICO_HCI_CREDIT_BATCH)
+    message(FATAL_ERROR "The dedicated HCI credit buffer requires credit batching")
+endif()
 if(SWITCH_PICO_HD_RUMBLE)
     set(SWITCH_PICO_HAPTICS_EXPERIMENT ON)
 endif()
@@ -308,6 +313,9 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     endif()
     if(SWITCH_PICO_HCI_CREDIT_BATCH)
         target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_HCI_CREDIT_BATCH=1)
+    endif()
+    if(SWITCH_PICO_HCI_CREDIT_BUFFER)
+        target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_HCI_CREDIT_BUFFER=1)
     endif()
     if(SWITCH_PICO_HAPTICS_EXPERIMENT)
         target_sources(switch-pico PRIVATE

@@ -307,6 +307,37 @@ profiles were compared with the pre-migration backup; the temporary editor
 profile and name were restored. No configuration, bond, or wake-identity reset
 was part of the transport work.
 
+### Dedicated receive-credit buffer
+
+`SWITCH_PICO_HCI_CREDIT_BUFFER` defaults to the credit-batching setting, so normal
+AIO and automatic Switch/XInput builds enable it. Setting it to `OFF` retains
+the original batched/shared-buffer path for A/B comparisons. Enabling it requires
+credit batching; UART defaults remain unchanged.
+
+The HCI patch uses a separate 24-byte, word-aligned buffer with the current
+four-connection configuration, including CYW43's four-byte transport header.
+Ready receive-credit commands precede pending ACL continuations without bypassing
+transport readiness or an in-flight fragment. Their completion releases only
+the credit buffer. Transfer ownership survives batching cancellation until
+completion or transport close. A send returning after stack reinitialization
+cannot release the new stack's buffer.
+
+A native probe delivered three incoming packets while the outgoing buffer
+remained reserved. At 20 ms, the shared path retained all three receive credits;
+the dedicated path had returned all three in two commands without releasing
+the outgoing buffer. Regressions cover mixed BLE input/Classic fragmentation,
+synchronous, delayed and CYW43-style inline completion, buffer lifetime, sleep,
+power-cycle recovery and the unchanged default/shared paths. AddressSanitizer
+and UndefinedBehaviorSanitizer also passed.
+
+The automatic-mode image was flashed and verified on hardware. Configuration
+generation 21 / CRC `b58672ac`, all nine pairings, the profile catalog and active
+profile selections were unchanged. Two controllers supplied input, but the
+DualSense native stream hit its can-send timeout both with this change and with
+the previous packaged firmware. The host-side blockage is fixed; no radio,
+native-stream reliability or physical latency improvement is established by
+that comparison.
+
 ### Historical mixed-controller cadence limit
 
 Final testing with a Switch Pro plus a DualSense and continuous USB motion

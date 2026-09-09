@@ -51,9 +51,8 @@ constexpr uint32_t kDefaultPairingWindowDurationMs =
 constexpr uint32_t kPairingResetFeedbackDurationMs = 2000;
 // Bluetooth Classic units are 0.625 ms: 0x1900 = 4 seconds.
 constexpr uint16_t kClassicLinkSupervisionTimeout = 0x1900;
-// LE units are 1.25 ms. Joy-Cons retain the fast interval even with Classic.
+// LE units are 1.25 ms. All Switch 2 links request the 7.5 ms minimum.
 constexpr uint16_t kSwitch2FastInterval = 6;
-constexpr uint16_t kSwitch2MixedInterval = 24;
 constexpr uint32_t kSwitch2IntervalSettleMs = 1000;
 constexpr uint8_t kAllBlePairingMethods =
     SM_STK_GENERATION_METHOD_JUST_WORKS |
@@ -602,11 +601,9 @@ void stop_background_scan() {
         g_background_scan_active = false;
     }
 }
-// Core 1 only. Count physical links, not logical players. Joy-Cons always keep
-// their fast default; retain preconnection coexistence timing for other Switch 2
-// models when multiple physical Switch 2 links share the radio.
+// Core 1 only. Reconcile every ready physical Switch 2 link to the fast interval,
+// independently of player grouping, controller count, or Classic connections.
 void apply_radio_connection_policy() {
-    unsigned switch2_links = 0;
     uni_hid_device_t* ready[kSlotCount]{};
     for (const BackendSlot& slot : g_slots) {
         uni_hid_device_t* targets[] = {slot.device, slot.companion};
@@ -616,7 +613,6 @@ void apply_radio_connection_policy() {
             const auto type = gap_get_connection_type(target->conn.handle);
             if (type == GAP_CONNECTION_LE &&
                 uni_hid_parser_switch2_is_ble_device(target)) {
-                ++switch2_links;
                 // The parser requests its initial interval during setup.
                 // Do not race that request by changing a pending device here.
                 if (slot.active) ready[index] = target;
@@ -630,24 +626,22 @@ void apply_radio_connection_policy() {
             request = {};
             continue;
         }
-        const uint16_t desired = switch2_links >= 2 && joycon_side(ready[index]) == 0
-                                     ? kSwitch2MixedInterval
-                                     : kSwitch2FastInterval;
         const auto handle = ready[index]->conn.handle;
         if (request.handle != handle) request = {};
         const uint16_t actual = gap_le_connection_interval(handle);
         if (request.interval != 0 && actual != request.interval &&
             now_ms - request.requested_ms < kSwitch2IntervalSettleMs) {
-            // Let an accepted asynchronous update settle before reversing it.
+            // Let an accepted asynchronous update settle before retrying it.
             // API success alone does not prove that negotiation completed.
             continue;
         }
         request.interval = 0;
-        if (actual == desired) continue;
-        gap_update_connection_parameters(handle, desired, desired, 0, 600);
+        if (actual == kSwitch2FastInterval) continue;
+        gap_update_connection_parameters(
+            handle, kSwitch2FastInterval, kSwitch2FastInterval, 0, 600);
         // Reconcile negotiated state on the configuration timer. Rejected or
         // incomplete requests are retried at most once per second per link.
-        request = {handle, desired, now_ms};
+        request = {handle, kSwitch2FastInterval, now_ms};
     }
 }
 

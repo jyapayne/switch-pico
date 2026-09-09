@@ -14,6 +14,14 @@ static unsigned wire_count;
 static uint8_t wire[32][64];
 static int wire_size[32];
 static void (*during_send)(void);
+static uint8_t wire_type[32];
+static bool complete_inline;
+static uint8_t *last_transport_packet;
+
+static void transport_sent(void){
+    uint8_t sent[] = {HCI_EVENT_TRANSPORT_PACKET_SENT, 0};
+    receive_packet(HCI_EVENT_PACKET, sent, sizeof(sent));
+}
 
 noreturn void btstack_assert_failed(const char *file, uint16_t line){
     fprintf(stderr, "BTstack assertion: %s:%u\n", file, line);
@@ -60,8 +68,13 @@ static int can_send(uint8_t packet_type){
 }
 
 static int send_packet(uint8_t type, uint8_t *packet, int size){
-    assert(type == HCI_COMMAND_DATA_PACKET);
+    assert(type == HCI_COMMAND_DATA_PACKET || type == HCI_ACL_DATA_PACKET);
     assert(wire_count < 32 && size <= 64);
+    // CYW43 writes its header before the packet and reads word-rounded data.
+    assert(((uintptr_t)packet & 3u) == 0);
+    memset(packet - HCI_OUTGOING_PRE_BUFFER_SIZE, 0xa5, HCI_OUTGOING_PRE_BUFFER_SIZE);
+    wire_type[wire_count] = type;
+    last_transport_packet = packet;
     memcpy(wire[wire_count], packet, (size_t) size);
     wire_size[wire_count++] = size;
     if (during_send != NULL){
@@ -69,6 +82,7 @@ static int send_packet(uint8_t type, uint8_t *packet, int size){
         during_send = NULL;
         callback();
     }
+    if (complete_inline) transport_sent();
     return 0;
 }
 
@@ -96,6 +110,7 @@ static void working(void){
     // Fixture bypasses controller initialization, leaving the production receive/run paths intact.
     hci_stack->state = HCI_STATE_WORKING;
     hci_stack->gap_tasks_classic = 0;
+    hci_stack->le_scanning_param_update = false;
     hci_stack->num_cmd_packets = 1;
     hci_register_acl_packet_handler(on_acl);
     hci_register_sco_packet_handler(on_sco);
@@ -106,6 +121,8 @@ static void begin(uint32_t now, bool asynchronous){
     transport_ready = true;
     transport.can_send_packet_now = asynchronous ? can_send : NULL;
     during_send = NULL;
+    complete_inline = false;
+    last_transport_packet = NULL;
     wire_count = acl_delivered = sco_delivered = 0;
     btstack_run_loop_init(&run_loop);
     btstack_memory_init();
@@ -310,6 +327,125 @@ static void test_lifecycle(void){
     assert(wire_count == after_power_transition);
     finish();
 }
+
+#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
+static void test_credits_bypass_fragmented_acl(unsigned completion_mode){
+    begin(100, completion_mode != 0);
+    complete_inline = completion_mode == 2;
+    add_connection(0x41, BD_ADDR_TYPE_ACL);
+    add_connection(0x42, BD_ADDR_TYPE_LE_PUBLIC);
+    hci_stack->acl_packets_total_num = 1;
+    hci_stack->acl_data_packet_length = 8;
+    hci_reserve_packet_buffer();
+    uint8_t *packet = hci_get_outgoing_packet_buffer();
+    little_endian_store_16(packet, 0, 0x2041);
+    little_endian_store_16(packet, 2, 16);
+    for (unsigned i = 0; i < 16; ++i) packet[4 + i] = (uint8_t)(0x80 + i);
+    assert(hci_send_acl_packet_buffer(20) == ERROR_CODE_SUCCESS);
+    assert(wire_count == 1 && wire_type[0] == HCI_ACL_DATA_PACKET);
+
+    if (completion_mode == 1) transport_ready = false;
+    acl(0x42);
+    acl(0x42);
+    if (completion_mode == 1){
+        advance(2);
+        assert(wire_count == 1);
+        transport_ready = true;
+        transport_sent();
+    }
+    assert(wire_count == 2 && wire_type[1] == HCI_COMMAND_DATA_PACKET);
+    expect_credits(1, 0x42, 2);
+    if (completion_mode == 1) transport_sent();
+    // A credit completion must not release the still-prepared ACL continuation.
+    assert(!hci_can_send_command_packet_now());
+
+    uint8_t completed[] = {HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS, 5, 1, 0x41, 0, 1, 0};
+    receive_packet(HCI_EVENT_PACKET, completed, sizeof(completed));
+    assert(wire_count == 3 && wire_type[2] == HCI_ACL_DATA_PACKET);
+    assert(wire_size[0] == 12 && wire_size[2] == 12);
+    assert(little_endian_read_16(wire[2], 0) == 0x1041);
+    for (unsigned i = 0; i < 8; ++i){
+        assert(wire[0][4 + i] == 0x80 + i);
+        assert(wire[2][4 + i] == 0x88 + i);
+    }
+    if (completion_mode == 1) transport_sent();
+    assert(hci_can_send_command_packet_now());
+    finish();
+}
+
+static void test_credit_buffer_async_ownership(void){
+    begin(100, true);
+    add_connection(0x41, BD_ADDR_TYPE_ACL);
+    hci_reserve_packet_buffer();
+    acl(0x41);
+    advance(2);
+    assert(wire_count == 1);
+    uint8_t *in_flight = last_transport_packet;
+    uint8_t saved[8];
+    memcpy(saved, in_flight, sizeof(saved));
+    acl(0x41);
+    advance(2);
+    assert(wire_count == 1 && memcmp(saved, in_flight, sizeof(saved)) == 0);
+    // Even a transport that reports ready must not permit overlapping sends.
+    assert(!hci_can_send_prepared_acl_packet_now(0x41));
+    transport_sent();
+    assert(wire_count == 2);
+    expect_credits(1, 0x41, 1);
+    transport_sent();
+    assert(!hci_can_send_command_packet_now());
+    hci_release_packet_buffer();
+    assert(hci_can_send_command_packet_now());
+    finish();
+}
+
+static void sleep_during_send(void){
+    hci_power_control(HCI_POWER_SLEEP);
+}
+
+static void test_credit_completion_during_sleep(void){
+    begin(100, false);
+    add_connection(0x41, BD_ADDR_TYPE_ACL);
+    acl(0x41);
+    during_send = sleep_during_send;
+    advance(2);
+    assert(wire_count == 1);
+    expect_credits(0, 0x41, 1);
+    // Cancelling batching must not strand ownership of a completed synchronous send.
+    assert(hci_can_send_command_packet_now());
+    finish();
+
+    begin(100, true);
+    add_connection(0x41, BD_ADDR_TYPE_ACL);
+    hci_reserve_packet_buffer();
+    acl(0x41);
+    advance(2);
+    hci_power_control(HCI_POWER_SLEEP);
+    transport_sent();
+    // A late credit completion after sleep still must not release another packet.
+    assert(!hci_can_send_command_packet_now());
+    hci_release_packet_buffer();
+    assert(hci_can_send_command_packet_now());
+    finish();
+}
+
+static void test_credit_buffer_power_cycle(void){
+    begin(100, true);
+    add_connection(0x41, BD_ADDR_TYPE_ACL);
+    acl(0x41);
+    advance(2);
+    assert(wire_count == 1);
+    // A wedged transport never completes the credit send; shutdown closes it.
+    transport_ready = false;
+    hci_power_control(HCI_POWER_OFF);
+    advance(1001);
+    transport_ready = true;
+    hci_power_control(HCI_POWER_ON);
+    assert(wire_count == 2);
+    assert(wire_type[1] == HCI_COMMAND_DATA_PACKET);
+    assert(little_endian_read_16(wire[1], 0) == HCI_OPCODE_HCI_RESET);
+    finish();
+}
+#endif
 #endif
 
 int main(void){
@@ -320,6 +456,12 @@ int main(void){
     test_sco_and_malformed_acl();
     test_synchronous_callbacks();
     test_lifecycle();
+#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
+    for (unsigned mode = 0; mode < 3; ++mode) test_credits_bypass_fragmented_acl(mode);
+    test_credit_buffer_async_ownership();
+    test_credit_completion_during_sleep();
+    test_credit_buffer_power_cycle();
+#endif
 #else
     begin(100, false);
     add_connection(0x41, BD_ADDR_TYPE_ACL);

@@ -1,6 +1,6 @@
 --- a/lib/btstack/src/hci.c
 +++ b/lib/btstack/src/hci.c
-@@ -93,6 +93,12 @@
+@@ -93,6 +93,20 @@
  #endif
  #endif
  
@@ -9,11 +9,19 @@
 +#error "SWITCH_PICO_HCI_CREDIT_BATCH requires controller-to-host flow control with three ACL credits"
 +#endif
 +#endif
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++#ifndef SWITCH_PICO_HCI_CREDIT_BATCH
++#error "SWITCH_PICO_HCI_CREDIT_BUFFER requires SWITCH_PICO_HCI_CREDIT_BATCH"
++#endif
++#if !defined(MAX_NR_HCI_CONNECTIONS) || (MAX_NR_HCI_CONNECTIONS < 1) || (MAX_NR_HCI_CONNECTIONS > 63)
++#error "SWITCH_PICO_HCI_CREDIT_BUFFER requires 1..63 configured HCI connections"
++#endif
++#endif
 +
  #ifndef MAX_NR_CONTROLLER_ACL_BUFFERS
  #define MAX_NR_CONTROLLER_ACL_BUFFERS 255
  #endif
-@@ -273,6 +279,74 @@
+@@ -273,6 +287,84 @@
  #endif
  static hci_stack_t * hci_stack = NULL;
  
@@ -23,6 +31,13 @@
 +static bool hci_credit_batch_due;
 +static bool hci_credit_batch_enabled;
 +static uint32_t hci_credit_batch_generation;
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++static bool hci_credit_batch_in_flight;
++// Independent of the prepared ACL buffer, including transport header and word padding.
++#define HCI_CREDIT_BATCH_PRE_BUFFER_SIZE ((HCI_OUTGOING_PRE_BUFFER_SIZE + 3u) & ~3u)
++static uint32_t hci_credit_batch_buffer[
++    (HCI_CREDIT_BATCH_PRE_BUFFER_SIZE + 4u + 4u * MAX_NR_HCI_CONNECTIONS) / sizeof(uint32_t)];
++#endif
 +
 +static void hci_credit_batch_reset(void){
 +    if (hci_credit_batch_armed){
@@ -34,7 +49,10 @@
 +
 +static void hci_credit_batch_stop(void){
 +    hci_credit_batch_enabled = false;
++#ifndef SWITCH_PICO_HCI_CREDIT_BUFFER
 +    hci_credit_batch_generation++;
++#endif
++    // Cancellation does not end an asynchronous transfer; completion or close does.
 +    hci_credit_batch_reset();
 +}
 +
@@ -88,7 +106,27 @@
  #ifdef ENABLE_CLASSIC
  // default name
  static const char * default_classic_name = "BTstack 00:00:00:00:00:00";
-@@ -1195,6 +1269,9 @@
+@@ -738,6 +830,9 @@
+ 
+ // only used to send HCI Host Number Completed Packets
+ static int hci_can_send_command_packet_transport(void){
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++    if (hci_credit_batch_in_flight) return 0;
++#endif
+     if (hci_stack->hci_packet_buffer_reserved) return 0;
+ 
+     // check for async hci transport implementations
+@@ -756,6 +851,9 @@
+ }
+ 
+ static int hci_transport_can_send_prepared_packet_now(uint8_t packet_type){
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++    if (hci_credit_batch_in_flight) return false;
++#endif
+     // check for async hci transport implementations
+     if (!hci_stack->hci_transport->can_send_packet_now) return true;
+     return hci_stack->hci_transport->can_send_packet_now(packet_type);
+@@ -1195,6 +1293,9 @@
  #ifdef ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL
      hci_stack->host_completed_packets = 1;
      conn->num_packets_completed++;
@@ -98,7 +136,7 @@
  #endif
  
      // handle different packet types
-@@ -1269,8 +1346,10 @@
+@@ -1269,8 +1370,10 @@
              return;
      }
      
@@ -109,7 +147,7 @@
  }
  
  static void hci_connection_stop_timer(hci_connection_t * conn){
-@@ -1296,6 +1375,9 @@
+@@ -1296,6 +1399,9 @@
  
      btstack_linked_list_remove(&hci_stack->connections, (btstack_linked_item_t *) conn);
      btstack_memory_hci_connection_free( conn );
@@ -119,7 +157,7 @@
      
      // now it's gone
      hci_emit_nr_connections_changed();
-@@ -4314,6 +4396,12 @@
+@@ -4314,6 +4420,12 @@
  
              conn = hci_connection_for_handle(handle);
              if (!conn) break;
@@ -132,7 +170,21 @@
  #ifdef ENABLE_CLASSIC
              // pairing failed if it was ongoing
              hci_pairing_complete(conn, ERROR_CODE_REMOTE_USER_TERMINATED_CONNECTION);
-@@ -4780,6 +4868,10 @@
+@@ -4367,6 +4479,13 @@
+                 log_error("Synchronous HCI Transport shouldn't send HCI_EVENT_TRANSPORT_PACKET_SENT");
+                 return; // instead of break: to avoid re-entering hci_run()
+             }
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++            if (hci_credit_batch_in_flight){
++                hci_credit_batch_in_flight = false;
++                // This completion owns only the credit buffer, not a prepared ACL fragment.
++                break;
++            }
++#endif
+             hci_stack->acl_fragmentation_tx_active = 0;
+ #ifdef ENABLE_LE_ISOCHRONOUS_STREAMS
+             hci_stack->iso_fragmentation_tx_active = 0;
+@@ -4780,6 +4899,10 @@
  #ifdef ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL
      conn->num_packets_completed++;
      hci_stack->host_completed_packets = 1;
@@ -143,7 +195,7 @@
      hci_run();
  #endif    
  }
-@@ -4814,6 +4906,10 @@
+@@ -4814,6 +4937,10 @@
              break;
          case HCI_ACL_DATA_PACKET:
              acl_handler(packet, size);
@@ -154,19 +206,22 @@
              break;
  #ifdef ENABLE_CLASSIC
          case HCI_SCO_DATA_PACKET:
-@@ -4869,6 +4965,11 @@
+@@ -4869,6 +4996,14 @@
  #endif
  
  static void hci_state_reset(void){
 +#ifdef SWITCH_PICO_HCI_CREDIT_BATCH
 +    hci_credit_batch_reset();
 +    hci_credit_batch_generation++;
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++    hci_credit_batch_in_flight = false;
++#endif
 +    hci_stack->host_completed_packets = 0;
 +#endif
      // no connections yet
      hci_stack->connections = NULL;
  
-@@ -4953,6 +5054,10 @@
+@@ -4953,6 +5088,10 @@
  #endif
  
  void hci_init(const hci_transport_t *transport, const void *config){
@@ -177,7 +232,7 @@
      
  #ifdef HAVE_MALLOC
      if (!hci_stack) {
-@@ -5082,6 +5187,9 @@
+@@ -5082,6 +5221,9 @@
  }
  
  void hci_deinit(void){
@@ -187,7 +242,7 @@
      btstack_run_loop_remove_timer(&hci_stack->timeout);
  #ifdef HAVE_MALLOC
      if (hci_stack) {
-@@ -5138,6 +5246,9 @@
+@@ -5138,6 +5280,9 @@
  }
  
  void hci_close(void){
@@ -197,7 +252,7 @@
  
  #ifdef ENABLE_CLASSIC
      // close remote device db
-@@ -5264,6 +5375,10 @@
+@@ -5264,6 +5409,10 @@
  // HCI_STATE_FALLING_ASLEEP  on       open
  
  static int hci_power_control_on(void){
@@ -208,7 +263,7 @@
      
      // power on
      int err = 0;
-@@ -5300,6 +5415,9 @@
+@@ -5300,11 +5449,18 @@
  }
  
  static void hci_power_control_off(void){
@@ -218,7 +273,16 @@
      
      log_info("hci_power_control_off");
  
-@@ -5319,6 +5437,9 @@
+     // close low-level device
+     hci_stack->hci_transport->close();
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++    hci_credit_batch_in_flight = false;
++    hci_credit_batch_generation++;
++#endif
+ 
+     log_info("hci_power_control_off - hci_transport closed");
+     
+@@ -5319,6 +5475,9 @@
  }
  
  static void hci_power_control_sleep(void){
@@ -228,7 +292,7 @@
      
      log_info("hci_power_control_sleep");
      
-@@ -5363,6 +5484,10 @@
+@@ -5363,6 +5522,10 @@
  }
  
  static void hci_power_enter_initializing_state(void){
@@ -239,7 +303,7 @@
      // set up state machine
      hci_stack->num_cmd_packets = 1; // assume that one cmd can be sent
      hci_stack->hci_packet_buffer_reserved = false;
-@@ -5543,6 +5668,10 @@
+@@ -5543,6 +5706,10 @@
  }
  
  int hci_power_control(HCI_POWER_MODE power_mode){
@@ -250,7 +314,7 @@
      log_info("hci_power_control: %d, current mode %u", power_mode, hci_stack->state);
      btstack_run_loop_remove_timer(&hci_stack->timeout);
      int err = 0;
-@@ -5834,6 +5963,11 @@
+@@ -5834,10 +6001,19 @@
  
  #ifdef ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL
  static void hci_host_num_completed_packets(void){
@@ -261,9 +325,32 @@
 +#endif
  
      // create packet manually as arrays are not supported and num_commands should not get reduced
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++    uint8_t * packet = (uint8_t *) hci_credit_batch_buffer + HCI_CREDIT_BATCH_PRE_BUFFER_SIZE;
++#else
      hci_reserve_packet_buffer();
-@@ -5868,6 +6002,9 @@
+     uint8_t * packet = hci_get_outgoing_packet_buffer();
++#endif
  
+     uint16_t size = 0;
+     uint16_t num_handles = 0;
+@@ -5851,6 +6027,9 @@
+     for (it = (btstack_linked_item_t *) hci_stack->connections; it ; it = it->next){
+         hci_connection_t * connection = (hci_connection_t *) it;
+         if (connection->num_packets_completed){
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++            btstack_assert(num_handles < MAX_NR_HCI_CONNECTIONS);
++#endif
+             little_endian_store_16(packet, size, connection->con_handle);
+             size += 2;
+             little_endian_store_16(packet, size, connection->num_packets_completed);
+@@ -5866,12 +6045,22 @@
+ 
+     hci_stack->host_completed_packets = 0;
+ 
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++    hci_credit_batch_in_flight = true;
++#endif
      hci_dump_packet(HCI_COMMAND_DATA_PACKET, 0, packet, size);
      hci_stack->hci_transport->send_packet(HCI_COMMAND_DATA_PACKET, packet, size);
 +#ifdef SWITCH_PICO_HCI_CREDIT_BATCH
@@ -272,10 +359,41 @@
  
      // release packet buffer for synchronous transport implementations    
      if (hci_transport_synchronous()){
-@@ -7664,12 +7801,21 @@
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++        hci_credit_batch_in_flight = false;
++#else
+         hci_release_packet_buffer();
++#endif
+         hci_emit_transport_packet_sent();
+     }
+ }
+@@ -7652,6 +7841,21 @@
+         return;
+     }
+ 
++#ifdef SWITCH_PICO_HCI_CREDIT_BUFFER
++    if (hci_credit_batch_in_flight) return;
++    // Return receive credits before continuing an ACL packet that may exhaust
++    // transmit credits. A prepared packet is not an occupied transport.
++    if (hci_stack->host_completed_packets && hci_credit_batch_ready()){
++        if (!hci_transport_synchronous() && hci_stack->acl_fragmentation_tx_active) return;
++#ifdef ENABLE_LE_ISOCHRONOUS_STREAMS
++        if (hci_stack->iso_fragmentation_tx_active) return;
++#endif
++        if (!hci_transport_can_send_prepared_packet_now(HCI_COMMAND_DATA_PACKET)) return;
++        hci_host_num_completed_packets();
++        return;
++    }
++#endif
++
+     bool done;
+ 
+     // send continuation fragments first, as they block the prepared packet buffer
+@@ -7664,12 +7868,23 @@
  #endif
  
  #ifdef ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL
++#ifndef SWITCH_PICO_HCI_CREDIT_BUFFER
 +#ifdef SWITCH_PICO_HCI_CREDIT_BATCH
 +    // A single deferred ACL credit must not block ordinary HCI commands.
 +    if (hci_stack->host_completed_packets && hci_credit_batch_ready()){
@@ -290,6 +408,7 @@
          hci_host_num_completed_packets();        
          return;
      }
++#endif
 +#endif
  #endif
  

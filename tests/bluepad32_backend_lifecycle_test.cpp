@@ -3061,6 +3061,7 @@ void test_switch2_radio_policy(bool individual) {
     auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
     auto classic = device(2, true, UNI_BT_CONN_PROTOCOL_BR_EDR);
     auto other_ble = device(3, true, UNI_BT_CONN_PROTOCOL_BLE);
+    negotiated_intervals[other_ble.conn.handle] = 24;
     ready_switch2(left);
     require(negotiated_intervals[left.conn.handle] == 6,
             "a single Switch2 link must retain fast scheduling");
@@ -3075,7 +3076,7 @@ void test_switch2_radio_policy(bool individual) {
     platform_on_device_connected(&classic);
     require(negotiated_intervals[left.conn.handle] == 6 &&
                 negotiated_intervals[right.conn.handle] == 6 &&
-                negotiated_intervals[other_ble.conn.handle] == 6,
+                negotiated_intervals[other_ble.conn.handle] == 24,
             "Classic setup must not slow Joy-Cons or retime unrelated BLE");
     require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
             "Classic controller must complete setup alongside the pair");
@@ -3105,10 +3106,19 @@ void test_switch2_radio_policy(bool individual) {
             "peer-negotiated slow Joy-Con links must reconcile to the fast default");
     platform_on_device_disconnected(&right);
     right = switch2_device(1, UNI_SW2_PRO_PID);
+    negotiated_intervals[right.conn.handle] = 24;
     ready_switch2(right);
     require(negotiated_intervals[left.conn.handle] == 6 &&
-                negotiated_intervals[right.conn.handle] == 24,
-            "Joy-Con preference must not remove the existing Switch2 Pro coexistence policy");
+                negotiated_intervals[right.conn.handle] == 6 &&
+                negotiated_intervals[other_ble.conn.handle] == 24,
+            "Switch2 Pro must join at the fast interval without retiming unrelated BLE");
+    platform_on_device_disconnected(&left);
+    left = switch2_device(0, UNI_SW2_PRO_PID);
+    negotiated_intervals[left.conn.handle] = 24;
+    ready_switch2(left);
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6,
+            "multiple Switch2 Pro links must remain fast alongside Classic");
 }
 
 void test_switch2_radio_settling() {
@@ -3119,39 +3129,50 @@ void test_switch2_radio_settling() {
     platform_on_device_connected(&classic);
     require(platform_on_device_ready(&classic) == UNI_ERROR_SUCCESS,
             "Classic-first connection must become ready");
-    ready_switch2(left);
+    negotiated_intervals[left.conn.handle] = 24;
+    negotiated_intervals[right.conn.handle] = 24;
     defer_interval_updates = true;
     now_ms = UINT32_MAX - 10;
+    ready_switch2(left);
     platform_on_device_connected(&right);
     require(interval_requests[right.conn.handle] == 0,
             "pending Switch2 setup must retain ownership of its initial interval");
     require(platform_on_device_ready(&right) == UNI_ERROR_SUCCESS,
             "second Switch2 connection must become ready");
-    platform_on_device_disconnected(&right);
-    // The surviving controller completes the old update after losing its mate.
-    for (auto* half : {&left, &right}) {
-        negotiated_intervals[half->conn.handle] = pending_intervals[half->conn.handle];
-    }
-    now_ms += 50;
-    process_configuration_timer(&g_configuration_timer);
-    negotiated_intervals[left.conn.handle] = pending_intervals[left.conn.handle];
-    require(negotiated_intervals[left.conn.handle] == 6,
-            "late coexistence update must not strand a solo at slow intervals across clock wrap");
-    process_configuration_timer(&g_configuration_timer);
-    defer_interval_updates = false;
-    reject_interval_updates = true;
-    ready_switch2(right);
-    const unsigned attempts = interval_requests[left.conn.handle];
+    require(pending_intervals[left.conn.handle] == 6 &&
+                pending_intervals[right.conn.handle] == 6,
+            "both slow Switch2 Pro links must request the fast interval");
+    const unsigned deferred_attempts = interval_requests[left.conn.handle];
     now_ms += 999;
     process_configuration_timer(&g_configuration_timer);
-    require(interval_requests[left.conn.handle] == attempts,
-            "rejected negotiation must not flood the HCI command queue");
+    require(interval_requests[left.conn.handle] == deferred_attempts &&
+                negotiated_intervals[left.conn.handle] == 24,
+            "an accepted asynchronous request must be allowed to settle across clock wrap");
+    platform_on_device_disconnected(&right);
+    negotiated_intervals[left.conn.handle] = pending_intervals[left.conn.handle];
+    process_configuration_timer(&g_configuration_timer);
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                interval_requests[left.conn.handle] == deferred_attempts,
+            "a late fast-interval acknowledgement must survive another controller leaving");
+    defer_interval_updates = false;
+    reject_interval_updates = true;
+    negotiated_intervals[left.conn.handle] = 24;
+    right = switch2_device(1, UNI_SW2_PRO_PID);
+    negotiated_intervals[right.conn.handle] = 24;
+    ready_switch2(right);
+    const unsigned left_attempts = interval_requests[left.conn.handle];
+    const unsigned right_attempts = interval_requests[right.conn.handle];
+    now_ms += 999;
+    process_configuration_timer(&g_configuration_timer);
+    require(interval_requests[left.conn.handle] == left_attempts &&
+                interval_requests[right.conn.handle] == right_attempts,
+            "rejected negotiations must not flood the HCI command queue");
     reject_interval_updates = false;
     ++now_ms;
     process_configuration_timer(&g_configuration_timer);
-    require(negotiated_intervals[left.conn.handle] == 24 &&
-                negotiated_intervals[right.conn.handle] == 24,
-            "transiently rejected negotiation must recover without reconnect or pairing");
+    require(negotiated_intervals[left.conn.handle] == 6 &&
+                negotiated_intervals[right.conn.handle] == 6,
+            "transiently rejected fast intervals must recover without reconnect or pairing");
 }
 
 void test_switch2_mate_reconnect() {

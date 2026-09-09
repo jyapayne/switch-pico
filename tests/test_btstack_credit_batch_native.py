@@ -6,8 +6,14 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("batching", [False, True], ids=["default", "batched"])
-def test_btstack_credit_batch_native(tmp_path: Path, batching: bool) -> None:
+@pytest.mark.parametrize(
+    ("batching", "dedicated"),
+    [(False, False), (True, False), (True, True)],
+    ids=["default", "batched", "dedicated"],
+)
+def test_btstack_credit_batch_native(
+    tmp_path: Path, batching: bool, dedicated: bool
+) -> None:
     root = Path(__file__).resolve().parents[1]
     sdk = Path(
         os.environ.get("PICO_SDK_PATH", root / "build" / "_deps" / "pico_sdk-src")
@@ -58,6 +64,7 @@ def test_btstack_credit_batch_native(tmp_path: Path, batching: bool) -> None:
             "-ffunction-sections",
             "-fdata-sections",
             *(["-DSWITCH_PICO_HCI_CREDIT_BATCH=1"] if batching else []),
+            *(["-DSWITCH_PICO_HCI_CREDIT_BUFFER=1"] if dedicated else []),
             f"-I{root / 'tests' / 'btstack_credit_batch_native_stubs'}",
             f"-I{patched_source}",
             f"-I{source}",
