@@ -79,6 +79,7 @@ enum class Operation : uint8_t {
     kHapticsTransportProbe = 0x41,
     kMacroCapture = 0x42,
     kNativeSwitchRumble = 0x43,
+    kWiiIrGyro = 0x45,
 };
 
 enum class Status : uint8_t {
@@ -101,6 +102,7 @@ struct DecodedRequest {
 
 bool decode_request(Operation setup_operation, const uint8_t* input,
                     size_t input_size, DecodedRequest* output);
+// Payload may already occupy output + kResponseHeaderSize for in-place encoding.
 size_t encode_response(Operation operation, Status status, uint8_t flags,
                        uint16_t schema_version, uint32_t generation,
                        const uint8_t* payload, size_t payload_size,

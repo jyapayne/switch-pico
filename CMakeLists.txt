@@ -24,6 +24,10 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 option(SWITCH_PICO_LOG "Enable UART debug logging" OFF)
+option(SWITCH_PICO_WII_IR_MOUSE
+       "Experiment: Wii IR as a composite USB mouse with Switch controllers" OFF)
+option(SWITCH_PICO_WII_IR_GYRO
+       "Experiment: selectable Wii IR or MotionPlus gyro aiming" OFF)
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     set(SWITCH_PICO_NATIVE_DEFAULT ON)
     set(SWITCH_PICO_CLOCK_DEFAULT 300)
@@ -110,6 +114,22 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
         SWITCH_PICO_ENABLE_CLASSIC=${SWITCH_PICO_ENABLE_CLASSIC})
 elseif(NOT SWITCH_PICO_BLUETOOTH_MODE STREQUAL "MIXED")
     message(FATAL_ERROR "Single-transport Bluetooth modes require the BLUEPAD32 backend")
+endif()
+if(SWITCH_PICO_WII_IR_MOUSE AND SWITCH_PICO_WII_IR_GYRO)
+    message(FATAL_ERROR "Select either Wii IR mouse or selectable gyro output")
+endif()
+if(SWITCH_PICO_WII_IR_GYRO)
+    add_compile_definitions(SWITCH_PICO_WII_IR_GYRO=1)
+endif()
+if(SWITCH_PICO_WII_IR_MOUSE OR SWITCH_PICO_WII_IR_GYRO)
+    if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
+            OR NOT SWITCH_PICO_ENABLE_CLASSIC)
+        message(FATAL_ERROR "Wii IR requires BLUEPAD32 with Classic Bluetooth")
+    endif()
+    add_compile_definitions(SWITCH_PICO_WII_IR=1)
+endif()
+if(SWITCH_PICO_WII_IR_MOUSE)
+    add_compile_definitions(SWITCH_PICO_WII_IR_MOUSE=1)
 endif()
 set(PICO_BOARD pico CACHE STRING "Board type")
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
@@ -266,6 +286,15 @@ add_executable(switch-pico
         ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_pro_driver.cpp
         ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_haptics.cpp
 )
+if(SWITCH_PICO_WII_IR_MOUSE OR SWITCH_PICO_WII_IR_GYRO)
+    target_sources(switch-pico PRIVATE
+        ${SWITCH_PICO_SOURCE_DIR}/input/wii_ir_pointer.cpp
+        ${SWITCH_PICO_SOURCE_DIR}/input/wii_ir_tracker.cpp)
+endif()
+if(SWITCH_PICO_WII_IR_MOUSE)
+    target_sources(switch-pico PRIVATE
+        ${SWITCH_PICO_SOURCE_DIR}/usb/wii_ir_mouse_usb.cpp)
+endif()
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE
             ${SWITCH_PICO_SOURCE_DIR}/adapter/adapter_host_probe.cpp
@@ -311,7 +340,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             SWITCH_PICO_BLUEPAD32=1
             SWITCH_PICO_NATIVE_SWITCH_RUMBLE=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
-            SWITCH_PICO_USB_OUTPUT_MODES=1
+            $<$<NOT:$<OR:$<BOOL:${SWITCH_PICO_WII_IR_MOUSE}>,$<BOOL:${SWITCH_PICO_WII_IR_GYRO}>>>:SWITCH_PICO_USB_OUTPUT_MODES=1>
             PICO_FLASH_ASSUME_CORE1_SAFE=0
             PICO_STACK_SIZE=4096
             PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT=$<IF:$<BOOL:${SWITCH_PICO_HAPTICS_EXPERIMENT}>,1,16>

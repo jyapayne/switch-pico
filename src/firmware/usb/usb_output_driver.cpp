@@ -8,6 +8,13 @@
 #include "usb/switch/switch_pro_descriptors.h"
 #include "tusb.h"
 
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+#include "usb/wii_ir_mouse_usb.h"
+#endif
+#ifdef SWITCH_PICO_WII_IR_GYRO
+#include "input/wii_ir_pointer.h"
+#endif
+
 #ifdef SWITCH_PICO_BLUEPAD32
 #include "usb/usb_configuration_management.h"
 #endif
@@ -189,6 +196,12 @@ void usb_output_driver_set_rumble_callback(
 extern "C" uint16_t tud_hid_get_report_cb(
     uint8_t instance, uint8_t report_id, hid_report_type_t report_type,
     uint8_t* buffer, uint16_t requested_length) {
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    if (instance == SWITCH_PICO_HID_INSTANCE_COUNT) {
+        return usb_wii_ir_mouse_get_report(report_id, report_type, buffer,
+                                           requested_length);
+    }
+#endif
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         return 0;
@@ -205,6 +218,11 @@ extern "C" uint16_t tud_hid_get_report_cb(
 extern "C" void tud_hid_set_report_cb(
     uint8_t instance, uint8_t report_id, hid_report_type_t report_type,
     const uint8_t* buffer, uint16_t buffer_size) {
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    if (instance == SWITCH_PICO_HID_INSTANCE_COUNT) {
+        return;
+    }
+#endif
     if (switch_selected()) {
         switch_pro_hid_set_report(instance, report_id, report_type, buffer,
                                   buffer_size);
@@ -214,6 +232,11 @@ extern "C" void tud_hid_set_report_cb(
 extern "C" void tud_hid_report_received_cb(
     uint8_t instance, uint8_t report_id, const uint8_t* buffer,
     uint16_t buffer_size) {
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    if (instance == SWITCH_PICO_HID_INSTANCE_COUNT) {
+        return;
+    }
+#endif
     if (switch_selected()) {
         switch_pro_hid_report_received(instance, report_id, buffer,
                                        buffer_size);
@@ -221,6 +244,11 @@ extern "C" void tud_hid_report_received_cb(
 }
 
 extern "C" uint8_t const* tud_hid_descriptor_report_cb(uint8_t instance) {
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    if (instance == SWITCH_PICO_HID_INSTANCE_COUNT) {
+        return wii_ir_mouse_report_descriptor;
+    }
+#endif
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) {
         return nullptr;
@@ -378,6 +406,12 @@ extern "C" bool tud_control_request_cb(
 
 extern "C" void tud_mount_cb() {
     LOG_PRINTF("[USB] mount_cb\n");
+#ifdef SWITCH_PICO_WII_IR_GYRO
+    wii_ir_gyro_reset_output();
+#endif
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    usb_wii_ir_mouse_reset();
+#endif
     if (switch_selected()) {
         switch_pro_mount();
     }
@@ -385,6 +419,12 @@ extern "C" void tud_mount_cb() {
 
 extern "C" void tud_umount_cb() {
     LOG_PRINTF("[USB] umount_cb\n");
+#ifdef SWITCH_PICO_WII_IR_GYRO
+    wii_ir_gyro_reset_output();
+#endif
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    usb_wii_ir_mouse_reset();
+#endif
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
     if (xinput_selected()) xinput_stop_rumble();
 #endif

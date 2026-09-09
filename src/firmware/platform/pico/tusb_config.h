@@ -31,7 +31,11 @@ extern "C" {
 #define CFG_TUD_ENDPOINT0_SIZE 64
 
 // Device class configuration
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+#define CFG_TUD_HID (SWITCH_PICO_HID_INSTANCE_COUNT + 1)
+#else
 #define CFG_TUD_HID SWITCH_PICO_HID_INSTANCE_COUNT
+#endif
 #define CFG_TUD_CDC 0
 #define CFG_TUD_MSC 0
 #define CFG_TUD_MIDI 0

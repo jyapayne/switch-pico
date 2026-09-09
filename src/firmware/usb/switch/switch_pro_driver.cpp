@@ -8,6 +8,9 @@
 #include "pico/rand.h"
 #include "pico/time.h"
 #include "tusb.h"
+#ifdef SWITCH_PICO_WII_IR_GYRO
+#include "input/wii_ir_pointer.h"
+#endif
 
 #ifdef SWITCH_PICO_LOG
 #define LOG_PRINTF(...) printf(__VA_ARGS__)
@@ -875,10 +878,24 @@ bool switch_pro_task(uint8_t instance) {
         const uint8_t previous_timestamp = context->switch_report.timestamp;
         uint8_t previous_imu[sizeof(context->switch_report.imuData)];
         memcpy(previous_imu, context->switch_report.imuData, sizeof(previous_imu));
+#ifdef SWITCH_PICO_WII_IR_GYRO
+        // Only IMU fields are read by fill_imu_report_data. Avoid copying
+        // unrelated controls, and retain the original real-gyro state.
+        ControllerState ir_motion;
+        WiiIrGyroReport ir_report{};
+        const bool ir_override = wii_ir_gyro_prepare(
+            instance, time_us_32(), &ir_motion, &ir_report);
+        fill_imu_report_data(*context,
+                             ir_override ? ir_motion : context->input_state, now);
+#else
         fill_imu_report_data(*context, context->input_state, now);
+#endif
         context->switch_report.timestamp += static_cast<uint8_t>(periods * 3);
         if (send_report(instance, *context, 0, &context->switch_report,
                         sizeof(context->switch_report))) {
+#ifdef SWITCH_PICO_WII_IR_GYRO
+            if (ir_override) wii_ir_gyro_commit(ir_report);
+#endif
             context->input_state.motion_sample_count = 0;
             // Stay on the 15 ms clock across 8 ms USB polling quantization.
             // Long stalls skip obsolete periods, never replay a motion burst.

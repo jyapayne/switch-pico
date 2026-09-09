@@ -13,6 +13,9 @@
 #include "platform/pico/system_clock.h"
 #include "profile/controller_profile_runtime.h"
 #endif
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+#include "usb/wii_ir_mouse_usb.h"
+#endif
 
 #ifdef SWITCH_PICO_LOG
 #define LOG_PRINTF(...) printf(__VA_ARGS__)
@@ -258,6 +261,9 @@ int main() {
 
     while (true) {
         tud_task();          // USB device tasks
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+        usb_wii_ir_mouse_task();
+#endif
 
 #ifdef SWITCH_PICO_BLUEPAD32
         switch (bootsel_pairing_button_task()) {

@@ -2,6 +2,10 @@
 #include "bluetooth_transport_config.h"
 #include "input/controller_hotkey_config.h"
 #include "input/switch2_wake.h"
+#ifdef SWITCH_PICO_WII_IR
+#include "input/wii_ir_pointer.h"
+#include "parser/uni_hid_parser_wii_ir.h"
+#endif
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
 #include "input/switch_native_output.h"
 #endif
@@ -66,6 +70,11 @@ constexpr uint8_t kProfileFeedbackStrongMagnitude = UINT8_MAX;
 constexpr uint32_t kJoyConGestureHoldMs = 2000;
 constexpr uint32_t kJoyConGestureFreshMs = 250;
 constexpr uint16_t kJoyConGestureFeedbackMs = 75;
+#ifdef SWITCH_PICO_WII_IR_GYRO
+constexpr uint32_t kWiiAimChordHoldUs = 2000000;
+constexpr uint32_t kWiiAimChordFreshUs = 150000;
+constexpr uint16_t kWiiAimChordButtons = 0x0002 | 0x0001;
+#endif
 // One initial indication can be followed by one committed switch before the
 // Core 1 timer drains the queue. Profile commits are rate-limited well beyond
 // the longest feedback sequence.
@@ -170,6 +179,19 @@ struct WiiOrientationRequest {
     uint32_t connection_generation;
     bool vertical;
 };
+#ifdef SWITCH_PICO_WII_IR_GYRO
+struct WiiAimSource {
+    uint32_t sequence;
+    uint32_t last_report_us;
+    uint32_t started_us;
+    bool have_sequence;
+    bool infrared;
+    bool holding;
+    bool masked;
+    bool latched;
+    bool reposition_masked;
+};
+#endif
 
 
 
@@ -203,6 +225,9 @@ struct BackendSlot {
     bool active;
     bool wii_orientation_pending;
     WiiOrientationRequest pending_wii_orientation;
+#ifdef SWITCH_PICO_WII_IR_GYRO
+    WiiAimSource wii_aim;
+#endif
     bool rumble_pending;
     bool motion_enabled;
     bool feedback_pending;
@@ -1087,15 +1112,30 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
     if (target.active && target.device == device) {
         target.state = state;
         target.pre_hotkey_button_mask = pre_hotkey_button_mask;
+#ifdef SWITCH_PICO_WII_IR_GYRO
+        if (device->controller_type == CONTROLLER_TYPE_WiiController) {
+            const ControllerMotionSample sample =
+                state.motion_sample_count != 0
+                    ? state.motion_samples[0] : ControllerMotionSample{};
+            wii_ir_gyro_update_motion(
+                slot, target.connection_generation, target.motion_enabled, sample);
+            if (!target.motion_enabled) {
+                target.state.motion_sample_count = 0;
+            }
+        }
+#endif
         ++target.state_generation;
         g_macro_capture.observe(slot, target.connection_generation,
-                                time_us_32(), state);
+                                time_us_32(), target.state);
     }
     critical_section_exit(&g_state_lock);
 }
 
 void publish_all_neutral() {
     critical_section_enter_blocking(&g_state_lock);
+#ifdef SWITCH_PICO_WII_IR
+    wii_ir_pointer_reset();
+#endif
     for (BackendSlot& slot : g_slots) {
         clear_switch2_ingress(slot);
         reset_switch2_outputs(slot);
@@ -1111,6 +1151,9 @@ void publish_all_neutral() {
         slot.active = false;
         slot.wii_orientation_pending = false;
         slot.pending_wii_orientation = {};
+#ifdef SWITCH_PICO_WII_IR_GYRO
+        slot.wii_aim = {};
+#endif
         slot.rumble_pending = false;
         slot.retained_host_rumble_valid = false;
         slot.retained_host_rumble = {};
@@ -1452,9 +1495,38 @@ void rotate_solo_joycon(uni_gamepad_t& gamepad, int side,
         axes[1] = side < 0 ? x : negate_motion_axis(x);
     }
 }
+#ifdef SWITCH_PICO_WII_IR_GYRO
+uint32_t wii_aim_chord_button_mask(const uni_hid_device_t* device) {
+    if (device == nullptr ||
+        device->controller_type != CONTROLLER_TYPE_WiiController) {
+        return 0;
+    }
+    switch (device->controller_subtype) {
+        case CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL:
+        case CONTROLLER_SUBTYPE_WIIMOTE_ACCEL:
+            return BUTTON_A | BUTTON_B;
+        case CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL:
+            return BUTTON_X | BUTTON_Y;
+        case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK:
+        case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL:
+            return BUTTON_SHOULDER_L | BUTTON_SHOULDER_R;
+        default:
+            return 0;
+    }
+}
+#endif
+
 uni_gamepad_t logical_gamepad(const BackendSlot& slot) {
     uni_gamepad_t gamepad = slot.gamepad;
     mask_joycon_gesture(gamepad, slot.device);
+#ifdef SWITCH_PICO_WII_IR_GYRO
+    if (slot.wii_aim.masked) {
+        gamepad.buttons &= ~wii_aim_chord_button_mask(slot.device);
+    }
+    if (slot.wii_aim.reposition_masked) {
+        gamepad.buttons &= ~(BUTTON_X | BUTTON_SHOULDER_L);
+    }
+#endif
     if (slot.companion != nullptr) {
         const uni_gamepad_t& right = slot.companion_gamepad;
         gamepad.dpad |= right.dpad;
@@ -1501,11 +1573,103 @@ void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
         strong_magnitude};
     __atomic_add_fetch(&g_local_feedback_requests, 1, __ATOMIC_RELAXED);
 }
+
+void queue_profile_feedback(BackendSlot& slot,
+                            const ProfileFeedbackEnvelope& feedback) {
+    if (slot.pending_profile_feedback_count < kProfileFeedbackQueueCapacity) {
+        slot.pending_profile_feedback[
+            slot.pending_profile_feedback_count++] = feedback;
+    } else {
+        slot.pending_profile_feedback[kProfileFeedbackQueueCapacity - 1u] =
+            feedback;
+    }
+}
+
+#ifdef SWITCH_PICO_WII_IR_GYRO
+void observe_wii_aim_chord(BackendSlot& slot, uni_hid_device_t* device,
+                           const uni_gamepad_t& gamepad,
+                           const uni_wii_ir_snapshot_t* infrared,
+                           uint32_t now_us) {
+    const uint32_t mapped_buttons = wii_aim_chord_button_mask(device);
+    if (mapped_buttons == 0) return;
+    WiiAimSource& aim = slot.wii_aim;
+    const uint8_t slot_index = static_cast<uint8_t>(&slot - g_slots);
+    if (mapped_buttons == (BUTTON_SHOULDER_L | BUTTON_SHOULDER_R)) {
+        const uint32_t controls = BUTTON_X | BUTTON_SHOULDER_L;  // Nunchuk C + 1.
+        const uint32_t pressed = gamepad.buttons & controls;
+        if (aim.infrared && pressed == controls) {
+            aim.reposition_masked = true;
+        } else if (pressed == 0) {
+            aim.reposition_masked = false;
+        }
+    } else {
+        aim.reposition_masked = false;
+    }
+
+    // Expire before accepting a returning packet. Cached snapshots cannot
+    // extend or complete a hold, and a gap requires a full release to retry.
+    // A transport gap cancels the gesture, not the user's selected source.
+    // The pointer's freshness guard stops IR output without falling back.
+    if (aim.have_sequence &&
+        now_us - aim.last_report_us >= kWiiAimChordFreshUs) {
+        aim.holding = false;
+        aim.latched = aim.latched || aim.masked;
+    }
+    const uint32_t pressed_buttons = gamepad.buttons & mapped_buttons;
+    if (pressed_buttons == mapped_buttons) {
+        aim.masked = true;
+    } else {
+        aim.holding = false;
+        if (pressed_buttons == 0) {
+            aim.masked = false;
+            aim.latched = false;
+        } else {
+            aim.latched = aim.latched || aim.masked;
+        }
+    }
+    if (infrared == nullptr ||
+        (aim.have_sequence && infrared->sequence == aim.sequence) ||
+        (!aim.have_sequence && infrared->sequence == 0)) {
+        return;
+    }
+    aim.have_sequence = true;
+    aim.sequence = infrared->sequence;
+    aim.last_report_us = now_us;
+    const uint16_t buttons = infrared->buttons & kWiiAimChordButtons;
+    if (buttons != kWiiAimChordButtons || pressed_buttons != mapped_buttons) {
+        aim.holding = false;
+        aim.latched = aim.latched || aim.masked;
+        return;
+    }
+    if (aim.latched) return;
+    if (!aim.holding) {
+        aim.started_us = now_us;
+        aim.holding = true;
+        return;
+    }
+    if (now_us - aim.started_us < kWiiAimChordHoldUs) return;
+    aim.latched = true;
+    if (!wii_ir_gyro_select(
+            slot_index, slot.connection_generation, !aim.infrared)) {
+        return;
+    }
+    aim.infrared = !aim.infrared;
+    queue_profile_feedback(
+        slot, {slot.connection_generation,
+               static_cast<uint8_t>(aim.infrared ? 2 : 1),
+               ControllerProfileConfirmationPolicy::kRumble});
+    __atomic_add_fetch(&g_local_feedback_requests, 1, __ATOMIC_RELAXED);
+}
+#endif
+
 void reset_slot_hotkeys(BackendSlot& slot) {
     g_macro_capture.disconnect(static_cast<uint8_t>(&slot - g_slots),
                                slot.connection_generation, time_us_32());
     slot.wii_orientation_pending = false;
     slot.pending_wii_orientation = {};
+#ifdef SWITCH_PICO_WII_IR_GYRO
+    slot.wii_aim = {};
+#endif
     slot.motion_enabled = kDefaultMotionEnabled;
     slot.pre_hotkey_button_mask = 0;
     slot.feedback_pending = false;
@@ -1522,6 +1686,9 @@ void reset_slot_hotkeys(BackendSlot& slot) {
 }
 
 void invalidate_slot(BackendSlot& slot) {
+#ifdef SWITCH_PICO_WII_IR
+    wii_ir_pointer_disconnect(static_cast<uint8_t>(&slot - g_slots));
+#endif
     clear_switch2_ingress(slot);
     reset_switch2_outputs(slot);
     reset_slot_hotkeys(slot);
@@ -3102,6 +3269,25 @@ void platform_on_controller_data(uni_hid_device_t* device,
         critical_section_exit(&g_state_lock);
         return;
     }
+#ifdef SWITCH_PICO_WII_IR
+    uni_wii_ir_snapshot_t infrared{};
+    const bool have_infrared = uni_hid_parser_wii_ir_snapshot(device, &infrared);
+#ifdef SWITCH_PICO_WII_IR_GYRO
+    observe_wii_aim_chord(
+        slot, device, controller->gamepad,
+        have_infrared ? &infrared : nullptr, time_us_32());
+#endif
+    if (have_infrared) {
+        const bool nunchuk_c =
+            (device->controller_subtype == CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK ||
+             device->controller_subtype == CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL) &&
+            (controller->gamepad.buttons & BUTTON_X) != 0;
+        wii_ir_pointer_observe(static_cast<uint8_t>(slot_index),
+                             slot.connection_generation, infrared.sequence,
+                             infrared.buttons, infrared.x, infrared.y,
+                             infrared.valid_mask, nunchuk_c);
+    }
+#endif
     const uint8_t extras = uni_hid_parser_switch2_extra_buttons(device);
     if (slot.companion == device) {
         slot.companion_gamepad = controller->gamepad;
@@ -3297,6 +3483,9 @@ void bluepad32_input_backend_init() {
     }
 
     critical_section_init(&g_state_lock);
+#ifdef SWITCH_PICO_WII_IR
+    wii_ir_pointer_init();
+#endif
     configuration_service_prepare();
     profile_service_prepare();
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
@@ -3569,6 +3758,19 @@ bool bluepad32_input_backend_toggle_motion(
     if (slot.active &&
         slot.connection_generation == connection_generation) {
         slot.motion_enabled = !slot.motion_enabled;
+#ifdef SWITCH_PICO_WII_IR_GYRO
+        if (slot.device != nullptr &&
+            slot.device->controller_type == CONTROLLER_TYPE_WiiController) {
+            const ControllerMotionSample sample =
+                slot.state.motion_sample_count != 0
+                    ? slot.state.motion_samples[0] : ControllerMotionSample{};
+            wii_ir_gyro_update_motion(
+                slot_index, connection_generation, slot.motion_enabled, sample);
+            if (!slot.motion_enabled) {
+                slot.state.motion_sample_count = 0;
+            }
+        }
+#endif
         if (slot.motion_enabled) {
             queue_local_feedback(
                 slot, kMotionEnabledFeedbackDurationMs,
@@ -3722,14 +3924,7 @@ bool bluepad32_input_backend_identify(
         const ProfileFeedbackEnvelope feedback{
             slot.connection_generation, 1,
             ControllerProfileConfirmationPolicy::kRumbleAndLed};
-        if (slot.pending_profile_feedback_count <
-            kProfileFeedbackQueueCapacity) {
-            slot.pending_profile_feedback[
-                slot.pending_profile_feedback_count++] = feedback;
-        } else {
-            slot.pending_profile_feedback[
-                kProfileFeedbackQueueCapacity - 1u] = feedback;
-        }
+        queue_profile_feedback(slot, feedback);
         queued = true;
         break;
     }
@@ -3755,14 +3950,7 @@ void bluepad32_input_backend_queue_profile_feedback(
         slot.connection_generation == connection_generation) {
         const ProfileFeedbackEnvelope feedback{
             connection_generation, active_profile_number, policy};
-        if (slot.pending_profile_feedback_count <
-            kProfileFeedbackQueueCapacity) {
-            slot.pending_profile_feedback[
-                slot.pending_profile_feedback_count++] = feedback;
-        } else {
-            slot.pending_profile_feedback[
-                kProfileFeedbackQueueCapacity - 1u] = feedback;
-        }
+        queue_profile_feedback(slot, feedback);
     }
     critical_section_exit(&g_state_lock);
 }

@@ -12,6 +12,9 @@
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 #include "input/haptics_transport_probe.h"
 #endif
+#ifdef SWITCH_PICO_WII_IR_GYRO
+#include "input/wii_ir_pointer.h"
+#endif
 #include "tusb.h"
 #include "usb/usb_output_driver.h"
 
@@ -396,6 +399,21 @@ size_t encode_native_switch_rumble(uint8_t* output, size_t output_size) {
 #endif
 }
 
+size_t encode_wii_ir_gyro(uint8_t* output, size_t output_size) {
+#ifdef SWITCH_PICO_WII_IR_GYRO
+    if (output == nullptr || output_size < kResponseHeaderSize) return 0;
+    uint8_t* payload = output + kResponseHeaderSize;
+    const size_t size = wii_ir_gyro_diagnostics(
+        payload, output_size - kResponseHeaderSize);
+    if (size == 0) return 0;
+    return encode_response(Operation::kWiiIrGyro, Status::kOk, 0, 2, 0,
+                           payload, size, output, output_size);
+#else
+    return encode_response(Operation::kWiiIrGyro, Status::kUnsupportedSchema,
+                           0, 2, 0, nullptr, 0, output, output_size);
+#endif
+}
+
 }  // namespace
 
 bool decode_request(Operation setup_operation, const uint8_t* input,
@@ -441,7 +459,7 @@ size_t encode_response(Operation operation, Status status, uint8_t flags,
     write_u32(&output[12], generation);
     write_u32(&output[16],
               configuration_crc32(payload, payload_size));
-    if (payload_size != 0) {
+    if (payload_size != 0 && payload != &output[kResponseHeaderSize]) {
         memcpy(&output[kResponseHeaderSize], payload, payload_size);
     }
     return required;
@@ -957,7 +975,8 @@ bool usb_configuration_management_vendor_control(
 
     const Operation operation =
         static_cast<Operation>(request->bRequest);
-    if (operation == Operation::kHapticsTransportProbe &&
+    if ((operation == Operation::kHapticsTransportProbe ||
+         operation == Operation::kWiiIrGyro) &&
         request->bmRequestType_bit.direction != TUSB_DIR_IN) {
         return false;
     }
@@ -1038,6 +1057,9 @@ bool usb_configuration_management_vendor_control(
             break;
         case Operation::kNativeSwitchRumble:
             response_size = encode_native_switch_rumble(response, sizeof(response));
+            break;
+        case Operation::kWiiIrGyro:
+            response_size = encode_wii_ir_gyro(response, sizeof(response));
             break;
         case Operation::kMacroCapture:
             response_size = encode_macro_capture(response, sizeof(response));

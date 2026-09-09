@@ -373,11 +373,54 @@ static const uint8_t switch_pro_hid_descriptor[] =
     0xCB, 0x00,  // wDescriptorLength[0] 86
 };
 
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+static const uint8_t wii_ir_mouse_report_descriptor[] =
+{
+    0x05, 0x01,        // Usage Page (Generic Desktop)
+    0x09, 0x02,        // Usage (Mouse)
+    0xA1, 0x01,        // Collection (Application)
+    0x09, 0x01,        //   Usage (Pointer)
+    0xA1, 0x00,        //   Collection (Physical)
+    0x05, 0x09,        //     Usage Page (Button)
+    0x19, 0x01,        //     Usage Minimum (Button 1)
+    0x29, 0x03,        //     Usage Maximum (Button 3)
+    0x15, 0x00,        //     Logical Minimum (0)
+    0x25, 0x01,        //     Logical Maximum (1)
+    0x95, 0x03,        //     Report Count (3)
+    0x75, 0x01,        //     Report Size (1)
+    0x81, 0x02,        //     Input (Data, Variable, Absolute)
+    0x95, 0x01,        //     Report Count (1)
+    0x75, 0x05,        //     Report Size (5)
+    0x81, 0x03,        //     Input (Constant padding)
+    0x05, 0x01,        //     Usage Page (Generic Desktop)
+    0x09, 0x30,        //     Usage (X)
+    0x09, 0x31,        //     Usage (Y)
+    0x15, 0x81,        //     Logical Minimum (-127)
+    0x25, 0x7F,        //     Logical Maximum (127)
+    0x75, 0x08,        //     Report Size (8)
+    0x95, 0x02,        //     Report Count (2)
+    0x81, 0x06,        //     Input (Data, Variable, Relative)
+    0xC0,              //   End Collection
+    0x06, 0x00, 0xFF,  //   Usage Page (Vendor 0xFF00)
+    0x09, 0x01,        //   Usage (IR diagnostics)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x26, 0xFF, 0x00,  //   Logical Maximum (255)
+    0x75, 0x08,        //   Report Size (8)
+    0x95, 0x30,        //   Report Count (48)
+    0xB1, 0x02,        //   Feature (Data, Variable, Absolute)
+    0xC0,              // End Collection
+};
+#endif
+
 static const uint8_t switch_pro_configuration_descriptor[] =
 {
     0x09,        // bLength
     0x02,        // bDescriptorType (Configuration)
-#if SWITCH_PICO_HID_INSTANCE_COUNT == 1
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    (9 + 32 * SWITCH_PICO_HID_INSTANCE_COUNT + 25) & 0xFF,
+    (9 + 32 * SWITCH_PICO_HID_INSTANCE_COUNT + 25) >> 8,
+    SWITCH_PICO_HID_INSTANCE_COUNT + 1,  // Controllers plus mouse
+#elif SWITCH_PICO_HID_INSTANCE_COUNT == 1
     0x29, 0x00,  // wTotalLength 41
     0x01,        // bNumInterfaces 1
 #elif SWITCH_PICO_HID_INSTANCE_COUNT == 2
@@ -527,6 +570,34 @@ static const uint8_t switch_pro_configuration_descriptor[] =
     0x03,        // bmAttributes (Interrupt)
     0x40, 0x00,  // wMaxPacketSize 64
     0x08,        // bInterval 8 (unit depends on device speed)
+#endif
+
+#ifdef SWITCH_PICO_WII_IR_MOUSE
+    0x09,        // bLength
+    0x04,        // bDescriptorType (Interface)
+    SWITCH_PICO_HID_INSTANCE_COUNT,  // Appended after controller interfaces
+    0x00,        // bAlternateSetting
+    0x01,        // bNumEndpoints 1
+    0x03,        // bInterfaceClass (HID)
+    0x01,        // bInterfaceSubClass (Boot)
+    0x02,        // bInterfaceProtocol (Mouse)
+    0x00,        // iInterface (String Index)
+
+    0x09,        // bLength
+    0x21,        // bDescriptorType (HID)
+    0x11, 0x01,  // bcdHID 1.11
+    0x00,        // bCountryCode
+    0x01,        // bNumDescriptors
+    0x22,        // bDescriptorType[0] (Report)
+    sizeof(wii_ir_mouse_report_descriptor) & 0xFF,
+    sizeof(wii_ir_mouse_report_descriptor) >> 8,
+
+    0x07,        // bLength
+    0x05,        // bDescriptorType (Endpoint)
+    0x80 | (SWITCH_PICO_HID_INSTANCE_COUNT + 1),  // IN, 0x85 with four controllers
+    0x03,        // bmAttributes (Interrupt)
+    0x03, 0x00,  // wMaxPacketSize 3 (buttons, dx, dy)
+    0x08,        // bInterval 8 ms
 #endif
 };
 
