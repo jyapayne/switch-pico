@@ -1,3 +1,4 @@
+#include "platform/pico/bootsel_button_sample.h"
 #include "platform/pico/bootsel_pairing_button.h"
 #include "hardware/gpio.h"
 #include "hardware/structs/ioqspi.h"
@@ -48,18 +49,18 @@ void __no_inline_not_in_flash_func(read_bootsel_callback)(void* parameter) {
         IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
 }
 
-BootselPairingButtonSample sample_bootsel() {
+
+}  // namespace
+
+int bootsel_button_sample(void) {
     bool pressed = false;
     const int result = flash_safe_execute(read_bootsel_callback, &pressed,
                                           kFlashSafeTimeoutMs);
     if (result != PICO_OK) {
-        return BootselPairingButtonSample::kUnread;
+        return -1;
     }
-    return pressed ? BootselPairingButtonSample::kPressed
-                   : BootselPairingButtonSample::kReleased;
+    return pressed ? 1 : 0;
 }
-
-}  // namespace
 
 BootselPairingButtonEvent BootselPairingButtonHoldFsm::update(
     BootselPairingButtonSample sample) {
@@ -96,5 +97,8 @@ BootselPairingButtonEvent bootsel_pairing_button_task() {
     }
     g_last_sample_ms = now_ms;
 
-    return g_hold_fsm.update(sample_bootsel());
+    const int sample = bootsel_button_sample();
+    return g_hold_fsm.update(sample < 0 ? BootselPairingButtonSample::kUnread :
+                            sample ? BootselPairingButtonSample::kPressed :
+                                     BootselPairingButtonSample::kReleased);
 }

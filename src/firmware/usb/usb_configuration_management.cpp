@@ -12,6 +12,9 @@
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 #include "input/haptics_transport_probe.h"
 #endif
+#ifdef SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+#include "input/switch2_mouse_capture.h"
+#endif
 #ifdef SWITCH_PICO_WII_IR_GYRO
 #include "input/wii_ir_pointer.h"
 #endif
@@ -396,6 +399,28 @@ size_t encode_native_switch_rumble(uint8_t* output, size_t output_size) {
 #else
     return encode_response(Operation::kNativeSwitchRumble, Status::kUnsupportedSchema, 0,
         kNativeSwitchRumbleSchemaVersion, 0, nullptr, 0, output, output_size);
+#endif
+}
+
+size_t encode_switch2_mouse_capture(uint8_t* output, size_t output_size) {
+#ifdef SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    static_assert(kResponseHeaderSize + SWITCH2_MOUSE_CAPTURE_MAXIMUM_PAYLOAD_SIZE <=
+                  kMaximumResponseSize,
+                  "Switch 2 mouse capture no longer fits the EP0 response buffer");
+    if (output == nullptr || output_size < kResponseHeaderSize) return 0;
+    uint32_t total_records = 0;
+    uint8_t* payload = output + kResponseHeaderSize;
+    const size_t payload_size = switch2_mouse_capture_snapshot(
+        payload, output_size - kResponseHeaderSize, &total_records);
+    if (payload_size == 0) return 0;
+    return encode_response(
+        Operation::kSwitch2MouseCapture, Status::kOk, 0,
+        kSwitch2MouseCaptureSchemaVersion, total_records,
+        payload, payload_size, output, output_size);
+#else
+    return encode_response(
+        Operation::kSwitch2MouseCapture, Status::kUnsupportedSchema, 0,
+        kSwitch2MouseCaptureSchemaVersion, 0, nullptr, 0, output, output_size);
 #endif
 }
 
@@ -976,6 +1001,7 @@ bool usb_configuration_management_vendor_control(
     const Operation operation =
         static_cast<Operation>(request->bRequest);
     if ((operation == Operation::kHapticsTransportProbe ||
+         operation == Operation::kSwitch2MouseCapture ||
          operation == Operation::kWiiIrGyro) &&
         request->bmRequestType_bit.direction != TUSB_DIR_IN) {
         return false;
@@ -1057,6 +1083,9 @@ bool usb_configuration_management_vendor_control(
             break;
         case Operation::kNativeSwitchRumble:
             response_size = encode_native_switch_rumble(response, sizeof(response));
+            break;
+        case Operation::kSwitch2MouseCapture:
+            response_size = encode_switch2_mouse_capture(response, sizeof(response));
             break;
         case Operation::kWiiIrGyro:
             response_size = encode_wii_ir_gyro(response, sizeof(response));

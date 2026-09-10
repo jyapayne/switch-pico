@@ -16,6 +16,9 @@
 #ifdef SWITCH_PICO_WII_IR_MOUSE
 #include "usb/wii_ir_mouse_usb.h"
 #endif
+#ifdef SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+#include "input/switch2_mouse_capture.h"
+#endif
 
 #ifdef SWITCH_PICO_LOG
 #define LOG_PRINTF(...) printf(__VA_ARGS__)
@@ -219,6 +222,9 @@ int main() {
 #endif
     board_init();
     stdio_init_all();
+#ifdef SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    switch2_mouse_capture_init();
+#endif
 
 #ifdef SWITCH_PICO_BLUEPAD32
     bluepad32_input_backend_init();

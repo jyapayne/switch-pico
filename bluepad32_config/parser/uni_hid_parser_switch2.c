@@ -10,6 +10,9 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <string.h>
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+#include <stdio.h>
+#endif
 
 #include <btstack.h>
 #include "bt/uni_bt_defines.h"
@@ -33,6 +36,12 @@ static const uint8_t sw2_service_uuid[16] = {
     0xab, 0x7d, 0xe9, 0xbe, 0x89, 0xfe, 0x49, 0xad, 0x82, 0x8f, 0x11, 0x8f, 0x09, 0xdf, 0x7f, 0xd0};
 static const uint8_t sw2_input_uuid[16] = {
     0xab, 0x7d, 0xe9, 0xbe, 0x89, 0xfe, 0x49, 0xad, 0x82, 0x8f, 0x11, 0x8f, 0x09, 0xdf, 0x7f, 0xd2};
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+static const uint8_t sw2_secondary_left_uuid[16] = {
+    0xcc, 0x1b, 0xbb, 0xb5, 0x73, 0x54, 0x4d, 0x32, 0xa7, 0x16, 0xa8, 0x1c, 0xb2, 0x41, 0xa3, 0x2a};
+static const uint8_t sw2_secondary_right_uuid[16] = {
+    0xd5, 0xa9, 0xe0, 0x1e, 0x2f, 0xfc, 0x4c, 0xca, 0xb2, 0x0c, 0x8b, 0x67, 0x14, 0x2b, 0xf4, 0x42};
+#endif
 static const uint8_t sw2_command_uuid[16] = {
     0x64, 0x9d, 0x4a, 0xc9, 0x8e, 0xb7, 0x4e, 0x6c, 0xaf, 0x44, 0x1e, 0xa5, 0x4f, 0xe5, 0xf0, 0x05};
 static const uint8_t sw2_response_uuid[16] = {
@@ -58,6 +67,9 @@ typedef enum {
     SW2_RESPONSE_DESCRIPTOR, SW2_INPUT_DESCRIPTOR, SW2_SUBSCRIBE_RESPONSE,
     SW2_INFO, SW2_PAIR, SW2_CALIBRATION, SW2_GYRO_CALIBRATION,
     SW2_SUBSCRIBE_INPUT, SW2_FEATURES, SW2_READY,
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    SW2_SECONDARY_DESCRIPTOR, SW2_SUBSCRIBE_SECONDARY,
+#endif
 } sw2_state_t;
 typedef enum { SW2_QUERY_NONE, SW2_QUERY_DISCOVERY, SW2_QUERY_CCCD, SW2_QUERY_COMMAND, SW2_QUERY_RUMBLE } sw2_query_t;
 typedef struct {
@@ -89,12 +101,21 @@ typedef struct {
     uint16_t response_cccd, input_cccd;
     gatt_client_notification_t response_listener, input_listener;
     bool response_listening, input_listening;
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    gatt_client_characteristic_t secondary;
+    uint16_t secondary_cccd;
+    gatt_client_notification_t secondary_listener;
+    bool secondary_listening;
+#endif
     btstack_timer_source_t timeout_timer, output_timer;
     bool timeout_active, output_active;
     // ATT write-request buffers must outlive the asynchronous call.
     uint8_t command_data[32], rumble_data[33], cccd_data[2];
     uint8_t command_length;
     bool command_pending, command_sent, command_acked;
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+    uint64_t sample_token;
+#endif
     uint8_t step, calibration_slot;
     bool factory_calibration, calibration_done;
     uint32_t memory_address;
@@ -138,6 +159,33 @@ static bool sw2_product(uint16_t pid) {
     return pid == UNI_SW2_PRO_PID || pid == UNI_SW2_JOYCON_L_PID || pid == UNI_SW2_JOYCON_R_PID;
 }
 
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+static bool sw2_mouse_capture_enabled(const sw2_instance_t* ins) {
+    return ins->device->product_id == UNI_SW2_JOYCON_L_PID || ins->device->product_id == UNI_SW2_JOYCON_R_PID;
+}
+
+static void sw2_capture(sw2_instance_t* ins, uint8_t report_id, const uint8_t* report, uint16_t length) {
+    if (sw2_mouse_capture_enabled(ins))
+        switch_pico_switch2_mouse_report(ins->device->product_id, ins->address, report_id, report,
+                                        length > 64 ? 64 : length, btstack_run_loop_get_time_ms());
+}
+
+static void sw2_log_capture(const char* label, const sw2_instance_t* ins,
+                            const uint8_t* data, unsigned length) {
+    if (length > 64 || !sw2_mouse_capture_enabled(ins)) return;
+    static const char hex[] = "0123456789abcdef";
+    char text[129];
+    for (unsigned i = 0; i < length; ++i) {
+        text[2 * i] = hex[data[i] >> 4];
+        text[2 * i + 1] = hex[data[i] & 15];
+    }
+    text[length * 2] = 0;
+    printf("[SW2_%s] pid=%04x address=%02x:%02x:%02x:%02x:%02x:%02x data=%s\n",
+           label, ins->device->product_id, ins->address[0], ins->address[1],
+           ins->address[2], ins->address[3], ins->address[4], ins->address[5], text);
+}
+#endif
+
 bool uni_hid_parser_switch2_is_ble_device(const uni_hid_device_t* d) {
     return d && d->conn.protocol == UNI_BT_CONN_PROTOCOL_BLE && d->vendor_id == UNI_SW2_NINTENDO_VID &&
            sw2_product(d->product_id);
@@ -168,6 +216,13 @@ void uni_hid_parser_switch2_teardown(uni_hid_device_t* d) {
     sw2_instance_t* ins = sw2_instance(d);
     if (!ins)
         return;
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+    if (ins->sample_token) {
+        switch_pico_switch2_sample_result(d->product_id, ins->address, ins->sample_token,
+                                          -1, btstack_run_loop_get_time_ms());
+        ins->sample_token = 0;
+    }
+#endif
     sw2_disarm_timeout(ins);
     if (ins->output_active)
         btstack_run_loop_remove_timer(&ins->output_timer);
@@ -177,6 +232,12 @@ void uni_hid_parser_switch2_teardown(uni_hid_device_t* d) {
     if (ins->input_listening)
         gatt_client_stop_listening_for_characteristic_value_updates(&ins->input_listener);
     ins->response_listening = ins->input_listening = false;
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    if (ins->secondary_listening)
+        gatt_client_stop_listening_for_characteristic_value_updates(&ins->secondary_listener);
+    ins->secondary_listening = false;
+    sw2_capture(ins, 0, NULL, 0);
+#endif
     sw2_discard_host(ins);
     ++ins->haptics_epoch;
     ins->command_pending = ins->rumble_scheduled = false;
@@ -254,6 +315,29 @@ static void sw2_subscribe(sw2_instance_t* ins, bool input) {
                              sw2_gatt_handler, ins->handle, input ? ins->input_cccd : ins->response_cccd, 2, ins->cccd_data));
 }
 
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+static void sw2_discover_secondary_descriptors(sw2_instance_t* ins) {
+    ins->state = SW2_SECONDARY_DESCRIPTOR;
+    ins->query = SW2_QUERY_DISCOVERY;
+    sw2_arm_timeout(ins);
+    sw2_check_query(ins, gatt_client_discover_characteristic_descriptors(
+                             sw2_gatt_handler, ins->handle, &ins->secondary));
+}
+
+static void sw2_subscribe_secondary(sw2_instance_t* ins) {
+    ins->state = SW2_SUBSCRIBE_SECONDARY;
+    ins->query = SW2_QUERY_CCCD;
+    ins->cccd_data[0] = 1;
+    ins->cccd_data[1] = 0;
+    gatt_client_listen_for_characteristic_value_updates(&ins->secondary_listener, sw2_gatt_handler,
+                                                       ins->handle, &ins->secondary);
+    ins->secondary_listening = true;
+    sw2_arm_timeout(ins);
+    sw2_check_query(ins, gatt_client_write_characteristic_descriptor_using_descriptor_handle(
+                             sw2_gatt_handler, ins->handle, ins->secondary_cccd, 2, ins->cccd_data));
+}
+#endif
+
 static bool sw2_transient_write_error(uint8_t status) {
     return status == BTSTACK_ACL_BUFFERS_FULL || status == GATT_CLIENT_BUSY ||
            status == GATT_CLIENT_IN_WRONG_STATE;
@@ -262,6 +346,18 @@ static bool sw2_transient_write_error(uint8_t status) {
 static void sw2_try_command(sw2_instance_t* ins) {
     if (!ins->command_pending || ins->command_sent || ins->query != SW2_QUERY_NONE)
         return;
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+    if (ins->sample_token &&
+        !switch_pico_switch2_sample_result(ins->device->product_id, ins->address,
+                                           ins->sample_token, 0, btstack_run_loop_get_time_ms())) {
+        // Nothing was sent yet. Once sent, keep the old transaction serialized
+        // until its ACK/timeout: the empty response has no request nonce.
+        ins->sample_token = 0;
+        ins->command_pending = false;
+        sw2_disarm_timeout(ins);
+        return;
+    }
+#endif
     // Re-check immediately before every application-pairing write, including a
     // deferred write after ACL backpressure. A closed window cannot write MACs.
     if (ins->command_data[0] == 0x15 && !switch_pico_switch2_pairing_allowed()) {
@@ -342,6 +438,12 @@ static bool sw2_calibration(sw2_stick_t* out, const uint8_t* data) {
 static void sw2_continue(sw2_instance_t* ins) {
     switch (ins->state) {
         case SW2_INFO:
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            if (sw2_mouse_capture_enabled(ins) && ins->step == 1) {
+                sw2_send_command(ins, 0x10, 0x01, NULL, 0);
+                break;
+            }
+#endif
             sw2_read_memory(ins, 0x13000, 0x40);
             break;
         case SW2_PAIR: {
@@ -372,7 +474,15 @@ static void sw2_continue(sw2_instance_t* ins) {
             sw2_read_memory(ins, 0x13044, 12);
             break;
         case SW2_FEATURES: {
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+            // Match the console's complete native feature set, including the
+            // status associated with bit 5, rather than a mouse-only capture.
+            const uint8_t features[4] = {sw2_mouse_capture_enabled(ins) ? 0x37 : 0x04, 0, 0, 0};
+#elif SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            const uint8_t features[4] = {sw2_mouse_capture_enabled(ins) ? 0x14 : 0x04, 0, 0, 0};
+#else
             const uint8_t features[4] = {0x04, 0, 0, 0};
+#endif
             sw2_send_command(ins, 0x0c, ins->step ? 0x04 : 0x02, features, sizeof(features));
             break;
         }
@@ -393,8 +503,22 @@ static void sw2_complete_command(sw2_instance_t* ins) {
         return;
     ins->command_pending = false;
     sw2_disarm_timeout(ins);
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+    if (ins->sample_token) {
+        switch_pico_switch2_sample_result(ins->device->product_id, ins->address,
+                                           ins->sample_token, 1, btstack_run_loop_get_time_ms());
+        ins->sample_token = 0;
+    }
+#endif
     switch (ins->state) {
         case SW2_INFO:
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            if (sw2_mouse_capture_enabled(ins) && ins->step == 0) {
+                ins->step = 1;
+                break;
+            }
+            ins->step = 0;
+#endif
             ins->state = ins->needs_pair ? SW2_PAIR : SW2_CALIBRATION;
             break;
         case SW2_PAIR:
@@ -438,6 +562,19 @@ static void sw2_response(sw2_instance_t* ins, const uint8_t* data, uint16_t leng
         sw2_fail(ins, "negative application ACK", data[5]);
         return;
     }
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+    // 0A/02 has an empty application ACK, not a returned sample ID or status
+    // payload. Never interpret a truncated/extended response as its success.
+    if (ins->sample_token && (length != 8 || data[4] != 0x10 || data[6] || data[7]))
+        return;
+#endif
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    if (ins->state == SW2_INFO && ins->step == 1) {
+        const uint8_t expected_type = ins->device->product_id == UNI_SW2_JOYCON_R_PID ? 1 : 0;
+        if (data[0] != 0x10 || length < 20 || data[11] != expected_type) return;
+        sw2_log_capture("VERSION", ins, data + 8, 12);
+    }
+#endif
     if (data[0] == 0x02) {
         if (length < 16 || data[8] != ins->memory_length ||
             little_endian_read_32(data, 12) != ins->memory_address || length < 16 + ins->memory_length)
@@ -449,6 +586,12 @@ static void sw2_response(sw2_instance_t* ins, const uint8_t* data, uint16_t leng
                 sw2_fail(ins, "controller identity mismatch", 0);
                 return;
             }
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            // This read is already part of normal setup. Capture its validated
+            // factory identity for USB enumeration research, without new reads
+            // or writes to the controller. Keep donor data out of source files.
+            sw2_log_capture("IDENTITY", ins, value, 64);
+#endif
         } else if (ins->state == SW2_CALIBRATION) {
             // Both solo Joy-Cons store their one stick in calibration slot 1.
             unsigned stick = ins->device->product_id == UNI_SW2_JOYCON_R_PID ? 1 : ins->calibration_slot;
@@ -483,6 +626,10 @@ static void sw2_response(sw2_instance_t* ins, const uint8_t* data, uint16_t leng
             return;
         }
     }
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    if (ins->state == SW2_FEATURES)
+        sw2_capture(ins, 0xc0, data, length);
+#endif
     ins->command_acked = true;
     sw2_complete_command(ins);
 }
@@ -527,6 +674,12 @@ static void sw2_query_complete(sw2_instance_t* ins, uint8_t status) {
                 sw2_fail(ins, "missing required characteristic", 0);
                 return;
             }
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            if (sw2_mouse_capture_enabled(ins) && !ins->secondary.value_handle) {
+                sw2_fail(ins, "missing secondary input characteristic", 0);
+                return;
+            }
+#endif
             sw2_discover_descriptors(ins, false);
             break;
         case SW2_RESPONSE_DESCRIPTOR:
@@ -541,13 +694,39 @@ static void sw2_query_complete(sw2_instance_t* ins, uint8_t status) {
                 sw2_fail(ins, "missing input CCCD", 0);
                 return;
             }
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            if (sw2_mouse_capture_enabled(ins)) {
+                sw2_discover_secondary_descriptors(ins);
+                return;
+            }
+#endif
             sw2_subscribe(ins, false);
             break;
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+        case SW2_SECONDARY_DESCRIPTOR:
+            if (!ins->secondary_cccd) {
+                sw2_fail(ins, "missing secondary input CCCD", 0);
+                return;
+            }
+            sw2_subscribe(ins, false);
+            break;
+#endif
         case SW2_SUBSCRIBE_RESPONSE:
             ins->state = SW2_INFO;
             sw2_continue(ins);
             break;
         case SW2_SUBSCRIBE_INPUT:
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+        case SW2_SUBSCRIBE_SECONDARY:
+            // This Joy-Con emits the last subscribed input format, not both.
+            // Native capture is explicit: its packed input is not yet decoded
+            // by the normal gamepad parser. Common capture preserves controls.
+            if (SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE &&
+                ins->state == SW2_SUBSCRIBE_INPUT && sw2_mouse_capture_enabled(ins)) {
+                sw2_subscribe_secondary(ins);
+                return;
+            }
+#endif
             ins->state = SW2_FEATURES;
             ins->step = 0;
             sw2_continue(ins);
@@ -576,6 +755,12 @@ static void sw2_characteristic(sw2_instance_t* ins, const gatt_client_characteri
         target = &ins->rumble;
         properties = ATT_PROPERTY_WRITE | ATT_PROPERTY_WRITE_WITHOUT_RESPONSE;
     }
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+    if (!target && sw2_mouse_capture_enabled(ins) &&
+             memcmp(characteristic->uuid128, ins->device->product_id == UNI_SW2_JOYCON_L_PID ?
+                    sw2_secondary_left_uuid : sw2_secondary_right_uuid, 16) == 0)
+        target = &ins->secondary;
+#endif
     if (!target)
         return;
     if (target->value_handle || !(characteristic->properties & properties) ||
@@ -632,8 +817,14 @@ static void sw2_gatt_handler(uint8_t packet_type, uint16_t channel, uint8_t* pac
             break;
         }
         case GATT_EVENT_ALL_CHARACTERISTIC_DESCRIPTORS_QUERY_RESULT: {
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            if (ins->state != SW2_RESPONSE_DESCRIPTOR && ins->state != SW2_INPUT_DESCRIPTOR &&
+                ins->state != SW2_SECONDARY_DESCRIPTOR)
+                return;
+#else
             if (ins->state != SW2_RESPONSE_DESCRIPTOR && ins->state != SW2_INPUT_DESCRIPTOR)
                 return;
+#endif
             gatt_client_characteristic_descriptor_t descriptor;
             gatt_event_all_characteristic_descriptors_query_result_get_characteristic_descriptor(packet, &descriptor);
             if (descriptor.uuid16 != SW2_CCCD_UUID)
@@ -641,6 +832,12 @@ static void sw2_gatt_handler(uint8_t packet_type, uint16_t channel, uint8_t* pac
             bool input = ins->state == SW2_INPUT_DESCRIPTOR;
             gatt_client_characteristic_t* characteristic = input ? &ins->input : &ins->response;
             uint16_t* handle = input ? &ins->input_cccd : &ins->response_cccd;
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            if (ins->state == SW2_SECONDARY_DESCRIPTOR) {
+                characteristic = &ins->secondary;
+                handle = &ins->secondary_cccd;
+            }
+#endif
             if (*handle || descriptor.handle <= characteristic->value_handle || descriptor.handle > characteristic->end_handle) {
                 sw2_fail(ins, "invalid or ambiguous CCCD", descriptor.handle);
                 return;
@@ -657,6 +854,14 @@ static void sw2_gatt_handler(uint8_t packet_type, uint16_t channel, uint8_t* pac
                 return;
             uint16_t handle = gatt_event_notification_get_value_handle(packet);
             const uint8_t* value = gatt_event_notification_get_value(packet);
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            // BLE omits report IDs. Keep both formats raw and never route the
+            // secondary packed motion data through the common gamepad parser.
+            if (length && ins->input_listening && handle == ins->input.value_handle)
+                sw2_capture(ins, 0x05, value, length);
+            else if (length && ins->secondary_listening && handle == ins->secondary.value_handle)
+                sw2_capture(ins, ins->device->product_id == UNI_SW2_JOYCON_L_PID ? 0x07 : 0x08, value, length);
+#endif
             if (ins->response_listening && handle == ins->response.value_handle)
                 sw2_response(ins, value, length);
             else if (ins->state == SW2_READY && ins->input_listening && handle == ins->input.value_handle && length == SW2_REPORT_SIZE) {
@@ -1271,6 +1476,18 @@ static void sw2_output_tick(btstack_timer_source_t* timer) {
     if (ins->state != SW2_READY)
         return; // A blocked setup command rescheduled itself, or awaits its ACK.
     uint32_t now = btstack_run_loop_get_time_ms();
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+    if (!ins->command_pending && ins->query == SW2_QUERY_NONE) {
+        uint8_t sample_id;
+        if (switch_pico_switch2_sample_take(ins->device->product_id, ins->address, now,
+                                            &sample_id, &ins->sample_token)) {
+            const uint8_t data[4] = {sample_id, 0, 0, 0};
+            sw2_send_command(ins, 0x0a, 0x02, data, sizeof(data));
+            if (!ins->device)
+                return;
+        }
+    }
+#endif
     sw2_update_haptics(ins, now);
     bool sent = sw2_send_rumble(ins, now);
     if (!ins->device)

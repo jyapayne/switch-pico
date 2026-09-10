@@ -36,7 +36,9 @@
 namespace {
 
 AdapterUsbMode g_mode = AdapterUsbMode::kSwitch;
+#ifndef SWITCH_PICO_SWITCH2_USB_BRIDGE
 uint16_t g_string_descriptor[32]{};
+#endif
 
 bool xinput_selected() {
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
@@ -55,9 +57,11 @@ bool generic_selected() {
 #endif
 }
 
+#ifndef SWITCH_PICO_SWITCH2_USB_BRIDGE
 bool switch_selected() {
     return !xinput_selected() && !generic_selected();
 }
+#endif
 
 }  // namespace
 
@@ -193,6 +197,9 @@ void usb_output_driver_set_rumble_callback(
     switch_pro_set_rumble_callback(instance, callback);
 }
 
+// The bridge's probe main owns every descriptor and TinyUSB callback. Keep the
+// legacy output APIs above available to the normal backend dependency graph.
+#ifndef SWITCH_PICO_SWITCH2_USB_BRIDGE
 extern "C" uint16_t tud_hid_get_report_cb(
     uint8_t instance, uint8_t report_id, hid_report_type_t report_type,
     uint8_t* buffer, uint16_t requested_length) {
@@ -454,3 +461,4 @@ extern "C" usbd_class_driver_t const* usbd_app_driver_get_cb(
     *driver_count = 0;
     return nullptr;
 }
+#endif

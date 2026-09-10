@@ -29,6 +29,24 @@ enum {
 // Supplied by the platform's existing bounded pairing-window policy.
 bool switch_pico_switch2_pairing_allowed(void);
 
+#if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+// BTstack-core callback: canonical Bluepad32 address, unmodified BLE payload
+// (without a report-ID prefix), at most 64 bytes. 0xc0 is a validated feature
+// reply; report_id=0 with length=0 marks teardown and permits a NULL report.
+void switch_pico_switch2_mouse_report(uint16_t product_id, const uint8_t address[6], uint8_t report_id,
+                                     const uint8_t* report, uint16_t length, uint32_t received_ms);
+#endif
+
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+// BTstack-core mailbox hooks. Take only when READY with no command/query in
+// flight. Result 0 checks ownership before a deferred write, 1 records verified
+// command completion, and -1 fails it. False means canceled/stale/wrong source.
+bool switch_pico_switch2_sample_take(uint16_t product_id, const uint8_t address[6],
+                                    uint32_t now_ms, uint8_t* sample_id, uint64_t* token);
+bool switch_pico_switch2_sample_result(uint16_t product_id, const uint8_t address[6],
+                                      uint64_t token, int result, uint32_t now_ms);
+#endif
+
 bool uni_bt_le_switch2_handle_advertisement(const uint8_t* packet, uint16_t size);
 bool uni_hid_parser_switch2_is_ble_device(const struct uni_hid_device_s* d);
 void uni_hid_parser_switch2_on_le_connected(struct uni_hid_device_s* d);

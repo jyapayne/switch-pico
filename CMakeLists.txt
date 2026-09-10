@@ -28,6 +28,12 @@ option(SWITCH_PICO_WII_IR_MOUSE
        "Experiment: Wii IR as a composite USB mouse with Switch controllers" OFF)
 option(SWITCH_PICO_WII_IR_GYRO
        "Experiment: selectable Wii IR or MotionPlus gyro aiming" OFF)
+option(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+       "Experiment: capture Joy-Con 2 mouse reports through USB management" OFF)
+option(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE
+       "Capture native Joy-Con mouse reports instead of common controller reports" OFF)
+option(SWITCH_PICO_SWITCH2_USB_BRIDGE
+       "Experiment: forward a native right Joy-Con 2 through the verified USB probe" OFF)
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     set(SWITCH_PICO_NATIVE_DEFAULT ON)
     set(SWITCH_PICO_CLOCK_DEFAULT 300)
@@ -131,6 +137,40 @@ endif()
 if(SWITCH_PICO_WII_IR_MOUSE)
     add_compile_definitions(SWITCH_PICO_WII_IR_MOUSE=1)
 endif()
+if(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE)
+    if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
+            OR NOT SWITCH_PICO_ENABLE_BLE)
+        message(FATAL_ERROR "Joy-Con mouse capture requires BLUEPAD32 with BLE")
+    endif()
+    add_compile_definitions(
+        SWITCH_PICO_SWITCH2_MOUSE_CAPTURE=1
+        SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE=$<BOOL:${SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE}>)
+endif()
+if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
+    if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
+            OR NOT SWITCH_PICO_ENABLE_BLE
+            OR NOT SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
+            OR NOT SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE)
+        message(FATAL_ERROR
+            "Switch 2 USB bridge requires BLUEPAD32 with BLE and native Joy-Con mouse capture")
+    endif()
+    if(SWITCH_PICO_WII_IR_MOUSE OR SWITCH_PICO_WII_IR_GYRO)
+        message(FATAL_ERROR "Switch 2 USB bridge owns USB; Wii IR USB experiments cannot be combined")
+    endif()
+    set(SWITCH2_BRIDGE_SOURCE_ADDRESS "" CACHE STRING
+        "Physical right Joy-Con 2 Bluetooth source address (xx:xx:xx:xx:xx:xx)")
+    string(TOLOWER "${SWITCH2_BRIDGE_SOURCE_ADDRESS}" bridge_source_address)
+    string(LENGTH "${bridge_source_address}" bridge_source_address_length)
+    if(NOT bridge_source_address_length EQUAL 17
+            OR NOT bridge_source_address MATCHES "^([0-9a-f][0-9a-f]:)+[0-9a-f][0-9a-f]$"
+            OR bridge_source_address STREQUAL "00:00:00:00:00:00"
+            OR bridge_source_address STREQUAL "ff:ff:ff:ff:ff:ff")
+        message(FATAL_ERROR "Provide SWITCH2_BRIDGE_SOURCE_ADDRESS as a physical six-byte Bluetooth address")
+    endif()
+    string(REPLACE ":" ",0x" SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES "${bridge_source_address}")
+    string(PREPEND SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES "0x")
+    add_compile_definitions(SWITCH_PICO_SWITCH2_USB_BRIDGE=1)
+endif()
 set(PICO_BOARD pico CACHE STRING "Board type")
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
         AND NOT PICO_BOARD STREQUAL "pico2_w")
@@ -170,6 +210,9 @@ endif()
 include(pico_sdk_import.cmake)
 
 project(switch-pico C CXX ASM)
+if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
+    include(${CMAKE_CURRENT_LIST_DIR}/tools/switch2_usb_probe/probe_build.cmake)
+endif()
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
@@ -281,11 +324,23 @@ endif()
 set(SWITCH_PICO_SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/src/firmware)
 
 add_executable(switch-pico
-        ${SWITCH_PICO_SOURCE_DIR}/main.cpp
         ${SWITCH_PICO_SOURCE_DIR}/usb/usb_output_driver.cpp
         ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_pro_driver.cpp
         ${SWITCH_PICO_SOURCE_DIR}/usb/switch/switch_haptics.cpp
 )
+if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
+    switch2_usb_probe_configure(switch-pico)
+    if(NOT SWITCH2_PROBE_USB_INIT OR NOT SWITCH2_PROBE_FACTORY_FILE
+            OR NOT SWITCH2_PROBE_USER_CALIBRATION_FILE)
+        message(FATAL_ERROR "Switch 2 USB bridge requires the initialized probe with factory and user calibration captures")
+    endif()
+    target_sources(switch-pico PRIVATE
+        ${SWITCH2_USB_PROBE_DIR}/controller_input.cpp)
+    target_compile_definitions(switch-pico PRIVATE
+        SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES=${SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES})
+else()
+    target_sources(switch-pico PRIVATE ${SWITCH_PICO_SOURCE_DIR}/main.cpp)
+endif()
 if(SWITCH_PICO_WII_IR_MOUSE OR SWITCH_PICO_WII_IR_GYRO)
     target_sources(switch-pico PRIVATE
         ${SWITCH_PICO_SOURCE_DIR}/input/wii_ir_pointer.cpp
@@ -294,6 +349,10 @@ endif()
 if(SWITCH_PICO_WII_IR_MOUSE)
     target_sources(switch-pico PRIVATE
         ${SWITCH_PICO_SOURCE_DIR}/usb/wii_ir_mouse_usb.cpp)
+endif()
+if(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE)
+    target_sources(switch-pico PRIVATE
+        ${SWITCH_PICO_SOURCE_DIR}/input/switch2_mouse_capture.cpp)
 endif()
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     target_sources(switch-pico PRIVATE
@@ -391,8 +450,10 @@ else()
     )
 endif()
 
-pico_set_program_name(switch-pico "switch-pico")
-pico_set_program_version(switch-pico "0.2.0")
+if(NOT SWITCH_PICO_SWITCH2_USB_BRIDGE)
+    pico_set_program_name(switch-pico "switch-pico")
+    pico_set_program_version(switch-pico "0.2.0")
+endif()
 
 # Modify the below lines to enable/disable output over UART/USB
 # UART0 is enabled for debug logging; USB stdio remains off.
@@ -400,7 +461,7 @@ pico_enable_stdio_uart(switch-pico 1)
 pico_enable_stdio_usb(switch-pico 0)
 
 # Add the standard library to the build
-target_link_libraries(switch-pico
+target_link_libraries(switch-pico PRIVATE
         pico_stdlib
         tinyusb_device
         tinyusb_board
@@ -408,7 +469,7 @@ target_link_libraries(switch-pico
         pico_rand
 )
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
-    target_link_libraries(switch-pico
+    target_link_libraries(switch-pico PRIVATE
             bluepad32
             pico_cyw43_arch_none
             pico_btstack_ble
@@ -417,15 +478,15 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             pico_multicore
             pico_flash
     )
-    target_link_libraries(switch-pico hardware_watchdog hardware_adc hardware_vreg hardware_powman)
+    target_link_libraries(switch-pico PRIVATE hardware_watchdog hardware_adc hardware_vreg hardware_powman)
 endif()
 
 if (SWITCH_PICO_LOG)
     target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_LOG=1)
 endif()
 
-# Internal includes are rooted at src/firmware. TinyUSB discovers tusb_config.h
-# through the Pico platform directory.
+# Internal includes are rooted at src/firmware. Ordinary builds discover
+# tusb_config.h here; the bridge selects the probe config explicitly.
 target_include_directories(switch-pico PRIVATE
         ${SWITCH_PICO_SOURCE_DIR}
         ${SWITCH_PICO_SOURCE_DIR}/platform/pico

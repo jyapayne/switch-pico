@@ -39,6 +39,7 @@ constexpr size_t kMacroCaptureEventSize = 20;
 constexpr uint16_t kNativeSwitchRumbleSchemaVersion = 2;
 constexpr size_t kNativeSwitchRumbleRowSize = 80;
 constexpr size_t kNativeSwitchRumblePayloadSize = 4 * kNativeSwitchRumbleRowSize;
+constexpr uint16_t kSwitch2MouseCaptureSchemaVersion = 1;
 constexpr size_t kMaximumResponseSize =
     kResponseHeaderSize + kProfileListPayloadSize;
 constexpr size_t kMaximumChunkSize =
@@ -79,6 +80,7 @@ enum class Operation : uint8_t {
     kHapticsTransportProbe = 0x41,
     kMacroCapture = 0x42,
     kNativeSwitchRumble = 0x43,
+    kSwitch2MouseCapture = 0x44,
     kWiiIrGyro = 0x45,
 };
 
