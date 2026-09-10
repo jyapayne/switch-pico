@@ -1823,6 +1823,7 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         config_manager.PROFILE_LEGACY_DEFAULT_DIGITAL_THRESHOLD,
     )
     migrated_default = config_manager.ControllerProfile.from_bytes(legacy_default_wire)
+    assert migrated_default.swing.button == config_manager.PROFILE_NONE_BUTTON
     assert (
         migrated_default.left_trigger.digital_threshold
         == config_manager.PROFILE_DEFAULT_DIGITAL_THRESHOLD
@@ -1857,6 +1858,7 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         macro_cancel=1,
     )
     migrated_previous = config_manager.ControllerProfile.from_bytes(previous_wire)
+    assert migrated_previous.swing.button == config_manager.PROFILE_NONE_BUTTON
     assert migrated_previous.left_trigger.output == 16
     assert migrated_previous.right_trigger.output == 17
     assert migrated_previous.macros[0].trigger_mask == 1
@@ -1867,7 +1869,7 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     legacy_json_object = default_profile.to_json_object()
     legacy_json_object["schema_version"] = config_manager.PROFILE_LEGACY_SCHEMA_VERSION
     legacy_json_object["size"] = config_manager.PROFILE_LEGACY_SIZE
-    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map"):
+    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map", "swing"):
         del legacy_json_object[field]
     del legacy_json_object["motion_toggle_chord"]
     del legacy_json_object["triggers"]["left"]["output"]
@@ -1930,7 +1932,7 @@ def test_schema5_full_macro_stream_migrates_bytes_and_json(monkeypatch) -> None:
 
     obj["schema_version"] = 5
     obj["size"] = 256
-    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map"):
+    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map", "swing"):
         del obj[field]
     for macro in obj["macros"]:
         del macro["playback"]
@@ -1970,7 +1972,8 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     assert encoded[294:336] == bytes(42)
     assert encoded[336:344] == bytes((3, 255, 0, 1, 1, 1, 2, 1))
     assert encoded[344:358] == bytes([255]) * 14
-    assert encoded[358:] == bytes(26)
+    assert encoded[358:364] == bytes(6)
+    assert encoded[367:] == bytes(17)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
     assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
 
@@ -1981,6 +1984,7 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     legacy_json["schema_version"] = 6
     del legacy_json["extra_button_map"]
     del legacy_json["shift"]["extra_button_map"]
+    del legacy_json["swing"]
     assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
     assert config_manager.ControllerProfile.from_json_object(legacy_json) == profile
     device = FakeDevice()
@@ -1994,7 +1998,8 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     assert old_listing[1] == config_manager.ProfileListEntry(device.stable_identity, 1, "Custom controller")
 
 
-def test_schema7_extra_controls_keep_output_channels_and_wire_layout() -> None:
+@pytest.mark.parametrize("version", [7, 8])
+def test_schema7_extra_controls_keep_output_channels_and_wire_layout(version: int) -> None:
     obj = custom_profile().to_json_object()
     obj["extra_button_map"] = dict(zip(
         config_manager.EXTRA_BUTTONS,
@@ -2013,16 +2018,32 @@ def test_schema7_extra_controls_keep_output_channels_and_wire_layout() -> None:
     for index, names in enumerate((["c", "gl"], ["gr"], ["left_sl", "left_sr"], ["right_sl", "right_sr"])):
         obj["macros"][index]["trigger"] = names
         obj["macros"][index]["cancel"] = config_manager.EXTRA_BUTTONS[index + 3]
+    obj["schema_version"] = version
+    if version == 7:
+        del obj["swing"]
     profile = config_manager.ControllerProfile.from_json_object(obj)
     encoded = profile.to_bytes()
-    assert encoded[:4] == struct.pack("<HH", 7, 384)
+    assert encoded[:4] == struct.pack("<HH", config_manager.PROFILE_SCHEMA_VERSION, 384)
     assert encoded[344:351] == bytes((0, 17, 16, 255, 14, 7, 9))
     assert encoded[351:358] == bytes((1, 255, 2, 3, 8, 12, 15))
     assert encoded[358:364] == bytes((3, 4, 24, 96, 65, 10))
-    assert encoded[364:] == bytes(20)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
     assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
     assert len(profile.button_map) == len(profile.shift.button_map) == len(profile.turbo_modes) == 16
+    assert profile.swing.button == config_manager.PROFILE_NONE_BUTTON
+    legacy_wire = bytearray(encoded)
+    struct.pack_into("<H", legacy_wire, 0, version)
+    if version == 7:
+        legacy_wire[364:] = bytes(20)
+    device = FakeDevice()
+    device.profiles[(device.stable_identity.to_bytes(), 1)] = bytes(legacy_wire)
+    assert config_manager.read_profile(device, device.stable_identity, 1) == profile
+    listing = config_manager.parse_profile_list(config_manager.parse_response(
+        make_response(config_manager.OP_PROFILE_LIST, device._profile_list_payload(), schema=version),
+        config_manager.OP_PROFILE_LIST,
+    ))
+    assert listing[1].identity == device.stable_identity
+    assert listing[1].active_profile_index == 1
 
 
 @pytest.mark.parametrize("path", [
@@ -2058,6 +2079,8 @@ def test_schema6_rejects_schema7_controls_in_old_fields(offset: int, value: int)
 ])
 def test_schema7_rejects_extra_map_and_mask_overflow(offset: int, value: int) -> None:
     payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    struct.pack_into("<H", payload, 0, 7)
+    payload[364:] = bytes(20)
     payload[offset] = value
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerProfile.from_bytes(payload)
@@ -2083,6 +2106,7 @@ def test_legacy_control_profiles_preserve_custom_actions(version: int) -> None:
     assert profile.macros[0].trigger_mask == 3
     assert profile.macros[0].cancel_control == (17 if version == 4 else 2)
     assert profile.extra_button_map == (255,) * 7
+    assert profile.swing.button == config_manager.PROFILE_NONE_BUTTON
     obj = profile.to_json_object()
     obj["schema_version"] = version
     obj["size"] = 256
@@ -2091,10 +2115,89 @@ def test_legacy_control_profiles_preserve_custom_actions(version: int) -> None:
     macro.pop("repeat_count")
     macro["steps"].append(config_manager.MacroStep.end().to_json_object())
     obj["macro"] = macro
-    for key in ("shortcuts", "shift", "turbo_settings", "extra_button_map"):
+    for key in ("shortcuts", "shift", "turbo_settings", "extra_button_map", "swing"):
         del obj[key]
     assert config_manager.ControllerProfile.from_json_object(obj) == profile
     assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()) == profile
+
+
+@pytest.mark.parametrize(("button", "sensitivity", "modifier"), [
+    ("south", "low", "right_sr"),
+    ("dpad_right", "high", "south"),
+    ("west", "medium", "right_trigger"),
+    (None, "high", None),
+])
+def test_swing_profile_round_trip_preserves_other_settings(
+    button: str | None, sensitivity: str, modifier: str | None,
+) -> None:
+    before = custom_profile()
+    obj = before.to_json_object()
+    obj["swing"] = {
+        "button": button, "sensitivity": sensitivity, "modifier": modifier,
+    }
+    profile = config_manager.ControllerProfile.from_json_object(obj)
+    assert replace(profile, swing=before.swing) == before
+    assert profile.to_json_object()["swing"] == obj["swing"]
+    assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
+    assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()) == profile
+    device = FakeDevice()
+    config_manager.write_profile(device, device.stable_identity, 2, profile, 1.0)
+    assert config_manager.read_profile(device, device.stable_identity, 2) == profile
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("button", "left_trigger"),
+    ("button", "right_sr"),
+    ("button", 0),
+    ("sensitivity", "extreme"),
+    ("sensitivity", None),
+    ("sensitivity", 1),
+    ("modifier", "unknown"),
+    ("modifier", False),
+])
+def test_swing_rejects_invalid_json_settings(field: str, value: object) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    obj["swing"][field] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("button", -1), ("button", 16), ("button", True),
+    ("sensitivity", -1), ("sensitivity", 3), ("sensitivity", False),
+    ("modifier", -1), ("modifier", 25), ("modifier", 256),
+])
+def test_swing_rejects_invalid_in_memory_settings(field: str, value: object) -> None:
+    with pytest.raises(config_manager.ConfigManagerError):
+        replace(config_manager.ProfileSwing(), **{field: value})
+
+
+@pytest.mark.parametrize(("offset", "value"), [
+    (364, 16), (365, 3), (366, 25), (367, 1),
+])
+def test_swing_rejects_corrupt_wire_settings(offset: int, value: int) -> None:
+    payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    payload[offset] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize("mutation", [
+    "missing", "unknown", "missing_button", "missing_sensitivity", "missing_modifier",
+    "legacy_field",
+])
+def test_swing_json_fields_are_strict(mutation: str) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    if mutation == "missing":
+        del obj["swing"]
+    elif mutation == "unknown":
+        obj["swing"]["enabled"] = False
+    elif mutation.startswith("missing_"):
+        del obj["swing"][mutation.removeprefix("missing_")]
+    else:
+        obj["schema_version"] = 7
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
 
 
 @pytest.mark.parametrize(

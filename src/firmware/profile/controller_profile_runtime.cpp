@@ -16,6 +16,7 @@ struct ControllerProfileRuntimeContext {
     bool profile_snapshot_valid = false;
     ControllerProfile profile{};
     ControllerSyntheticInputContext synthetic{};
+    WiiSwingDetector swing{};
     bool runtime_generations_initialized = false;
     AdapterUsbMode output_mode = AdapterUsbMode::kSwitchProbe;
     uint32_t configuration_reset_generation = 0;
@@ -145,6 +146,7 @@ void refresh_profile(ControllerProfileRuntimeContext* context,
             input_snapshot.state, context->profile);
     controller_synthetic_input_cancel(
         &context->synthetic, current_input_control_mask);
+    context->swing.reset();
     const uint32_t hotkey_control_mask =
         (current_input_control_mask & ~0xffffu) |
         input_snapshot.pre_hotkey_button_mask;
@@ -339,6 +341,7 @@ ControllerProfileTransformResult controller_profile_runtime_transform(
          context->configuration_reset_generation != reset_generation)) {
         controller_synthetic_input_cancel(
             &context->synthetic, state_control_mask);
+        context->swing.reset();
         context->previous_hotkey_control_mask = input_control_mask;
         context->activation_requested = true;
         context->activation_transaction_id = 0;
@@ -349,9 +352,24 @@ ControllerProfileTransformResult controller_profile_runtime_transform(
     const uint32_t consumed_controls =
         process_hotkeys(context, slot, input_control_mask);
     context->previous_hotkey_control_mask = input_control_mask;
-    return controller_synthetic_input_apply(
+    const bool macro_was_active = context->synthetic.macro_active;
+    ControllerProfileTransformResult result = controller_synthetic_input_apply(
         &context->synthetic, snapshot.state, context->profile, now_ms,
         consumed_controls, consumed_controls != 0);
+    const ControllerProfileSwingConfiguration& swing = context->profile.swing;
+    const bool modifier_held = swing.modifier == CONTROLLER_PROFILE_NO_BUTTON ||
+        (swing.modifier < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT &&
+         (input_control_mask & (1u << swing.modifier)) != 0);
+    const bool allowed = swing.button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT &&
+        modifier_held && consumed_controls == 0 &&
+        !macro_was_active && !context->synthetic.macro_active;
+    if (context->swing.update(snapshot.accelerometer, now_ms, swing.sensitivity, allowed)) {
+        controller_profile_apply_button_mask(
+            controller_profile_extract_button_mask(result.state) |
+                static_cast<uint16_t>(1u << swing.button),
+            &result.state);
+    }
+    return result;
 }
 
 bool controller_profile_runtime_take_initial_profile_indication(

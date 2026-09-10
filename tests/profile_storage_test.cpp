@@ -522,6 +522,15 @@ void test_compaction_preserves_latest_records() {
           "compaction metadata did not append");
   profile.extra_button_map[0] = 16;
   profile.shift.extra_button_map[6] = 15;
+  profile.swing = {2, 2, 24};
+  ControllerProfile other = controller_profile_default(global, 7);
+  other.swing = {15, 0, CONTROLLER_PROFILE_NO_BUTTON};
+  const ControllerIdentity stable = identity(1);
+  require(storage.set(global, 7, other) == ProfileStorageResult::kOk,
+          "second swing profile did not append");
+  other.swing = {0, 1, 16};
+  require(storage.set(stable, 0, other) == ProfileStorageResult::kOk,
+          "stable identity swing profile did not append");
   for (uint16_t write = 1; write <= 260; ++write) {
     profile.weak_rumble_scale = static_cast<uint8_t>(write);
     require(storage.set(global, 0, profile) == ProfileStorageResult::kOk,
@@ -538,6 +547,9 @@ void test_compaction_preserves_latest_records() {
               recovered.weak_rumble_scale == static_cast<uint8_t>(260) &&
               recovered.extra_button_map[0] == 16 &&
               recovered.shift.extra_button_map[6] == 15 &&
+              recovered.swing.button == 2 &&
+              recovered.swing.sensitivity == 2 &&
+              recovered.swing.modifier == 24 &&
               reloaded.get_alias(global, metadata, sizeof(metadata)) ==
                   ProfileStorageResult::kOk &&
               strcmp(metadata, "Fallback") == 0 &&
@@ -546,6 +558,17 @@ void test_compaction_preserves_latest_records() {
                   ProfileStorageResult::kOk &&
               strcmp(metadata, "Compacted") == 0,
           "compaction did not preserve profiles and metadata");
+  require(reloaded.get(global, 7, &recovered) == ProfileStorageResult::kOk &&
+              recovered.swing.button == 15 &&
+              recovered.swing.sensitivity == 0 &&
+              recovered.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
+              reloaded.get(stable, 0, &recovered) == ProfileStorageResult::kOk &&
+              recovered.swing.button == 0 &&
+              recovered.swing.sensitivity == 1 &&
+              recovered.swing.modifier == 16 &&
+              reloaded.get(global, 1, &recovered) == ProfileStorageResult::kOk &&
+              recovered.swing.button == CONTROLLER_PROFILE_NO_BUTTON,
+          "compacted swing settings bled across profiles or identities");
 }
 
 void test_legacy_migration_is_atomic_and_complete() {

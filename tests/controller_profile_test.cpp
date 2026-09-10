@@ -123,9 +123,9 @@ void test_profile_wire_schema() {
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)),
             "default profile did not encode");
-    require(encoded[0] == 7 && encoded[1] == 0 &&
+    require(encoded[0] == 8 && encoded[1] == 0 &&
                 encoded[2] == 0x80 && encoded[3] == 1,
-            "profile header is not little-endian v7/384");
+            "profile header is not little-endian v8/384");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
         require(encoded[4 + index] == index,
@@ -276,6 +276,10 @@ void test_legacy_profile_migration() {
                 kLegacyDefaultProfile, sizeof(kLegacyDefaultProfile),
                 &migrated),
             "legacy default profile did not decode");
+    require(migrated.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                migrated.swing.sensitivity == 1 &&
+                migrated.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
+            "legacy padding enabled a swing gesture");
     require(migrated.triggers[0].digital_threshold ==
                     CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD &&
                 migrated.triggers[1].digital_threshold ==
@@ -389,6 +393,37 @@ void test_legacy_profile_migration() {
                 migrated.macros[0].step_count == 1 &&
                 migrated.macro_steps[0].output_button_mask == 1,
             "legacy nonempty macro did not migrate into shared pool");
+
+    previous_encoded[60] = CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL;
+    previous_encoded[70] = CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    previous_encoded[76] = 3;
+    previous_encoded[78] = 1;
+    previous_encoded[79] = 0;
+    previous_encoded[81] = 11;
+    previous_encoded[98] = 4;
+    for (uint8_t version = 3; version <= 4; ++version) {
+        previous_encoded[0] = version;
+        previous_encoded[75] = version == 4 ? 0x21 : 0;
+        migrated.swing = {2, 2, 24};
+        require(controller_profile_decode(
+                    previous_encoded, sizeof(previous_encoded), &migrated) &&
+                    migrated.triggers[0].output ==
+                        CONTROLLER_PROFILE_RIGHT_TRIGGER_CONTROL &&
+                    migrated.triggers[1].output ==
+                        CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+                    migrated.switching_chord ==
+                        (3u | (version == 4 ? 1u << 16 : 0u)) &&
+                    migrated.motion_toggle_chord ==
+                        (4u | (version == 4 ? 1u << 17 : 0u)) &&
+                    migrated.macros[0].trigger_mask == 1 &&
+                    migrated.macros[0].cancel_control == 11 &&
+                    migrated.macros[0].step_count == 1 &&
+                    migrated.macro_steps[0].output_button_mask == 1 &&
+                    migrated.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                    migrated.swing.sensitivity == 1 &&
+                    migrated.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
+                "legacy control mapping or action migration lost settings");
+    }
 
     ControllerProfile current =
         controller_profile_default(controller_identity_global(), 0);
@@ -514,7 +549,10 @@ void test_set_b_sparse_extension_and_migration() {
                 decoded.macro_steps[7].right_trigger == 0xabcd &&
                 decoded.macros[0].mode == ControllerProfileMacroMode::kOnce &&
                 decoded.shortcuts.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
-                decoded.turbo_override_mask == 0,
+                decoded.turbo_override_mask == 0 &&
+                decoded.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                decoded.swing.sensitivity == 1 &&
+                decoded.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
             "schema5 full136-byte macro stream did not migrate");
     require(controller_profile_encode(decoded, encoded, sizeof(encoded)) &&
                 memcmp(&legacy[4], &encoded[4], sizeof(legacy) - 4) == 0,
@@ -595,6 +633,10 @@ void test_schema6_migration_preserves_every_setting() {
             "schema6 profile could not upgrade");
     require(memcmp(upgraded + 2, kLegacySchema6Profile + 2, 342) == 0,
             "schema6 migration changed an existing encoded setting");
+    require(profile.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.swing.sensitivity == 1 &&
+                profile.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
+            "schema6 padding became a swing gesture");
     for (uint8_t index = 0; index < CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT; ++index) {
         require(profile.extra_button_map[index] == CONTROLLER_PROFILE_NO_BUTTON &&
                     profile.shift.extra_button_map[index] == CONTROLLER_PROFILE_NO_BUTTON,
@@ -681,6 +723,89 @@ void test_extra_control_schema_round_trip_and_output_limits() {
             "Shift extra mapping admitted an analog destination");
 }
 
+void test_schema7_migration_preserves_extra_controls_and_macros() {
+    uint8_t legacy[sizeof(kLegacySchema6Profile)]{};
+    memcpy(legacy, kLegacySchema6Profile, sizeof(legacy));
+    legacy[0] = 7;
+    const uint8_t extra_map[] = {0, 16, 17, 12, 13, 14, 15};
+    const uint8_t shifted_map[] = {15, 14, 13, 12, 3, 2, 0xff};
+    memcpy(legacy + 344, extra_map, sizeof(extra_map));
+    memcpy(legacy + 351, shifted_map, sizeof(shifted_map));
+    legacy[256] = 18;
+    legacy[266] = 24;
+    for (uint8_t index = 0; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+        legacy[98 + index * 6] = static_cast<uint8_t>(
+            (legacy[98 + index * 6] & 3u) | ((24 - index) << 2));
+        legacy[358 + index] = static_cast<uint8_t>(1u << index);
+    }
+    legacy[362] = 0x55;
+    legacy[363] = 0x2a;
+    ControllerProfile migrated{};
+    migrated.swing = {2, 2, 24};
+    uint8_t upgraded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_decode(legacy, sizeof(legacy), &migrated) &&
+                controller_profile_encode(migrated, upgraded, sizeof(upgraded)) &&
+                memcmp(legacy + 2, upgraded + 2, 362) == 0 &&
+                migrated.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                migrated.swing.sensitivity == 1 &&
+                migrated.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
+            "schema7 migration lost existing settings or enabled swing");
+    for (size_t offset = 364; offset < sizeof(legacy); ++offset) {
+        legacy[offset] = 1;
+        require(!controller_profile_decode(legacy, sizeof(legacy), &migrated),
+                "schema7 interpreted reserved padding as swing settings");
+        legacy[offset] = 0;
+    }
+}
+
+void test_swing_wire_settings_and_rejection() {
+    ControllerProfile profile =
+        controller_profile_default(controller_identity_global(), 0);
+    profile.swing = {15, 2, 24};
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    ControllerProfile decoded{};
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                encoded[364] == 15 && encoded[365] == 2 && encoded[366] == 24 &&
+                controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
+                decoded.swing.button == 15 && decoded.swing.sensitivity == 2 &&
+                decoded.swing.modifier == 24,
+            "swing wire settings did not round-trip");
+    const ControllerProfileSwingConfiguration invalid_settings[] = {
+        {16, 2, 24}, {254, 2, 24}, {15, 3, 24}, {15, 255, 24},
+        {15, 2, 25}, {15, 2, 254}, {255, 3, 255}, {255, 1, 25}};
+    for (const auto& invalid : invalid_settings) {
+        profile.swing = invalid;
+        require(!controller_profile_validate(profile) &&
+                    !controller_profile_encode(profile, encoded, sizeof(encoded)),
+                "invalid swing settings were accepted for encoding");
+        encoded[364] = invalid.button;
+        encoded[365] = invalid.sensitivity;
+        encoded[366] = invalid.modifier;
+        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "invalid swing wire settings were accepted");
+    }
+    profile.swing = {0, 0, 0};
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
+                decoded.swing.button == 0 && decoded.swing.sensitivity == 0 &&
+                decoded.swing.modifier == 0,
+            "zero-valued swing settings were mistaken for disabled settings");
+    for (size_t offset = 367; offset < sizeof(encoded); ++offset) {
+        encoded[offset] = 1;
+        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "nonzero swing extension reservation was accepted");
+        encoded[offset] = 0;
+    }
+    profile.swing = {CONTROLLER_PROFILE_NO_BUTTON, 0,
+                     CONTROLLER_PROFILE_NO_BUTTON};
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
+                decoded.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                decoded.swing.sensitivity == 0 &&
+                decoded.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
+            "disabled swing did not preserve sensitivity and absent modifier");
+}
+
 }  // namespace
 int main() {
     test_pair_identity_wire_and_member_validation();
@@ -691,5 +816,7 @@ int main() {
     test_legacy_database_strides();
     test_schema6_migration_preserves_every_setting();
     test_extra_control_schema_round_trip_and_output_limits();
+    test_schema7_migration_preserves_extra_controls_and_macros();
+    test_swing_wire_settings_and_rejection();
     return 0;
 }

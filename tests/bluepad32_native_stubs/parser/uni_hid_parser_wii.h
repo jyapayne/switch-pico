@@ -13,6 +13,10 @@ typedef enum wii_flags {
 } wii_mode_t;
 
 void uni_hid_parser_wii_set_mode(uni_hid_device_t* device, wii_mode_t mode);
+static inline bool uni_hid_parser_wii_accel_snapshot(
+    uni_hid_device_t*, int32_t[3], uint32_t*) {
+    return false;
+}
 
 #ifdef __cplusplus
 }

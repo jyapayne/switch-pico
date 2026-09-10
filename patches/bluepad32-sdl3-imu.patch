@@ -1256,6 +1256,21 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_switch.c b/src/compo
      logi("Switch: setup timer timeout, failed state: 0x%02x\n", ins->state);
      process_fsm(d);
  }
+diff --git a/src/components/bluepad32/include/parser/uni_hid_parser_wii.h b/src/components/bluepad32/include/parser/uni_hid_parser_wii.h
+--- a/src/components/bluepad32/include/parser/uni_hid_parser_wii.h
++++ b/src/components/bluepad32/include/parser/uni_hid_parser_wii.h
+@@ -8,1 +8,2 @@
++#include <stdbool.h>
+ #include <stdint.h>
+@@ -46,3 +47,8 @@
+ void uni_hid_parser_wii_request_report_type(struct uni_hid_device_s* d, wii_report_type_t report_type);
++
++// Calibrated physical acceleration, independent of gyro/IR output selection.
++// Sequence advances only on a fresh accelerometer report, never status/acks.
++bool uni_hid_parser_wii_accel_snapshot(struct uni_hid_device_s* d,
++                                     int32_t accel[3], uint32_t* sequence);
+ 
+ #endif  // UNI_HID_PARSER_WII_H
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/components/bluepad32/parser/uni_hid_parser_wii.c
 --- a/src/components/bluepad32/parser/uni_hid_parser_wii.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_wii.c
@@ -1328,7 +1343,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      wii_mode_t mode; /* horizontal, accel, vertical, rumble, etc.. */
      enum wii_devtype dev_type;
      enum wii_exttype ext_type;
-@@ -159,6 +167,29 @@
+@@ -159,6 +167,30 @@
      uint16_t rumble_duration_ms;
  
      balance_board_calibration_t balance_board_calibration;
@@ -1349,6 +1364,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
 +    // Two factory blocks, fast then slow; preserve all 16 bits of calibration.
 +    uint8_t mp_calibration[32];
 +    int32_t accel[3];
++    uint32_t accel_sequence;
 +    int32_t gyro[3];
 +    int16_t nunchuk_x;
 +    int16_t nunchuk_y;
@@ -1358,7 +1374,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  
      // Debug only
      int debug_fd;         // File descriptor where dump is saved
-@@ -177,7 +208,6 @@
+@@ -177,7 +209,6 @@
  static void process_drm_kae(uni_hid_device_t* d, const uint8_t* report, uint16_t len);
  static void process_drm_kee(uni_hid_device_t* d, const uint8_t* report, uint16_t len);
  static void process_drm_e(uni_hid_device_t* d, const uint8_t* report, uint16_t len);
@@ -1366,7 +1382,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  static udraw_tablet_t process_udraw_tablet(const uint8_t* e, uint16_t len);
  static balance_board_t process_balance_board(uni_hid_device_t* d, const uint8_t* e, uint16_t len);
  
-@@ -196,6 +226,43 @@
+@@ -196,6 +227,43 @@
  static void on_wii_set_rumble_on(btstack_timer_source_t* ts);
  static void on_wii_set_rumble_off(btstack_timer_source_t* ts);
  static void wii_play_dual_rumble_now(struct uni_hid_device_s* d, uint16_t duration_ms);
@@ -1410,7 +1426,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  
  // Constants
  static const char* wii_devtype_names[] = {
-@@ -217,124 +284,436 @@
+@@ -217,124 +285,436 @@
  
  // process_ functions
  
@@ -1957,7 +1973,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  }
  
  static void process_req_data_read_calibration_data(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
-@@ -444,17 +823,83 @@
+@@ -444,17 +824,83 @@
  
  // Defined here: http://wiibrew.org/wiki/Wiimote#0x21:_Read_Memory_Data
  static void process_req_data(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
@@ -2048,7 +2064,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
          case WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION:
              process_req_data_read_calibration_data(d, report, len);
              break;
-@@ -465,7 +910,6 @@
+@@ -465,7 +911,6 @@
              process_req_data_dump_eeprom(d, report, len);
              break;
          default:
@@ -2056,7 +2072,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
              break;
      }
  }
-@@ -473,29 +917,44 @@
+@@ -473,29 +918,44 @@
  // Defined here:
  // http://wiibrew.org/wiki/Wiimote#0x22:_Acknowledge_output_report.2C_return_function_result
  static void process_req_return(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
@@ -2124,7 +2140,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      }
  }
  
-@@ -514,15 +973,26 @@
+@@ -514,15 +974,26 @@
      const uint8_t* data = &report[1];
      wii_instance_t* ins = get_wii_instance(d);
  
@@ -2160,7 +2176,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      }
      // Process misc buttons
      ctl->gamepad.misc_buttons |= (data[1] & 0x80) ? MISC_BUTTON_SYSTEM : 0;  // Button "home"
-@@ -563,46 +1033,101 @@
+@@ -563,46 +1034,116 @@
  // Used for WiiMote in Accelerometer Mode. Defined here:
  // http://wiibrew.org/wiki/Wiimote#0x31:_Core_Buttons_and_Accelerometer
  static void process_drm_ka(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
@@ -2217,8 +2233,23 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
 +    ins->accel[0] = uni_imu_scale(ins->accel_zero[0] - x, ins->accel_span[0], UNI_IMU_ACCEL_RES_PER_G);
 +    ins->accel[1] = uni_imu_scale(z - ins->accel_zero[2], ins->accel_span[2], UNI_IMU_ACCEL_RES_PER_G);
 +    ins->accel[2] = uni_imu_scale(y - ins->accel_zero[1], ins->accel_span[1], UNI_IMU_ACCEL_RES_PER_G);
++    if (++ins->accel_sequence == 0)
++        ++ins->accel_sequence;
 +    for (int i = 0; i < 3; i++)
 +        d->controller.gamepad.accel[i] = ins->accel[i];
++}
++
++bool uni_hid_parser_wii_accel_snapshot(uni_hid_device_t* d,
++                                     int32_t accel[3], uint32_t* sequence) {
++    if (!d || !accel || !sequence || d->report_parser.setup != uni_hid_parser_wii_setup)
++        return false;
++    wii_instance_t* ins = get_wii_instance(d);
++    if (!ins->accel_calibrated || ins->accel_sequence == 0)
++        return false;
++    for (int i = 0; i < 3; ++i)
++        accel[i] = ins->accel[i];
++    *sequence = ins->accel_sequence;
++    return true;
 +}
 +
 +static int16_t wii_nunchuk_axis(uint8_t raw, const uint8_t* calibration, bool invert) {
@@ -2302,7 +2333,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  }
  
  // Used in WiiMote + Nunchuk Mode
-@@ -617,31 +1142,17 @@
+@@ -617,31 +1158,17 @@
      }
  
      wii_instance_t* ins = get_wii_instance(d);
@@ -2342,7 +2373,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
          // Better if uDraw reports its own "type", but for the moment
          // it gets reported and the 2nd half of a gamepad.
  
-@@ -668,59 +1179,59 @@
+@@ -668,59 +1195,59 @@
          ctl->gamepad.buttons |= n.button_lower ? BUTTON_Y : 0;
      }
  
@@ -2450,7 +2481,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  
  static udraw_tablet_t process_udraw_tablet(const uint8_t* e, uint16_t len) {
      // uDraw Tablet format here:
-@@ -1002,52 +1513,18 @@
+@@ -1002,52 +1529,18 @@
      logi("fsm: req_status\n");
      wii_instance_t* ins = get_wii_instance(d);
      ins->state = WII_FSM_DID_REQ_STATUS;
@@ -2508,7 +2539,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  }
  
  static void wii_fsm_ext_read_register(uni_hid_device_t* d) {
-@@ -1055,8 +1532,7 @@
+@@ -1055,8 +1548,7 @@
      wii_instance_t* ins = get_wii_instance(d);
      ins->state = WII_FSM_EXT_DID_READ_REGISTER;
  
@@ -2518,7 +2549,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      uint16_t bytes_to_read = 6;
      wii_read_mem(d, WII_READ_FROM_REGISTERS, offset, bytes_to_read);
  }
-@@ -1066,8 +1542,7 @@
+@@ -1066,8 +1558,7 @@
      wii_instance_t* ins = get_wii_instance(d);
      ins->state = WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION;
  
@@ -2528,7 +2559,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      uint16_t bytes_to_read = 16;
      wii_read_mem(d, WII_READ_FROM_REGISTERS, offset, bytes_to_read);
  }
-@@ -1077,8 +1552,7 @@
+@@ -1077,8 +1568,7 @@
      wii_instance_t* ins = get_wii_instance(d);
      ins->state = WII_FSM_BALANCE_BOARD_DID_READ_CALIBRATION2;
  
@@ -2538,7 +2569,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      uint16_t bytes_to_read = 8;
      wii_read_mem(d, WII_READ_FROM_REGISTERS, offset, bytes_to_read);
  }
-@@ -1086,6 +1560,10 @@
+@@ -1086,6 +1576,10 @@
  static void wii_fsm_assign_device(uni_hid_device_t* d) {
      logi("fsm: assign_device\n");
      wii_instance_t* ins = get_wii_instance(d);
@@ -2549,7 +2580,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      uint8_t dev = ins->dev_type;
      switch (dev) {
          case WII_DEVTYPE_UNK:
-@@ -1100,18 +1578,8 @@
+@@ -1100,18 +1594,8 @@
              }
              uint8_t report_type = 0xff;
              if (ins->ext_type == WII_EXT_NUNCHUK) {
@@ -2570,7 +2601,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
              } else if (ins->ext_type == WII_EXT_CLASSIC_CONTROLLER) {
                  logi("Wii: requesting E (Classic Controller)\n");
                  d->controller_subtype = CONTROLLER_SUBTYPE_WII_CLASSIC;
-@@ -1125,21 +1593,17 @@
+@@ -1125,21 +1609,17 @@
                  d->controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_UDRAW_TABLET;
                  report_type = WII_REPORT_TYPE_KE;
              } else {
@@ -2602,7 +2633,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
              uni_hid_parser_wii_request_report_type(d, report_type);
              break;
          }
-@@ -1164,7 +1628,10 @@
+@@ -1164,7 +1644,10 @@
      ins->state = WII_FSM_LED_UPDATED;
      wii_process_fsm(d);
  
@@ -2614,7 +2645,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  }
  
  static void wii_fsm_dump_eeprom(struct uni_hid_device_s* d) {
-@@ -1218,7 +1685,15 @@
+@@ -1218,7 +1701,15 @@
              // Do nothing
              break;
          case WII_FSM_DEV_GUESSED:
@@ -2631,7 +2662,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
              break;
          case WII_FSM_BALANCE_BOARD_READ_CALIBRATION:
              wii_fsm_balance_board_read_calibration(d);
-@@ -1234,6 +1709,19 @@
+@@ -1234,6 +1725,19 @@
              wii_fsm_update_led(d);
              break;
          case WII_FSM_LED_UPDATED:
@@ -2651,7 +2682,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
              break;
          default:
              loge("Wii: wii_process_fsm() unexpected state: %d\n", ins->state);
-@@ -1249,10 +1737,10 @@
+@@ -1249,10 +1753,10 @@
  
      ins->mode = WII_MODE_HORIZONTAL;
      ins->state = WII_FSM_SETUP;
@@ -2666,7 +2697,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  
      // Dump EEPROM
  #if ENABLE_EEPROM_DUMP
-@@ -1267,13 +1755,18 @@
+@@ -1267,13 +1771,18 @@
  }
  
  void uni_hid_parser_wii_init_report(uni_hid_device_t* d) {
@@ -2687,7 +2718,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
          return;
      switch (report[0]) {
          case WIIPROTO_REQ_STATUS:
-@@ -1291,6 +1784,14 @@
+@@ -1291,6 +1800,14 @@
          case WII_REPORT_TYPE_KAE:
              process_drm_kae(d, report, len);
              break;
@@ -2702,7 +2733,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
          case WII_REPORT_TYPE_KEE:
              process_drm_kee(d, report, len);
              break;
-@@ -1307,6 +1808,9 @@
+@@ -1307,6 +1824,9 @@
              logi("Wii parser: unknown report type: 0x%02x\n", report[0]);
              printf_hexdump(report, len);
      }
@@ -2712,7 +2743,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
  }
  
  void uni_hid_parser_wii_set_player_leds(uni_hid_device_t* d, uint8_t leds) {
-@@ -1371,29 +1875,25 @@
+@@ -1371,29 +1891,25 @@
  
  void uni_hid_parser_wii_set_mode(uni_hid_device_t* d, wii_mode_t mode) {
      wii_instance_t* ins = get_wii_instance(d);
@@ -2757,7 +2788,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
      uni_hid_device_send_intr_report(d, report, sizeof(report));
  }
  
-@@ -1480,10 +1980,13 @@
+@@ -1480,10 +1996,13 @@
  
  static void wii_read_mem(uni_hid_device_t* d, wii_read_type_t t, uint32_t offset, uint16_t size) {
      logi("****** read_mem: offset=0x%04x, size=%d from=%d\n", offset, size, t);
@@ -2772,7 +2803,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_wii.c b/src/componen
        (offset & 0xff0000) >> 16, (offset & 0xff00) >> 8, (offset & 0xff), // Offset
        (size & 0xff00) >> 8, (size & 0xff), // Size in bytes
          // clang-format on
-@@ -1491,6 +1994,15 @@
+@@ -1491,6 +2010,15 @@
      uni_hid_device_send_intr_report(d, report, sizeof(report));
  }
  

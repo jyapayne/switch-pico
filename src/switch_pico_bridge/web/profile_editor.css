@@ -495,6 +495,8 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .action-card-heading > span { display: block; margin-top: 8px; color: var(--muted); font-size: 0.73rem; line-height: 1.45; }
 .action-kind { color: var(--section-accent); font-size: 0.62rem; font-weight: 850; letter-spacing: 0.11em; text-transform: uppercase; }
 
+.swing-controls { margin-bottom: 18px; }
+.swing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 14px; }
 .macro-controls { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr); gap: 14px; margin-bottom: 20px; }
 .macro-picker { display: flex; grid-column: 1 / -1; align-items: stretch; justify-content: space-between; gap: 14px; padding: 13px; border: 1px solid var(--line); border-radius: 16px; background: #090f1d; }
 .macro-tabs { display: grid; grid-template-columns: repeat(4, minmax(90px, 1fr)); gap: 8px; flex: 1; }

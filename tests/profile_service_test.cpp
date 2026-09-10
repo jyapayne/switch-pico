@@ -295,7 +295,7 @@ void test_profile_bounds_and_transaction_namespace() {
           "transaction namespaces were not enforced");
 }
 
-void test_schema7_validation_and_atomic_selection() {
+void test_current_schema_validation_and_atomic_selection() {
   const ControllerIdentity id = stable_identity();
   require(profile_service_select(id, 6) ==
               ConfigurationTransactionStatus::kCommitted,
@@ -308,6 +308,7 @@ void test_schema7_validation_and_atomic_selection() {
   updated.turbo_defaults = {30, 1, 255};
   updated.extra_button_map[6] = 16;
   updated.shift.extra_button_map[0] = 3;
+  updated.swing = {2, 2, 24};
   updated.macros[0].trigger_mask = 1u << 24;
   updated.macros[0].cancel_control = 19;
   updated.macros[0].step_count = 1;
@@ -320,11 +321,15 @@ void test_schema7_validation_and_atomic_selection() {
   uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
   require(controller_profile_encode(updated, encoded, sizeof(encoded)),
           "extended service profile did not encode");
-  require(profile_service_begin(20, id, 6, 6, 384, 0) ==
+  require(profile_service_begin(
+              20, id, 6, CONTROLLER_PROFILE_EXTRA_CONTROL_SCHEMA_VERSION,
+              CONTROLLER_PROFILE_ENCODED_SIZE, 0) ==
               ConfigurationTransactionStatus::kUnsupportedSchema &&
-              profile_service_begin(21, id, 6, 7, 256, 0) ==
+              profile_service_begin(21, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION,
+                                    256, 0) ==
                   ConfigurationTransactionStatus::kMalformed &&
-              profile_service_begin(22, id, 6, 7, 385, 0) ==
+              profile_service_begin(22, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION,
+                                    385, 0) ==
                   ConfigurationTransactionStatus::kTooLarge,
           "service admitted old-schema or incorrectly-sized writes");
 
@@ -346,6 +351,25 @@ void test_schema7_validation_and_atomic_selection() {
               selected.profile.turbo_defaults.rate_hz ==
                   old_selection.profile.turbo_defaults.rate_hz,
           "rejected extension replaced the old selected snapshot");
+
+  require(controller_profile_encode(updated, encoded, sizeof(encoded)),
+          "swing rejection baseline did not encode");
+  encoded[366] = CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT;
+  require(profile_service_begin(
+              25, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
+              profile_storage_crc32(encoded, sizeof(encoded))) ==
+              ConfigurationTransactionStatus::kReceiving &&
+              profile_service_append(25, 0, encoded, sizeof(encoded)) ==
+                  ConfigurationTransactionStatus::kReceiving &&
+              profile_service_commit(25) ==
+                  ConfigurationTransactionStatus::kMalformed,
+          "service admitted an invalid swing modifier with a valid CRC");
+  profile_service_selected_snapshot(&selected);
+  require(selected.metadata.generation == old_selection.metadata.generation &&
+              selected.profile.swing.button == old_selection.profile.swing.button &&
+              active_snapshot(id).profile.swing.button ==
+                  old_selection.profile.swing.button,
+          "rejected swing replaced a selected or active profile");
 
   require(controller_profile_encode(updated, encoded, sizeof(encoded)),
           "valid replacement did not encode");
@@ -373,10 +397,16 @@ void test_schema7_validation_and_atomic_selection() {
               selected.profile.macros[0].repeat_count == 255 &&
               selected.profile.extra_button_map[6] == 16 &&
               selected.profile.shift.extra_button_map[0] == 3 &&
+              selected.profile.swing.button == 2 &&
+              selected.profile.swing.sensitivity == 2 &&
+              selected.profile.swing.modifier == 24 &&
+              active_snapshot(id).profile.swing.button == 2 &&
+              active_snapshot(id).profile.swing.sensitivity == 2 &&
+              active_snapshot(id).profile.swing.modifier == 24 &&
               active_snapshot(id).profile.macros[0].trigger_mask == (1u << 24) &&
               active_snapshot(id).profile.macros[0].cancel_control == 19 &&
               active_snapshot(id).profile.turbo_defaults.rate_hz == 30,
-          "committed schema7 profile did not atomically refresh snapshots");
+          "committed profile did not atomically refresh snapshots");
 }
 
 void test_catalog1_selected_and_active_snapshots_migrate() {
@@ -568,7 +598,7 @@ ProfileStorageIo pico_profile_storage_io() { return fake_io(); }
 int main() {
   test_eight_profile_transactions_and_active_cache();
   test_profile_bounds_and_transaction_namespace();
-  test_schema7_validation_and_atomic_selection();
+  test_current_schema_validation_and_atomic_selection();
   test_catalog1_selected_and_active_snapshots_migrate();
   test_pair_publication_failure_recovery_and_independence();
   std::cout << "profile service tests passed\n";

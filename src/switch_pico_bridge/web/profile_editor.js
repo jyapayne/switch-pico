@@ -131,6 +131,7 @@ const elements = {
   analog: document.querySelector("#analogFields"),
   rumble: document.querySelector("#rumbleFields"),
   builtinActions: document.querySelector("#builtinActions"),
+  swing: document.querySelector("#swingFields"),
   turbo: document.querySelector("#turboFields"),
   turboDefaults: document.querySelector("#turboDefaultFields"),
   turboTimingNotice: document.querySelector("#turboTimingNotice"),
@@ -967,10 +968,11 @@ function buttonOptions(
   selected,
   includeNone = true,
   choices = state.schema.output_controls,
-  style = currentControllerStyle()
+  style = currentControllerStyle(),
+  noneLabel = "None"
 ) {
   const none = includeNone
-    ? `<option value=""${selected === null ? " selected" : ""}>None</option>`
+    ? `<option value=""${selected === null ? " selected" : ""}>${escapeHtml(noneLabel)}</option>`
     : "";
   return none + choices.map((button) => (
     `<option value="${button}"${selected === button ? " selected" : ""}>${escapeHtml(controlLabel(button, style))}</option>`
@@ -1238,6 +1240,7 @@ function refreshSourceControls() {
   const modifiers = [
     [elements.shortcutModifier.querySelector("select"), shortcuts.modifier, shortcuts.profiles],
     [elements.shift.querySelector("#shift-modifier"), state.profile.shift.modifier, []],
+    [elements.swing?.querySelector("#swing-modifier"), state.profile.swing.modifier, []],
     [elements.macroControls.querySelector("#macro-cancel"), state.profile.macros[state.selectedMacro].cancel, []],
   ];
   for (const [select, selected, excluded] of modifiers) {
@@ -1272,6 +1275,16 @@ function refreshSourceControls() {
   document.querySelectorAll("[data-output-label]").forEach(node => {
     node.textContent = controlLabel(node.dataset.outputLabel);
   });
+  const swingButtonSelect = elements.swing?.querySelector("#swing-button");
+  if (swingButtonSelect && state.profile.swing) {
+    swingButtonSelect.innerHTML = buttonOptions(
+      state.profile.swing.button,
+      true,
+      state.schema.buttons,
+      currentControllerStyle(),
+      "Disabled"
+    );
+  }
 }
 
 elements.form.addEventListener("focusout", event => {
@@ -2118,6 +2131,37 @@ function renderMacro() {
       state.schema.default_motion_toggle_chord
     ),
   ].join("");
+  const swing = state.profile.swing;
+  const swingSensitivities = state.schema.swing_sensitivities;
+  elements.swing.innerHTML = `
+    <div class="subpanel-heading">
+      <div>
+        <span class="action-kind">Motion gesture</span>
+        <h4>Wii Remote swing</h4>
+      </div>
+      <span>Accelerometer only · no sensor bar or MotionPlus required</span>
+    </div>
+    <div class="swing-grid">
+      <div class="control-card">
+        <label for="swing-button">Output button</label>
+        <select class="select" id="swing-button" data-kind="swing-button" data-output-select="swing">
+          ${buttonOptions(swing.button, true, state.schema.buttons, controllerStyle, "Disabled")}
+        </select>
+      </div>
+      <div class="control-card">
+        <label for="swing-sensitivity">Sensitivity</label>
+        <select class="select" id="swing-sensitivity" data-kind="swing-sensitivity">
+          ${modeOptions(swingSensitivities, swing.sensitivity)}
+        </select>
+      </div>
+      <div class="control-card">
+        <label for="swing-modifier">Held modifier (optional)</label>
+        <select class="select" id="swing-modifier" data-kind="swing-modifier">
+          ${modifierOptions(swing.modifier)}
+        </select>
+      </div>
+    </div>
+    <p class="field-help">Triggers one ~80 ms press per deliberate swing and must settle before rearming. High sensitivity triggers more easily but is more susceptible to accidental shakes. The optional held modifier is not consumed by the gesture and remains active for normal mapping.</p>`;
   elements.macroControls.innerHTML = `
     <div class="macro-picker">
       <div class="macro-tabs" role="group" aria-label="Choose a macro draft">
@@ -2424,6 +2468,12 @@ function handleFormChange(event) {
       });
     }
     updateTurboTiming();
+  } else if (kind === "swing-button") {
+    state.profile.swing.button = target.value || null;
+  } else if (kind === "swing-sensitivity") {
+    state.profile.swing.sensitivity = target.value;
+  } else if (kind === "swing-modifier") {
+    state.profile.swing.modifier = target.value || null;
   } else if (kind === "macro-selector") {
     state.profile.macros[state.selectedMacro][target.dataset.field] = target.value || null;
   } else if (kind === "macro-playback" || kind === "macro-repeat") {
@@ -2947,6 +2997,7 @@ document.querySelectorAll("[data-reset-section]").forEach((button) => {
     } else if (section === "macro") {
       state.profile.switching_chord = clone(defaults.switching_chord);
       state.profile.motion_toggle_chord = clone(defaults.motion_toggle_chord);
+      state.profile.swing = clone(defaults.swing);
       state.profile.macros = clone(defaults.macros);
     }
     renderEditor();

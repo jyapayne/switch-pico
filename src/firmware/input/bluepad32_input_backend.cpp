@@ -209,6 +209,7 @@ struct BleIdentityMapping {
 
 struct BackendSlot {
     ControllerState state;
+    WiiAccelerometerSample accelerometer{};
     uint16_t pre_hotkey_button_mask;
     ControllerIdentity identity;
     // Non-null with active=false is a connected device still becoming ready.
@@ -1140,6 +1141,7 @@ void publish_all_neutral() {
         clear_switch2_ingress(slot);
         reset_switch2_outputs(slot);
         slot.state = make_neutral_state();
+        slot.accelerometer = {};
         slot.pre_hotkey_button_mask = 0;
         slot.identity = controller_identity_global();
         slot.device = nullptr;
@@ -1672,6 +1674,7 @@ void reset_slot_hotkeys(BackendSlot& slot) {
 #endif
     slot.motion_enabled = kDefaultMotionEnabled;
     slot.pre_hotkey_button_mask = 0;
+    slot.accelerometer = {};
     slot.feedback_pending = false;
     slot.feedback_until_ms = 0;
     slot.pending_feedback = {};
@@ -3298,6 +3301,19 @@ void platform_on_controller_data(uni_hid_device_t* device,
     }
     observe_joycon_gesture(
         device, controller->gamepad, btstack_run_loop_get_time_ms());
+    if (device->controller_type == CONTROLLER_TYPE_WiiController) {
+        int32_t acceleration[3];
+        uint32_t sequence;
+        if (!uni_hid_parser_wii_accel_snapshot(device, acceleration, &sequence)) {
+            slot.accelerometer = {};
+        } else if (!slot.accelerometer.valid || sequence != slot.accelerometer.sequence) {
+            slot.accelerometer = {
+                convert_accel(-static_cast<int64_t>(acceleration[2])),
+                convert_accel(-static_cast<int64_t>(acceleration[0])),
+                convert_accel(acceleration[1]), sequence,
+                btstack_run_loop_get_time_ms(), true};
+        }
+    }
     const uni_gamepad_t gamepad = logical_gamepad(slot);
     uni_hid_device_t* owner = slot.device;
     const bool fresh_motion =
@@ -3680,6 +3696,7 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
     out->pre_hotkey_button_mask =
         slot.pre_hotkey_button_mask;
     out->state = slot.state;
+    out->accelerometer = slot.accelerometer;
     const uint32_t state_generation = slot.state_generation;
     critical_section_exit(&g_state_lock);
 

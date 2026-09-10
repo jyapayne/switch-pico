@@ -314,6 +314,7 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                     "rumble_policies": list(config_manager.RUMBLE_POLICIES),
                     "turbo_modes": list(config_manager.TURBO_MODES),
                     "shift_modes": list(config_manager.SHIFT_MODES),
+                    "swing_sensitivities": list(config_manager.SWING_SENSITIVITIES),
                     "shortcut_selectors": list(
                         config_manager.SHORTCUT_SELECTOR_BUTTONS
                     ),

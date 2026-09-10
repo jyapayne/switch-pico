@@ -7,6 +7,7 @@
 #include "profile/controller_profile.h"
 #include "core/controller_state.h"
 #include "input/controller_macro_capture.h"
+#include "input/wii_swing.h"
 #include "usb/switch/switch_haptics.h"
 
 constexpr uint8_t BLUEPAD32_INPUT_BACKEND_SLOT_COUNT = 4;
@@ -62,6 +63,7 @@ struct Bluepad32SlotSnapshot {
     // Valid only for this snapshot's connection generation.
     uint16_t pre_hotkey_button_mask;
     ControllerState state;
+    WiiAccelerometerSample accelerometer{};
 };
 
 enum class Bluepad32ControllerLayout : uint8_t {

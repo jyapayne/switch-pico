@@ -24,6 +24,7 @@ def test_controller_profile_runtime_native(tmp_path: Path) -> None:
             str(root / "src" / "firmware" / "profile" / "controller_profile_transform.cpp"),
             str(root / "src" / "firmware" / "profile" / "controller_synthetic_input.cpp"),
             str(root / "src" / "firmware" / "profile" / "controller_profile_runtime.cpp"),
+            str(root / "src" / "firmware" / "input" / "wii_swing.cpp"),
             "-o",
             str(executable),
         ],

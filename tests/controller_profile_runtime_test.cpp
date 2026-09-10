@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 
 namespace {
 
@@ -1215,6 +1216,103 @@ void test_extra_hotkeys_consume_mappings_and_rearm() {
             "released extra switching chord did not rearm");
 }
 
+void test_accelerometer_swing_requires_evidence_and_settle() {
+    WiiSwingDetector detector;
+    WiiAccelerometerSample sample{};
+    sample.valid = true;
+    uint32_t now = UINT32_MAX - 100u;
+    auto feed = [&](int16_t x, int16_t y, int16_t z) {
+        now += 10;
+        sample = {x, y, z, sample.sequence + 1, now, true};
+        return detector.update(sample, now, 1, true);
+    };
+    for (int i = 0; i < 20; ++i)
+        require(!feed(0, 0, 4096), "resting gravity armed a swing output");
+    for (int degrees = 0; degrees <= 90; degrees += 3) {
+        const double angle = degrees * 0.017453292519943;
+        require(!feed(static_cast<int16_t>(4096 * std::sin(angle)), 0,
+                      static_cast<int16_t>(4096 * std::cos(angle))),
+                "ordinary rotation of gravity triggered a sword swing");
+    }
+    for (int i = 0; i < 40; ++i) feed(4096, 0, 0);
+    require(!feed(4096, 10000, 0), "a single acceleration spike triggered a swing");
+    for (int i = 0; i < 5; ++i) {
+        now += 2;
+        require(!detector.update(sample, now, 1, true),
+                "repeated reads of one sample accumulated swing evidence");
+    }
+    require(feed(4096, 10000, 0), "sustained acceleration did not produce a swing");
+    for (int i = 0; i < 50; ++i) {
+        const bool pressed = feed(4096, 10000, 0);
+        if (i >= 8) require(!pressed, "continuous shaking retriggered without settling");
+    }
+    for (int i = 0; i < 35; ++i)
+        require(!feed(4096, 0, 0), "settling generated a second button pulse");
+    require(!feed(4096, -10000, 0) && feed(4096, -10000, 0),
+            "settled detector did not accept an opposite-direction swing");
+    require(!detector.update(sample, now + 151, 1, true),
+            "stale acceleration retained a button press");
+}
+
+void test_swing_output_isolated_from_motion_remaps_and_profiles() {
+    prepare_profiles();
+    rows[0].profiles[0].swing.button = 2;  // Final logical west / Switch Y.
+    rows[0].profiles[0].button_map[2] = 1;
+    rows[1].profiles[0].swing.button = 2;
+    auto snapshot = make_snapshot(0);
+    snapshot.state.button_south = true;
+    snapshot.pre_hotkey_button_mask = 1;
+    uint32_t now = 0;
+    auto feed = [&](int16_t x) {
+        now += 10;
+        snapshot.accelerometer = {x, 0, 4096, snapshot.accelerometer.sequence + 1, now, true};
+        return runtime_transform(0, snapshot, now);
+    };
+    for (int i = 0; i < 20; ++i) feed(0);
+    feed(10000);
+    auto output = feed(10000);
+    require(output.state.button_west && output.state.button_south &&
+                !output.state.button_east && output.state.motion_sample_count == 0,
+            "accelerometer swing required gyro output, remapped its target, or lost physical input");
+    require(!runtime_transform(1, make_snapshot(1), now).state.button_west,
+            "a swing leaked to another controller slot");
+    snapshot.state.button_west = true;
+    rows[0].profiles[0].button_map[2] = 2;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, now + 1);
+    require(output.state.button_west, "gesture cancellation released a physical target button");
+    snapshot.state.button_west = false;
+    rows[0].profiles[0].swing.button = 3;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, now + 2);
+    require(!output.state.button_west && !output.state.button_north,
+            "profile refresh replayed a swing onto old or new target");
+}
+
+void test_swing_modifier_release_cancels_and_requires_fresh_settle() {
+    prepare_profiles();
+    rows[0].profiles[0].swing = {2, 1, 0};
+    auto snapshot = make_snapshot(0);
+    uint32_t now = 0;
+    auto feed = [&](int16_t x, bool held) {
+        now += 10;
+        apply_button_mask(held ? 1 : 0, &snapshot);
+        snapshot.accelerometer = {x, 0, 4096, snapshot.accelerometer.sequence + 1, now, true};
+        return runtime_transform(0, snapshot, now);
+    };
+    for (int i = 0; i < 20; ++i) feed(0, true);
+    feed(10000, true);
+    require(feed(10000, true).state.button_west, "held modifier failed to allow a swing");
+    require(!feed(10000, false).state.button_west, "modifier release retained swing output");
+    require(!feed(10000, true).state.button_west, "repressing modifier during motion retriggered");
+    for (int i = 0; i < 60; ++i) feed(0, true);
+    feed(10000, true);
+    require(feed(10000, true).state.button_west, "settling after modifier release did not rearm");
+    snapshot.active = false;
+    require(!runtime_transform(0, snapshot, now + 1).state.button_west,
+            "disconnect retained gesture output");
+}
+
 }  // namespace
 
 bool bluepad32_input_backend_toggle_motion(
@@ -1288,5 +1386,8 @@ int main() {
     test_held_synthetic_sources_and_disconnect_rearming();
     test_shortcut_selector_rollover_without_modifier_release();
     test_extra_hotkeys_consume_mappings_and_rearm();
+    test_accelerometer_swing_requires_evidence_and_settle();
+    test_swing_output_isolated_from_motion_remaps_and_profiles();
+    test_swing_modifier_release_cancels_and_requires_fresh_settle();
     return 0;
 }

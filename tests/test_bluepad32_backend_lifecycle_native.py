@@ -102,6 +102,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                     / "controller_profile_runtime.cpp"
                 ),
                 str(root / "src" / "firmware" / "profile" / "profile_storage.cpp"),
+                str(root / "src" / "firmware" / "input" / "wii_swing.cpp"),
                 str(root / "bluepad32_config" / "parser" / "uni_switch2_haptics.c"),
                 str(
                     root / "src" / "firmware" / "input" / "controller_macro_capture.cpp"

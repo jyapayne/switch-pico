@@ -316,6 +316,7 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${SWITCH_PICO_SOURCE_DIR}/platform/pico/pico_profile_storage.cpp
             ${SWITCH_PICO_SOURCE_DIR}/profile/controller_profile.cpp
             ${SWITCH_PICO_SOURCE_DIR}/profile/controller_profile_runtime.cpp
+            ${SWITCH_PICO_SOURCE_DIR}/input/wii_swing.cpp
             ${SWITCH_PICO_SOURCE_DIR}/profile/controller_profile_transform.cpp
             ${SWITCH_PICO_SOURCE_DIR}/profile/controller_synthetic_input.cpp
             ${SWITCH_PICO_SOURCE_DIR}/profile/profile_service.cpp

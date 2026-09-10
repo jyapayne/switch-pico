@@ -296,6 +296,9 @@ bool controller_profile_validate(const ControllerProfile& profile) {
         }
     }
     if (!valid_source_control(profile.shortcuts.modifier) ||
+        !valid_button(profile.swing.button) ||
+        profile.swing.sensitivity > 2 ||
+        !valid_source_control(profile.swing.modifier) ||
         !valid_source_control(profile.shift.modifier) ||
         static_cast<uint8_t>(profile.shift.mode) >
             static_cast<uint8_t>(ControllerProfileShiftMode::kToggle) ||
@@ -551,6 +554,9 @@ bool controller_profile_encode(const ControllerProfile& profile,
         profile.switching_chord >> CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL);
     output[363] = static_cast<uint8_t>(
         profile.motion_toggle_chord >> CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL);
+    output[364] = profile.swing.button;
+    output[365] = profile.swing.sensitivity;
+    output[366] = profile.swing.modifier;
     return stream_offset <= CONTROLLER_PROFILE_MACRO_STREAM_SIZE;
 }
 
@@ -583,6 +589,8 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     const bool has_expanded_settings =
         schema_version >= CONTROLLER_PROFILE_EXPANDED_SCHEMA_VERSION;
     const bool has_extra_controls =
+        schema_version >= CONTROLLER_PROFILE_EXTRA_CONTROL_SCHEMA_VERSION;
+    const bool has_swing =
         schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION;
     if ((has_control_mapping
              ? input[61] != 0 || input[71] != 0
@@ -841,7 +849,9 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                 return false;
             }
         }
-        if (!profile_bytes_are_zero(&input[364], 20)) {
+        const size_t reserved_offset = has_swing ? 367 : 364;
+        if (!profile_bytes_are_zero(
+                &input[reserved_offset], expected_size - reserved_offset)) {
             return false;
         }
         for (uint8_t index = 0; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
@@ -859,6 +869,9 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                 return false;
             }
         }
+    }
+    if (has_swing) {
+        profile.swing = {input[364], input[365], input[366]};
     }
     if (!controller_profile_validate(profile)) {
         return false;

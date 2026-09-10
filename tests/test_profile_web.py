@@ -106,6 +106,7 @@ def test_editor_serves_assets_and_complete_schema(
     assert schema["controls"] == list(config_manager.LOGICAL_CONTROLS)
     assert schema["rumble_policies"] == list(config_manager.RUMBLE_POLICIES)
     assert schema["turbo_modes"] == list(config_manager.TURBO_MODES)
+    assert schema["swing_sensitivities"] == ["low", "medium", "high"]
     assert schema["macro_overrides"] == list(config_manager.MACRO_OVERRIDE_NAMES)
     assert schema["profile_capacity"] == 8
     assert (
@@ -141,15 +142,19 @@ def test_switch2_input_choices_are_never_output_targets(
     assert schema["output_controls"] == list(config_manager.OUTPUT_CONTROLS)
 
 
-def test_editor_migrates_schema6_and_saves_extra_mappings_without_metadata_loss(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("version", [6, 7])
+def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
+    monkeypatch: pytest.MonkeyPatch, version: int,
 ) -> None:
     device = FakeDevice()
     key = (device.stable_identity.to_bytes(), 1)
     profile = custom_profile()
     legacy_wire = bytearray(profile.to_bytes())
-    legacy_wire[:2] = b"\x06\x00"
-    legacy_wire[344:] = bytes(40)
+    legacy_wire[:2] = version.to_bytes(2, "little")
+    if version == 6:
+        legacy_wire[344:] = bytes(40)
+    else:
+        legacy_wire[364:] = bytes(20)
     device.profiles[key] = bytes(legacy_wire)
     device.profile_aliases[key[0]] = "Living room"
     device.profile_names[key] = "Racing"
@@ -158,6 +163,7 @@ def test_editor_migrates_schema6_and_saves_extra_mappings_without_metadata_loss(
         status, migrated = request_json(f"{base_url}/api/profiles/1/2")
         assert status == 200
         assert config_manager.ControllerProfile.from_json_object(migrated["profile"]) == profile
+        assert migrated["profile"]["swing"]["button"] is None
         draft = migrated["profile"]
         draft["extra_button_map"] = dict(zip(config_manager.EXTRA_BUTTONS, config_manager.LOGICAL_BUTTONS[:7]))
         draft["shift"]["mode"] = "hold"
@@ -167,6 +173,9 @@ def test_editor_migrates_schema6_and_saves_extra_mappings_without_metadata_loss(
         draft["macros"][0]["cancel"] = "gr"
         draft["switching_chord"] = ["left_sl", "left_sr"]
         draft["motion_toggle_chord"] = ["right_sl", "c"]
+        draft["swing"] = {
+            "button": "west", "sensitivity": "high", "modifier": "right_trigger",
+        }
         status, validated = request_json(
             f"{base_url}/api/profiles/validate", method="POST", value=draft, token=token,
         )

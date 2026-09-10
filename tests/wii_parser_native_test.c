@@ -112,6 +112,7 @@ static void reset_fixture(uint16_t product_id, bool motionplus, extension_t exte
     memset(&f, 0, sizeof(f));
     f.device.vendor_id = 0x057e;
     f.device.product_id = product_id;
+    f.device.report_parser.setup = uni_hid_parser_wii_setup;
     f.device.conn.connected = true;
     f.device.conn.interrupt_cid = 0x40;
     f.extension = extension;
@@ -452,6 +453,31 @@ static void absent_motionplus_keeps_calibrated_remote(void) {
     send_core_and_accel();
     expect_accel();
     expect_vector(f.device.controller.gamepad.gyro, 0, 0, 0);
+}
+
+static void accelerometer_snapshot_requires_fresh_calibrated_reports(void) {
+    reset_fixture(0x0306, false, EXT_NONE);
+    connect_device();
+    int32_t acceleration[3];
+    uint32_t sequence;
+    assert(!uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+    send_core_and_accel();
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+    expect_vector(acceleration, -8192, 2048, -4096);
+    const uint32_t first = sequence;
+    send_ack(0x16, 0);
+    const uint8_t short_report[5] = {0x31};
+    feed(short_report, sizeof(short_report));
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+    assert(sequence == first);
+    send_core_and_accel();
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+    assert(sequence != first);  // Identical readings can still be fresh.
+    reset_fixture(0x0306, false, EXT_NONE);
+    f.fail_accel_reads = true;
+    connect_device();
+    send_core_and_accel();
+    assert(!uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
 }
 
 static void setup_read_and_write_errors_leave_buttons_ready(void) {
@@ -890,6 +916,7 @@ static void run_case(const char* name, void (*test)(void)) {
 }
 
 int main(void) {
+    run_case("fresh calibrated accelerometer snapshots without MotionPlus", accelerometer_snapshot_requires_fresh_calibrated_reports);
     run_case("calibrated Nunchuk left-stick endpoints and replacement", calibrated_nunchuk_left_stick_endpoints_and_replacement);
     run_case("unavailable Nunchuk calibration uses safe nominal travel", unavailable_nunchuk_calibration_keeps_safe_nominal_stick);
     run_case("integrated MotionPlus calibration and per-axis slow bits", integrated_motionplus_calibration_and_slow_bits);
