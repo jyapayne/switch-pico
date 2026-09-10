@@ -1313,6 +1313,56 @@ void test_swing_modifier_release_cancels_and_requires_fresh_settle() {
             "disconnect retained gesture output");
 }
 
+void test_back_and_forth_swings_do_not_require_full_stops() {
+    prepare_profiles();
+    rows[0].profiles[0].swing.button = 2;
+    auto snapshot = make_snapshot(0);
+    uint32_t now = UINT32_MAX - 100u;
+    unsigned presses = 0;
+    bool held = false;
+    auto feed = [&](int16_t force) {
+        now += 10;
+        snapshot.accelerometer = {force, 0, 4096, snapshot.accelerometer.sequence + 1, now, true};
+        const bool pressed = runtime_transform(0, snapshot, now).state.button_west;
+        if (pressed && !held) ++presses;
+        held = pressed;
+    };
+    for (int i = 0; i < 20; ++i) feed(0);
+    for (int stroke = 0; stroke < 6; ++stroke) {
+        const int direction = stroke % 2 == 0 ? 1 : -1;
+        for (int i = 0; i < 24; ++i) feed(direction * 10000);
+        // An 80ms lower-force transition, not a 120ms full stop.
+        for (int i = 0; i < 8; ++i) feed(direction * 2000);
+        require(presses == static_cast<unsigned>(stroke + 1),
+                "each back-and-forth stroke must press once without coming to rest");
+    }
+}
+
+void test_early_rebound_cannot_become_a_delayed_swing() {
+    WiiSwingDetector detector;
+    WiiAccelerometerSample sample{};
+    uint32_t now = 0;
+    unsigned presses = 0;
+    bool held = false;
+    auto feed = [&](int16_t force) {
+        now += 10;
+        sample = {force, 0, 4096, sample.sequence + 1, now, true};
+        const bool pressed = detector.update(sample, now, 1, true);
+        if (pressed && !held) ++presses;
+        held = pressed;
+    };
+    for (int i = 0; i < 20; ++i) feed(0);
+    for (int i = 0; i < 3; ++i) feed(10000);
+    require(presses == 1, "initial swing must trigger");
+    for (int i = 0; i < 5; ++i) feed(0);
+    for (int i = 0; i < 40; ++i) feed(-10000);
+    require(presses == 1,
+            "early rebound must not fire after cooldown while its force remains high");
+    for (int i = 0; i < 5; ++i) feed(0);
+    for (int i = 0; i < 3; ++i) feed(10000);
+    require(presses == 2, "a new stroke after cooldown and release must trigger");
+}
+
 }  // namespace
 
 bool bluepad32_input_backend_toggle_motion(
@@ -1389,5 +1439,7 @@ int main() {
     test_accelerometer_swing_requires_evidence_and_settle();
     test_swing_output_isolated_from_motion_remaps_and_profiles();
     test_swing_modifier_release_cancels_and_requires_fresh_settle();
+    test_back_and_forth_swings_do_not_require_full_stops();
+    test_early_rebound_cannot_become_a_delayed_swing();
     return 0;
 }

@@ -5,7 +5,8 @@ constexpr uint32_t kStaleMs = 150;
 constexpr uint32_t kMaximumSampleGapMs = 50;
 constexpr uint32_t kSettleMs = 120;
 constexpr uint32_t kPulseMs = 80;
-constexpr uint32_t kRearmMs = 250;
+constexpr uint32_t kRearmMs = 200;
+constexpr uint32_t kReleaseMs = 20;
 constexpr uint32_t kEvidenceMs = 10;
 constexpr int32_t kGravity = 4096;
 constexpr int64_t square(int32_t value) {
@@ -55,13 +56,16 @@ bool WiiSwingDetector::update(const WiiAccelerometerSample& sample,
                          magnitude_squared > square(kGravity * 3 / 4) &&
                          magnitude_squared < square(kGravity * 5 / 4);
 
-    if (settled) {
+    // Startup still needs a settled reference. Between strokes, a short
+    // lower-force interval is enough; continuous swinging need not stop.
+    const bool released = dynamic_squared < square(thresholds[sensitivity] / 2) ||
+                          !force_excursion;
+    if (fired_ ? released : settled) {
         if (!quiet_) {
             quiet_ = true;
             quiet_since_ms_ = sample_ms_;
         }
-        if (sample_ms_ - quiet_since_ms_ >= kSettleMs &&
-            (!fired_ || sample_ms_ - fired_ms_ >= kRearmMs)) {
+        if (sample_ms_ - quiet_since_ms_ >= (fired_ ? kReleaseMs : kSettleMs)) {
             armed_ = true;
         }
     } else {
@@ -72,9 +76,13 @@ bool WiiSwingDetector::update(const WiiAccelerometerSample& sample,
             candidate_ = true;
             candidate_since_ms_ = sample_ms_;
         } else if (sample_ms_ - candidate_since_ms_ >= kEvidenceMs) {
-            pulsing_ = true;
-            fired_ = true;
-            fired_ms_ = now_ms;
+            // Consume even an early rebound. It must fall below the release
+            // threshold again, rather than firing late when cooldown expires.
+            if (!fired_ || now_ms - fired_ms_ >= kRearmMs) {
+                pulsing_ = true;
+                fired_ = true;
+                fired_ms_ = now_ms;
+            }
             armed_ = false;
             candidate_ = false;
             quiet_ = false;

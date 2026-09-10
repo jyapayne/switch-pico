@@ -2161,7 +2161,7 @@ function renderMacro() {
         </select>
       </div>
     </div>
-    <p class="field-help">Triggers one ~80 ms press per deliberate swing and must settle before rearming. High sensitivity triggers more easily but is more susceptible to accidental shakes. The optional held modifier is not consumed by the gesture and remains active for normal mapping.</p>`;
+    <p class="field-help">Triggers one ~80 ms press per deliberate stroke. Settle once to arm; back-and-forth strokes can then repeat after brief lower-force gaps, with at least 200 ms between presses. High sensitivity triggers more easily but is more susceptible to accidental shakes. The optional held modifier is not consumed by the gesture and remains active for normal mapping.</p>`;
   elements.macroControls.innerHTML = `
     <div class="macro-picker">
       <div class="macro-tabs" role="group" aria-label="Choose a macro draft">

@@ -16,8 +16,9 @@ struct WiiAccelerometerSample {
 class WiiSwingDetector {
 public:
     void reset();
-    // Returns an 80ms button pulse. Fresh observations must settle before
-    // arming/rearming; repeated reads cannot extend a pulse or build evidence.
+    // Returns an 80ms button pulse. Startup needs settled observations;
+    // subsequent strokes need a brief force release and a 200ms cooldown.
+    // Repeated reads cannot extend a pulse or build evidence.
     bool update(const WiiAccelerometerSample& sample, uint32_t now_ms,
                 uint8_t sensitivity, bool allowed);
 
