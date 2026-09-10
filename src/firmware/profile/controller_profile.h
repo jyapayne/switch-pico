@@ -12,7 +12,8 @@ constexpr uint16_t CONTROLLER_PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4;
 constexpr uint16_t CONTROLLER_PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5;
 constexpr uint16_t CONTROLLER_PROFILE_EXPANDED_SCHEMA_VERSION = 6;
 constexpr uint16_t CONTROLLER_PROFILE_EXTRA_CONTROL_SCHEMA_VERSION = 7;
-constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 8;
+constexpr uint16_t CONTROLLER_PROFILE_SWING_SCHEMA_VERSION = 8;
+constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 9;
 constexpr size_t CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE = 256;
 constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 384;
 constexpr uint8_t CONTROLLER_PROFILE_COUNT = 8;
@@ -189,11 +190,18 @@ struct ControllerProfileMacro {
 };
 
 struct ControllerProfileSwingConfiguration {
-    // Logical output button; NO_BUTTON disables the accelerometer gesture.
+    // Exactly one output may be selected; both NO_BUTTON disables the gesture.
     uint8_t button = CONTROLLER_PROFILE_NO_BUTTON;
     // 0 low, 1 medium, 2 high sensitivity.
     uint8_t sensitivity = 1;
     // Optional physical logical control required while swinging.
+    uint8_t modifier = CONTROLLER_PROFILE_NO_BUTTON;
+    uint8_t macro = CONTROLLER_PROFILE_NO_BUTTON;
+};
+
+struct ControllerProfileCombinedSwingConfiguration {
+    uint8_t button = CONTROLLER_PROFILE_NO_BUTTON;
+    uint8_t macro = CONTROLLER_PROFILE_NO_BUTTON;
     uint8_t modifier = CONTROLLER_PROFILE_NO_BUTTON;
 };
 
@@ -222,6 +230,9 @@ struct ControllerProfile {
     ControllerProfileTurboSettings
         turbo_overrides[CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT]{};
     ControllerProfileSwingConfiguration swing{};
+    ControllerProfileSwingConfiguration nunchuk_swing{};
+    ControllerProfileCombinedSwingConfiguration combined_swing{};
+    uint8_t combination_window_ms = 100;
 };
 
 struct ControllerProfileDatabaseEntry {

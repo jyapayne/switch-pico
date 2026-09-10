@@ -62,6 +62,13 @@ bool valid_source_control(uint8_t control) {
            control == CONTROLLER_PROFILE_NO_BUTTON;
 }
 
+bool valid_swing_action(uint8_t button, uint8_t macro, uint8_t modifier) {
+    return valid_button(button) && valid_source_control(modifier) &&
+           (macro == CONTROLLER_PROFILE_NO_BUTTON ||
+            (macro < CONTROLLER_PROFILE_MACRO_COUNT &&
+             button == CONTROLLER_PROFILE_NO_BUTTON));
+}
+
 bool valid_turbo_settings(const ControllerProfileTurboSettings& settings) {
     return settings.rate_hz >= CONTROLLER_PROFILE_TURBO_RATE_MIN &&
            settings.rate_hz <= CONTROLLER_PROFILE_TURBO_RATE_MAX &&
@@ -296,9 +303,18 @@ bool controller_profile_validate(const ControllerProfile& profile) {
         }
     }
     if (!valid_source_control(profile.shortcuts.modifier) ||
-        !valid_button(profile.swing.button) ||
+        !valid_swing_action(profile.swing.button, profile.swing.macro,
+                            profile.swing.modifier) ||
+        !valid_swing_action(profile.nunchuk_swing.button,
+                            profile.nunchuk_swing.macro,
+                            profile.nunchuk_swing.modifier) ||
+        !valid_swing_action(profile.combined_swing.button,
+                            profile.combined_swing.macro,
+                            profile.combined_swing.modifier) ||
         profile.swing.sensitivity > 2 ||
-        !valid_source_control(profile.swing.modifier) ||
+        profile.nunchuk_swing.sensitivity > 2 ||
+        profile.combination_window_ms < 30 ||
+        profile.combination_window_ms > 200 ||
         !valid_source_control(profile.shift.modifier) ||
         static_cast<uint8_t>(profile.shift.mode) >
             static_cast<uint8_t>(ControllerProfileShiftMode::kToggle) ||
@@ -403,6 +419,12 @@ bool controller_profile_validate(const ControllerProfile& profile) {
             }
             encoded_macro_size += sparse_macro_step_size(value);
             duration_ms += value.duration_ms;
+        }
+        if ((profile.swing.macro == macro_index ||
+             profile.nunchuk_swing.macro == macro_index ||
+             profile.combined_swing.macro == macro_index) &&
+            (macro.step_count == 0 || duration_ms == 0)) {
+            return false;
         }
         if (macro.trigger_mask != 0 && macro.step_count != 0 &&
             macro.mode != ControllerProfileMacroMode::kOnce &&
@@ -557,6 +579,15 @@ bool controller_profile_encode(const ControllerProfile& profile,
     output[364] = profile.swing.button;
     output[365] = profile.swing.sensitivity;
     output[366] = profile.swing.modifier;
+    output[367] = profile.swing.macro;
+    output[368] = profile.nunchuk_swing.button;
+    output[369] = profile.nunchuk_swing.sensitivity;
+    output[370] = profile.nunchuk_swing.modifier;
+    output[371] = profile.nunchuk_swing.macro;
+    output[372] = profile.combined_swing.button;
+    output[373] = profile.combined_swing.macro;
+    output[374] = profile.combined_swing.modifier;
+    output[375] = profile.combination_window_ms;
     return stream_offset <= CONTROLLER_PROFILE_MACRO_STREAM_SIZE;
 }
 
@@ -591,6 +622,8 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     const bool has_extra_controls =
         schema_version >= CONTROLLER_PROFILE_EXTRA_CONTROL_SCHEMA_VERSION;
     const bool has_swing =
+        schema_version >= CONTROLLER_PROFILE_SWING_SCHEMA_VERSION;
+    const bool has_combined_swing =
         schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION;
     if ((has_control_mapping
              ? input[61] != 0 || input[71] != 0
@@ -849,7 +882,8 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                 return false;
             }
         }
-        const size_t reserved_offset = has_swing ? 367 : 364;
+        const size_t reserved_offset =
+            has_combined_swing ? 376 : (has_swing ? 367 : 364);
         if (!profile_bytes_are_zero(
                 &input[reserved_offset], expected_size - reserved_offset)) {
             return false;
@@ -872,6 +906,13 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     }
     if (has_swing) {
         profile.swing = {input[364], input[365], input[366]};
+    }
+    if (has_combined_swing) {
+        profile.swing.macro = input[367];
+        profile.nunchuk_swing = {
+            input[368], input[369], input[370], input[371]};
+        profile.combined_swing = {input[372], input[373], input[374]};
+        profile.combination_window_ms = input[375];
     }
     if (!controller_profile_validate(profile)) {
         return false;

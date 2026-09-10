@@ -523,12 +523,31 @@ void test_compaction_preserves_latest_records() {
   profile.extra_button_map[0] = 16;
   profile.shift.extra_button_map[6] = 15;
   profile.swing = {2, 2, 24};
+  profile.nunchuk_swing = {255, 0, 18, 3};
+  profile.combined_swing = {4, 255, 16};
+  profile.combination_window_ms = 30;
+  profile.macros[3].step_count = 1;
+  profile.macros[3].mode = ControllerProfileMacroMode::kToggle;
+  profile.macro_step_count = 1;
+  profile.macro_steps[0].duration_ms = 50;
   ControllerProfile other = controller_profile_default(global, 7);
   other.swing = {15, 0, CONTROLLER_PROFILE_NO_BUTTON};
+  other.nunchuk_swing = {1, 2, 24};
+  other.combined_swing = {255, 0, 255};
+  other.combination_window_ms = 200;
+  other.macros[0].step_count = 1;
+  other.macro_step_count = 1;
+  other.macro_steps[0].duration_ms = 75;
+  for (uint8_t index = 1; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+    other.macros[index].first_step = 1;
+  }
   const ControllerIdentity stable = identity(1);
   require(storage.set(global, 7, other) == ProfileStorageResult::kOk,
           "second swing profile did not append");
-  other.swing = {0, 1, 16};
+  other.swing = {255, 1, 16, 0};
+  other.nunchuk_swing = {3, 1, 17};
+  other.combined_swing = {14, 255, 24};
+  other.combination_window_ms = 120;
   require(storage.set(stable, 0, other) == ProfileStorageResult::kOk,
           "stable identity swing profile did not append");
   for (uint16_t write = 1; write <= 260; ++write) {
@@ -550,6 +569,17 @@ void test_compaction_preserves_latest_records() {
               recovered.swing.button == 2 &&
               recovered.swing.sensitivity == 2 &&
               recovered.swing.modifier == 24 &&
+              recovered.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.nunchuk_swing.sensitivity == 0 &&
+              recovered.nunchuk_swing.modifier == 18 &&
+              recovered.nunchuk_swing.macro == 3 &&
+              recovered.combined_swing.button == 4 &&
+              recovered.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.combined_swing.modifier == 16 &&
+              recovered.combination_window_ms == 30 &&
+              recovered.macros[3].mode == ControllerProfileMacroMode::kToggle &&
+              recovered.macro_steps[0].duration_ms == 50 &&
               reloaded.get_alias(global, metadata, sizeof(metadata)) ==
                   ProfileStorageResult::kOk &&
               strcmp(metadata, "Fallback") == 0 &&
@@ -558,16 +588,45 @@ void test_compaction_preserves_latest_records() {
                   ProfileStorageResult::kOk &&
               strcmp(metadata, "Compacted") == 0,
           "compaction did not preserve profiles and metadata");
+  const uint32_t generation = reloaded.snapshot().generation;
+  const int programs = flash.programs;
+  recovered.nunchuk_swing.button = 0;
+  require(reloaded.set(global, 0, recovered) ==
+                  ProfileStorageResult::kInvalidArgument &&
+              reloaded.snapshot().generation == generation &&
+              flash.programs == programs &&
+              reloaded.get(global, 0, &recovered) == ProfileStorageResult::kOk &&
+              recovered.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.nunchuk_swing.macro == 3,
+          "rejected gesture action modified the stored profile");
   require(reloaded.get(global, 7, &recovered) == ProfileStorageResult::kOk &&
               recovered.swing.button == 15 &&
               recovered.swing.sensitivity == 0 &&
               recovered.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.nunchuk_swing.button == 1 &&
+              recovered.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.combined_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.combined_swing.macro == 0 &&
+              recovered.combination_window_ms == 200 &&
+              recovered.macro_steps[0].duration_ms == 75 &&
               reloaded.get(stable, 0, &recovered) == ProfileStorageResult::kOk &&
-              recovered.swing.button == 0 &&
+              recovered.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.swing.macro == 0 &&
               recovered.swing.sensitivity == 1 &&
               recovered.swing.modifier == 16 &&
+              recovered.nunchuk_swing.button == 3 &&
+              recovered.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.combined_swing.button == 14 &&
+              recovered.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.combination_window_ms == 120 &&
               reloaded.get(global, 1, &recovered) == ProfileStorageResult::kOk &&
-              recovered.swing.button == CONTROLLER_PROFILE_NO_BUTTON,
+              recovered.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.combined_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              recovered.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON,
           "compacted swing settings bled across profiles or identities");
 }
 
@@ -823,6 +882,62 @@ void test_schema6_read_migration_is_lazy_and_edit_preserves_metadata() {
           "editing a schema6 profile lost its active index, alias, or name");
 }
 
+void test_schema8_swing_migration_is_lazy_and_preserves_existing_data() {
+  erase_all();
+  install_populated_catalog(3);
+  const auto id = controller_identity_global();
+  ControllerProfile original = catalog_profile(0, 0, true);
+  original.extra_button_map[6] = 16;
+  original.shift.extra_button_map[0] = 15;
+  original.swing = {2, 0, 24};
+  uint8_t legacy[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  require(controller_profile_encode(original, legacy, sizeof(legacy)),
+          "schema8 storage fixture did not encode");
+  write_u16(legacy, CONTROLLER_PROFILE_SWING_SCHEMA_VERSION);
+  memset(legacy + 367, 0, sizeof(legacy) - 367);
+  install_catalog_record(3, PROFILE_STORAGE_RECORDS_OFFSET, 1, id, 0, 1001,
+                         legacy, sizeof(legacy));
+  ProfileStorage storage;
+  ControllerProfile migrated{};
+  require(storage.initialize(fake_io()) &&
+              storage.get(id, 0, &migrated) == ProfileStorageResult::kOk &&
+              migrated.swing.button == 2 && migrated.swing.sensitivity == 0 &&
+              migrated.swing.modifier == 24 &&
+              migrated.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              migrated.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              migrated.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              migrated.combined_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              migrated.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              migrated.combination_window_ms == 100 &&
+              storage.set(id, 0, migrated) == ProfileStorageResult::kUnchanged &&
+              flash.programs == 0 && flash.erases == 0,
+          "schema8 read enabled new gestures or unnecessarily rewrote flash");
+  migrated.nunchuk_swing = {255, 2, 18, 1};
+  migrated.combined_swing = {255, 0, 16};
+  migrated.combination_window_ms = 200;
+  require(storage.set(id, 0, migrated) == ProfileStorageResult::kOk,
+          "schema8 profile could not add gesture macro actions");
+  ProfileStorage reloaded;
+  ControllerProfile recovered{};
+  uint8_t upgraded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  char metadata[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+  require(reloaded.initialize(fake_io()) &&
+              reloaded.get(id, 0, &recovered) == ProfileStorageResult::kOk &&
+              controller_profile_encode(recovered, upgraded, sizeof(upgraded)) &&
+              memcmp(legacy + 2, upgraded + 2, 365) == 0 &&
+              recovered.nunchuk_swing.macro == 1 &&
+              recovered.combined_swing.macro == 0 &&
+              recovered.combination_window_ms == 200 &&
+              reloaded.find(id)->active_profile == 0 &&
+              reloaded.get_alias(id, metadata, sizeof(metadata)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(metadata, "A") == 0 &&
+              reloaded.get_profile_name(id, 0, metadata, sizeof(metadata)) ==
+                  ProfileStorageResult::kOk &&
+              strcmp(metadata, "A0") == 0,
+          "editing migrated gestures lost Remote, macros, extras, or metadata");
+}
+
 void require_pair_bank(const ProfileStorage &storage,
                        const ControllerIdentity &owner, uint8_t base,
                        uint8_t active, char name_prefix) {
@@ -1052,6 +1167,7 @@ int main() {
   test_late_second_page_program_is_not_reused();
   test_unreadable_legacy_data_is_not_erased();
   test_schema6_read_migration_is_lazy_and_edit_preserves_metadata();
+  test_schema8_swing_migration_is_lazy_and_preserves_existing_data();
   test_pair_seed_independence_reconnect_and_compaction();
   test_pair_capacity_and_unseeded_mutations();
   test_pair_seed_interruption_and_ambiguous_readback();

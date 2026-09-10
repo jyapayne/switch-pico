@@ -32,6 +32,23 @@ uni_platform* installed_platform = nullptr;
 bool observed_status_led_on = false;
 int observed_status_led_writes = 0;
 uint32_t now_ms = 0;
+struct WiiAccelFixture {
+    uni_hid_device_t* device = nullptr;
+    int32_t acceleration[3]{};
+    uint32_t sequence = 0;
+    bool valid = false;
+};
+WiiAccelFixture remote_accel_fixture;
+WiiAccelFixture nunchuk_accel_fixture;
+
+bool wii_accel_fixture_snapshot(const WiiAccelFixture& fixture,
+                                uni_hid_device_t* controller,
+                                int32_t acceleration[3], uint32_t* sequence) {
+    if (!fixture.valid || fixture.device != controller) return false;
+    memcpy(acceleration, fixture.acceleration, sizeof(fixture.acceleration));
+    *sequence = fixture.sequence;
+    return true;
+}
 bool bondable = true;
 bool ssp_auto_accept = true;
 uint8_t accepted_stk_methods = 0xff;
@@ -720,6 +737,16 @@ extern "C" void uni_hid_parser_wii_set_mode(
     // The real parser's report reconfiguration can synchronously announce ready.
     require(platform_on_device_ready(device) == UNI_ERROR_SUCCESS,
             "Wii mode reconfiguration must retain the ready connection");
+}
+
+extern "C" bool uni_hid_parser_wii_accel_snapshot(
+    uni_hid_device_t* controller, int32_t acceleration[3], uint32_t* sequence) {
+    return wii_accel_fixture_snapshot(remote_accel_fixture, controller, acceleration, sequence);
+}
+
+extern "C" bool uni_hid_parser_wii_nunchuk_accel_snapshot(
+    uni_hid_device_t* controller, int32_t acceleration[3], uint32_t* sequence) {
+    return wii_accel_fixture_snapshot(nunchuk_accel_fixture, controller, acceleration, sequence);
 }
 
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
@@ -5496,6 +5523,81 @@ uni_hid_device_t wii_device(int index) {
     return result;
 }
 
+void test_wii_accelerometer_streams() {
+    start_pairing_backend();
+    auto remote = wii_device(0);
+    remote.controller_subtype = CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL;
+    require(platform_on_device_ready(&remote) == UNI_ERROR_SUCCESS, "Wii must become ready");
+    const auto generation = slot_snapshot(0).connection_generation;
+    if (kDefaultMotionEnabled) {
+        require(bluepad32_input_backend_toggle_motion(0, generation),
+                "Wii console motion must be disabled for independent gesture streams");
+    }
+    remote_accel_fixture = {&remote, {8192, 0, 0}, 7, true};
+    nunchuk_accel_fixture = {&remote, {0, 8192, 0}, 9, false};
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    input.gamepad.accel[0] = 8192;
+    input.gamepad.gyro[2] = 1024;
+    now_ms = 100;
+    platform_on_controller_data(&remote, &input);
+    auto snapshot = slot_snapshot(0);
+    require(snapshot.state.motion_sample_count == 0 &&
+                snapshot.accelerometer.valid && !snapshot.nunchuk_accelerometer.valid &&
+                snapshot.accelerometer.y == -4096 && snapshot.accelerometer.timestamp_ms == 100,
+            "Remote gesture acceleration must remain calibrated with console motion off");
+
+    now_ms = 125;
+    nunchuk_accel_fixture.valid = true;
+    platform_on_controller_data(&remote, &input);
+    snapshot = slot_snapshot(0);
+    require(snapshot.state.motion_sample_count == 0 &&
+                snapshot.nunchuk_accelerometer.valid && snapshot.nunchuk_accelerometer.z == 4096 &&
+                snapshot.nunchuk_accelerometer.timestamp_ms == 125 &&
+                snapshot.accelerometer.timestamp_ms == 100,
+            "Nunchuk interleave must publish its own sample without refreshing the Remote");
+
+    now_ms = 150;
+    ++remote_accel_fixture.sequence;  // Same physical values, genuinely new report.
+    platform_on_controller_data(&remote, &input);
+    now_ms = 200;  // Status/ack callback exposes the same parser snapshots.
+    platform_on_controller_data(&remote, &input);
+    snapshot = slot_snapshot(0);
+    bluepad32_input_backend_report_sent(0);
+    snapshot = slot_snapshot(0);
+    require(snapshot.accelerometer.timestamp_ms == 150 &&
+                snapshot.nunchuk_accelerometer.timestamp_ms == 125 &&
+                snapshot.accelerometer.valid && snapshot.nunchuk_accelerometer.valid,
+            "cached parser callbacks and USB consumption must not freshen either sensor");
+
+    now_ms = 225;
+    nunchuk_accel_fixture.valid = false;
+    platform_on_controller_data(&remote, &input);
+    snapshot = slot_snapshot(0);
+    require(!snapshot.nunchuk_accelerometer.valid &&
+                snapshot.accelerometer.valid && snapshot.accelerometer.timestamp_ms == 150,
+            "Nunchuk detach/calibration failure must immediately invalidate only its own sensor");
+    now_ms = 250;
+    nunchuk_accel_fixture.valid = true;
+    ++nunchuk_accel_fixture.sequence;
+    platform_on_controller_data(&remote, &input);
+    snapshot = slot_snapshot(0);
+    require(snapshot.nunchuk_accelerometer.valid &&
+                snapshot.nunchuk_accelerometer.timestamp_ms == 250 &&
+                snapshot.accelerometer.timestamp_ms == 150,
+            "replacement Nunchuk must resume with its own fresh timestamp");
+
+    platform_on_device_disconnected(&remote);
+    snapshot = slot_snapshot(0);
+    require(!snapshot.accelerometer.valid && !snapshot.nunchuk_accelerometer.valid,
+            "Remote disconnect must invalidate both accelerometer streams");
+    auto replacement = wii_device(0);
+    require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS, "replacement Wii must become ready");
+    snapshot = slot_snapshot(0);
+    require(!snapshot.accelerometer.valid && !snapshot.nunchuk_accelerometer.valid,
+            "reused backend slot must not inherit either sensor sample");
+}
+
 void dispatch_wii_requests() {
     wii_dispatch_active = true;
     now_ms += g_rumble_timer.timeout_ms;
@@ -5943,6 +6045,10 @@ int main(int argc, char** argv) {
     }
     if (scenario == "wii-orientation-races") {
         test_wii_orientation_races();
+        return 0;
+    }
+    if (scenario == "wii-accelerometers") {
+        test_wii_accelerometer_streams();
         return 0;
     }
     if (scenario == "switch2-hd-pro") {

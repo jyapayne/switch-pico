@@ -496,7 +496,12 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .action-kind { color: var(--section-accent); font-size: 0.62rem; font-weight: 850; letter-spacing: 0.11em; text-transform: uppercase; }
 
 .swing-controls { margin-bottom: 18px; }
-.swing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 14px; }
+.swing-cards { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 14px; }
+.swing-card { display: flex; flex-direction: column; flex: 1 1 320px; min-width: 0; }
+.swing-card .action-card-heading { min-height: 0; margin-bottom: 12px; }
+.swing-card-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.swing-card:last-child { flex-basis: 100%; }
+.swing-card:last-child .swing-card-grid { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
 .macro-controls { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr); gap: 14px; margin-bottom: 20px; }
 .macro-picker { display: flex; grid-column: 1 / -1; align-items: stretch; justify-content: space-between; gap: 14px; padding: 13px; border: 1px solid var(--line); border-radius: 16px; background: #090f1d; }
 .macro-tabs { display: grid; grid-template-columns: repeat(4, minmax(90px, 1fr)); gap: 8px; flex: 1; }

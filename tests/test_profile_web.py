@@ -107,6 +107,7 @@ def test_editor_serves_assets_and_complete_schema(
     assert schema["rumble_policies"] == list(config_manager.RUMBLE_POLICIES)
     assert schema["turbo_modes"] == list(config_manager.TURBO_MODES)
     assert schema["swing_sensitivities"] == ["low", "medium", "high"]
+    assert schema["combination_window_bounds"] == {"min": 30, "max": 200}
     assert schema["macro_overrides"] == list(config_manager.MACRO_OVERRIDE_NAMES)
     assert schema["profile_capacity"] == 8
     assert (
@@ -142,19 +143,23 @@ def test_switch2_input_choices_are_never_output_targets(
     assert schema["output_controls"] == list(config_manager.OUTPUT_CONTROLS)
 
 
-@pytest.mark.parametrize("version", [6, 7])
+@pytest.mark.parametrize("version", [6, 7, 8])
 def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
     monkeypatch: pytest.MonkeyPatch, version: int,
 ) -> None:
     device = FakeDevice()
     key = (device.stable_identity.to_bytes(), 1)
     profile = custom_profile()
+    if version == 8:
+        profile = replace(profile, swing=config_manager.ProfileSwing(3, 0, 24))
     legacy_wire = bytearray(profile.to_bytes())
     legacy_wire[:2] = version.to_bytes(2, "little")
     if version == 6:
         legacy_wire[344:] = bytes(40)
-    else:
+    elif version == 7:
         legacy_wire[364:] = bytes(20)
+    else:
+        legacy_wire[367:] = bytes(17)
     device.profiles[key] = bytes(legacy_wire)
     device.profile_aliases[key[0]] = "Living room"
     device.profile_names[key] = "Racing"
@@ -163,7 +168,7 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
         status, migrated = request_json(f"{base_url}/api/profiles/1/2")
         assert status == 200
         assert config_manager.ControllerProfile.from_json_object(migrated["profile"]) == profile
-        assert migrated["profile"]["swing"]["button"] is None
+        assert migrated["profile"]["swing"] == profile.swing.to_json_object()
         draft = migrated["profile"]
         draft["extra_button_map"] = dict(zip(config_manager.EXTRA_BUTTONS, config_manager.LOGICAL_BUTTONS[:7]))
         draft["shift"]["mode"] = "hold"
@@ -175,7 +180,11 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
         draft["motion_toggle_chord"] = ["right_sl", "c"]
         draft["swing"] = {
             "button": "west", "sensitivity": "high", "modifier": "right_trigger",
+            "macro": None,
         }
+        draft["nunchuk_swing"].update(macro=1, sensitivity="low", modifier="c")
+        draft["combined_swing"].update(macro=2, modifier="left_trigger")
+        draft["combination_window_ms"] = 30
         status, validated = request_json(
             f"{base_url}/api/profiles/validate", method="POST", value=draft, token=token,
         )
@@ -197,6 +206,27 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
         assert status == 200
         assert sample["extra_buttons"] == list(config_manager.EXTRA_BUTTONS)
         assert sample["buttons"] == ["south", "dpad_up", "dpad_right"]
+
+
+@pytest.mark.parametrize("gesture", ["swing", "nunchuk_swing", "combined_swing"])
+def test_editor_rejects_unconfigured_gesture_macro_without_saving(
+    monkeypatch: pytest.MonkeyPatch, gesture: str,
+) -> None:
+    device = FakeDevice()
+    key = (device.stable_identity.to_bytes(), 1)
+    original = device.profiles[key]
+    draft = config_manager.ControllerProfile.default().to_json_object()
+    draft[gesture]["macro"] = 4
+    with running_server(monkeypatch, device) as (base_url, token):
+        for endpoint, method in (
+            ("/api/profiles/validate", "POST"), ("/api/profiles/1/2", "PUT"),
+        ):
+            status, result = request_json(
+                f"{base_url}{endpoint}", method=method, value=draft, token=token,
+            )
+            assert status == 400
+            assert "error" in result
+            assert device.profiles[key] == original
 
 
 def test_editor_identifies_connected_controller_artwork(

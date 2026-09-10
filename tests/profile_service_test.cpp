@@ -309,6 +309,9 @@ void test_current_schema_validation_and_atomic_selection() {
   updated.extra_button_map[6] = 16;
   updated.shift.extra_button_map[0] = 3;
   updated.swing = {2, 2, 24};
+  updated.nunchuk_swing = {255, 0, 18, 0};
+  updated.combined_swing = {15, 255, 16};
+  updated.combination_window_ms = 200;
   updated.macros[0].trigger_mask = 1u << 24;
   updated.macros[0].cancel_control = 19;
   updated.macros[0].step_count = 1;
@@ -322,7 +325,7 @@ void test_current_schema_validation_and_atomic_selection() {
   require(controller_profile_encode(updated, encoded, sizeof(encoded)),
           "extended service profile did not encode");
   require(profile_service_begin(
-              20, id, 6, CONTROLLER_PROFILE_EXTRA_CONTROL_SCHEMA_VERSION,
+              20, id, 6, CONTROLLER_PROFILE_SWING_SCHEMA_VERSION,
               CONTROLLER_PROFILE_ENCODED_SIZE, 0) ==
               ConfigurationTransactionStatus::kUnsupportedSchema &&
               profile_service_begin(21, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION,
@@ -352,24 +355,46 @@ void test_current_schema_validation_and_atomic_selection() {
                   old_selection.profile.turbo_defaults.rate_hz,
           "rejected extension replaced the old selected snapshot");
 
-  require(controller_profile_encode(updated, encoded, sizeof(encoded)),
-          "swing rejection baseline did not encode");
-  encoded[366] = CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT;
-  require(profile_service_begin(
-              25, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION, sizeof(encoded),
-              profile_storage_crc32(encoded, sizeof(encoded))) ==
-              ConfigurationTransactionStatus::kReceiving &&
-              profile_service_append(25, 0, encoded, sizeof(encoded)) ==
-                  ConfigurationTransactionStatus::kReceiving &&
-              profile_service_commit(25) ==
-                  ConfigurationTransactionStatus::kMalformed,
-          "service admitted an invalid swing modifier with a valid CRC");
-  profile_service_selected_snapshot(&selected);
-  require(selected.metadata.generation == old_selection.metadata.generation &&
-              selected.profile.swing.button == old_selection.profile.swing.button &&
-              active_snapshot(id).profile.swing.button ==
-                  old_selection.profile.swing.button,
-          "rejected swing replaced a selected or active profile");
+  const struct {
+    size_t offset;
+    uint8_t value;
+  } malformed_gestures[] = {
+      {366, 25}, {367, 0}, {368, 0}, {369, 3}, {370, 25},
+      {371, 1}, {371, 4}, {372, 16}, {373, 0}, {374, 25},
+      {375, 29}, {375, 201}, {376, 1}, {121, 0}};
+  uint8_t stored_before[sizeof(flash.bytes)];
+  memcpy(stored_before, flash.bytes, sizeof(stored_before));
+  uint32_t transaction_id = 25;
+  for (const auto& malformed : malformed_gestures) {
+    require(controller_profile_encode(updated, encoded, sizeof(encoded)),
+            "gesture rejection baseline did not encode");
+    encoded[malformed.offset] = malformed.value;
+    require(profile_service_begin(
+                transaction_id, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION,
+                sizeof(encoded), profile_storage_crc32(encoded, sizeof(encoded))) ==
+                ConfigurationTransactionStatus::kReceiving &&
+                profile_service_append(transaction_id, 0, encoded, sizeof(encoded)) ==
+                    ConfigurationTransactionStatus::kReceiving &&
+                profile_service_commit(transaction_id) ==
+                    ConfigurationTransactionStatus::kMalformed,
+            "service admitted a malformed gesture or unplayable macro with a valid CRC");
+    profile_service_selected_snapshot(&selected);
+    const auto active = active_snapshot(id);
+    require(selected.metadata.generation == old_selection.metadata.generation &&
+                selected.profile.swing.button == old_selection.profile.swing.button &&
+                selected.profile.nunchuk_swing.macro ==
+                    old_selection.profile.nunchuk_swing.macro &&
+                selected.profile.combined_swing.button ==
+                    old_selection.profile.combined_swing.button &&
+                active.profile.swing.button == old_selection.profile.swing.button &&
+                active.profile.nunchuk_swing.macro ==
+                    old_selection.profile.nunchuk_swing.macro &&
+                active.profile.combined_swing.button ==
+                    old_selection.profile.combined_swing.button &&
+                memcmp(stored_before, flash.bytes, sizeof(stored_before)) == 0,
+            "rejected gesture replaced a selected, active, or stored profile");
+    ++transaction_id;
+  }
 
   require(controller_profile_encode(updated, encoded, sizeof(encoded)),
           "valid replacement did not encode");
@@ -387,7 +412,11 @@ void test_current_schema_validation_and_atomic_selection() {
   profile_service_selected_snapshot(&selected);
   require(selected.metadata.generation == old_selection.metadata.generation &&
               active_snapshot(id).profile.turbo_defaults.rate_hz ==
-                  old_selection.profile.turbo_defaults.rate_hz,
+                  old_selection.profile.turbo_defaults.rate_hz &&
+              selected.profile.nunchuk_swing.macro ==
+                  old_selection.profile.nunchuk_swing.macro &&
+              active_snapshot(id).profile.combined_swing.button ==
+                  old_selection.profile.combined_swing.button,
           "pending write replaced a selected or active profile before commit");
   profile_service_task_on_storage_core(8000);
   profile_service_selected_snapshot(&selected);
@@ -400,9 +429,21 @@ void test_current_schema_validation_and_atomic_selection() {
               selected.profile.swing.button == 2 &&
               selected.profile.swing.sensitivity == 2 &&
               selected.profile.swing.modifier == 24 &&
+              selected.profile.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.nunchuk_swing.macro == 0 &&
+              selected.profile.nunchuk_swing.sensitivity == 0 &&
+              selected.profile.nunchuk_swing.modifier == 18 &&
+              selected.profile.combined_swing.button == 15 &&
+              selected.profile.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.combined_swing.modifier == 16 &&
+              selected.profile.combination_window_ms == 200 &&
               active_snapshot(id).profile.swing.button == 2 &&
               active_snapshot(id).profile.swing.sensitivity == 2 &&
               active_snapshot(id).profile.swing.modifier == 24 &&
+              active_snapshot(id).profile.nunchuk_swing.macro == 0 &&
+              active_snapshot(id).profile.combined_swing.button == 15 &&
+              active_snapshot(id).profile.combination_window_ms == 200 &&
               active_snapshot(id).profile.macros[0].trigger_mask == (1u << 24) &&
               active_snapshot(id).profile.macros[0].cancel_control == 19 &&
               active_snapshot(id).profile.turbo_defaults.rate_hz == 30,
@@ -470,6 +511,16 @@ void test_catalog1_selected_and_active_snapshots_migrate() {
               selected.profile.shortcuts.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
               selected.profile.shift.mode == ControllerProfileShiftMode::kOff &&
               selected.profile.macros[0].mode == ControllerProfileMacroMode::kOnce &&
+              selected.profile.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.combined_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              selected.profile.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              active.profile.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              active.profile.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              active.profile.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+              active.profile.combined_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+              active.profile.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
               selected.metadata.generation > 42,
           "old selection/activation snapshots lost migrated content or defaults");
 }

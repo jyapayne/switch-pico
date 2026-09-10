@@ -125,6 +125,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         for scenario in (
             "wii-orientation",
             "wii-orientation-races",
+            "wii-accelerometers",
             "switch2-individual-core-start",
             "switch2-individual-forward",
             "switch2-individual-reverse",

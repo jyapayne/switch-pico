@@ -144,7 +144,8 @@ PROFILE_ACTION_CONTROL_SCHEMA_VERSION = 4
 PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5
 PROFILE_EXPANDED_SCHEMA_VERSION = 6
 PROFILE_EXTRA_CONTROL_SCHEMA_VERSION = 7
-PROFILE_SCHEMA_VERSION = 8
+PROFILE_SWING_SCHEMA_VERSION = 8
+PROFILE_SCHEMA_VERSION = 9
 PROFILE_LEGACY_SIZE = 256
 PROFILE_SIZE = 384
 PROFILE_CAPACITY = 8
@@ -170,6 +171,9 @@ PROFILE_TURBO_BURST_MIN = 1
 PROFILE_TURBO_BURST_MAX = 255
 PROFILE_MACRO_REPEAT_MIN = 1
 PROFILE_MACRO_REPEAT_MAX = 255
+PROFILE_COMBINATION_WINDOW_MIN = 30
+PROFILE_COMBINATION_WINDOW_MAX = 200
+PROFILE_COMBINATION_WINDOW_DEFAULT = 100
 PROFILE_PLAYTEST_LEGACY_SCHEMA_VERSION = 2
 PROFILE_PLAYTEST_LEGACY_SIZE = 54
 PROFILE_PLAYTEST_EXTRA_BUTTON_SCHEMA_VERSION = 3
@@ -1778,45 +1782,92 @@ class ControllerMacro:
         )
 
 
+def _validate_swing_action(button: int, macro: int, modifier: int) -> None:
+    if type(button) is not int or (
+        button != PROFILE_NONE_BUTTON and not 0 <= button < len(LOGICAL_BUTTONS)
+    ):
+        raise ConfigManagerError("invalid swing output button")
+    if type(macro) is not int or (
+        macro != PROFILE_NONE_BUTTON and not 0 <= macro < PROFILE_MACRO_COUNT
+    ):
+        raise ConfigManagerError("invalid swing macro index")
+    if button != PROFILE_NONE_BUTTON and macro != PROFILE_NONE_BUTTON:
+        raise ConfigManagerError("swing action must select either a button or a macro, not both")
+    if type(modifier) is not int or (
+        modifier != PROFILE_NONE_BUTTON and not 0 <= modifier < len(LOGICAL_CONTROLS)
+    ):
+        raise ConfigManagerError("invalid swing modifier")
+
+
+def _swing_macro_index(value: Any, name: str) -> int:
+    if value is None:
+        return PROFILE_NONE_BUTTON
+    return _require_int(value, name, 1, PROFILE_MACRO_COUNT) - 1
+
+
 @dataclass(frozen=True)
 class ProfileSwing:
     button: int = PROFILE_NONE_BUTTON
     sensitivity: int = 1
     modifier: int = PROFILE_NONE_BUTTON
+    macro: int = PROFILE_NONE_BUTTON
 
     def __post_init__(self) -> None:
-        if type(self.button) is not int or (
-            self.button != PROFILE_NONE_BUTTON
-            and not 0 <= self.button < len(LOGICAL_BUTTONS)
-        ):
-            raise ConfigManagerError("invalid swing output button")
+        _validate_swing_action(self.button, self.macro, self.modifier)
         _require_int(
             self.sensitivity, "swing sensitivity", 0, len(SWING_SENSITIVITIES) - 1
         )
-        if type(self.modifier) is not int or (
-            self.modifier != PROFILE_NONE_BUTTON
-            and not 0 <= self.modifier < len(LOGICAL_CONTROLS)
-        ):
-            raise ConfigManagerError("invalid swing modifier")
 
     def to_json_object(self) -> dict[str, Any]:
         return {
             "button": _button_name(self.button),
             "sensitivity": SWING_SENSITIVITIES[self.sensitivity],
             "modifier": _control_name(self.modifier),
+            "macro": None if self.macro == PROFILE_NONE_BUTTON else self.macro + 1,
         }
 
     @classmethod
-    def from_json_object(cls, value: Any) -> ProfileSwing:
-        obj = _require_object(
-            value, ("button", "sensitivity", "modifier"), "profile.swing"
-        )
+    def from_json_object(
+        cls, value: Any, name: str = "profile.swing",
+        *, schema_version: int = PROFILE_SCHEMA_VERSION,
+    ) -> ProfileSwing:
+        fields = ["button", "sensitivity", "modifier"]
+        if schema_version >= PROFILE_SCHEMA_VERSION:
+            fields.append("macro")
+        obj = _require_object(value, fields, name)
         return cls(
-            _button_index(obj["button"], "profile.swing.button"),
-            _require_enum(
-                obj["sensitivity"], SWING_SENSITIVITIES, "profile.swing.sensitivity"
-            ),
-            _control_index(obj["modifier"], "profile.swing.modifier"),
+            _button_index(obj["button"], f"{name}.button"),
+            _require_enum(obj["sensitivity"], SWING_SENSITIVITIES, f"{name}.sensitivity"),
+            _control_index(obj["modifier"], f"{name}.modifier", schema_version=schema_version),
+            _swing_macro_index(obj["macro"], f"{name}.macro")
+            if schema_version >= PROFILE_SCHEMA_VERSION else PROFILE_NONE_BUTTON,
+        )
+
+
+@dataclass(frozen=True)
+class ProfileCombinedSwing:
+    button: int = PROFILE_NONE_BUTTON
+    macro: int = PROFILE_NONE_BUTTON
+    modifier: int = PROFILE_NONE_BUTTON
+
+    def __post_init__(self) -> None:
+        _validate_swing_action(self.button, self.macro, self.modifier)
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            "button": _button_name(self.button),
+            "macro": None if self.macro == PROFILE_NONE_BUTTON else self.macro + 1,
+            "modifier": _control_name(self.modifier),
+        }
+
+    @classmethod
+    def from_json_object(cls, value: Any) -> ProfileCombinedSwing:
+        name = "profile.combined_swing"
+        obj = _require_object(value, ("button", "macro", "modifier"), name)
+        return cls(
+            _button_index(obj["button"], f"{name}.button"),
+            _swing_macro_index(obj["macro"], f"{name}.macro"),
+            _control_index(obj["modifier"], f"{name}.modifier"),
         )
 
 
@@ -1840,6 +1891,9 @@ class ControllerProfile:
     turbo_overrides: tuple[TurboSettings | None, ...] = (None,) * len(LOGICAL_BUTTONS)
     extra_button_map: tuple[int, ...] = (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS)
     swing: ProfileSwing = ProfileSwing()
+    nunchuk_swing: ProfileSwing = ProfileSwing()
+    combined_swing: ProfileCombinedSwing = ProfileCombinedSwing()
+    combination_window_ms: int = PROFILE_COMBINATION_WINDOW_DEFAULT
 
     def __post_init__(self) -> None:
         if type(self.button_map) is not tuple or len(self.button_map) != len(
@@ -1922,8 +1976,25 @@ class ControllerProfile:
             raise ConfigManagerError("profile shortcuts must be ProfileShortcuts")
         if not isinstance(self.shift, ProfileShift):
             raise ConfigManagerError("profile Shift must be ProfileShift")
-        if not isinstance(self.swing, ProfileSwing):
-            raise ConfigManagerError("profile swing must be ProfileSwing")
+        for name, gesture_type in (
+            ("swing", ProfileSwing),
+            ("nunchuk_swing", ProfileSwing),
+            ("combined_swing", ProfileCombinedSwing),
+        ):
+            gesture = getattr(self, name)
+            if not isinstance(gesture, gesture_type):
+                raise ConfigManagerError(f"profile {name} must be {gesture_type.__name__}")
+            if gesture.macro != PROFILE_NONE_BUTTON:
+                target = self.macros[gesture.macro]
+                if not target.steps or not any(step.duration_ms for step in target.steps):
+                    raise ConfigManagerError(
+                        f"profile.{name} macro {gesture.macro + 1} must contain "
+                        "at least one step and a positive total duration"
+                    )
+        _require_int(
+            self.combination_window_ms, "profile.combination_window_ms",
+            PROFILE_COMBINATION_WINDOW_MIN, PROFILE_COMBINATION_WINDOW_MAX,
+        )
         if not isinstance(self.turbo_defaults, TurboSettings):
             raise ConfigManagerError("Turbo defaults must be TurboSettings")
         if (
@@ -1990,7 +2061,8 @@ class ControllerProfile:
         has_action_controls = version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
         sparse_macros = version >= PROFILE_SPARSE_MACRO_SCHEMA_VERSION
         has_extra_buttons = version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION
-        has_swing = version >= PROFILE_SCHEMA_VERSION
+        has_swing = version >= PROFILE_SWING_SCHEMA_VERSION
+        has_combined_swing = version >= PROFILE_SCHEMA_VERSION
         control_count = len(LOGICAL_CONTROLS) if has_extra_buttons else len(OUTPUT_CONTROLS)
         if sparse_macros:
             if payload[75] & 0xCC:
@@ -2159,7 +2231,11 @@ class ControllerProfile:
                     settings_offset += 3
             if payload[settings_offset:336] != bytes(336 - settings_offset):
                 raise ConfigManagerError("nonzero Turbo override padding")
-            reserved_offset = 367 if has_swing else (364 if has_extra_buttons else 344)
+            reserved_offset = (
+                376 if has_combined_swing else
+                367 if has_swing else
+                364 if has_extra_buttons else 344
+            )
             if any(payload[reserved_offset:]):
                 raise ConfigManagerError("profile reserved fields must be zero")
         elif any(mode > 2 for mode in turbo_modes):
@@ -2183,7 +2259,13 @@ class ControllerProfile:
             turbo_defaults=turbo_defaults,
             turbo_overrides=tuple(turbo_overrides),
             extra_button_map=tuple(payload[344:351]) if has_extra_buttons else (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS),
-            swing=ProfileSwing(*payload[364:367]) if has_swing else ProfileSwing(),
+            swing=(
+                ProfileSwing(*payload[364:368]) if has_combined_swing else
+                ProfileSwing(*payload[364:367]) if has_swing else ProfileSwing()
+            ),
+            nunchuk_swing=ProfileSwing(*payload[368:372]) if has_combined_swing else ProfileSwing(),
+            combined_swing=ProfileCombinedSwing(*payload[372:375]) if has_combined_swing else ProfileCombinedSwing(),
+            combination_window_ms=payload[375] if has_combined_swing else PROFILE_COMBINATION_WINDOW_DEFAULT,
         )
 
     def to_bytes(self) -> bytes:
@@ -2263,8 +2345,16 @@ class ControllerProfile:
         payload[351:358] = bytes(self.shift.extra_button_map)
         payload[362] = (self.switching_chord >> 18) & 0x7F
         payload[363] = (self.motion_toggle_chord >> 18) & 0x7F
-        payload[364:367] = bytes(
-            (self.swing.button, self.swing.sensitivity, self.swing.modifier)
+        payload[364:368] = bytes(
+            (self.swing.button, self.swing.sensitivity, self.swing.modifier, self.swing.macro)
+        )
+        payload[368:372] = bytes(
+            (self.nunchuk_swing.button, self.nunchuk_swing.sensitivity,
+             self.nunchuk_swing.modifier, self.nunchuk_swing.macro)
+        )
+        payload[372:376] = bytes(
+            (self.combined_swing.button, self.combined_swing.macro,
+             self.combined_swing.modifier, self.combination_window_ms)
         )
         return bytes(payload)
 
@@ -2303,6 +2393,9 @@ class ControllerProfile:
             "shortcuts": self.shortcuts.to_json_object(),
             "shift": self.shift.to_json_object(),
             "swing": self.swing.to_json_object(),
+            "nunchuk_swing": self.nunchuk_swing.to_json_object(),
+            "combined_swing": self.combined_swing.to_json_object(),
+            "combination_window_ms": self.combination_window_ms,
             "turbo_settings": {
                 "defaults": self.turbo_defaults.to_json_object(),
                 "overrides": {
@@ -2352,8 +2445,10 @@ class ControllerProfile:
             fields.extend(("shortcuts", "shift", "turbo_settings"))
         if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION:
             fields.append("extra_button_map")
-        if schema_version >= PROFILE_SCHEMA_VERSION:
+        if schema_version >= PROFILE_SWING_SCHEMA_VERSION:
             fields.append("swing")
+        if schema_version >= PROFILE_SCHEMA_VERSION:
+            fields.extend(("nunchuk_swing", "combined_swing", "combination_window_ms"))
         obj = _require_object(value, fields, "profile")
         expected_size = (
             PROFILE_SIZE
@@ -2538,9 +2633,21 @@ class ControllerProfile:
                 for name in EXTRA_BUTTONS
             ),
             swing=(
-                ProfileSwing.from_json_object(obj["swing"])
-                if schema_version >= PROFILE_SCHEMA_VERSION
+                ProfileSwing.from_json_object(obj["swing"], schema_version=schema_version)
+                if schema_version >= PROFILE_SWING_SCHEMA_VERSION
                 else ProfileSwing()
+            ),
+            nunchuk_swing=(
+                ProfileSwing.from_json_object(obj["nunchuk_swing"], "profile.nunchuk_swing")
+                if schema_version >= PROFILE_SCHEMA_VERSION else ProfileSwing()
+            ),
+            combined_swing=(
+                ProfileCombinedSwing.from_json_object(obj["combined_swing"])
+                if schema_version >= PROFILE_SCHEMA_VERSION else ProfileCombinedSwing()
+            ),
+            combination_window_ms=(
+                obj["combination_window_ms"] if schema_version >= PROFILE_SCHEMA_VERSION
+                else PROFILE_COMBINATION_WINDOW_DEFAULT
             ),
         )
 
@@ -3666,6 +3773,7 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
         PROFILE_SPARSE_MACRO_SCHEMA_VERSION,
         PROFILE_EXPANDED_SCHEMA_VERSION,
         PROFILE_EXTRA_CONTROL_SCHEMA_VERSION,
+        PROFILE_SWING_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile-list schema")
@@ -3745,6 +3853,7 @@ def read_selected_profile(device: UsbDevice) -> ControllerProfile:
         PROFILE_SPARSE_MACRO_SCHEMA_VERSION,
         PROFILE_EXPANDED_SCHEMA_VERSION,
         PROFILE_EXTRA_CONTROL_SCHEMA_VERSION,
+        PROFILE_SWING_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile schema")

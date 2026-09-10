@@ -16,7 +16,7 @@ struct ControllerProfileRuntimeContext {
     bool profile_snapshot_valid = false;
     ControllerProfile profile{};
     ControllerSyntheticInputContext synthetic{};
-    WiiSwingDetector swing{};
+    WiiSwingGestures swing{};
     bool runtime_generations_initialized = false;
     AdapterUsbMode output_mode = AdapterUsbMode::kSwitchProbe;
     uint32_t configuration_reset_generation = 0;
@@ -353,21 +353,53 @@ ControllerProfileTransformResult controller_profile_runtime_transform(
         process_hotkeys(context, slot, input_control_mask);
     context->previous_hotkey_control_mask = input_control_mask;
     const bool macro_was_active = context->synthetic.macro_active;
+    const ControllerProfile& profile = context->profile;
+    const auto binding_allowed = [&](uint8_t button, uint8_t macro, uint8_t modifier) {
+        const bool assigned = button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT ||
+                              macro < CONTROLLER_PROFILE_MACRO_COUNT;
+        return assigned && (modifier == CONTROLLER_PROFILE_NO_BUTTON ||
+            (modifier < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT &&
+             (input_control_mask & (1u << modifier)) != 0));
+    };
+    bool cancel_pressed = false;
+    for (const auto& macro : profile.macros) {
+        cancel_pressed |= macro.cancel_control < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT &&
+                          (input_control_mask & (1u << macro.cancel_control)) != 0;
+    }
+    uint8_t allowed = 0;
+    if (consumed_controls == 0 && !cancel_pressed) {
+        if (binding_allowed(profile.swing.button, profile.swing.macro, profile.swing.modifier))
+            allowed |= 1;
+        if (binding_allowed(profile.nunchuk_swing.button, profile.nunchuk_swing.macro,
+                            profile.nunchuk_swing.modifier))
+            allowed |= 2;
+        if (binding_allowed(profile.combined_swing.button, profile.combined_swing.macro,
+                            profile.combined_swing.modifier))
+            allowed |= 4;
+    }
+    const WiiSwingGestureResult gestures = context->swing.update(
+        snapshot.accelerometer, snapshot.nunchuk_accelerometer, now_ms,
+        profile.swing.sensitivity, profile.nunchuk_swing.sensitivity,
+        allowed, profile.combination_window_ms);
+    const uint8_t macros[3] = {
+        profile.swing.macro, profile.nunchuk_swing.macro, profile.combined_swing.macro};
+    const uint8_t buttons[3] = {
+        profile.swing.button, profile.nunchuk_swing.button, profile.combined_swing.button};
+    uint8_t requested_macro = CONTROLLER_PROFILE_NO_BUTTON;
+    for (unsigned i = 0; i < 3; ++i)
+        if ((gestures.started & (1u << i)) && macros[i] < requested_macro)
+            requested_macro = macros[i];
     ControllerProfileTransformResult result = controller_synthetic_input_apply(
-        &context->synthetic, snapshot.state, context->profile, now_ms,
-        consumed_controls, consumed_controls != 0);
-    const ControllerProfileSwingConfiguration& swing = context->profile.swing;
-    const bool modifier_held = swing.modifier == CONTROLLER_PROFILE_NO_BUTTON ||
-        (swing.modifier < CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT &&
-         (input_control_mask & (1u << swing.modifier)) != 0);
-    const bool allowed = swing.button < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT &&
-        modifier_held && consumed_controls == 0 &&
-        !macro_was_active && !context->synthetic.macro_active;
-    if (context->swing.update(snapshot.accelerometer, now_ms, swing.sensitivity, allowed)) {
-        controller_profile_apply_button_mask(
-            controller_profile_extract_button_mask(result.state) |
-                static_cast<uint16_t>(1u << swing.button),
-            &result.state);
+        &context->synthetic, snapshot.state, profile, now_ms,
+        consumed_controls, consumed_controls != 0, requested_macro);
+    if (macro_was_active || context->synthetic.macro_active) {
+        context->swing.discard_actions();
+    } else {
+        uint16_t output_buttons = controller_profile_extract_button_mask(result.state);
+        for (unsigned i = 0; i < 3; ++i)
+            if ((gestures.active & (1u << i)) && buttons[i] < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT)
+                output_buttons |= static_cast<uint16_t>(1u << buttons[i]);
+        controller_profile_apply_button_mask(output_buttons, &result.state);
     }
     return result;
 }

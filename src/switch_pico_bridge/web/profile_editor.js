@@ -979,6 +979,100 @@ function buttonOptions(
   )).join("");
 }
 
+function macroSummary(macro) {
+  if (!macro) return "empty";
+  const steps = macro.steps || [];
+  if (!steps.length) return "empty";
+  const duration = steps.reduce((sum, step) => sum + (step.duration_ms || 0), 0);
+  return `${steps.length} step${steps.length === 1 ? "" : "s"} · ${duration} ms`;
+}
+
+function gestureActionOptions(
+  gesture,
+  choices = state.schema.buttons,
+  style = currentControllerStyle(),
+  noneLabel = "Disabled"
+) {
+  const selectedButton = gesture?.button ?? null;
+  const selectedMacro = gesture?.macro ?? null;
+  const noneSelected = selectedButton === null && selectedMacro === null;
+  const noneOption = `<option value=""${noneSelected ? " selected" : ""}>${escapeHtml(noneLabel)}</option>`;
+
+  const buttonGroup = choices.length ? `
+    <optgroup label="Output buttons">
+      ${choices.map((button) => (
+        `<option value="${button}"${selectedButton === button ? " selected" : ""}>${escapeHtml(controlLabel(button, style))}</option>`
+      )).join("")}
+    </optgroup>` : "";
+
+  const macroList = state.profile?.macros || [];
+  const macroGroup = `
+    <optgroup label="Custom macros">
+      ${[1, 2, 3, 4].map((macroNum) => {
+        const macro = macroList[macroNum - 1];
+        const summary = macroSummary(macro);
+        const isSelected = selectedMacro === macroNum;
+        return `<option value="macro:${macroNum}"${isSelected ? " selected" : ""}>Macro ${macroNum} (${escapeHtml(summary)})</option>`;
+      }).join("")}
+    </optgroup>`;
+
+  return noneOption + buttonGroup + macroGroup;
+}
+
+function parseGestureActionValue(value) {
+  if (!value) return { button: null, macro: null };
+  if (value.startsWith("macro:")) {
+    const macroNum = parseInt(value.slice(6), 10);
+    return { button: null, macro: Number.isInteger(macroNum) ? macroNum : null };
+  }
+  return { button: value, macro: null };
+}
+
+function validateGestureMacros() {
+  if (!elements.swing || !state.profile) return;
+  const macros = state.profile.macros || [];
+  const gestures = [
+    { name: "Wii Remote swing", selectId: "#swing-button", gesture: state.profile.swing },
+    { name: "Nunchuk swing", selectId: "#nunchuk-swing-button", gesture: state.profile.nunchuk_swing },
+    { name: "Both together", selectId: "#combined-swing-button", gesture: state.profile.combined_swing },
+  ];
+  for (const { name, selectId, gesture } of gestures) {
+    const select = elements.swing.querySelector(selectId);
+    if (!select) continue;
+    if (gesture && gesture.macro != null) {
+      const target = macros[gesture.macro - 1];
+      const steps = target?.steps || [];
+      const hasPositiveDuration = steps.some((step) => step.duration_ms > 0);
+      if (!steps.length || !hasPositiveDuration) {
+        select.setCustomValidity(`${name} is bound to Macro ${gesture.macro}, which must contain at least one step and a positive total duration.`);
+      } else {
+        select.setCustomValidity("");
+      }
+    } else {
+      select.setCustomValidity("");
+    }
+  }
+}
+
+function updateGestureActionSelects() {
+  if (!elements.swing || !state.profile) return;
+  const controllerStyle = currentControllerStyle();
+  const buttons = state.schema.buttons;
+  const remoteSelect = elements.swing.querySelector("#swing-button");
+  if (remoteSelect && state.profile.swing) {
+    remoteSelect.innerHTML = gestureActionOptions(state.profile.swing, buttons, controllerStyle, "Disabled");
+  }
+  const nunchukSelect = elements.swing.querySelector("#nunchuk-swing-button");
+  if (nunchukSelect && state.profile.nunchuk_swing) {
+    nunchukSelect.innerHTML = gestureActionOptions(state.profile.nunchuk_swing, buttons, controllerStyle, "Disabled");
+  }
+  const combinedSelect = elements.swing.querySelector("#combined-swing-button");
+  if (combinedSelect && state.profile.combined_swing) {
+    combinedSelect.innerHTML = gestureActionOptions(state.profile.combined_swing, buttons, controllerStyle, "Disabled");
+  }
+  validateGestureMacros();
+}
+
 function modeOptions(modes, selected) {
   return modes.map((mode) =>
     `<option value="${mode}"${mode === selected ? " selected" : ""}>${label(mode)}</option>`
@@ -1240,7 +1334,9 @@ function refreshSourceControls() {
   const modifiers = [
     [elements.shortcutModifier.querySelector("select"), shortcuts.modifier, shortcuts.profiles],
     [elements.shift.querySelector("#shift-modifier"), state.profile.shift.modifier, []],
-    [elements.swing?.querySelector("#swing-modifier"), state.profile.swing.modifier, []],
+    [elements.swing?.querySelector("#swing-modifier"), state.profile.swing?.modifier, []],
+    [elements.swing?.querySelector("#nunchuk-swing-modifier"), state.profile.nunchuk_swing?.modifier, []],
+    [elements.swing?.querySelector("#combined-swing-modifier"), state.profile.combined_swing?.modifier, []],
     [elements.macroControls.querySelector("#macro-cancel"), state.profile.macros[state.selectedMacro].cancel, []],
   ];
   for (const [select, selected, excluded] of modifiers) {
@@ -1275,16 +1371,7 @@ function refreshSourceControls() {
   document.querySelectorAll("[data-output-label]").forEach(node => {
     node.textContent = controlLabel(node.dataset.outputLabel);
   });
-  const swingButtonSelect = elements.swing?.querySelector("#swing-button");
-  if (swingButtonSelect && state.profile.swing) {
-    swingButtonSelect.innerHTML = buttonOptions(
-      state.profile.swing.button,
-      true,
-      state.schema.buttons,
-      currentControllerStyle(),
-      "Disabled"
-    );
-  }
+  updateGestureActionSelects();
 }
 
 elements.form.addEventListener("focusout", event => {
@@ -1981,6 +2068,7 @@ function mutateMacroSteps(change, focusIndex, focusSelector = "[data-step-handle
   macro.steps = steps;
   renderMacroSteps();
   updateMacroBudgets();
+  updateGestureActionSelects();
   updateDirtyState();
   const index = Math.min(focusIndex, steps.length - 1);
   const focus = elements.macroSteps.querySelector(`[data-step-index="${index}"] ${focusSelector}`);
@@ -2132,36 +2220,109 @@ function renderMacro() {
     ),
   ].join("");
   const swing = state.profile.swing;
+  const nunchukSwing = state.profile.nunchuk_swing;
+  const combinedSwing = state.profile.combined_swing;
   const swingSensitivities = state.schema.swing_sensitivities;
+  const windowBounds = state.schema.combination_window_bounds;
+  const combinationWindowMs = state.profile.combination_window_ms;
+
   elements.swing.innerHTML = `
     <div class="subpanel-heading">
       <div>
-        <span class="action-kind">Motion gesture</span>
-        <h4>Wii Remote swing</h4>
+        <span class="action-kind">Motion gestures</span>
+        <h4>Motion gestures &amp; swings</h4>
       </div>
       <span>Accelerometer only · no sensor bar or MotionPlus required</span>
     </div>
-    <div class="swing-grid">
-      <div class="control-card">
-        <label for="swing-button">Output button</label>
-        <select class="select" id="swing-button" data-kind="swing-button" data-output-select="swing">
-          ${buttonOptions(swing.button, true, state.schema.buttons, controllerStyle, "Disabled")}
-        </select>
+    <div class="swing-cards">
+      <div class="action-card swing-card">
+        <div class="action-card-heading">
+          <div>
+            <span class="action-kind">Individual gesture</span>
+            <h4>Wii Remote swing</h4>
+          </div>
+          <span>Triggers when the Wii Remote is swung deliberately.</span>
+        </div>
+        <div class="swing-card-grid">
+          <div class="control-card">
+            <label for="swing-button">Remote action</label>
+            <select class="select" id="swing-button" data-kind="swing-action" data-gesture="swing" data-output-select="swing">
+              ${gestureActionOptions(swing, state.schema.buttons, controllerStyle, "Disabled")}
+            </select>
+          </div>
+          <div class="control-card">
+            <label for="swing-sensitivity">Sensitivity</label>
+            <select class="select" id="swing-sensitivity" data-kind="swing-sensitivity" data-gesture="swing">
+              ${modeOptions(swingSensitivities, swing.sensitivity)}
+            </select>
+          </div>
+          <div class="control-card">
+            <label for="swing-modifier">Held modifier (optional)</label>
+            <select class="select" id="swing-modifier" data-kind="swing-modifier" data-gesture="swing">
+              ${modifierOptions(swing.modifier)}
+            </select>
+          </div>
+        </div>
       </div>
-      <div class="control-card">
-        <label for="swing-sensitivity">Sensitivity</label>
-        <select class="select" id="swing-sensitivity" data-kind="swing-sensitivity">
-          ${modeOptions(swingSensitivities, swing.sensitivity)}
-        </select>
+      <div class="action-card swing-card">
+        <div class="action-card-heading">
+          <div>
+            <span class="action-kind">Individual gesture</span>
+            <h4>Nunchuk swing</h4>
+          </div>
+          <span>Triggers when the connected Nunchuk is swung deliberately.</span>
+        </div>
+        <div class="swing-card-grid">
+          <div class="control-card">
+            <label for="nunchuk-swing-button">Nunchuk action</label>
+            <select class="select" id="nunchuk-swing-button" data-kind="swing-action" data-gesture="nunchuk_swing" data-output-select="nunchuk_swing">
+              ${gestureActionOptions(nunchukSwing, state.schema.buttons, controllerStyle, "Disabled")}
+            </select>
+          </div>
+          <div class="control-card">
+            <label for="nunchuk-swing-sensitivity">Sensitivity</label>
+            <select class="select" id="nunchuk-swing-sensitivity" data-kind="swing-sensitivity" data-gesture="nunchuk_swing">
+              ${modeOptions(swingSensitivities, nunchukSwing.sensitivity)}
+            </select>
+          </div>
+          <div class="control-card">
+            <label for="nunchuk-swing-modifier">Held modifier (optional)</label>
+            <select class="select" id="nunchuk-swing-modifier" data-kind="swing-modifier" data-gesture="nunchuk_swing">
+              ${modifierOptions(nunchukSwing.modifier)}
+            </select>
+          </div>
+        </div>
       </div>
-      <div class="control-card">
-        <label for="swing-modifier">Held modifier (optional)</label>
-        <select class="select" id="swing-modifier" data-kind="swing-modifier">
-          ${modifierOptions(swing.modifier)}
-        </select>
+      <div class="action-card swing-card">
+        <div class="action-card-heading">
+          <div>
+            <span class="action-kind">Combined gesture</span>
+            <h4>Both together</h4>
+          </div>
+          <span>One full swing plus qualifying movement from the other device within the timing window.</span>
+        </div>
+        <div class="swing-card-grid">
+          <div class="control-card">
+            <label for="combined-swing-button">Combined action</label>
+            <select class="select" id="combined-swing-button" data-kind="swing-action" data-gesture="combined_swing" data-output-select="combined_swing">
+              ${gestureActionOptions(combinedSwing, state.schema.buttons, controllerStyle, "Disabled")}
+            </select>
+          </div>
+          <div class="control-card">
+            <label for="combination-window-ms">Combination window · ${windowBounds.min}–${windowBounds.max} ms</label>
+            <input class="number-input" id="combination-window-ms" type="number" required min="${windowBounds.min}" max="${windowBounds.max}" step="1" value="${combinationWindowMs}" data-kind="combination-window">
+          </div>
+          <div class="control-card">
+            <label for="combined-swing-modifier">Held modifier (optional)</label>
+            <select class="select" id="combined-swing-modifier" data-kind="swing-modifier" data-gesture="combined_swing">
+              ${modifierOptions(combinedSwing.modifier)}
+            </select>
+          </div>
+        </div>
       </div>
     </div>
-    <p class="field-help">Triggers one ~80 ms press per deliberate stroke. Settle once to arm; back-and-forth strokes can then repeat after brief lower-force gaps, with at least 200 ms between presses. High sensitivity triggers more easily but is more susceptible to accidental shakes. The optional held modifier is not consumed by the gesture and remains active for normal mapping.</p>`;
+    <p class="field-help">Triggers one ~80 ms press or one-shot macro cycle per deliberate stroke. When Both together is enabled and both sensors are available, individual swings wait for the combination window. One full swing can combine with smaller sustained movement from the other sensor; two small movements alone do not trigger. Individual thresholds are unchanged, and each confirmation is used only once. Gestures play bound macros exactly once regardless of physical-trigger playback modes. Empty or zero-duration macro targets must be configured before saving.</p>`;
+  validateGestureMacros();
   elements.macroControls.innerHTML = `
     <div class="macro-picker">
       <div class="macro-tabs" role="group" aria-label="Choose a macro draft">
@@ -2468,12 +2629,22 @@ function handleFormChange(event) {
       });
     }
     updateTurboTiming();
-  } else if (kind === "swing-button") {
-    state.profile.swing.button = target.value || null;
+  } else if (kind === "swing-action") {
+    const gestureName = target.dataset.gesture;
+    const { button, macro } = parseGestureActionValue(target.value);
+    state.profile[gestureName].button = button;
+    state.profile[gestureName].macro = macro;
+    validateGestureMacros();
   } else if (kind === "swing-sensitivity") {
-    state.profile.swing.sensitivity = target.value;
+    const gestureName = target.dataset.gesture;
+    state.profile[gestureName].sensitivity = target.value;
   } else if (kind === "swing-modifier") {
-    state.profile.swing.modifier = target.value || null;
+    const gestureName = target.dataset.gesture;
+    state.profile[gestureName].modifier = target.value || null;
+  } else if (kind === "combination-window") {
+    if (target.validity.valid) {
+      state.profile.combination_window_ms = Number(target.value);
+    }
   } else if (kind === "macro-selector") {
     state.profile.macros[state.selectedMacro][target.dataset.field] = target.value || null;
   } else if (kind === "macro-playback" || kind === "macro-repeat") {
@@ -2536,6 +2707,7 @@ function handleFormChange(event) {
   if (kind.startsWith("macro-")) {
     macroNotice("");
     updateMacroBudgets();
+    updateGestureActionSelects();
   }
   updateDirtyState();
   if (state.liveSample) renderPlaytest(state.liveSample);
@@ -2998,6 +3170,9 @@ document.querySelectorAll("[data-reset-section]").forEach((button) => {
       state.profile.switching_chord = clone(defaults.switching_chord);
       state.profile.motion_toggle_chord = clone(defaults.motion_toggle_chord);
       state.profile.swing = clone(defaults.swing);
+      state.profile.nunchuk_swing = clone(defaults.nunchuk_swing);
+      state.profile.combined_swing = clone(defaults.combined_swing);
+      state.profile.combination_window_ms = defaults.combination_window_ms;
       state.profile.macros = clone(defaults.macros);
     }
     renderEditor();

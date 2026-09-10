@@ -19,11 +19,18 @@ void WiiSwingDetector::reset() {
 }
 
 bool WiiSwingDetector::update(const WiiAccelerometerSample& sample,
-                              uint32_t now_ms, uint8_t sensitivity, bool allowed) {
+                              uint32_t now_ms, uint8_t sensitivity, bool allowed,
+                              bool observe_confirmation) {
     if (!allowed || !sample.valid || sensitivity > 2 ||
         static_cast<int32_t>(now_ms - sample.timestamp_ms) > static_cast<int32_t>(kStaleMs)) {
         reset();
         return false;
+    }
+    if (!observe_confirmation) {
+        have_confirmation_ = false;
+        confirmation_candidate_ = false;
+        confirmation_latched_ = false;
+        confirmation_releasing_ = false;
     }
     if (pulsing_ && now_ms - fired_ms_ >= kPulseMs) pulsing_ = false;
     if (initialized_ && sample.sequence == sequence_) return pulsing_;
@@ -71,6 +78,39 @@ bool WiiSwingDetector::update(const WiiAccelerometerSample& sample,
     } else {
         quiet_ = false;
     }
+    if (observe_confirmation) {
+        // Reuse the same calibrated gravity reference and force/tilt guard.
+        // Do not lower the individual trigger or change its filtering/rearm.
+        const bool confirming = dynamic_squared > square(thresholds[sensitivity] / 2) &&
+                                force_excursion;
+        if (confirmation_latched_ && released) {
+            if (!confirmation_releasing_) {
+                confirmation_releasing_ = true;
+                confirmation_release_ms_ = sample_ms_;
+            }
+            if (sample_ms_ - confirmation_release_ms_ >= kReleaseMs)
+                confirmation_latched_ = false;
+        } else {
+            confirmation_releasing_ = false;
+        }
+        if (!confirmation_latched_ && confirming && (armed_ || fired_)) {
+            if (!confirmation_candidate_) {
+                confirmation_candidate_ = true;
+                confirmation_since_ms_ = sample_ms_;
+            } else if (sample_ms_ - confirmation_since_ms_ >= kEvidenceMs) {
+                // Reject early rebounds rather than confirming them later.
+                if (!fired_ || now_ms - fired_ms_ >= kRearmMs) {
+                    confirmation_ms_ = now_ms;
+                    have_confirmation_ = true;
+                }
+                confirmation_latched_ = true;
+                confirmation_candidate_ = false;
+                confirmation_releasing_ = false;
+            }
+        } else {
+            confirmation_candidate_ = false;
+        }
+    }
     if (armed_ && energetic) {
         if (!candidate_) {
             candidate_ = true;
@@ -98,4 +138,131 @@ bool WiiSwingDetector::update(const WiiAccelerometerSample& sample,
         }
     }
     return pulsing_;
+}
+
+bool WiiSwingDetector::confirmation(uint32_t* timestamp_ms) const {
+    if (!have_confirmation_ || timestamp_ms == nullptr) return false;
+    *timestamp_ms = confirmation_ms_;
+    return true;
+}
+
+void WiiSwingDetector::consume_confirmation() {
+    if (!have_confirmation_) return;
+    // Count the confirming motion as this source's stroke. Otherwise a weak
+    // confirmation growing into a full swing would later leak a single action.
+    if (!fired_ || static_cast<int32_t>(confirmation_ms_ - fired_ms_) > 0)
+        fired_ms_ = confirmation_ms_;
+    fired_ = true;
+    armed_ = false;
+    candidate_ = false;
+    quiet_ = false;
+}
+
+void WiiSwingGestures::reset() {
+    *this = {};
+}
+
+void WiiSwingGestures::discard_actions() {
+    pending_ = 0;
+    pending_individual_ = 0;
+    active_ = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        if (detectors_[i].confirmation(&used_confirmation_ms_[i]))
+            used_confirmations_ |= 1u << i;
+    }
+}
+
+WiiSwingGestureResult WiiSwingGestures::update(
+    const WiiAccelerometerSample& remote, const WiiAccelerometerSample& nunchuk,
+    uint32_t now_ms, uint8_t remote_sensitivity, uint8_t nunchuk_sensitivity,
+    uint8_t allowed, uint8_t combination_window_ms) {
+    const auto fresh = [now_ms](const WiiAccelerometerSample& sample) {
+        return sample.valid &&
+            static_cast<int32_t>(now_ms - sample.timestamp_ms) <= static_cast<int32_t>(kStaleMs);
+    };
+    const bool remote_fresh = fresh(remote);
+    const bool nunchuk_fresh = fresh(nunchuk);
+    if (!remote_fresh) allowed &= ~5u;
+    if (!nunchuk_fresh) allowed &= ~6u;
+    if (allowed == 0) {
+        reset();
+        return {};
+    }
+    const bool combining = (allowed & 4u) != 0;
+    if (combining != combining_) {
+        pending_ = 0;
+        pending_individual_ = 0;
+        combining_ = combining;
+        used_confirmations_ = 0;
+    }
+    active_ &= allowed;
+    pending_individual_ &= allowed;
+    for (unsigned i = 0; i < 3; ++i) {
+        if (now_ms - pulse_since_ms_[i] >= kPulseMs) active_ &= ~(1u << i);
+    }
+    const bool pulses[2] = {
+        detectors_[0].update(remote, now_ms, remote_sensitivity, (allowed & 5u) != 0, combining),
+        detectors_[1].update(nunchuk, now_ms, nunchuk_sensitivity, (allowed & 6u) != 0, combining)};
+    uint8_t edges = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        if (pulses[i] && !previous_[i]) edges |= 1u << i;
+        previous_[i] = pulses[i];
+    }
+    uint32_t confirmation_ms[2]{};
+    uint8_t confirmations = 0;
+    for (unsigned i = 0; combining && i < 2; ++i) {
+        if (detectors_[i].confirmation(&confirmation_ms[i]) &&
+            now_ms - confirmation_ms[i] <= combination_window_ms &&
+            (!(used_confirmations_ & (1u << i)) ||
+             used_confirmation_ms_[i] != confirmation_ms[i])) {
+            confirmations |= 1u << i;
+        }
+    }
+    WiiSwingGestureResult result;
+    const auto emit = [&](uint8_t bits) {
+        bits &= allowed;
+        result.started |= bits;
+        active_ |= bits;
+        for (unsigned i = 0; i < 3; ++i)
+            if (bits & (1u << i)) pulse_since_ms_[i] = now_ms;
+    };
+    const auto combine = [&] {
+        emit(4);
+        for (unsigned i = 0; i < 2; ++i) {
+            if (detectors_[i].confirmation(&used_confirmation_ms_[i])) {
+                used_confirmations_ |= 1u << i;
+                detectors_[i].consume_confirmation();
+            }
+        }
+        confirmations = 0;
+    };
+    if (pending_ && now_ms - pending_since_ms_ > combination_window_ms) {
+        emit(pending_individual_);
+        pending_ = pending_individual_ = 0;
+    }
+    if (combining) {
+        // Match the older pending stroke before a new stroke on the same source.
+        // This also makes the inclusive window boundary deterministic.
+        const uint8_t opposite = pending_ == 1 ? 2 : pending_ == 2 ? 1 : 0;
+        if (opposite && ((edges | confirmations) & opposite)) {
+            combine();
+            edges &= ~opposite;
+            pending_ = pending_individual_ = 0;
+        }
+        if (edges == 3 || ((edges & 1) && (confirmations & 2)) ||
+            ((edges & 2) && (confirmations & 1))) {
+            combine();
+            edges = 0;
+        }
+        if (edges) {
+            if (pending_) emit(pending_individual_);
+            pending_ = edges;
+            pending_individual_ = edges & allowed;
+            pending_since_ms_ = now_ms;
+        }
+    } else {
+        emit(edges);
+    }
+    result.active = active_;
+    return result;
 }

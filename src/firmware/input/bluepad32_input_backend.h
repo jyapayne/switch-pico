@@ -64,6 +64,7 @@ struct Bluepad32SlotSnapshot {
     uint16_t pre_hotkey_button_mask;
     ControllerState state;
     WiiAccelerometerSample accelerometer{};
+    WiiAccelerometerSample nunchuk_accelerometer{};
 };
 
 enum class Bluepad32ControllerLayout : uint8_t {

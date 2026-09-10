@@ -14,6 +14,7 @@ struct ControllerSyntheticBindingState {
 
 struct ControllerSyntheticInputContext {
     bool macro_active = false;
+    bool macro_from_gesture = false;
     uint8_t macro_index = 0;
     uint8_t macro_step_index = 0;
     uint32_t macro_cycle_duration_ms = 0;
@@ -36,7 +37,10 @@ void controller_synthetic_input_cancel(
 // Consume reserved controls and Shift before physical macro/Turbo arbitration.
 // Only the selected button map changes; base analog tuning and final macro
 // overrides retain their precedence. Suppressed inputs still track raw edges.
+// gesture_macro is an edge request for one cycle, regardless of the macro's
+// physical-trigger playback mode. Physical triggers/cancel and active macros win.
 ControllerProfileTransformResult controller_synthetic_input_apply(
     ControllerSyntheticInputContext* context, const ControllerState& input,
     const ControllerProfile& profile, uint32_t now_ms,
-    uint32_t suppressed_control_mask = 0, bool suppress_shift = false);
+    uint32_t suppressed_control_mask = 0, bool suppress_shift = false,
+    uint8_t gesture_macro = CONTROLLER_PROFILE_NO_BUTTON);

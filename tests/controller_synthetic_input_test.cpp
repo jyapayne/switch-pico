@@ -813,6 +813,60 @@ void test_extra_shift_and_macro_sources_are_consumed() {
             "while-held macro survived release of an extra trigger source");
 }
 
+void test_gesture_macros_play_once_and_preserve_trigger_inputs() {
+    for (auto mode : {ControllerProfileMacroMode::kWhileHeld,
+                      ControllerProfileMacroMode::kToggle,
+                      ControllerProfileMacroMode::kRepeat}) {
+        auto profile = profile_with_macro(ControllerProfileLogicalButton::kSouth);
+        profile.macro_step_count = 1;
+        profile.macros[0].step_count = 1;
+        profile.macros[0].mode = mode;
+        profile.macros[0].repeat_count = 5;
+        profile.macro_steps[0].duration_ms = 100;
+        profile.macro_steps[0].override_flags = kControllerProfileOverrideLeftStick;
+        profile.macro_steps[0].left_stick_x = 12345;
+        ControllerSyntheticInputContext context{};
+        ControllerState input{};
+        auto output = controller_synthetic_input_apply(&context, input, profile, 1000, 0, false, 0);
+        require(output.state.left_stick_x == 12345, "gesture must start macro immediately");
+        input.button_south = true;
+        output = controller_synthetic_input_apply(&context, input, profile, 1050);
+        require(output.state.left_stick_x == 12345 && output.state.button_south,
+                "gesture macro consumed its unrelated physical trigger button");
+        input.button_south = false;
+        output = controller_synthetic_input_apply(&context, input, profile, 1090);
+        require(output.state.left_stick_x == 12345, "gesture macro stopped on trigger release");
+        output = controller_synthetic_input_apply(&context, input, profile, 1100);
+        require(output.state.left_stick_x == 0 && !context.macro_active,
+                "gesture macro repeated according to physical playback mode");
+        output = controller_synthetic_input_apply(&context, input, profile, 1200, 0, false, 0);
+        require(output.state.left_stick_x == 12345, "later gesture could not restart completed macro");
+        input.button_capture = true;
+        output = controller_synthetic_input_apply(&context, input, profile, 1210, 0, false, 0);
+        require(!context.macro_active && output.state.left_stick_x == 0,
+                "explicit cancel must beat a simultaneous gesture request");
+    }
+}
+
+void test_physical_macro_precedes_simultaneous_gesture_request() {
+    auto profile = controller_profile_default(controller_identity_global(), 0);
+    profile.macro_step_count = 2;
+    for (unsigned i = 0; i < 2; ++i) {
+        profile.macros[i].first_step = i;
+        profile.macros[i].step_count = 1;
+        profile.macro_steps[i].override_flags = kControllerProfileOverrideButtons;
+        profile.macro_steps[i].duration_ms = 100;
+        profile.macro_steps[i].output_button_mask = i == 0 ? 4 : 8;
+    }
+    profile.macros[1].trigger_mask = 1;
+    ControllerState input{};
+    input.button_south = true;
+    ControllerSyntheticInputContext context{};
+    const auto output = controller_synthetic_input_apply(&context, input, profile, 100, 0, false, 0);
+    require(output.state.button_north && !output.state.button_west,
+            "gesture request stole a simultaneous physical macro trigger");
+}
+
 }  // namespace
 
 int main() {
@@ -829,5 +883,7 @@ int main() {
     test_shift_maps_consumption_and_physical_bindings();
     test_macro_playback_modes_and_bounded_cycle_skips();
     test_extra_shift_and_macro_sources_are_consumed();
+    test_gesture_macros_play_once_and_preserve_trigger_inputs();
+    test_physical_macro_precedes_simultaneous_gesture_request();
     return 0;
 }

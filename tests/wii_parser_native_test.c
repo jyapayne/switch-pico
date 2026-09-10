@@ -99,13 +99,23 @@ static void update_mp_checksum(void) {
     put_be16(&f.mp_calibration[30], crc);
 }
 
-static void set_nunchuk_stick_calibration(const uint8_t values[6]) {
-    memcpy(f.nunchuk_calibration + 8, values, 6);
+static void update_nunchuk_checksum(void) {
     uint8_t checksum = 0x55;
     for (unsigned i = 0; i < 14; ++i)
         checksum += f.nunchuk_calibration[i];
     f.nunchuk_calibration[14] = checksum;
     f.nunchuk_calibration[15] = checksum + 0x55;
+}
+
+static void set_nunchuk_stick_calibration(const uint8_t values[6]) {
+    memcpy(f.nunchuk_calibration + 8, values, 6);
+    update_nunchuk_checksum();
+}
+
+static void set_nunchuk_accel_calibration(const uint16_t zero[3], const uint16_t one_g[3]) {
+    pack_accel_calibration(f.nunchuk_calibration, zero);
+    pack_accel_calibration(f.nunchuk_calibration + 4, one_g);
+    update_nunchuk_checksum();
 }
 
 static void reset_fixture(uint16_t product_id, bool motionplus, extension_t extension) {
@@ -122,6 +132,10 @@ static void reset_fixture(uint16_t product_id, bool motionplus, extension_t exte
     const uint8_t nunchuk_identity[6] = {0, 0, 0xa4, 0x20, 0, 0};
     memcpy(f.extension_identity, nunchuk_identity, sizeof(nunchuk_identity));
     set_nunchuk_stick_calibration((const uint8_t[]){224, 32, 128, 224, 32, 128});
+    // Dolphin Nunchuk::CalibrationData uses the same packed 10-bit points as
+    // the Remote, but its own centers and sensitivities.
+    set_nunchuk_accel_calibration((const uint16_t[]){501, 510, 519},
+                                 (const uint16_t[]){693, 766, 647});
 
     // Non-default centers, unequal spans, and nonzero packed low bits catch
     // nominal 0x200/100-count calibration and high-byte-only decoding.
@@ -415,6 +429,21 @@ static void send_nunchuk_controls(bool passthrough) {
     assert(f.device.controller.gamepad.axis_rx == 0 && f.device.controller.gamepad.axis_ry == 0);
     assert(f.device.controller_subtype == CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL);
     expect_accel();
+}
+
+static void send_nunchuk_sample(const uint8_t extension[6]) {
+    // Extension-only input proves its sequence does not need Remote accel.
+    uint8_t report[11] = {0x32};
+    memcpy(report + 3, extension, 6);
+    feed(report, sizeof(report));
+}
+
+static uint32_t expect_nunchuk_accel(int32_t x, int32_t y, int32_t z) {
+    int32_t acceleration[3];
+    uint32_t sequence;
+    assert(uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &sequence));
+    expect_vector(acceleration, x, y, z);
+    return sequence;
 }
 
 static void integrated_motionplus_calibration_and_slow_bits(void) {
@@ -909,6 +938,172 @@ static void unavailable_nunchuk_calibration_keeps_safe_nominal_stick(void) {
     expect_nunchuk_stick(224, 32, 511, 511);
 }
 
+static void plain_nunchuk_accel_uses_own_packed_factory_points(void) {
+    reset_fixture(0x0306, false, EXT_NUNCHUK);
+    connect_device();
+    int32_t acceleration[3];
+    uint32_t remote_sequence;
+    assert(!uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &remote_sequence));
+    assert(!uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &remote_sequence));
+
+    // Native (693,382,551) = (+1g,-0.5g,+0.25g). Each axis has a different
+    // packed low-bit value (1,2,3), distinct calibration, and a non-default zero.
+    const uint8_t extension[6] = {160, 192, 173, 95, 137, 0xe5};
+    send_nunchuk_sample(extension);
+    uint32_t first = expect_nunchuk_accel(-8192, 2048, -4096);
+    assert(f.device.controller.gamepad.buttons == BUTTON_X);
+    assert(f.device.controller.gamepad.axis_x == 170 && f.device.controller.gamepad.axis_y == -341);
+    assert(!uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &remote_sequence));
+    expect_vector(f.device.controller.gamepad.accel, 0, 0, 0);
+
+    uint8_t remote[6] = {0x31};
+    put_accel_report(remote, 614, 442, 534);
+    feed(remote, sizeof(remote));
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &remote_sequence));
+    assert(expect_nunchuk_accel(-8192, 2048, -4096) == first);
+    send_nunchuk_sample(extension);
+    assert(expect_nunchuk_accel(-8192, 2048, -4096) != first);
+    uint32_t sequence;
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+    assert(sequence == remote_sequence);
+    expect_accel();  // Nunchuk does not overwrite the Remote's console IMU.
+}
+
+static void passthrough_nunchuk_accel_bitpacking_and_freshness(void) {
+    reset_fixture(0x0330, true, EXT_NUNCHUK);
+    set_nunchuk_accel_calibration((const uint16_t[]){502, 510, 518},
+                                 (const uint16_t[]){694, 766, 646});
+    connect_device();
+    // MP relocates AZ bit2 to byte5 bit7, not the connected bit in byte4.
+    // Bits 4/5/6/7 here reconstruct (694,382,550); C held, Z released.
+    uint8_t extension[6] = {160, 192, 173, 95, 137, 0xf4};
+    send_nunchuk_sample(extension);
+    uint32_t first = expect_nunchuk_accel(-8192, 2048, -4096);
+    assert(f.device.controller.gamepad.buttons == BUTTON_X);
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(expect_nunchuk_accel(-8192, 2048, -4096) == first);
+    int32_t acceleration[3];
+    uint32_t remote_sequence;
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &remote_sequence));
+    send_ack(0x16, 0);
+    send_status(false);  // MP synthetic detach: the mapped ID still exists.
+    finish_setup();
+    uint8_t short_report[8] = {0x32};
+    feed(short_report, sizeof(short_report));
+    send_nunchuk_sample((const uint8_t[]){255, 255, 255, 255, 255, 255});
+    assert(expect_nunchuk_accel(-8192, 2048, -4096) == first);
+    uint32_t sequence;
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+    assert(sequence == remote_sequence);
+    expect_accel();
+    expect_vector(f.device.controller.gamepad.gyro, 360 * 1024, -120 * 1024, 40 * 1024);
+
+    // Different low bits distinguish the X/Y selectors and both relocated Z
+    // bits; clear bit0 is the missing precision, never a synthesized bit.
+    extension[5] = 0x94;  // (694,380,548).
+    send_nunchuk_sample(extension);
+    assert(expect_nunchuk_accel(-8192, 1920, -4160) != first);
+    extension[5] = 0x64;  // (692,382,546).
+    send_nunchuk_sample(extension);
+    first = expect_nunchuk_accel(-8106, 1792, -4096);
+    send_nunchuk_sample(extension);
+    assert(expect_nunchuk_accel(-8106, 1792, -4096) != first);
+}
+
+static void nunchuk_accel_calibration_is_independent_of_stick_and_remote(void) {
+    reset_fixture(0x0306, false, EXT_NUNCHUK);
+    f.fail_accel_reads = true;
+    set_nunchuk_stick_calibration((const uint8_t[]){128, 32, 128, 224, 32, 128});
+    connect_device();
+    send_nunchuk_sample((const uint8_t[]){160, 192, 173, 95, 137, 0xe5});
+    expect_nunchuk_accel(-8192, 2048, -4096);
+    assert(f.device.controller.gamepad.axis_x == 170 && f.device.controller.gamepad.axis_y == -341);
+    int32_t acceleration[3];
+    uint32_t sequence;
+    assert(!uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+
+    // Each axis must have a real span, not merely a valid checksum or X span.
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        reset_fixture(0x0330, true, EXT_NUNCHUK);
+        uint16_t one_g[3] = {693, 766, 647};
+        const uint16_t zero[3] = {501, 510, 519};
+        one_g[axis] = zero[axis];
+        set_nunchuk_accel_calibration(zero, one_g);
+        set_nunchuk_stick_calibration((const uint8_t[]){220, 40, 124, 210, 30, 126});
+        connect_device();
+        expect_nunchuk_stick(124, 126, 0, 0);
+        expect_nunchuk_stick(220, 30, 511, 511);
+        send_motion(7760, 8200, 7560, false, true, false);
+        expect_accel();
+        expect_vector(f.device.controller.gamepad.gyro, 360 * 1024, -120 * 1024, 40 * 1024);
+        assert(!uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &sequence));
+    }
+
+    // Either checksum byte or an unreadable block disables only Nunchuk motion.
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        reset_fixture(0x0306, false, EXT_NUNCHUK);
+        if (failure < 2)
+            f.nunchuk_calibration[14 + failure] ^= 1;
+        else
+            f.fail_read_address = 0xa40020;
+        connect_device();
+        send_nunchuk_controls(false);
+        assert(!uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &sequence));
+    }
+}
+
+static void nunchuk_accel_detach_and_replacement_require_fresh_calibration(void) {
+    for (unsigned passthrough = 0; passthrough < 2; ++passthrough) {
+        reset_fixture(passthrough ? 0x0330 : 0x0306, passthrough, EXT_NUNCHUK);
+        connect_device();
+        send_nunchuk_controls(passthrough);
+        int32_t acceleration[3];
+        uint32_t original_sequence;
+        assert(uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &original_sequence));
+        f.extension = EXT_NONE;
+        if (passthrough)
+            send_motion(7760, 8200, 7560, false, true, false);
+        else
+            send_status(false);
+        uint32_t sequence;
+        assert(!uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &sequence));
+        finish_setup();
+        // In-flight extension bytes must not resurrect the detached stream.
+        send_nunchuk_sample((const uint8_t[]){160, 192, 128, 128, 128, 0});
+        assert(!uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &sequence));
+        set_nunchuk_accel_calibration((const uint16_t[]){512, 512, 512},
+                                     (const uint16_t[]){712, 752, 672});
+        f.extension = EXT_NUNCHUK;
+        if (passthrough)
+            send_motion(7760, 8200, 7560, false, true, false);
+        else
+            send_status(true);
+        finish_setup();
+        assert(!uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &sequence));
+        send_nunchuk_controls(passthrough);
+        assert(expect_nunchuk_accel(0, 0, 0) != original_sequence);
+        expect_accel();
+
+        // Replacement with unreadable calibration must not inherit old points.
+        f.extension = EXT_NONE;
+        if (passthrough)
+            send_motion(7760, 8200, 7560, false, true, false);
+        else
+            send_status(false);
+        finish_setup();
+        f.fail_read_address = 0xa40020;
+        f.extension = EXT_NUNCHUK;
+        if (passthrough)
+            send_motion(7760, 8200, 7560, false, true, false);
+        else
+            send_status(true);
+        finish_setup();
+        send_nunchuk_controls(passthrough);
+        assert(!uni_hid_parser_wii_nunchuk_accel_snapshot(&f.device, acceleration, &sequence));
+        expect_accel();
+    }
+}
+
 static void run_case(const char* name, void (*test)(void)) {
     printf("Wii parser: %s\n", name);
     fflush(stdout);
@@ -917,6 +1112,10 @@ static void run_case(const char* name, void (*test)(void)) {
 
 int main(void) {
     run_case("fresh calibrated accelerometer snapshots without MotionPlus", accelerometer_snapshot_requires_fresh_calibrated_reports);
+    run_case("plain Nunchuk independent packed acceleration", plain_nunchuk_accel_uses_own_packed_factory_points);
+    run_case("MotionPlus Nunchuk acceleration bitpacking and freshness", passthrough_nunchuk_accel_bitpacking_and_freshness);
+    run_case("Nunchuk accelerometer calibration independent of stick and Remote", nunchuk_accel_calibration_is_independent_of_stick_and_remote);
+    run_case("Nunchuk acceleration detach and replacement", nunchuk_accel_detach_and_replacement_require_fresh_calibration);
     run_case("calibrated Nunchuk left-stick endpoints and replacement", calibrated_nunchuk_left_stick_endpoints_and_replacement);
     run_case("unavailable Nunchuk calibration uses safe nominal travel", unavailable_nunchuk_calibration_keeps_safe_nominal_stick);
     run_case("integrated MotionPlus calibration and per-axis slow bits", integrated_motionplus_calibration_and_slow_bits);

@@ -57,6 +57,7 @@ void advance_binding(ControllerSyntheticBindingState* binding,
 
 void stop_macro(ControllerSyntheticInputContext* context) {
     context->macro_active = false;
+    context->macro_from_gesture = false;
     context->macro_index = 0;
     context->macro_step_index = 0;
     context->macro_cycle_duration_ms = 0;
@@ -67,7 +68,7 @@ void stop_macro(ControllerSyntheticInputContext* context) {
 
 bool start_macro(ControllerSyntheticInputContext* context,
                  const ControllerProfile& profile, uint8_t macro_index,
-                 uint32_t now_ms) {
+                 uint32_t now_ms, bool from_gesture = false) {
     if (macro_index >= CONTROLLER_PROFILE_MACRO_COUNT) {
         return false;
     }
@@ -87,13 +88,14 @@ bool start_macro(ControllerSyntheticInputContext* context,
         return false;
     }
     context->macro_active = true;
+    context->macro_from_gesture = from_gesture;
     context->macro_index = macro_index;
     context->macro_step_index = 0;
     context->macro_cycle_duration_ms = duration_ms;
     context->macro_cycle_elapsed_ms = 0;
     context->macro_last_update_ms = now_ms;
     context->macro_cycles_remaining =
-        macro.mode == ControllerProfileMacroMode::kOnce ? 1 :
+        from_gesture || macro.mode == ControllerProfileMacroMode::kOnce ? 1 :
         macro.mode == ControllerProfileMacroMode::kRepeat ? macro.repeat_count : 0;
     return true;
 }
@@ -177,7 +179,7 @@ void controller_synthetic_input_cancel(
 ControllerProfileTransformResult controller_synthetic_input_apply(
     ControllerSyntheticInputContext* context, const ControllerState& input,
     const ControllerProfile& profile, uint32_t now_ms,
-    uint32_t suppressed_control_mask, bool suppress_shift) {
+    uint32_t suppressed_control_mask, bool suppress_shift, uint8_t gesture_macro) {
     if (context == nullptr) {
         return controller_profile_transform(input, profile);
     }
@@ -219,7 +221,7 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
 
     bool macro_started = false;
     const bool macro_was_active = context->macro_active;
-    if (macro_was_active) {
+    if (macro_was_active && !context->macro_from_gesture) {
         const ControllerProfileMacro& macro =
             profile.macros[context->macro_index];
         const bool held = (input_control_mask & macro.trigger_mask) ==
@@ -249,10 +251,14 @@ ControllerProfileTransformResult controller_synthetic_input_apply(
             }
         }
     }
+    if (!cancel_pressed && !macro_was_active && !macro_started &&
+        gesture_macro < CONTROLLER_PROFILE_MACRO_COUNT) {
+        macro_started = start_macro(context, profile, gesture_macro, now_ms, true);
+    }
     if (!macro_started) {
         advance_macro(context, profile, now_ms);
     }
-    if (context->macro_active &&
+    if (context->macro_active && !context->macro_from_gesture &&
         context->macro_index < CONTROLLER_PROFILE_MACRO_COUNT) {
         consumed_controls |=
             profile.macros[context->macro_index].trigger_mask;

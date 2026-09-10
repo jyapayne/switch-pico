@@ -1363,6 +1363,226 @@ void test_early_rebound_cannot_become_a_delayed_swing() {
     require(presses == 2, "a new stroke after cooldown and release must trigger");
 }
 
+void test_combined_swings_have_priority_at_window_boundary() {
+    for (bool nunchuk_first : {false, true}) {
+        for (unsigned delay : {0u, 100u, 110u}) {
+            WiiSwingGestures gestures;
+            uint32_t now = UINT32_MAX - 100u;
+            uint32_t sequence = 0;
+            unsigned counts[3]{};
+            auto feed = [&](int16_t first, int16_t second) {
+                now += 10;
+                ++sequence;
+                WiiAccelerometerSample remote{
+                    nunchuk_first ? second : first, 0, 4096, sequence, now, true};
+                WiiAccelerometerSample nunchuk{
+                    nunchuk_first ? first : second, 0, 4096, sequence, now, true};
+                auto result = gestures.update(remote, nunchuk, now, 1, 1, 7, 100);
+                for (unsigned i = 0; i < 3; ++i)
+                    if (result.started & (1u << i)) ++counts[i];
+                return result;
+            };
+            for (unsigned i = 0; i < 20; ++i) feed(0, 0);
+            for (unsigned step = 0; step < 40; ++step) {
+                auto result = feed(10000, step * 10 >= delay ? 10000 : 0);
+                if (delay <= 100)
+                    require((result.active & 3u) == 0, "combined gesture leaked individual buttons");
+            }
+            if (delay <= 100)
+                require(counts[2] == 1 && counts[0] == 0 && counts[1] == 0,
+                        "simultaneous/in-window strokes must start only the combined action");
+            else
+                require(counts[2] == 0 && counts[0] == 1 && counts[1] == 1,
+                        "out-of-window strokes must remain two individual actions");
+        }
+    }
+}
+
+void test_combined_pending_cancels_on_detach_and_modifier_release() {
+    for (bool detach : {false, true}) {
+        WiiSwingGestures gestures;
+        uint32_t now = 0, sequence = 0;
+        auto feed = [&](int16_t force, uint8_t allowed, bool nunchuk_valid) {
+            now += 10;
+            ++sequence;
+            WiiAccelerometerSample remote{force, 0, 4096, sequence, now, true};
+            WiiAccelerometerSample nunchuk{0, 0, 4096, sequence, now, nunchuk_valid};
+            return gestures.update(remote, nunchuk, now, 1, 1, allowed, 100);
+        };
+        for (unsigned i = 0; i < 20; ++i) feed(0, 7, true);
+        feed(10000, 7, true);
+        require(feed(10000, 7, true).started == 0, "single must wait while combined is eligible");
+        for (unsigned i = 0; i < 20; ++i)
+            require(feed(10000, detach ? 7 : 3, !detach).started == 0,
+                    "detaching or releasing combined modifier replayed a pending action");
+    }
+    WiiSwingGestures remote_only;
+    WiiAccelerometerSample missing{};
+    WiiAccelerometerSample sample{0, 0, 4096, 0, 0, true};
+    for (unsigned i = 0; i < 20; ++i) {
+        sample.timestamp_ms += 10;
+        ++sample.sequence;
+        remote_only.update(sample, missing, sample.timestamp_ms, 1, 1, 7, 100);
+    }
+    sample.x = 10000;
+    ++sample.sequence;
+    sample.timestamp_ms += 10;
+    remote_only.update(sample, missing, sample.timestamp_ms, 1, 1, 7, 100);
+    ++sample.sequence;
+    sample.timestamp_ms += 10;
+    require(remote_only.update(sample, missing, sample.timestamp_ms, 1, 1, 7, 100).started == 1,
+            "absent Nunchuk must not delay the Remote gesture");
+}
+
+void test_nunchuk_button_and_combined_macro_runtime() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.swing.button = 2;
+    profile.nunchuk_swing.button = 1;
+    profile.combined_swing.macro = 0;
+    profile.macros[0].step_count = 1;
+    profile.macros[0].mode = ControllerProfileMacroMode::kWhileHeld;
+    profile.macros[0].trigger_mask = 1;  // Not held during the combined gesture.
+    profile.macro_step_count = 1;
+    profile.macro_steps[0].override_flags = kControllerProfileOverrideButtons;
+    profile.macro_steps[0].duration_ms = 100;
+    profile.macro_steps[0].output_button_mask = 8;
+    for (unsigned i = 1; i < CONTROLLER_PROFILE_MACRO_COUNT; ++i)
+        profile.macros[i].first_step = 1;
+    auto snapshot = make_snapshot(0);
+    uint32_t now = 0, sequence = 0;
+    auto feed = [&](int16_t remote, int16_t nunchuk) {
+        now += 10;
+        ++sequence;
+        snapshot.accelerometer = {remote, 0, 4096, sequence, now, true};
+        snapshot.nunchuk_accelerometer = {nunchuk, 0, 4096, sequence, now, true};
+        return runtime_transform(0, snapshot, now);
+    };
+    for (unsigned i = 0; i < 20; ++i) feed(0, 0);
+    feed(10000, 10000);
+    auto result = feed(10000, 10000);
+    require(result.state.button_north && !result.state.button_west && !result.state.button_east,
+            "combined gesture must start its macro instead of both individual buttons");
+    for (unsigned i = 0; i < 8; ++i)
+        require(feed(0, 0).state.button_north, "gesture macro stopped when physical trigger was absent");
+    feed(0, 0);
+    require(!feed(0, 0).state.button_north, "gesture macro must finish exactly one cycle");
+    for (unsigned i = 0; i < 30; ++i) feed(0, 0);
+    feed(0, 10000);
+    require(!feed(0, 10000).state.button_east, "Nunchuk alone must wait for combination window");
+    for (unsigned i = 0; i < 10; ++i) feed(0, 10000);
+    result = feed(0, 10000);
+    require(result.state.button_east && !result.state.button_west && !result.state.button_north,
+            "Nunchuk-only gesture must produce its configured button after the window");
+}
+
+void test_gesture_macros_rearm_during_continuous_swings() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.swing.macro = 0;
+    profile.macros[0].step_count = 1;
+    profile.macros[0].mode = ControllerProfileMacroMode::kRepeat;
+    profile.macros[0].repeat_count = 5;
+    profile.macro_step_count = 1;
+    profile.macro_steps[0].override_flags = kControllerProfileOverrideButtons;
+    profile.macro_steps[0].duration_ms = 100;
+    profile.macro_steps[0].output_button_mask = 8;
+    auto snapshot = make_snapshot(0);
+    uint32_t now = 0;
+    unsigned starts = 0;
+    bool held = false;
+    auto feed = [&](int16_t force) {
+        now += 10;
+        snapshot.accelerometer = {force, 0, 4096, snapshot.accelerometer.sequence + 1, now, true};
+        const bool pressed = runtime_transform(0, snapshot, now).state.button_north;
+        if (pressed && !held) ++starts;
+        held = pressed;
+    };
+    for (unsigned i = 0; i < 20; ++i) feed(0);
+    for (unsigned stroke = 0; stroke < 4; ++stroke) {
+        const int direction = stroke % 2 ? -1 : 1;
+        for (unsigned i = 0; i < 24; ++i) feed(direction * 10000);
+        for (unsigned i = 0; i < 8; ++i) feed(direction * 2000);
+        require(starts == stroke + 1 && !held,
+                "gesture macro must play once per stroke without requiring a full stop");
+    }
+}
+
+struct CombinedConfirmationRig {
+    WiiSwingGestures gestures;
+    uint32_t now = 1000, sequence = 0;
+    unsigned counts[3]{};
+    CombinedConfirmationRig() {
+        for (unsigned i = 0; i < 20; ++i) feed(0, 0);
+    }
+    WiiSwingGestureResult feed(int16_t remote_force, int16_t nunchuk_force,
+                               uint8_t allowed = 7) {
+        now += 10;
+        ++sequence;
+        WiiAccelerometerSample remote{remote_force, 0, 4096, sequence, now, true};
+        WiiAccelerometerSample nunchuk{nunchuk_force, 0, 4096, sequence, now, true};
+        const auto result = gestures.update(remote, nunchuk, now, 1, 1, allowed, 100);
+        for (unsigned i = 0; i < 3; ++i)
+            if (result.started & (1u << i)) ++counts[i];
+        return result;
+    }
+};
+
+void test_combined_accepts_smaller_motion_before_or_after_full_swing() {
+    for (bool weak_nunchuk : {false, true}) {
+        for (int delay : {-60, 0, 60}) {
+            CombinedConfirmationRig rig;
+            for (int step = 0; step < 40; ++step) {
+                const int strong_start = delay < 0 ? -delay : 0;
+                const int weak_start = delay > 0 ? delay : 0;
+                const int16_t strong = step * 10 >= strong_start ? 10000 : 0;
+                const int16_t weak = step * 10 >= weak_start ? 4500 : 0;
+                const auto result = rig.feed(weak_nunchuk ? strong : weak,
+                                             weak_nunchuk ? weak : strong);
+                require((result.active & 3) == 0, "confirmed combined motion leaked a single action");
+            }
+            require(rig.counts[2] == 1 && rig.counts[0] == 0 && rig.counts[1] == 0,
+                    "one full swing plus smaller companion motion must combine in either order");
+        }
+    }
+}
+
+void test_confirmation_does_not_weaken_individuals_or_accept_noise() {
+    for (uint8_t allowed : {uint8_t{3}, uint8_t{7}}) {
+        CombinedConfirmationRig rig;
+        for (unsigned i = 0; i < 40; ++i) rig.feed(4500, 4500, allowed);
+        require(rig.counts[0] == 0 && rig.counts[1] == 0 && rig.counts[2] == 0,
+                "two subthreshold movements must not generate any action");
+    }
+    for (bool spike : {false, true}) {
+        CombinedConfirmationRig rig;
+        for (unsigned i = 0; i < 40; ++i)
+            rig.feed(10000, spike && i == 2 ? 4500 : 0);
+        require(rig.counts[0] == 1 && rig.counts[1] == 0 && rig.counts[2] == 0,
+                "a stationary companion or one noisy sample must not confirm a combined swing");
+    }
+}
+
+void test_consumed_confirmation_suppresses_late_full_swing() {
+    CombinedConfirmationRig rig;
+    for (unsigned i = 0; i < 45; ++i)
+        rig.feed(10000, i < 8 ? 4500 : 10000);
+    require(rig.counts[2] == 1 && rig.counts[0] == 0 && rig.counts[1] == 0,
+            "a confirmation growing into a full swing must not leak a later individual action");
+}
+
+void test_expired_or_discarded_confirmation_cannot_be_reused() {
+    for (bool discard : {false, true}) {
+        CombinedConfirmationRig rig;
+        for (unsigned i = 0; i < 3; ++i) rig.feed(0, 4500);
+        if (discard) rig.gestures.discard_actions();
+        else for (unsigned i = 0; i < 12; ++i) rig.feed(0, 0);
+        for (unsigned i = 0; i < 40; ++i) rig.feed(10000, 0);
+        require(rig.counts[0] == 1 && rig.counts[1] == 0 && rig.counts[2] == 0,
+                "expired or macro-discarded evidence must not confirm a later swing");
+    }
+}
+
 }  // namespace
 
 bool bluepad32_input_backend_toggle_motion(
@@ -1441,5 +1661,13 @@ int main() {
     test_swing_modifier_release_cancels_and_requires_fresh_settle();
     test_back_and_forth_swings_do_not_require_full_stops();
     test_early_rebound_cannot_become_a_delayed_swing();
+    test_combined_swings_have_priority_at_window_boundary();
+    test_combined_pending_cancels_on_detach_and_modifier_release();
+    test_nunchuk_button_and_combined_macro_runtime();
+    test_gesture_macros_rearm_during_continuous_swings();
+    test_combined_accepts_smaller_motion_before_or_after_full_swing();
+    test_confirmation_does_not_weaken_individuals_or_accept_noise();
+    test_consumed_confirmation_suppresses_late_full_swing();
+    test_expired_or_discarded_confirmation_cannot_be_reused();
     return 0;
 }

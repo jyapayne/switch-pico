@@ -39,6 +39,19 @@ bool read_encoded_database(void*, size_t offset, uint8_t* output,
     return true;
 }
 
+void require_no_new_swing_actions(const ControllerProfile& profile) {
+    require(profile.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.nunchuk_swing.sensitivity == 1 &&
+                profile.nunchuk_swing.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.combined_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.combined_swing.modifier == CONTROLLER_PROFILE_NO_BUTTON &&
+                profile.combination_window_ms == 100,
+            "legacy profile enabled a new gesture action or lost its defaults");
+}
+
 void test_pair_identity_wire_and_member_validation() {
     ControllerIdentity left = identity(1);
     left.transport = ControllerTransport::kBle;
@@ -123,9 +136,9 @@ void test_profile_wire_schema() {
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)),
             "default profile did not encode");
-    require(encoded[0] == 8 && encoded[1] == 0 &&
+    require(encoded[0] == 9 && encoded[1] == 0 &&
                 encoded[2] == 0x80 && encoded[3] == 1,
-            "profile header is not little-endian v8/384");
+            "profile header is not little-endian v9/384");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
         require(encoded[4 + index] == index,
@@ -280,6 +293,7 @@ void test_legacy_profile_migration() {
                 migrated.swing.sensitivity == 1 &&
                 migrated.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
             "legacy padding enabled a swing gesture");
+    require_no_new_swing_actions(migrated);
     require(migrated.triggers[0].digital_threshold ==
                     CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD &&
                 migrated.triggers[1].digital_threshold ==
@@ -405,6 +419,9 @@ void test_legacy_profile_migration() {
         previous_encoded[0] = version;
         previous_encoded[75] = version == 4 ? 0x21 : 0;
         migrated.swing = {2, 2, 24};
+        migrated.nunchuk_swing = {0, 0, 0};
+        migrated.combined_swing = {15, CONTROLLER_PROFILE_NO_BUTTON, 24};
+        migrated.combination_window_ms = 30;
         require(controller_profile_decode(
                     previous_encoded, sizeof(previous_encoded), &migrated) &&
                     migrated.triggers[0].output ==
@@ -423,6 +440,7 @@ void test_legacy_profile_migration() {
                     migrated.swing.sensitivity == 1 &&
                     migrated.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
                 "legacy control mapping or action migration lost settings");
+        require_no_new_swing_actions(migrated);
     }
 
     ControllerProfile current =
@@ -554,6 +572,7 @@ void test_set_b_sparse_extension_and_migration() {
                 decoded.swing.sensitivity == 1 &&
                 decoded.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
             "schema5 full136-byte macro stream did not migrate");
+    require_no_new_swing_actions(decoded);
     require(controller_profile_encode(decoded, encoded, sizeof(encoded)) &&
                 memcmp(&legacy[4], &encoded[4], sizeof(legacy) - 4) == 0,
             "schema5 migration changed existing profile data");
@@ -637,6 +656,7 @@ void test_schema6_migration_preserves_every_setting() {
                 profile.swing.sensitivity == 1 &&
                 profile.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
             "schema6 padding became a swing gesture");
+    require_no_new_swing_actions(profile);
     for (uint8_t index = 0; index < CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT; ++index) {
         require(profile.extra_button_map[index] == CONTROLLER_PROFILE_NO_BUTTON &&
                     profile.shift.extra_button_map[index] == CONTROLLER_PROFILE_NO_BUTTON,
@@ -750,6 +770,7 @@ void test_schema7_migration_preserves_extra_controls_and_macros() {
                 migrated.swing.sensitivity == 1 &&
                 migrated.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
             "schema7 migration lost existing settings or enabled swing");
+    require_no_new_swing_actions(migrated);
     for (size_t offset = 364; offset < sizeof(legacy); ++offset) {
         legacy[offset] = 1;
         require(!controller_profile_decode(legacy, sizeof(legacy), &migrated),
@@ -758,39 +779,124 @@ void test_schema7_migration_preserves_extra_controls_and_macros() {
     }
 }
 
+void test_schema8_migration_preserves_remote_swing() {
+    uint8_t legacy[sizeof(kLegacySchema6Profile)]{};
+    memcpy(legacy, kLegacySchema6Profile, sizeof(legacy));
+    legacy[0] = 8;
+    legacy[344] = 16;
+    legacy[351] = 15;
+    legacy[358] = 0x40;
+    legacy[362] = 0x55;
+    legacy[363] = 0x2a;
+    legacy[364] = 15;
+    legacy[365] = 2;
+    legacy[366] = 24;
+    ControllerProfile migrated{};
+    migrated.swing.macro = 0;
+    migrated.nunchuk_swing = {0, 0, 0};
+    migrated.combined_swing = {1, CONTROLLER_PROFILE_NO_BUTTON, 16};
+    migrated.combination_window_ms = 200;
+    uint8_t upgraded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_decode(legacy, sizeof(legacy), &migrated) &&
+                controller_profile_encode(migrated, upgraded, sizeof(upgraded)) &&
+                memcmp(legacy + 2, upgraded + 2, 365) == 0 &&
+                migrated.swing.button == 15 &&
+                migrated.swing.sensitivity == 2 &&
+                migrated.swing.modifier == 24,
+            "schema8 migration changed Remote, extras, or macro settings");
+    require_no_new_swing_actions(migrated);
+    for (size_t offset = 367; offset < sizeof(legacy); ++offset) {
+        legacy[offset] = 1;
+        require(!controller_profile_decode(legacy, sizeof(legacy), &migrated),
+                "schema8 interpreted reserved padding as new swing actions");
+        legacy[offset] = 0;
+    }
+}
+
 void test_swing_wire_settings_and_rejection() {
     ControllerProfile profile =
         controller_profile_default(controller_identity_global(), 0);
     profile.swing = {15, 2, 24};
+    profile.nunchuk_swing = {0, 0, 0};
+    profile.combined_swing = {4, CONTROLLER_PROFILE_NO_BUTTON, 16};
+    profile.combination_window_ms = 30;
+    profile.macros[0].step_count = 1;
+    profile.macro_step_count = 1;
+    profile.macro_steps[0].duration_ms = 1;
+    for (uint8_t index = 1; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+        profile.macros[index].first_step = 1;
+    }
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     ControllerProfile decoded{};
+    const uint8_t button_actions[] = {
+        15, 2, 24, 255, 0, 0, 0, 255, 4, 255, 16, 30};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
-                encoded[364] == 15 && encoded[365] == 2 && encoded[366] == 24 &&
+                memcmp(encoded + 364, button_actions, sizeof(button_actions)) == 0 &&
                 controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
                 decoded.swing.button == 15 && decoded.swing.sensitivity == 2 &&
-                decoded.swing.modifier == 24,
-            "swing wire settings did not round-trip");
+                decoded.swing.modifier == 24 &&
+                decoded.nunchuk_swing.button == 0 &&
+                decoded.nunchuk_swing.sensitivity == 0 &&
+                decoded.nunchuk_swing.modifier == 0 &&
+                decoded.combined_swing.button == 4 &&
+                decoded.combined_swing.modifier == 16 &&
+                decoded.combination_window_ms == 30,
+            "independent swing button actions did not use the schema9 layout");
     const ControllerProfileSwingConfiguration invalid_settings[] = {
         {16, 2, 24}, {254, 2, 24}, {15, 3, 24}, {15, 255, 24},
-        {15, 2, 25}, {15, 2, 254}, {255, 3, 255}, {255, 1, 25}};
-    for (const auto& invalid : invalid_settings) {
-        profile.swing = invalid;
-        require(!controller_profile_validate(profile) &&
-                    !controller_profile_encode(profile, encoded, sizeof(encoded)),
-                "invalid swing settings were accepted for encoding");
-        encoded[364] = invalid.button;
-        encoded[365] = invalid.sensitivity;
-        encoded[366] = invalid.modifier;
-        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
-                "invalid swing wire settings were accepted");
+        {15, 2, 25}, {15, 2, 254}, {255, 3, 255}, {255, 1, 25},
+        {255, 1, 24, 4}, {255, 1, 24, 254}, {0, 1, 24, 0}};
+    for (uint8_t sensor = 0; sensor < 2; ++sensor) {
+        const size_t offset = 364 + sensor * 4;
+        for (const auto& settings : invalid_settings) {
+            ControllerProfile invalid = profile;
+            (sensor == 0 ? invalid.swing : invalid.nunchuk_swing) = settings;
+            uint8_t malformed[sizeof(encoded)]{};
+            require(!controller_profile_validate(invalid) &&
+                        !controller_profile_encode(invalid, malformed,
+                                                   sizeof(malformed)),
+                    "invalid single-sensor swing action was accepted for encoding");
+            memcpy(malformed, encoded, sizeof(malformed));
+            malformed[offset] = settings.button;
+            malformed[offset + 1] = settings.sensitivity;
+            malformed[offset + 2] = settings.modifier;
+            malformed[offset + 3] = settings.macro;
+            require(!controller_profile_decode(malformed, sizeof(malformed), &decoded),
+                    "invalid single-sensor swing wire action was accepted");
+        }
     }
-    profile.swing = {0, 0, 0};
-    require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
-                controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
-                decoded.swing.button == 0 && decoded.swing.sensitivity == 0 &&
-                decoded.swing.modifier == 0,
-            "zero-valued swing settings were mistaken for disabled settings");
-    for (size_t offset = 367; offset < sizeof(encoded); ++offset) {
+    const ControllerProfileCombinedSwingConfiguration invalid_combined[] = {
+        {16, 255, 24}, {254, 255, 24}, {255, 4, 24},
+        {255, 254, 24}, {0, 0, 24}, {15, 255, 25}, {255, 255, 254}};
+    for (const auto& settings : invalid_combined) {
+        ControllerProfile invalid = profile;
+        invalid.combined_swing = settings;
+        uint8_t malformed[sizeof(encoded)]{};
+        require(!controller_profile_validate(invalid) &&
+                    !controller_profile_encode(invalid, malformed, sizeof(malformed)),
+                "invalid combined swing action was accepted for encoding");
+        memcpy(malformed, encoded, sizeof(malformed));
+        malformed[372] = settings.button;
+        malformed[373] = settings.macro;
+        malformed[374] = settings.modifier;
+        require(!controller_profile_decode(malformed, sizeof(malformed), &decoded),
+                "invalid combined swing wire action was accepted");
+    }
+    const uint8_t invalid_windows[] = {29, 201};
+    for (uint8_t window : invalid_windows) {
+        ControllerProfile invalid = profile;
+        invalid.combination_window_ms = window;
+        uint8_t malformed[sizeof(encoded)]{};
+        require(!controller_profile_validate(invalid) &&
+                    !controller_profile_encode(invalid, malformed, sizeof(malformed)),
+                "out-of-range combination window was accepted for encoding");
+        memcpy(malformed, encoded, sizeof(malformed));
+        malformed[375] = window;
+        require(!controller_profile_decode(malformed, sizeof(malformed), &decoded),
+                "out-of-range combination window was accepted from wire");
+    }
+    for (size_t offset = 376; offset < sizeof(encoded); ++offset) {
+        require(encoded[offset] == 0, "schema9 reserved tail was not zero");
         encoded[offset] = 1;
         require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
                 "nonzero swing extension reservation was accepted");
@@ -798,12 +904,85 @@ void test_swing_wire_settings_and_rejection() {
     }
     profile.swing = {CONTROLLER_PROFILE_NO_BUTTON, 0,
                      CONTROLLER_PROFILE_NO_BUTTON};
+    profile.nunchuk_swing = profile.swing;
+    profile.combined_swing = {};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
                 controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
                 decoded.swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                decoded.swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
                 decoded.swing.sensitivity == 0 &&
-                decoded.swing.modifier == CONTROLLER_PROFILE_NO_BUTTON,
-            "disabled swing did not preserve sensitivity and absent modifier");
+                decoded.nunchuk_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                decoded.nunchuk_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
+                decoded.nunchuk_swing.sensitivity == 0 &&
+                decoded.combined_swing.button == CONTROLLER_PROFILE_NO_BUTTON &&
+                decoded.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON,
+            "disabled gestures became actions or lost their sensitivity");
+}
+
+void test_swing_macro_targets_require_playable_steps() {
+    ControllerProfile profile =
+        controller_profile_default(controller_identity_global(), 0);
+    profile.macros[0].step_count = 2;
+    for (uint8_t index = 1; index < CONTROLLER_PROFILE_MACRO_COUNT; ++index) {
+        profile.macros[index].first_step = 2;
+    }
+    profile.macros[3].step_count = 1;
+    profile.macro_step_count = 3;
+    profile.macro_steps[1].duration_ms = 1;
+    profile.macro_steps[2].duration_ms = 10000;
+    profile.swing = {255, 2, 24, 0};
+    profile.nunchuk_swing = {255, 0, 255, 3};
+    profile.combined_swing = {255, 0, 0};
+    profile.combination_window_ms = 200;
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    ControllerProfile decoded{};
+    const uint8_t macro_actions[] = {
+        255, 2, 24, 0, 255, 0, 255, 3, 255, 0, 0, 200};
+    for (uint8_t mode = 0; mode <= 3; ++mode) {
+        profile.macros[0].mode = static_cast<ControllerProfileMacroMode>(mode);
+        require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                    memcmp(encoded + 364, macro_actions, sizeof(macro_actions)) == 0 &&
+                    controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
+                    decoded.swing.macro == 0 && decoded.nunchuk_swing.macro == 3 &&
+                    decoded.combined_swing.macro == 0 &&
+                    decoded.combination_window_ms == 200 &&
+                    decoded.macros[0].mode == profile.macros[0].mode &&
+                    decoded.macros[0].trigger_mask == 0 &&
+                    decoded.macro_steps[0].duration_ms == 0 &&
+                    decoded.macro_steps[1].duration_ms == 1 &&
+                    decoded.macro_steps[2].duration_ms == 10000,
+                "gesture macro targets lost steps, playback mode, or index boundaries");
+    }
+    profile.swing = {};
+    profile.nunchuk_swing = {};
+    profile.combined_swing = {};
+    profile.macros[0].mode = ControllerProfileMacroMode::kOnce;
+    profile.macro_steps[1].duration_ms = 0;
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)),
+            "unbound zero-duration one-shot macro was rejected");
+    const size_t macro_offsets[] = {367, 371, 373};
+    for (uint8_t gesture = 0; gesture < 3; ++gesture) {
+        for (uint8_t target = 0; target < 2; ++target) {
+            ControllerProfile invalid = profile;
+            uint8_t* bindings[] = {&invalid.swing.macro,
+                                   &invalid.nunchuk_swing.macro,
+                                   &invalid.combined_swing.macro};
+            *bindings[gesture] = target;
+            uint8_t malformed[sizeof(encoded)]{};
+            require(!controller_profile_validate(invalid) &&
+                        !controller_profile_encode(invalid, malformed, sizeof(malformed)),
+                    "gesture accepted a zero-duration or empty macro target");
+            memcpy(malformed, encoded, sizeof(malformed));
+            malformed[macro_offsets[gesture]] = target;
+            require(!controller_profile_decode(malformed, sizeof(malformed), &decoded),
+                    "wire gesture accepted a zero-duration or empty macro target");
+        }
+    }
+    profile.macro_steps[1].duration_ms = 1;
+    profile.macro_steps[2].duration_ms = 0;
+    profile.nunchuk_swing.macro = 3;
+    require(!controller_profile_validate(profile),
+            "gesture used another macro's duration to validate its target");
 }
 
 }  // namespace
@@ -817,6 +996,8 @@ int main() {
     test_schema6_migration_preserves_every_setting();
     test_extra_control_schema_round_trip_and_output_limits();
     test_schema7_migration_preserves_extra_controls_and_macros();
+    test_schema8_migration_preserves_remote_swing();
     test_swing_wire_settings_and_rejection();
+    test_swing_macro_targets_require_playable_steps();
     return 0;
 }

@@ -1869,7 +1869,10 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     legacy_json_object = default_profile.to_json_object()
     legacy_json_object["schema_version"] = config_manager.PROFILE_LEGACY_SCHEMA_VERSION
     legacy_json_object["size"] = config_manager.PROFILE_LEGACY_SIZE
-    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map", "swing"):
+    for field in (
+        "shortcuts", "shift", "turbo_settings", "extra_button_map", "swing",
+        "nunchuk_swing", "combined_swing", "combination_window_ms",
+    ):
         del legacy_json_object[field]
     del legacy_json_object["motion_toggle_chord"]
     del legacy_json_object["triggers"]["left"]["output"]
@@ -1932,7 +1935,10 @@ def test_schema5_full_macro_stream_migrates_bytes_and_json(monkeypatch) -> None:
 
     obj["schema_version"] = 5
     obj["size"] = 256
-    for field in ("shortcuts", "shift", "turbo_settings", "extra_button_map", "swing"):
+    for field in (
+        "shortcuts", "shift", "turbo_settings", "extra_button_map", "swing",
+        "nunchuk_swing", "combined_swing", "combination_window_ms",
+    ):
         del obj[field]
     for macro in obj["macros"]:
         del macro["playback"]
@@ -1973,7 +1979,6 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     assert encoded[336:344] == bytes((3, 255, 0, 1, 1, 1, 2, 1))
     assert encoded[344:358] == bytes([255]) * 14
     assert encoded[358:364] == bytes(6)
-    assert encoded[367:] == bytes(17)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
     assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
 
@@ -1984,7 +1989,8 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     legacy_json["schema_version"] = 6
     del legacy_json["extra_button_map"]
     del legacy_json["shift"]["extra_button_map"]
-    del legacy_json["swing"]
+    for field in ("swing", "nunchuk_swing", "combined_swing", "combination_window_ms"):
+        del legacy_json[field]
     assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
     assert config_manager.ControllerProfile.from_json_object(legacy_json) == profile
     device = FakeDevice()
@@ -1998,7 +2004,7 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     assert old_listing[1] == config_manager.ProfileListEntry(device.stable_identity, 1, "Custom controller")
 
 
-@pytest.mark.parametrize("version", [7, 8])
+@pytest.mark.parametrize("version", [7, 8, 9])
 def test_schema7_extra_controls_keep_output_channels_and_wire_layout(version: int) -> None:
     obj = custom_profile().to_json_object()
     obj["extra_button_map"] = dict(zip(
@@ -2021,6 +2027,11 @@ def test_schema7_extra_controls_keep_output_channels_and_wire_layout(version: in
     obj["schema_version"] = version
     if version == 7:
         del obj["swing"]
+    elif version == 8:
+        del obj["swing"]["macro"]
+    if version < 9:
+        for field in ("nunchuk_swing", "combined_swing", "combination_window_ms"):
+            del obj[field]
     profile = config_manager.ControllerProfile.from_json_object(obj)
     encoded = profile.to_bytes()
     assert encoded[:4] == struct.pack("<HH", config_manager.PROFILE_SCHEMA_VERSION, 384)
@@ -2035,6 +2046,8 @@ def test_schema7_extra_controls_keep_output_channels_and_wire_layout(version: in
     struct.pack_into("<H", legacy_wire, 0, version)
     if version == 7:
         legacy_wire[364:] = bytes(20)
+    elif version == 8:
+        legacy_wire[367:] = bytes(17)
     device = FakeDevice()
     device.profiles[(device.stable_identity.to_bytes(), 1)] = bytes(legacy_wire)
     assert config_manager.read_profile(device, device.stable_identity, 1) == profile
@@ -2115,7 +2128,10 @@ def test_legacy_control_profiles_preserve_custom_actions(version: int) -> None:
     macro.pop("repeat_count")
     macro["steps"].append(config_manager.MacroStep.end().to_json_object())
     obj["macro"] = macro
-    for key in ("shortcuts", "shift", "turbo_settings", "extra_button_map", "swing"):
+    for key in (
+        "shortcuts", "shift", "turbo_settings", "extra_button_map", "swing",
+        "nunchuk_swing", "combined_swing", "combination_window_ms",
+    ):
         del obj[key]
     assert config_manager.ControllerProfile.from_json_object(obj) == profile
     assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()) == profile
@@ -2134,6 +2150,7 @@ def test_swing_profile_round_trip_preserves_other_settings(
     obj = before.to_json_object()
     obj["swing"] = {
         "button": button, "sensitivity": sensitivity, "modifier": modifier,
+        "macro": None,
     }
     profile = config_manager.ControllerProfile.from_json_object(obj)
     assert replace(profile, swing=before.swing) == before
@@ -2154,6 +2171,7 @@ def test_swing_profile_round_trip_preserves_other_settings(
     ("sensitivity", 1),
     ("modifier", "unknown"),
     ("modifier", False),
+    ("macro", 0), ("macro", 5), ("macro", True), ("macro", "1"),
 ])
 def test_swing_rejects_invalid_json_settings(field: str, value: object) -> None:
     obj = config_manager.ControllerProfile.default().to_json_object()
@@ -2166,6 +2184,7 @@ def test_swing_rejects_invalid_json_settings(field: str, value: object) -> None:
     ("button", -1), ("button", 16), ("button", True),
     ("sensitivity", -1), ("sensitivity", 3), ("sensitivity", False),
     ("modifier", -1), ("modifier", 25), ("modifier", 256),
+    ("macro", -1), ("macro", 4), ("macro", False),
 ])
 def test_swing_rejects_invalid_in_memory_settings(field: str, value: object) -> None:
     with pytest.raises(config_manager.ConfigManagerError):
@@ -2173,7 +2192,9 @@ def test_swing_rejects_invalid_in_memory_settings(field: str, value: object) -> 
 
 
 @pytest.mark.parametrize(("offset", "value"), [
-    (364, 16), (365, 3), (366, 25), (367, 1),
+    (364, 16), (365, 3), (366, 25), (367, 4),
+    (368, 16), (369, 3), (370, 25), (371, 4),
+    (372, 16), (373, 4), (374, 25), (375, 29), (375, 201), (376, 1),
 ])
 def test_swing_rejects_corrupt_wire_settings(offset: int, value: int) -> None:
     payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
@@ -2184,6 +2205,7 @@ def test_swing_rejects_corrupt_wire_settings(offset: int, value: int) -> None:
 
 @pytest.mark.parametrize("mutation", [
     "missing", "unknown", "missing_button", "missing_sensitivity", "missing_modifier",
+    "missing_macro",
     "legacy_field",
 ])
 def test_swing_json_fields_are_strict(mutation: str) -> None:
@@ -2195,9 +2217,115 @@ def test_swing_json_fields_are_strict(mutation: str) -> None:
     elif mutation.startswith("missing_"):
         del obj["swing"][mutation.removeprefix("missing_")]
     else:
+        for field in ("nunchuk_swing", "combined_swing", "combination_window_ms"):
+            del obj[field]
         obj["schema_version"] = 7
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerProfile.from_json_object(obj)
+
+
+def test_schema8_swing_migration_preserves_remote_binding() -> None:
+    profile = replace(custom_profile(), swing=config_manager.ProfileSwing(2, 2, 24))
+    legacy_wire = bytearray(profile.to_bytes())
+    struct.pack_into("<H", legacy_wire, 0, 8)
+    legacy_wire[367:] = bytes(17)
+    legacy_json = profile.to_json_object()
+    legacy_json["schema_version"] = 8
+    del legacy_json["swing"]["macro"]
+    for field in ("nunchuk_swing", "combined_swing", "combination_window_ms"):
+        del legacy_json[field]
+    assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
+    assert config_manager.ControllerProfile.from_json_object(legacy_json) == profile
+    assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()) == profile
+    legacy_wire[367] = 1
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(legacy_wire)
+
+
+@pytest.mark.parametrize("macro_number", [1, 4])
+def test_gesture_macro_json_indices_and_wire_layout(macro_number: int) -> None:
+    obj = custom_profile().to_json_object()
+    obj["macros"][macro_number - 1] = {
+        **obj["macros"][0], "trigger": [], "playback": "toggle",
+    }
+    obj["swing"].update(macro=macro_number, sensitivity="high", modifier="right_sr")
+    obj["nunchuk_swing"].update(button="dpad_right", sensitivity="low", modifier="c")
+    obj["combined_swing"].update(macro=macro_number, modifier="left_trigger")
+    obj["combination_window_ms"] = 200
+    profile = config_manager.ControllerProfile.from_json_object(obj)
+    assert profile.swing.macro == profile.combined_swing.macro == macro_number - 1
+    encoded = profile.to_bytes()
+    assert encoded[364:376] == bytes((
+        255, 2, 24, macro_number - 1, 15, 0, 18, 255,
+        255, macro_number - 1, 16, 200,
+    ))
+    assert encoded[376:] == bytes(8)
+    assert config_manager.ControllerProfile.from_bytes(encoded) == profile
+    assert profile.to_json_object() == obj
+
+
+@pytest.mark.parametrize("gesture", ["swing", "nunchuk_swing", "combined_swing"])
+def test_gesture_actions_are_exclusive(gesture: str) -> None:
+    obj = custom_profile().to_json_object()
+    obj[gesture].update(button="south", macro=1)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+    action_type = (
+        config_manager.ProfileCombinedSwing if gesture == "combined_swing"
+        else config_manager.ProfileSwing
+    )
+    with pytest.raises(config_manager.ConfigManagerError):
+        action_type(button=0, macro=0)
+    payload = bytearray(custom_profile().to_bytes())
+    button_offset, macro_offset = {
+        "swing": (364, 367), "nunchuk_swing": (368, 371), "combined_swing": (372, 373),
+    }[gesture]
+    payload[button_offset] = payload[macro_offset] = 0
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize("gesture", ["swing", "nunchuk_swing", "combined_swing"])
+@pytest.mark.parametrize("empty", [False, True])
+def test_gesture_macro_requires_configured_positive_duration_target(
+    gesture: str, empty: bool,
+) -> None:
+    obj = custom_profile().to_json_object()
+    target = obj["macros"][0]
+    target["trigger"] = []
+    if empty:
+        target["steps"] = []
+    else:
+        for step in target["steps"]:
+            step["duration_ms"] = 0
+    unbound = config_manager.ControllerProfile.from_json_object(obj)
+    obj[gesture]["macro"] = 1
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+    with pytest.raises(config_manager.ConfigManagerError):
+        replace(unbound, **{gesture: replace(getattr(unbound, gesture), macro=0)})
+    payload = bytearray(unbound.to_bytes())
+    payload[{"swing": 367, "nunchuk_swing": 371, "combined_swing": 373}[gesture]] = 0
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize("window", [30, 200])
+def test_combination_window_inclusive_bounds_round_trip(window: int) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    obj["combination_window_ms"] = window
+    profile = config_manager.ControllerProfile.from_json_object(obj)
+    assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()).combination_window_ms == window
+
+
+@pytest.mark.parametrize("window", [29, 201, True, 100.0, None])
+def test_combination_window_rejects_out_of_range_or_noninteger_values(window: object) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    obj["combination_window_ms"] = window
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+    with pytest.raises(config_manager.ConfigManagerError):
+        replace(config_manager.ControllerProfile.default(), combination_window_ms=window)
 
 
 @pytest.mark.parametrize(

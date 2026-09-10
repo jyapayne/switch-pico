@@ -315,6 +315,10 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                     "turbo_modes": list(config_manager.TURBO_MODES),
                     "shift_modes": list(config_manager.SHIFT_MODES),
                     "swing_sensitivities": list(config_manager.SWING_SENSITIVITIES),
+                    "combination_window_bounds": {
+                        "min": config_manager.PROFILE_COMBINATION_WINDOW_MIN,
+                        "max": config_manager.PROFILE_COMBINATION_WINDOW_MAX,
+                    },
                     "shortcut_selectors": list(
                         config_manager.SHORTCUT_SELECTOR_BUTTONS
                     ),
