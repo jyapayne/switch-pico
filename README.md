@@ -267,7 +267,9 @@ The Pico 2 W onboard LED reports the overall Bluetooth state:
 
 ### Joy-Con 2 player arrangement
 
-In Controller Studio, use **Joy-Con 2 default mode** and **Apply default mode**.
+In Controller Studio, open **Adapter settings** in the top bar, then use
+**Joy-Con 2 default mode** and **Apply default mode**. Closing the settings
+dialog preserves unapplied selections and does not change your profile draft.
 This is a real adapter-wide setting, separate from the artwork preview:
 
 - **Paired:** ready opposite halves form one player and use their L+R bank.

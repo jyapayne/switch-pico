@@ -23,6 +23,7 @@
         <span class="connection-dot"></span>
         <span id="connectionText">Connecting to adapter…</span>
       </div>
+      <button class="button button-secondary adapter-settings-button" id="adapterSettingsButton" type="button" aria-haspopup="dialog" aria-controls="adapterSettingsDialog">Adapter settings</button>
     </div>
   </header>
 
@@ -38,30 +39,6 @@
       <label class="field-label" for="identitySelect">Profile owner</label>
       <select id="identitySelect" class="select"></select>
       <p class="field-help">The default applies when a controller has no dedicated layout.</p>
-
-      <section class="joycon-mode" aria-labelledby="joyconModeTitle">
-        <p class="eyebrow">Adapter-wide setting</p>
-        <h3 id="joyconModeTitle">Joy-Con 2 default mode</h3>
-        <label class="field-label" for="joyconModeSelect">Default arrangement</label>
-        <select id="joyconModeSelect" class="select" aria-describedby="joyconModeHelp joyconModeStatus" disabled>
-          <option value="paired">Paired · L + R together</option>
-          <option value="individual">Individual · separate players</option>
-        </select>
-        <p class="field-help">Saved on the adapter; changing it applies live and clears temporary joins/splits. Not an artwork preview.</p>
-        <details class="joycon-mode-help">
-          <summary>Controller shortcut &amp; profile banks</summary>
-          <div id="joyconModeHelp">
-            <p><strong>Paired:</strong> L + R share one player and a separate L+R profile bank. Unmatched halves stay separate.</p>
-            <p><strong>Individual:</strong> each half is a sideways player using its own solo bank. Choose the L or R profile owner to edit it.</p>
-            <p><strong>Join / split this pair:</strong> hold <strong>ZL + Minus</strong> on the left and <strong>ZR + Plus</strong> on the right for <strong>2 seconds</strong>. A short pulse confirms success. Release all four buttons before using it again.</p>
-            <p>The shortcut affects only those halves and overrides this default until either disconnects. Other Joy-Cons are unchanged. Each half's complete two-button chord is reserved until both buttons release, even while waiting for the other half. Ambiguous solo selections do not join.</p>
-            <p>All saved banks and unsaved profile drafts are kept. Your chosen owner does not change automatically.</p>
-            <p>Saved preference is not a live pairing report. A pair waits for its L+R bank to be ready; the diagram and live playtest report the actual arrangement.</p>
-          </div>
-        </details>
-        <button class="button button-secondary" id="applyJoyconModeButton" type="button" disabled>Apply default mode</button>
-        <p class="joycon-mode-status" id="joyconModeStatus" data-state="loading" role="status" aria-live="polite">Reading saved preference…</p>
-      </section>
 
       <div class="identity-tools">
         <label class="field-label" for="controllerAlias">Controller alias</label>
@@ -453,6 +430,37 @@
     </section>
   </main>
   <form id="macroCaptureSettings" hidden></form>
+
+  <dialog class="adapter-settings-dialog" id="adapterSettingsDialog" aria-labelledby="adapterSettingsTitle" aria-describedby="adapterSettingsDescription">
+    <div class="adapter-settings-heading">
+      <h2 id="adapterSettingsTitle">Adapter settings</h2>
+      <button class="button button-ghost" id="closeAdapterSettingsButton" type="button" autofocus>Close</button>
+    </div>
+    <p class="field-help" id="adapterSettingsDescription">These settings apply to the whole adapter, not the selected profile. Use Apply to save changes; closing keeps unapplied selections.</p>
+      <section class="joycon-mode" aria-labelledby="joyconModeTitle">
+        <p class="eyebrow">Adapter-wide setting</p>
+        <h3 id="joyconModeTitle">Joy-Con 2 default mode</h3>
+        <label class="field-label" for="joyconModeSelect">Default arrangement</label>
+        <select id="joyconModeSelect" class="select" aria-describedby="joyconModeHelp joyconModeStatus" disabled>
+          <option value="paired">Paired · L + R together</option>
+          <option value="individual">Individual · separate players</option>
+        </select>
+        <p class="field-help">Saved on the adapter; changing it applies live and clears temporary joins/splits. Not an artwork preview.</p>
+        <details class="joycon-mode-help">
+          <summary>Controller shortcut &amp; profile banks</summary>
+          <div id="joyconModeHelp">
+            <p><strong>Paired:</strong> L + R share one player and a separate L+R profile bank. Unmatched halves stay separate.</p>
+            <p><strong>Individual:</strong> each half is a sideways player using its own solo bank. Choose the L or R profile owner to edit it.</p>
+            <p><strong>Join / split this pair:</strong> hold <strong>ZL + Minus</strong> on the left and <strong>ZR + Plus</strong> on the right for <strong>2 seconds</strong>. A short pulse confirms success. Release all four buttons before using it again.</p>
+            <p>The shortcut affects only those halves and overrides this default until either disconnects. Other Joy-Cons are unchanged. Each half's complete two-button chord is reserved until both buttons release, even while waiting for the other half. Ambiguous solo selections do not join.</p>
+            <p>All saved banks and unsaved profile drafts are kept. Your chosen owner does not change automatically.</p>
+            <p>Saved preference is not a live pairing report. A pair waits for its L+R bank to be ready; the diagram and live playtest report the actual arrangement.</p>
+          </div>
+        </details>
+        <button class="button button-secondary" id="applyJoyconModeButton" type="button" disabled>Apply default mode</button>
+        <p class="joycon-mode-status" id="joyconModeStatus" data-state="loading" role="status" aria-live="polite">Reading saved preference…</p>
+      </section>
+  </dialog>
 
   <dialog class="copy-dialog" id="copyDialog">
     <form method="dialog">

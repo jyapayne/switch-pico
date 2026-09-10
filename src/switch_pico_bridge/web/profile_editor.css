@@ -600,10 +600,14 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
 .curve-controls output { float: right; color: var(--ink); }
 .curve-controls input[type="range"] { display: block; margin-top: 8px; }
 .copy-side { min-height: 34px; margin-top: auto; padding-block: 6px; }
-.copy-dialog { width: min(440px, calc(100% - 28px)); padding: 24px; color: var(--ink); border: 1px solid var(--line); border-radius: 18px; background: var(--surface-solid); box-shadow: var(--shadow); }
-.copy-dialog::backdrop { background: rgba(2, 5, 13, 0.76); }
+.copy-dialog, .adapter-settings-dialog { width: min(440px, calc(100% - 28px)); padding: 24px; color: var(--ink); border: 1px solid var(--line); border-radius: 18px; background: var(--surface-solid); box-shadow: var(--shadow); }
+.copy-dialog::backdrop, .adapter-settings-dialog::backdrop { background: rgba(2, 5, 13, 0.76); }
 .copy-dialog h3 { margin-bottom: 18px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+.adapter-settings-dialog { width: min(580px, calc(100% - 28px)); max-height: calc(100dvh - 28px); overflow-y: auto; }
+.adapter-settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.adapter-settings-heading .button { flex: 0 0 auto; min-height: 44px; }
+.adapter-settings-dialog .joycon-mode { margin-top: 20px; padding-bottom: 0; border-bottom: 0; }
 @media (max-width: 1120px) {
   .workspace { grid-template-columns: 250px minmax(0, 1fr); }
   .profile-list { grid-template-columns: 1fr; }
@@ -615,8 +619,10 @@ input[type="range"] { width: 100%; accent-color: var(--blue); }
   .editor-header { align-items: flex-start; }
 }
 @media (max-width: 780px) {
-  .topbar { position: relative; min-height: 76px; }
+  .topbar { position: relative; min-height: 76px; flex-wrap: wrap; gap: 12px; }
   .topbar-meta > p { display: none; }
+  .topbar-meta { width: 100%; justify-content: space-between; gap: 12px; }
+  .topbar-meta .adapter-settings-button { flex: 0 0 auto; min-height: 44px; }
   .connection { max-width: 52%; }
   .workspace { display: block; width: min(100% - 24px, 700px); margin-top: 14px; }
   .sidebar { position: relative; top: auto; margin-bottom: 18px; max-height: none; overflow: visible; scrollbar-gutter: auto; }

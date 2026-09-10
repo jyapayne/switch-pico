@@ -88,6 +88,9 @@ const elements = {
   connection: document.querySelector("#connectionState"),
   connectionText: document.querySelector("#connectionText"),
   identity: document.querySelector("#identitySelect"),
+  adapterSettingsButton: document.querySelector("#adapterSettingsButton"),
+  adapterSettingsDialog: document.querySelector("#adapterSettingsDialog"),
+  closeAdapterSettings: document.querySelector("#closeAdapterSettingsButton"),
   joyconMode: document.querySelector("#joyconModeSelect"),
   applyJoyconMode: document.querySelector("#applyJoyconModeButton"),
   joyconModeStatus: document.querySelector("#joyconModeStatus"),
@@ -2521,6 +2524,19 @@ elements.identity.addEventListener("change", async () => {
 });
 elements.refresh.addEventListener("click", async () => {
   await loadLibrary(true);
+});
+
+elements.adapterSettingsButton.addEventListener("click", () => {
+  if (!elements.adapterSettingsDialog.open) {
+    renderJoyconMode();
+    elements.adapterSettingsDialog.showModal();
+  }
+});
+elements.closeAdapterSettings.addEventListener("click", () => {
+  elements.adapterSettingsDialog.close();
+});
+elements.adapterSettingsDialog.addEventListener("close", () => {
+  elements.adapterSettingsButton.focus();
 });
 
 elements.joyconMode.addEventListener("change", () => {
