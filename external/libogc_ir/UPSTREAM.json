@@ -1,0 +1,326 @@
+{
+  "format_version": 1,
+  "repository": "https://github.com/devkitPro/libogc",
+  "commit": "a4064a86487c46d8ab76d4fdf99e8059a62c4fa2",
+  "modified_date": "2026-09-11",
+  "ir_git_blob_sha1": "d9659f5da575861f574d3d0480887955ef8f8faf",
+  "sources": {
+    "wiiuse/ir.c": {
+      "url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/wiiuse/ir.c",
+      "local_path": "upstream/ir.c",
+      "sha256": "12b3a21bcbe92fa2ae3ba262ff4bff94f385978062b7f33f65956e11ec4c2ff2",
+      "git_blob_sha1": "d9659f5da575861f574d3d0480887955ef8f8faf",
+      "bytes": 23568,
+      "lines": 834
+    },
+    "gc/wiiuse/wiiuse.h": {
+      "url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/gc/wiiuse/wiiuse.h",
+      "local_path": "upstream/wiiuse.h",
+      "sha256": "21f890f417d3504999175692860f8994038c9127936f872d63405f2824e2c8d5",
+      "git_blob_sha1": "7be2a7d9e9cc4b506516b73a659b52feb59d507b",
+      "bytes": 22507,
+      "lines": 748
+    },
+    "wiiuse/wiiuse_internal.h": {
+      "url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/wiiuse/wiiuse_internal.h",
+      "local_path": "upstream/wiiuse_internal.h",
+      "sha256": "ea2485eb06e4423b7f1ddd584e4c1157aeb0cf79212c74c2bb93bef1afa7be3e",
+      "git_blob_sha1": "ade44da594289d79c4c9769f1f871198df09144e",
+      "bytes": 8678,
+      "lines": 277
+    },
+    "wiiuse/definitions.h": {
+      "url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/wiiuse/definitions.h",
+      "local_path": "upstream/definitions.h",
+      "sha256": "a625020c657d2369ea99e2044aa4298ba92e3bfb9d7a5801eb4b2ca0ff20bb90",
+      "git_blob_sha1": "04dc5be6d8437ac4e3ab9f923610246ab1f8b95e",
+      "bytes": 1680,
+      "lines": 55
+    },
+    "wiiuse/ir.h": {
+      "url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/wiiuse/ir.h",
+      "local_path": "upstream/ir.h",
+      "sha256": "4fd4009c1b4c81d8b121f233693bd4248d567ce641d19f2fb2bcd60a85f9f9e1",
+      "git_blob_sha1": "f90cfc89c53167bb494a090024fd0698c0f0cbdd",
+      "bytes": 413,
+      "lines": 22
+    },
+    "wiiuse/license_libogc.txt": {
+      "url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/wiiuse/license_libogc.txt",
+      "local_path": "license_libogc.txt",
+      "sha256": "6bbd4837fe3fd232883e27c606cce94f17aa4fd23a9f981c68149e4ec4c7cae1",
+      "git_blob_sha1": "a149fce1ce2915d22fc30eda8e691607d21335b4",
+      "bytes": 33495,
+      "lines": 641
+    },
+    "libogc_license.txt": {
+      "url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/libogc_license.txt",
+      "local_path": "libogc_license.txt",
+      "sha256": "8be3bc1cad868fae35498ce049c60b4263e57184a7d23df99ea1f7ba2d338a2f",
+      "git_blob_sha1": "a3dfd0581becdeaea787614ec3ed6b75287164b3",
+      "bytes": 942,
+      "lines": 20
+    }
+  },
+  "root_license_lookup": {
+    "requested_url": "https://raw.githubusercontent.com/devkitPro/libogc/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/LICENSE",
+    "status": "HTTP 404: no LICENSE entry in the pinned root tree",
+    "tree_url": "https://api.github.com/repos/devkitPro/libogc/git/trees/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2",
+    "actual_source": "libogc_license.txt"
+  },
+  "license": {
+    "component_license": "GNU GPL version 3 with libogc section 18 independent-module linking exception",
+    "upstream_internal_header_notice": "Michael Laforest, Copyright 2006-2007; GNU GPL version 3 or (at your option) any later version; no warranty",
+    "exception_extended_to_this_modified_component": true,
+    "full_component_license": "license_libogc.txt",
+    "full_root_notice": "libogc_license.txt",
+    "modification_notice": "NOTICE.txt",
+    "project_relicensed": false,
+    "inputs": "Only this pinned devkitPro/libogc component; no ordinary Wiiuse GPL-only repository inputs"
+  },
+  "extraction": {
+    "line_numbering": "1-based inclusive; bytes split with keepends=True, no newline or whitespace normalization",
+    "c_sections": [
+      {
+        "source": "wiiuse/wiiuse_internal.h",
+        "first_line": 1,
+        "last_line": 27,
+        "first_line_text": "/*",
+        "last_line_text": " */",
+        "sha256": "e78f559543e0d48e5f54d5316c55c98520e583ff16f0b9fecd2bb65efc3a97e9",
+        "purpose": "Wiiuse copyright, GPLv3-or-later and warranty notice"
+      },
+      {
+        "source": "wiiuse/definitions.h",
+        "first_line": 6,
+        "last_line": 6,
+        "first_line_text": "#define WIIMOTE_PI\t\t\t3.14159265f",
+        "last_line_text": "#define WIIMOTE_PI\t\t\t3.14159265f",
+        "sha256": "3c8132e59374a2aa64f38839677a5eda20286d0488f4b989ff2d60a00d15a501",
+        "purpose": "WIIMOTE_PI"
+      },
+      {
+        "source": "wiiuse/definitions.h",
+        "first_line": 31,
+        "last_line": 31,
+        "first_line_text": "\t#define WIIUSE_DEBUG(fmt, ...)",
+        "last_line_text": "\t#define WIIUSE_DEBUG(fmt, ...)",
+        "sha256": "3eb11daa6ec4902683edfbebb54fdad73cf2f4c3933f69dbc9b247f579206283",
+        "purpose": "upstream disabled WIIUSE_DEBUG definition"
+      },
+      {
+        "source": "wiiuse/definitions.h",
+        "first_line": 44,
+        "last_line": 46,
+        "first_line_text": "/* Convert between radians and degrees */",
+        "last_line_text": "#define DEGREE_TO_RAD(d)\t(d * (WIIMOTE_PI / 180.0f))",
+        "sha256": "87d7ef0bdfb09bc9f8be97e6938bb3cd0cd48836114aa398e6152fffb05c5739",
+        "purpose": "RAD_TO_DEGREE, DEGREE_TO_RAD"
+      },
+      {
+        "source": "wiiuse/ir.c",
+        "first_line": 15,
+        "last_line": 16,
+        "first_line_text": "static int ir_correct_for_bounds(float* x, float* y, enum aspect_t aspect, int offset_x, int offset_y);",
+        "last_line_text": "static void ir_convert_to_vres(float* x, float* y, enum aspect_t aspect, unsigned int vx, unsigned int vy);",
+        "sha256": "c20c25c89c31d8bddd6a885163d9c91e351e71c218731efb54af55a5edaec2e7",
+        "purpose": "original private helper prototypes"
+      },
+      {
+        "source": "wiiuse/ir.c",
+        "first_line": 55,
+        "last_line": 144,
+        "first_line_text": "static void rotate_dots(struct fdot_t* in, struct fdot_t *out, int count, float ang) {",
+        "last_line_text": "}",
+        "sha256": "cd6b24d0cb478cdc61270a45a7410a614ac6678c821a91e1ad9cac9d3809fac2",
+        "purpose": "rotate_dots, ir_correct_for_bounds, ir_convert_to_vres"
+      },
+      {
+        "source": "wiiuse/ir.c",
+        "first_line": 438,
+        "last_line": 833,
+        "first_line_text": "// half-height of the IR sensor if half-width is 1",
+        "last_line_text": "}",
+        "sha256": "2e8465a163a1d35a1781136d1078d3532b75995cb07cedfb96e9759daca5e7c2",
+        "purpose": "all sensorbar, smoothing and interpretation constants; find_sensorbar, apply_ir_smoothing, interpret_ir_data, calc_yaw"
+      }
+    ],
+    "header_sections": [
+      {
+        "source": "wiiuse/wiiuse_internal.h",
+        "first_line": 1,
+        "last_line": 27,
+        "first_line_text": "/*",
+        "last_line_text": " */",
+        "sha256": "e78f559543e0d48e5f54d5316c55c98520e583ff16f0b9fecd2bb65efc3a97e9",
+        "purpose": "Wiiuse copyright, GPLv3-or-later and warranty notice"
+      },
+      {
+        "source": "gc/wiiuse/wiiuse.h",
+        "first_line": 187,
+        "last_line": 187,
+        "first_line_text": "typedef unsigned char ubyte;",
+        "last_line_text": "typedef unsigned char ubyte;",
+        "sha256": "584753f151dc6fdb69bac85ef521ebe77f0c01de4e2801dc26f292bb24d0d305",
+        "purpose": "ubyte primitive"
+      },
+      {
+        "source": "gc/wiiuse/wiiuse.h",
+        "first_line": 108,
+        "last_line": 112,
+        "first_line_text": "/* IR correction types */",
+        "last_line_text": "} ir_position_t;",
+        "sha256": "495c0b4599ec31e4189f2ccedf640a76dc71868cc238ba339fc137cd5863514a",
+        "purpose": "ir_position_t"
+      },
+      {
+        "source": "gc/wiiuse/wiiuse.h",
+        "first_line": 297,
+        "last_line": 310,
+        "first_line_text": "/**",
+        "last_line_text": "} orient_t;",
+        "sha256": "073eab21f91deb1eb460d80c85e8e9f4de7d0340715ca86113a76d0e56d5c79b",
+        "purpose": "orient_t"
+      },
+      {
+        "source": "gc/wiiuse/wiiuse.h",
+        "first_line": 336,
+        "last_line": 405,
+        "first_line_text": "/**",
+        "last_line_text": "} ir_t;",
+        "sha256": "d1f7c5c93665b760c86bf1e3591a7b8c88cf82b4ad79a2ecfcf8af31d7d14474",
+        "purpose": "ir_dot_t, fdot_t, sb_t, aspect_t, ir_t"
+      },
+      {
+        "source": "wiiuse/ir.c",
+        "first_line": 431,
+        "last_line": 436,
+        "first_line_text": "enum {",
+        "last_line_text": "};",
+        "sha256": "672444f503b33a4bcd7e52c99ac9ca938f2410b99969ff6008d6e54b074cfe74",
+        "purpose": "IR_STATE_DEAD, IR_STATE_GOOD, IR_STATE_SINGLE, IR_STATE_LOST enum"
+      },
+      {
+        "source": "wiiuse/wiiuse_internal.h",
+        "first_line": 154,
+        "last_line": 158,
+        "first_line_text": "/* aspect ratio */",
+        "last_line_text": "#define WM_ASPECT_4_3_Y\t\t420",
+        "sha256": "8a6b6501b9b4e8645b3201c03fa6c114e5e557cac64d7659a0ce7358cbb4f8fc",
+        "purpose": "original viewport dimensions"
+      },
+      {
+        "source": "wiiuse/ir.h",
+        "first_line": 15,
+        "last_line": 16,
+        "first_line_text": "float calc_yaw(struct ir_t* ir);",
+        "last_line_text": "void interpret_ir_data(struct ir_t* ir, struct orient_t *orient);",
+        "sha256": "1b6d1fa3431f094bd6f25e1c9d9bbba3f4fd73183581cfb6685902b43e067dd9",
+        "purpose": "calc_yaw and interpret_ir_data prototypes"
+      }
+    ],
+    "retained_functions": [
+      {
+        "name": "rotate_dots",
+        "source": "wiiuse/ir.c",
+        "first_line": 55,
+        "last_line": 79,
+        "sha256": "b7f1437819b636ec237b451c38bfeb1aff1819b0994c608ce40cb448bcd08991"
+      },
+      {
+        "name": "ir_correct_for_bounds",
+        "source": "wiiuse/ir.c",
+        "first_line": 95,
+        "last_line": 122,
+        "sha256": "f303a51195d05355d3e699fa9a6e72f08c6ed1db6a57c95c0cc295b5475c6c68"
+      },
+      {
+        "name": "ir_convert_to_vres",
+        "source": "wiiuse/ir.c",
+        "first_line": 128,
+        "last_line": 144,
+        "sha256": "69a457776dadbec16cf6b71213943751814992d1f4b56c9bd96ad5473ea6797e"
+      },
+      {
+        "name": "find_sensorbar",
+        "source": "wiiuse/ir.c",
+        "first_line": 488,
+        "last_line": 719,
+        "sha256": "e0cb1843e92043a86705dd19bcbb248d4fb977fd8e3a4f2a215e9532d2ebfba9"
+      },
+      {
+        "name": "apply_ir_smoothing",
+        "source": "wiiuse/ir.c",
+        "first_line": 730,
+        "last_line": 751,
+        "sha256": "9ab2e0cef3167f5a1b156c32b0972766d704e69d12a1b492e14870034d7f84f6"
+      },
+      {
+        "name": "interpret_ir_data",
+        "source": "wiiuse/ir.c",
+        "first_line": 766,
+        "last_line": 819,
+        "sha256": "05c9ec6b4da39697dfd3c2fba20b99822bff64db57dc4df4fec0cb55bd6e758a"
+      },
+      {
+        "name": "calc_yaw",
+        "source": "wiiuse/ir.c",
+        "first_line": 826,
+        "last_line": 833,
+        "sha256": "fc6d1a163837cf6dda45db67c2c4cc9de9a263aed53a987a8d0d03bc4c073d48"
+      }
+    ],
+    "omitted_ir_c_ranges": [
+      {
+        "first_line": 1,
+        "last_line": 14,
+        "reason": "platform/transport includes replaced by portable header and math.h"
+      },
+      {
+        "first_line": 18,
+        "last_line": 53,
+        "reason": "get_ir_sens device sensitivity helper"
+      },
+      {
+        "first_line": 146,
+        "last_line": 429,
+        "reason": "device mode/enable/configuration/sensitivity and basic/extended Bluetooth report decoding"
+      }
+    ],
+    "debug": "Original disabled macro is retained, then equivalently redefined as WIIUSE_DEBUG(...) for strict C11 calls with only a format argument; logging remains disabled"
+  },
+  "portable_header": {
+    "path": "ir.h",
+    "sha256": "73bb59ab64183b943e206687883095723a39fd8a5d160dc32a6e8526f6ca1b7b",
+    "local_additions": [
+      "dated provenance/license comment",
+      "SWITCH_PICO_LIBOGC_IR_H include guard",
+      "typedef float f32;",
+      "extern C wrapper for the four public functions",
+      "find_sensorbar and apply_ir_smoothing declarations matching upstream definitions"
+    ]
+  },
+  "generated_c": {
+    "first_line": "#include \"libogc_ir/ir.h\"",
+    "standard_include": "#include <math.h>",
+    "local_additions": [
+      "dated provenance/license comment",
+      "blank separators",
+      "repository-relative #line directives before unchanged C sections",
+      "equivalent disabled WIIUSE_DEBUG(...) macro replaces GNU empty variadic-tail syntax for strict C11"
+    ],
+    "body_and_constant_rewrites": [],
+    "io_stubs": [],
+    "compile_language": "C11",
+    "include_root": "external/",
+    "math_library": "link the platform math library when required"
+  },
+  "helper": {
+    "path": "tools/prepare_libogc_ir.py",
+    "cli": "python tools/prepare_libogc_ir.py --output build/libogc_ir.c",
+    "python_api": "prepare(output: pathlib.Path) -> pathlib.Path",
+    "dependencies": "Python standard library only; vendored local inputs; no network or Git needed",
+    "writes": "Requested output only, and only when generated bytes differ"
+  },
+  "adaptation_boundary": "The native relative-output adapter supplies decoded dots and orientation, consumes each camera sequence once, maps unbounded smoothed coordinates into relative USB scale and manages output baselines. No such behavior is inserted into these upstream algorithm bodies."
+}

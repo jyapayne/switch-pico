@@ -15,6 +15,11 @@ typedef enum wii_flags {
 void uni_hid_parser_wii_set_mode(uni_hid_device_t* device, wii_mode_t mode);
 bool uni_hid_parser_wii_accel_snapshot(
     uni_hid_device_t*, int32_t[3], uint32_t*);
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+bool uni_hid_parser_wii_gyro_snapshot(
+    uni_hid_device_t*, int32_t[3], uint32_t*);
+bool uni_hid_parser_wii_rumble_ready(uni_hid_device_t*);
+#endif
 bool uni_hid_parser_wii_nunchuk_accel_snapshot(
     uni_hid_device_t*, int32_t[3], uint32_t*);
 

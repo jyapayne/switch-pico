@@ -13,3 +13,11 @@
 
 // 2 == Info
 #define CONFIG_BLUEPAD32_LOG_LEVEL 2
+
+// Standard Wii camera presets; native diagnostic builds may select level 2.
+#ifndef SWITCH_PICO_WII_IR_SENSITIVITY_LEVEL
+#define SWITCH_PICO_WII_IR_SENSITIVITY_LEVEL 3
+#endif
+#if SWITCH_PICO_WII_IR_SENSITIVITY_LEVEL != 2 && SWITCH_PICO_WII_IR_SENSITIVITY_LEVEL != 3
+#error "Wii IR sensitivity must be standard preset 2 or 3"
+#endif

@@ -43,7 +43,7 @@ static bool valid_calibration(const uint8_t* data) {
     return true;
 }
 
-bool probe_memory_right_stick_center(uint8_t output[3]) {
+bool probe_memory_right_stick_calibration(uint8_t output[9]) {
     if (!output) return false;
     // A solo Joy-Con uses the primary calibration record, even for the right
     // controller. User magic precedes its 9-byte record; factory has no magic.
@@ -52,6 +52,6 @@ bool probe_memory_right_stick_center(uint8_t output[3]) {
     if (user[0] == 0xb2 && user[1] == 0xa1 && valid_calibration(user + 2))
         selected = user + 2;
     if (!valid_calibration(selected)) return false;
-    memcpy(output, selected, 3);
+    memcpy(output, selected, 9);
     return true;
 }

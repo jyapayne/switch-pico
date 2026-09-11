@@ -4,4 +4,5 @@
 #include <stdint.h>
 
 bool probe_memory_read(uint32_t address, uint8_t* output, size_t length);
-bool probe_memory_right_stick_center(uint8_t output[3]);
+// Packed center, positive travel, negative travel (two12-bit axes each).
+bool probe_memory_right_stick_calibration(uint8_t output[9]);

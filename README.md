@@ -479,6 +479,173 @@ The AIO firmware enables motion automatically for original Wii Remotes with an e
 
 Protocol references: [WiiBrew Wiimote](https://wiibrew.org/wiki/Wiimote), [MotionPlus registers/calibration](https://wiibrew.org/wiki/Wiimote/Extension_Controllers/Wii_Motion_Plus), [Dolphin MotionPlus calibration](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Core/HW/WiimoteEmu/MotionPlus.cpp), and [SDL Wii sensor axes](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_wii.c).
 
+### Experimental native Joy-Con 2 USB output
+
+`SWITCH_PICO_SWITCH2_USB_BRIDGE=ON` selects the separate USB protocol probe in
+`tools/switch2_usb_probe`, not the ordinary four-Pro-controller AIO output.
+`SWITCH2_BRIDGE_INPUT=JOYCON2` preserves complete packets from one selected right
+Joy-Con 2; `SWITCH2_BRIDGE_INPUT=WII` generates native right-Joy-Con reports from
+Wii input. Select the physical Bluetooth address with
+`SWITCH2_BRIDGE_SOURCE_ADDRESS`.
+
+The Wii source requires Pico 2 W, the Bluepad32 backend, Bluetooth `MIXED` mode,
+and the bridge's native capture prerequisites
+(`SWITCH_PICO_SWITCH2_MOUSE_CAPTURE=ON` and
+`SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE=ON`). It enables the Wii camera parser
+without the mutually exclusive legacy `SWITCH_PICO_WII_IR_MOUSE` or
+`SWITCH_PICO_WII_IR_GYRO` USB experiments.
+
+This research target also requires the probe's validated identity, firmware,
+factory-memory and user-calibration inputs, a distinct virtual controller address,
+`SWITCH2_PROBE_ACK_SETUP04=ON`, and `SWITCH2_PROBE_USB_INIT=ON`. The
+`SWITCH2_PROBE_*_FILE` inputs are checked by `probe_build.cmake`; private captures,
+pairing records and firmware backups are not bundled with the source.
+Keep a known-good UF2 and use a separate build directory for experiments.
+
+- **Motion:** factory-calibrated Wii acceleration and MotionPlus gyro have
+  independent freshness counters. Keep the Remote still at startup for at least
+  1.5 seconds and 64 fresh gyro samples to estimate residual bias. The encoder
+  integrates real gyro into an orientation quaternion, using fresh near-1g
+  acceleration to correct tilt drift, and emits the recovered 30-byte native
+  IMU format. Fresh full-bar observations gently correct relative heading
+  around world-up, following the sensor-fusion approach used by Dolphin.
+  The first optical observation anchors the current heading without a jump;
+  missing/inferred observations do not supply heading corrections. Translation
+  changes optical bearing too, so this is not an absolute world-yaw reference.
+  A fixed mounting transform makes a face-up Wii
+  correspond to the virtual right Joy-Con's rail-down mouse pose. Missing,
+  stale or uncalibrated sensors withhold IMU/mouse output rather than inventing it.
+- **IR:** firmware 0.32 runs the actual libogc Wiiuse IR math pipeline from
+  [commit `a4064a8`](https://github.com/devkitPro/libogc/blob/a4064a86487c46d8ab76d4fdf99e8059a62c4fa2/wiiuse/ir.c),
+  not a separately implemented approximation. `tools/prepare_libogc_ir.py`
+  checks pinned source hashes and extracts seven unchanged functions and their
+  algorithm constants into a build-local C translation unit. The original
+  sources remain untouched under `external/libogc_ir/upstream/`.
+  Upstream owns bar selection, missing-dot recovery, smoothing, glitch counters
+  and bounded screen mapping. It runs once per new camera report, including
+  while USB output is disabled; its frame-count behavior is not replaced by
+  custom timing or association thresholds.
+  The separate native adapter supplies mirrored raw X, unchanged raw Y, and
+  gravity roll in degrees. It converts upstream smoothed `sx/sy` changes into
+  signed16 relative mouse reports with once-only consumption. A first native
+  baseline waits for an accepted upstream position rather than its initial
+  glitch-held origin; USB stalls, freshness loss and reconnects discard stale
+  native movement. Brief upstream missing/glitch holds produce no invented
+  movement. Relative output is not gated on upstream's bounded `ir.valid`,
+  because the adapter does not know the actual host cursor position.
+  Optical heading confidence excludes upstream-rejected glitches and inferred
+  endpoints. The native IMU encoder and heading observer remain project code;
+  they are not a verbatim Dolphin port. Legacy IR modes retain their old trackers.
+  Native USB still provides no absolute cursor-position feedback or automatic
+  synchronization; host sensitivity and initial cursor location still matter.
+- **Controls:** stored profiles map ordinary controller buttons; IR does not
+  create left/right clicks or turn button 1 into a desktop-mouse clutch.
+  This is one virtual **right** Joy-Con, so left-only controls require profile
+  remapping if needed. A mapped right stick takes precedence; otherwise a
+  Nunchuk's mapped left stick supplies the single virtual stick using the
+  calibration advertised to the console. Configure profiles in normal AIO
+  firmware before using this probe.
+  After Bluetooth setup, press a mapped face button (A with the tested profile)
+  if the Switch has not assigned the controller. The button used to wake the
+  Wii may be consumed during setup; observed activation changes player LEDs
+  from mask 0 to 1. No automatic button press is injected.
+- **Feedback/pairing:** built-in cue commands become bounded Wii on/off rumble
+  patterns, not HD frequency/audio emulation. USB completion follows Core 1
+  driver dispatch. Holding BOOTSEL for two seconds opens pairing; this probe
+  never routes a long hold to clear pairings.
+- **Qualification:** genuine Joy-Con passthrough mouse operation is confirmed
+  on Switch with firmware 0.24. Earlier Wii builds deliver accepted native mouse
+  and IMU reports, but pointing remained unreliable. Their custom tracker tests
+  did not establish equivalence to upstream. Firmware 0.32 replaces that native
+  tracker with the pinned upstream pipeline. Source identity and all seven
+  retained function bodies are verified; the actual C code has been replayed
+  on 495 recorded camera snapshots. All final 100 steady observations produced
+  valid smoothed full-bar output. That 10Hz, zero-roll replay does not establish
+  full-rate timing or improved console behavior; hardware qualification remains pending.
+  Firmware 0.33 adds a camera-only sensitivity-level-2 trial after an on/off
+  comparison retained one detection with the bar off. The upstream tracking
+  code is unchanged. Both default level 3 and selected level 2 have been
+  exercised through the real parser's complete camera-register setup; reduced
+  interference and usable range still require a hardware comparison.
+  **In progress; Wii pointing work is paused.** Firmware 0.33 was flashed and
+  verified with persistent storage unchanged, but the level-2 on/off comparison
+  has not been run. Erratic tracking, tracking loss and ineffective vertical
+  movement remain unresolved; this checkpoint is not a completed Wii pointer.
+
+Native Wii camera and viewport settings are build-time parameters, not stored profile changes:
+
+| CMake option | Default | Meaning |
+| --- | ---: | --- |
+| `SWITCH2_WII_IR_SENSITIVITY` | `3` | Standard camera preset `2` or `3`; lower sensitivity may reduce interference and range |
+| `SWITCH2_WII_IR_VIEW_WIDTH` | `660` | Viewport width in camera pixels |
+| `SWITCH2_WII_IR_VIEW_HEIGHT` | `370` | Viewport height in camera pixels |
+| `SWITCH2_WII_IR_OFFSET_X` | `0` | Horizontal offset from the camera center |
+| `SWITCH2_WII_IR_OFFSET_Y` | `-115` | Below-screen bar; use `115` for above-screen |
+| `SWITCH2_WII_IR_SPAN_X` | `1920` | Native mouse counts across viewport width |
+| `SWITCH2_WII_IR_SPAN_Y` | `1080` | Native mouse counts across viewport height |
+
+The 660 x 370 viewport and +/-115 vertical placement follow libogc's 16:9
+defaults; they are not a measurement of the attached camera or screen. Spans
+are **mouse counts**, not guaranteed display pixels. The viewport must remain
+inside the 1024 x 768 camera image. For example, configure the existing native
+Wii build with `cmake -S . -B build-switch2-usb-wii -DSWITCH2_WII_IR_OFFSET_Y=-115`,
+then build normally. Trace builds sample raw IR diagnostics at 10Hz; diagnostic
+flag bits 3/4 additionally indicate viewport inclusion and full optical reference.
+Offsets locate the nominal screen rectangle and its diagnostics; a constant
+offset alone cannot recenter a relative host cursor. Viewport dimensions and
+mouse-count spans determine movement scale, but absolute pointing remains unsynchronized.
+For the lower-sensitivity trial, configure with
+`cmake -S . -B build-switch2-usb-wii -DSWITCH2_WII_IR_SENSITIVITY=2`, then build.
+The parser logs the selected level after camera setup completes. Other firmware
+builds retain standard level 3 unless explicitly configured otherwise.
+
+
+**Port provenance and licensing:** see `external/libogc_ir/UPSTREAM.json` and
+`external/libogc_ir/NOTICE.txt`. The component retains its full GPLv3 license
+and libogc-specific independent-module linking exception; independent project
+code is not relicensed. Preserve component notices and corresponding source
+when distributing the firmware. The only C-language compatibility adjustment
+is an equivalent disabled debug macro accepting one-argument calls in strict
+C11; algorithm bodies and constants are unchanged. Transport/report decoding
+is provided by the existing Bluepad32 path, not copied Wiiuse I/O stubs.
+Do not edit generated `build*/libogc_ir.c` or the pinned original files to tune
+tracking. Changes to upstream require an explicit pin/manifest update; native
+protocol adaptations belong in the separate adapter.
+
+
+Both native bridge sources support the existing software **BOOTSEL reboot**
+without erasing pairings, profiles or configuration. The standalone USB diagnostic
+probe does not. Connect the bridge to a PC and disconnect any genuine USB right
+Joy-Con 2 before running this from the repository:
+
+```sh
+uv run python - <<'PY'
+import usb.core
+from switch_pico_bridge.config_manager import request_bootsel_reboot
+
+devices = list(usb.core.find(find_all=True, idVendor=0x057e, idProduct=0x2066))
+if len(devices) != 1:
+    raise SystemExit("Connect exactly one native bridge (057e:2066).")
+request_bootsel_reboot(devices[0])
+print("Rebooting into USB BOOTSEL mode.")
+PY
+```
+
+USB access requires permission to the matching `/dev/bus/usb` device. With
+multiple bridges, select the intended PyUSB device by its `bus` and `address`
+instead of sending to every matching device. The ordinary
+`switch-pico-config reboot bootsel` CLI uses management discovery, which this
+native USB identity deliberately does not expose; the direct helper above needs
+no discovery request or interface claim.
+
+Only vendor-device OUT `0x40`, request `0x04`, value `0x5350`, index `1`, with the
+existing validated 16-byte management envelope is accepted. The shared handler
+validates and dispatches at the control status ACK, then the existing 50 ms guard
+enters ROM USB boot mode. Invalid envelopes cannot schedule a reboot. Nintendo's
+separate request `0x04`, value `0x0276`, index `0`, length `0` remains an ordinary
+setup acknowledgement. No configuration writes or extra management capabilities
+are enabled in native mode.
+
 ### Switch 2 controller input
 
 The AIO firmware implements the proprietary BLE protocol for Nintendo `057E:2069` (Pro), `057E:2067` (left Joy-Con 2), and `057E:2066` (right Joy-Con 2). This is controller **input** support, distinct from the existing Switch 2 console-wake feature and from emulating a native Switch 2 USB controller.

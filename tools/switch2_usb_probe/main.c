@@ -9,6 +9,7 @@
 #include <string.h>
 
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+#include "bootsel.h"
 #include "controller_input.h"
 #else
 #include "platform/pico/bootsel_button_sample.h"
@@ -63,6 +64,9 @@ static uint32_t last_hid_complete_ms;
 static bool hid_completion_seen;
 static uint32_t mouse_delivered_reports, mouse_logged_reports;
 static int64_t mouse_delivered_x, mouse_delivered_y;
+#ifdef SWITCH2_PROBE_TRACE_NATIVE_INPUT
+static uint32_t last_native_trace_ms;
+#endif
 #endif
 #ifndef SWITCH_PICO_SWITCH2_USB_BRIDGE
 static probe_button_state button_test;
@@ -214,8 +218,13 @@ static void reset_protocol(void) {
     protocol.play_sample = probe_controller_input_play_sample;
 #endif
 #ifdef SWITCH2_PROBE_MEMORY
-    if (!probe_memory_right_stick_center(protocol.right_stick_center))
+    uint8_t stick_calibration[9];
+    if (!probe_memory_right_stick_calibration(stick_calibration))
         panic("Invalid captured Joy-Con stick calibration");
+    memcpy(protocol.right_stick_center, stick_calibration, sizeof(protocol.right_stick_center));
+#if SWITCH2_BRIDGE_WII_INPUT
+    probe_controller_input_set_stick_calibration(stick_calibration);
+#endif
     protocol.read_memory = probe_memory_read;
 #endif
     uint8_t pairing[PROBE_PAIRING_BLOB_SIZE];
@@ -230,12 +239,18 @@ static void reset_protocol(void) {
     command_expected = 8;
     last_input_ms = 0;
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH2_BRIDGE_WII_INPUT
+    probe_controller_input_set_native_features(0);
+#endif
     last_controller_poll_ms = 0;
     last_delivered_buttons = 0;
     probe_controller_input_set_native_stream(false);
     native_stream_ready = false;
     last_hid_complete_ms = 0;
     hid_completion_seen = false;
+#ifdef SWITCH2_PROBE_TRACE_NATIVE_INPUT
+    last_native_trace_ms = 0;
+#endif
 #endif
 #ifndef SWITCH_PICO_SWITCH2_USB_BRIDGE
     (void)probe_button_update(&button_test, -1, false);
@@ -267,12 +282,15 @@ static void complete_command(void) {
             previous_features != protocol.enabled_features) {
             probe_controller_input_set_native_stream(false);
             native_stream_ready = false;
+#if SWITCH2_BRIDGE_WII_INPUT
+            probe_controller_input_set_native_features(protocol.enabled_features);
+#endif
         }
 #endif
         reply->length = (uint8_t)length;
         ++reply_count;
         if (reply->deferred_token) {
-            probe_debug_printf("[PROBE] Sample %u awaiting source ACK token=%" PRIu64 "\n",
+            probe_debug_printf("[PROBE] Sample %u awaiting source completion token=%" PRIu64 "\n",
                                command_frame[8], reply->deferred_token);
         } else {
             log_packet("BULK_REPLY_QUEUED", 0, 0, reply->data, reply->length);
@@ -364,11 +382,23 @@ static void controller_input_task(uint32_t now) {
 }
 
 static void gate_native_report(uint8_t input[PROBE_INPUT_SIZE]) {
+#if SWITCH2_BRIDGE_WII_INPUT
+    // Generated status follows virtual feature state, not a donor snapshot.
+    input[8] = (uint8_t)(0x30 | ((protocol.enabled_features & 0x20) ? 8 : 0));
+#endif
     if (!(protocol.enabled_features & 1)) memset(input + 2, 0, 2);
     if (!(protocol.enabled_features & 2))
         memcpy(input + 5, protocol.right_stick_center, sizeof(protocol.right_stick_center));
     if (!(protocol.enabled_features & 0x10)) memset(input + 9, 0, 5);
+#ifdef SWITCH2_PROBE_OMIT_NATIVE_IMU
+    // Deliberate A/B fault injection: leave every other field and feature bit intact.
+    memset(input + 15, 0, 41);
+#elif defined(SWITCH2_PROBE_ZERO_NATIVE_IMU_PAYLOAD)
+    if (!(protocol.enabled_features & 4)) input[15] = 0;
+    memset(input + 16, 0, 40); // Otherwise preserve the genuine length byte.
+#else
     if (!(protocol.enabled_features & 4)) memset(input + 15, 0, 41);
+#endif
 }
 #endif
 
@@ -381,8 +411,13 @@ static void protocol_task(uint32_t now) {
         if (!ready) {
             const int result = probe_controller_input_sample_result(reply->deferred_token, now);
             if (result > 0) {
+#if SWITCH2_BRIDGE_WII_INPUT
+                probe_debug_printf("[PROBE] Wii cue dispatched token=%" PRIu64 "\n",
+                                   reply->deferred_token);
+#else
                 probe_debug_printf("[PROBE] Source sample ACK token=%" PRIu64 "\n",
                                    reply->deferred_token);
+#endif
                 reply->deferred_token = 0;
                 ready = true;
                 log_packet("BULK_REPLY_QUEUED", 0, 0, reply->data, reply->length);
@@ -468,6 +503,13 @@ void tud_hid_report_complete_cb(uint8_t instance, const uint8_t* report, uint16_
     if (report[0] == 0x08) {
         const int32_t dx = signed_mouse_delta(report + 10);
         const int32_t dy = signed_mouse_delta(report + 12);
+#ifdef SWITCH2_PROBE_TRACE_NATIVE_INPUT
+        if ((uint32_t)(last_hid_complete_ms - last_native_trace_ms) >= 1000) {
+            last_native_trace_ms = last_hid_complete_ms;
+            // Observe the completed transfer, not a proposed or ungated report.
+            log_packet("NATIVE_INPUT_DELIVERED", instance, report[0], report, length);
+        }
+#endif
         if (dx || dy) {
             ++mouse_delivered_reports;
             mouse_delivered_x += dx;
@@ -529,6 +571,10 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
                                 const tusb_control_request_t* request) {
     if (stage == CONTROL_STAGE_SETUP)
         log_packet("VENDOR_CONTROL", rhport, 0, (const uint8_t*)request, sizeof(*request));
+#ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+    if (probe_bootsel_vendor_control(rhport, stage, request))
+        return true;
+#endif
 #ifdef SWITCH2_PROBE_IDENTITY_REPLY
     if (request->bmRequestType == 0xc0 && request->bRequest == 0x03 &&
         request->wValue == 0 && request->wIndex == 0) {
@@ -611,9 +657,18 @@ int main(void) {
 #else
     probe_debug_printf("\n[PROBE] Joy-Con 2 (R) USB enumeration recorder\n");
 #endif
+#ifdef SWITCH2_PROBE_OMIT_NATIVE_IMU
+    probe_debug_printf("[PROBE] ACTIVATION_TEST=no-imu: native08 bytes 15..55 omitted; features, power, status, counters and cadence unchanged\n");
+#elif defined(SWITCH2_PROBE_ZERO_NATIVE_IMU_PAYLOAD)
+    probe_debug_printf("[PROBE] ACTIVATION_TEST=zero-imu-payload: native08 bytes 16..55 zeroed; length, features and all other fields unchanged\n");
+#endif
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
     probe_controller_input_init();
+#if SWITCH2_BRIDGE_WII_INPUT
+    probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; selected Wii IR/MotionPlus source enabled\n");
+#else
     probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; selected right Joy-Con Bluetooth source enabled\n");
+#endif
 #else
     probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; Bluetooth disabled\n");
 #endif
@@ -633,7 +688,12 @@ int main(void) {
     probe_debug_printf("[PROBE] Own virtual pairing storage offset=%08" PRIx32 "\n",
                        probe_storage_offset());
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH2_BRIDGE_WII_INPUT
+    probe_debug_printf("[PROBE] Wii IR drives native mouse movement; buttons retain profile mapping; keep Wii still for MotionPlus calibration\n");
+    probe_debug_printf("[PROBE] Hold BOOTSEL2s for pairing; Wii cue feedback uses bounded ERM patterns, not HD audio waveforms\n");
+#else
     probe_debug_printf("[PROBE] Live right Joy-Con buttons/stick/native mouse; hold BOOTSEL 2s for Bluetooth pairing (never clears pairings)\n");
+#endif
 #else
     probe_debug_printf("[PROBE] Manual input test: hold BOOTSEL for SL+SR, release for neutral; no controller forwarding\n");
 #endif
@@ -650,6 +710,9 @@ int main(void) {
         tud_task();
         drain_log();
         const uint32_t now = to_ms_since_boot(get_absolute_time());
+#ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+        probe_bootsel_task(now);
+#endif
 #ifdef SWITCH2_PROBE_USB_INIT
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
         if (probe_controller_input_pairing_task())

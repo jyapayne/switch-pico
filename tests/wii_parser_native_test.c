@@ -66,6 +66,13 @@ bool uni_hid_device_set_ready_complete(uni_hid_device_t* d) {
 void uni_log(const char* fmt, ...) { (void)fmt; }
 void printf_hexdump(const void* data, int len) { (void)data; (void)len; }
 
+// This parser fixture does not schedule rumble. Teardown still asks BTstack
+// to remove both timers; neither is present in the fixture's empty timer list.
+bool btstack_run_loop_remove_timer(btstack_timer_source_t* timer) {
+    assert(timer != NULL);
+    return false;
+}
+
 static void put_be16(uint8_t* output, uint16_t value) {
     output[0] = value >> 8;
     output[1] = value;
@@ -507,6 +514,88 @@ static void accelerometer_snapshot_requires_fresh_calibrated_reports(void) {
     connect_device();
     send_core_and_accel();
     assert(!uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
+}
+
+static void gyro_snapshot_advances_only_on_calibrated_motionplus_packets(void) {
+    reset_fixture(0x0330, true, EXT_NUNCHUK);
+    connect_device();
+    int32_t gyro[3];
+    uint32_t sequence;
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    send_nunchuk_controls(true);
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    expect_vector(gyro, 360 * 1024, -120 * 1024, 40 * 1024);
+    const uint32_t first = sequence;
+    send_nunchuk_controls(true);
+    send_ack(0x16, 0);
+    send_status(true);
+    finish_setup();
+    uint8_t short_report[11] = {0x35};
+    feed(short_report, sizeof(short_report));
+    assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    assert(sequence == first);
+    expect_vector(gyro, 360 * 1024, -120 * 1024, 40 * 1024);
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    assert(sequence != first);  // Equal values do not mean a duplicate packet.
+
+    reset_fixture(0x0330, true, EXT_NONE);
+    f.mp_calibration[30] ^= 1;
+    connect_device();
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, gyro, &sequence));
+}
+
+static void gyro_snapshot_invalidates_on_topology_and_teardown(void) {
+    reset_fixture(0x0306, true, EXT_NONE);
+    connect_device();
+    send_motion(7760, 8200, 7560, false, true, false);
+    int32_t gyro[3];
+    uint32_t sequence;
+    assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    const uint32_t first = sequence;
+    assert(uni_hid_parser_wii_rumble_ready(&f.device));
+    f.extension = EXT_NUNCHUK;
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    assert(!uni_hid_parser_wii_rumble_ready(&f.device));
+    finish_setup();
+    assert(uni_hid_parser_wii_rumble_ready(&f.device));
+    send_nunchuk_controls(true);
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    assert(sequence > first);  // Topology setup cannot reuse a pre-hotplug ID.
+
+    f.extension = EXT_NONE;
+    f.motionplus = false;
+    f.mp_active = false;
+    send_status(false);
+    finish_setup();
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    send_core_and_accel();
+    assert(uni_hid_parser_wii_accel_snapshot(&f.device, gyro, &sequence));
+    f.motionplus = true;
+    send_status(true);
+    finish_setup();
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    send_motion(7760, 8200, 7560, false, true, false);
+    // The first gyro packet resolves the active MP's downstream topology,
+    // which the attachment status bit alone cannot distinguish.
+    finish_setup();
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    assert(sequence > first);
+    uni_hid_parser_wii_teardown(&f.device);
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+    assert(!uni_hid_parser_wii_rumble_ready(&f.device));
+    f.ready_count = 0;  // A new parser connection gets its own ready notification.
+    uni_hid_parser_wii_setup(&f.device);
+    finish_setup();
+    assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
 }
 
 static void setup_read_and_write_errors_leave_buttons_ready(void) {
@@ -1112,6 +1201,8 @@ static void run_case(const char* name, void (*test)(void)) {
 
 int main(void) {
     run_case("fresh calibrated accelerometer snapshots without MotionPlus", accelerometer_snapshot_requires_fresh_calibrated_reports);
+    run_case("independent fresh calibrated MotionPlus gyro snapshots", gyro_snapshot_advances_only_on_calibrated_motionplus_packets);
+    run_case("gyro validity through hotplug, replacement and teardown", gyro_snapshot_invalidates_on_topology_and_teardown);
     run_case("plain Nunchuk independent packed acceleration", plain_nunchuk_accel_uses_own_packed_factory_points);
     run_case("MotionPlus Nunchuk acceleration bitpacking and freshness", passthrough_nunchuk_accel_bitpacking_and_freshness);
     run_case("Nunchuk accelerometer calibration independent of stick and Remote", nunchuk_accel_calibration_is_independent_of_stick_and_remote);

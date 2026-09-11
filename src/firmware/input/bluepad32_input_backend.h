@@ -78,6 +78,36 @@ enum class Bluepad32ControllerLayout : uint8_t {
     kWiiVertical = 7,
 };
 
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+// Calibrated SDL axes, before legacy Switch int16 conversion and motion gating.
+// Both sensor sequences and receipt times are independent of controller reports.
+struct Bluepad32WiiBridgeSnapshot {
+    uint8_t slot = 0xff;
+    Bluepad32SlotSnapshot controller{};
+    Bluepad32ControllerLayout layout = Bluepad32ControllerLayout::kUnspecified;
+    uint32_t state_generation = 0;
+    uint32_t received_us = 0;
+    uint8_t battery = 0;
+    bool accel_valid = false;
+    bool gyro_valid = false;
+    uint32_t accel_sequence = 0;
+    uint32_t gyro_sequence = 0;
+    uint32_t accel_received_us = 0;
+    uint32_t gyro_received_us = 0;
+    int32_t accel_q13[3]{};
+    int32_t gyro_q10[3]{};
+};
+
+// Core 0, after init and before start. Reselection retires source-local work.
+void bluepad32_input_backend_select_wii_source(const uint8_t address[6]);
+void bluepad32_input_backend_wii_snapshot(Bluepad32WiiBridgeSnapshot* output);
+// Bounded ERM approximations, not HD haptics. Completion means Core 1 driver
+// dispatch, never a Wii application ACK. Tokens are unique for this boot.
+bool bluepad32_input_backend_wii_sample_request(uint8_t sample_id, uint64_t* token);
+int bluepad32_input_backend_wii_sample_result(uint64_t token);
+void bluepad32_input_backend_wii_sample_cancel();
+#endif
+
 // Side-effect-free raw input snapshot for management telemetry. Unlike the
 // report-path snapshot, reading this does not consume motion samples.
 struct Bluepad32PlaytestSnapshot {

@@ -146,6 +146,7 @@ if(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE)
         SWITCH_PICO_SWITCH2_MOUSE_CAPTURE=1
         SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE=$<BOOL:${SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE}>)
 endif()
+set(SWITCH2_BRIDGE_WII_INPUT OFF)
 if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
     if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
             OR NOT SWITCH_PICO_ENABLE_BLE
@@ -157,8 +158,19 @@ if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
     if(SWITCH_PICO_WII_IR_MOUSE OR SWITCH_PICO_WII_IR_GYRO)
         message(FATAL_ERROR "Switch 2 USB bridge owns USB; Wii IR USB experiments cannot be combined")
     endif()
+    set(SWITCH2_BRIDGE_INPUT "JOYCON2" CACHE STRING "Native bridge source: JOYCON2 or WII")
+    set_property(CACHE SWITCH2_BRIDGE_INPUT PROPERTY STRINGS JOYCON2 WII)
+    if(SWITCH2_BRIDGE_INPUT STREQUAL "WII")
+        if(NOT SWITCH_PICO_ENABLE_CLASSIC)
+            message(FATAL_ERROR "Wii native bridge requires Bluetooth MIXED mode")
+        endif()
+        set(SWITCH2_BRIDGE_WII_INPUT ON)
+        add_compile_definitions(SWITCH2_BRIDGE_WII_INPUT=1 SWITCH_PICO_WII_IR=1)
+    elseif(NOT SWITCH2_BRIDGE_INPUT STREQUAL "JOYCON2")
+        message(FATAL_ERROR "SWITCH2_BRIDGE_INPUT must be JOYCON2 or WII")
+    endif()
     set(SWITCH2_BRIDGE_SOURCE_ADDRESS "" CACHE STRING
-        "Physical right Joy-Con 2 Bluetooth source address (xx:xx:xx:xx:xx:xx)")
+        "Physical Bluetooth controller source address (xx:xx:xx:xx:xx:xx)")
     string(TOLOWER "${SWITCH2_BRIDGE_SOURCE_ADDRESS}" bridge_source_address)
     string(LENGTH "${bridge_source_address}" bridge_source_address_length)
     if(NOT bridge_source_address_length EQUAL 17
@@ -335,16 +347,41 @@ if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
         message(FATAL_ERROR "Switch 2 USB bridge requires the initialized probe with factory and user calibration captures")
     endif()
     target_sources(switch-pico PRIVATE
+        ${SWITCH2_USB_PROBE_DIR}/bootsel.cpp
         ${SWITCH2_USB_PROBE_DIR}/controller_input.cpp)
+    if(SWITCH2_BRIDGE_WII_INPUT)
+        set(LIBOGC_IR_PREP_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/tools/prepare_libogc_ir.py)
+        set(LIBOGC_IR_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/libogc_ir.c)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            ${LIBOGC_IR_PREP_SCRIPT}
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/UPSTREAM.json
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/ir.h
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/license_libogc.txt
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/libogc_license.txt
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/upstream/ir.c
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/upstream/ir.h
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/upstream/wiiuse.h
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/upstream/wiiuse_internal.h
+            ${CMAKE_CURRENT_LIST_DIR}/external/libogc_ir/upstream/definitions.h)
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} ${LIBOGC_IR_PREP_SCRIPT} --output ${LIBOGC_IR_GENERATED}
+            RESULT_VARIABLE LIBOGC_IR_PREP_RESULT)
+        if(NOT LIBOGC_IR_PREP_RESULT EQUAL 0)
+            message(FATAL_ERROR "Preparing the pinned libogc IR pipeline failed")
+        endif()
+        target_include_directories(switch-pico PRIVATE ${CMAKE_CURRENT_LIST_DIR}/external)
+        target_sources(switch-pico PRIVATE ${SWITCH2_USB_PROBE_DIR}/native_imu.cpp ${LIBOGC_IR_GENERATED})
+    endif()
     target_compile_definitions(switch-pico PRIVATE
         SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES=${SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES})
 else()
     target_sources(switch-pico PRIVATE ${SWITCH_PICO_SOURCE_DIR}/main.cpp)
 endif()
-if(SWITCH_PICO_WII_IR_MOUSE OR SWITCH_PICO_WII_IR_GYRO)
-    target_sources(switch-pico PRIVATE
-        ${SWITCH_PICO_SOURCE_DIR}/input/wii_ir_pointer.cpp
-        ${SWITCH_PICO_SOURCE_DIR}/input/wii_ir_tracker.cpp)
+if(SWITCH_PICO_WII_IR_MOUSE OR SWITCH_PICO_WII_IR_GYRO OR SWITCH2_BRIDGE_WII_INPUT)
+    target_sources(switch-pico PRIVATE ${SWITCH_PICO_SOURCE_DIR}/input/wii_ir_pointer.cpp)
+    if(NOT SWITCH2_BRIDGE_WII_INPUT)
+        target_sources(switch-pico PRIVATE ${SWITCH_PICO_SOURCE_DIR}/input/wii_ir_tracker.cpp)
+    endif()
 endif()
 if(SWITCH_PICO_WII_IR_MOUSE)
     target_sources(switch-pico PRIVATE

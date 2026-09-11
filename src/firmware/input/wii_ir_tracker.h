@@ -15,7 +15,7 @@ struct WiiIrTrackingResult {
     bool tracked = false;
     bool rebased = false;
     bool inferred = false;
-    // Matched spots: relative mode may use one to four, not just a bar pair.
+    // Supporting spots used for the tracked measurement.
     uint8_t pair_mask = 0;
     float yaw_radians = 0;
     float pitch_radians = 0;

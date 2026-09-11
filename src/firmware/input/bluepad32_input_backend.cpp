@@ -18,6 +18,7 @@
 #include "configuration/configuration_service.h"
 #include "profile/profile_service.h"
 #include <limits.h>
+#include <math.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -193,6 +194,54 @@ struct WiiAimSource {
 };
 #endif
 
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+struct WiiMotionIngress {
+    uint32_t received_us = 0;
+    uint32_t accel_sequence = 0;
+    uint32_t gyro_sequence = 0;
+    uint32_t nunchuk_sequence = 0;
+    uint32_t accel_received_us = 0;
+    uint32_t gyro_received_us = 0;
+    int32_t accel_q13[3]{};
+    int32_t gyro_q10[3]{};
+    bool accel_valid = false;
+    bool gyro_valid = false;
+};
+
+struct WiiCue {
+    uint64_t token = 0;
+    uint32_t connection_generation = 0;
+    uint32_t requested_ms = 0;
+    uint32_t started_ms = 0;
+    uint8_t slot = 0xff;
+    uint8_t sample_id = 0;
+    uint8_t dispatched_phase = 0xff;
+    int result = -1;
+    bool consumed = false;
+    bool active = false;
+    bool stop_pending = false;
+    bool in_flight = false;
+};
+
+// Wii has a fixed-strength ERM motor: "soft"/"strong" are approximated only
+// through pulse length, not invented HD frequencies or amplitude control.
+struct WiiCuePattern {
+    uint16_t phases_ms[7];  // Alternating on/gap, starting and ending on.
+    uint8_t count;
+};
+constexpr WiiCuePattern kWiiCuePatterns[8] = {
+    {{0}, 0},
+    {{1000}, 1},
+    {{100, 180, 100, 180, 100, 180, 100}, 7},
+    {{25, 90, 25}, 3},
+    {{100, 140, 100}, 3},
+    {{70, 120, 70}, 3},
+    {{60}, 1},
+    {{120}, 1},
+};
+constexpr uint32_t kWiiCueDeadlineMs = 2000;
+#endif
+
 
 
 // Security Manager identity events arrive before Bluepad32 publishes a ready
@@ -227,6 +276,9 @@ struct BackendSlot {
     bool active;
     bool wii_orientation_pending;
     WiiOrientationRequest pending_wii_orientation;
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+    WiiMotionIngress wii_motion;
+#endif
 #ifdef SWITCH_PICO_WII_IR_GYRO
     WiiAimSource wii_aim;
 #endif
@@ -265,6 +317,50 @@ uint32_t g_next_clear_pairings_request_token = 1;
 bool g_pairing_snapshot_requested = false;
 bool g_initialized = false;
 bool g_started = false;
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+bool g_wii_source_selected = false;
+uint8_t g_wii_source_address[6]{};
+Bluepad32WiiBridgeSnapshot g_wii_snapshot{};
+WiiCue g_wii_cue{};
+uint64_t g_next_wii_cue_token = 1;
+
+// All native Wii state shares the backend lock. Only Core 1 dereferences a
+// parser or dispatches transport; Core 0 sees a copied, published snapshot.
+bool is_selected_wii(const BackendSlot& slot) {
+    return g_wii_source_selected && slot.active && slot.device != nullptr &&
+        slot.companion == nullptr &&
+        slot.device->controller_type == CONTROLLER_TYPE_WiiController &&
+        memcmp(slot.device->conn.btaddr, g_wii_source_address, 6) == 0;
+}
+
+void retire_wii_motion(WiiMotionIngress& motion) {
+    // Keep the observed counters across logical epochs: a cached parser sample
+    // must not acquire a new receipt timestamp after orientation/reselection.
+    const uint32_t accel_sequence = motion.accel_sequence;
+    const uint32_t gyro_sequence = motion.gyro_sequence;
+    const uint32_t nunchuk_sequence = motion.nunchuk_sequence;
+    motion = {};
+    motion.accel_sequence = accel_sequence;
+    motion.gyro_sequence = gyro_sequence;
+    motion.nunchuk_sequence = nunchuk_sequence;
+}
+
+void cancel_wii_cue_locked() {
+    g_wii_cue.stop_pending = g_wii_cue.stop_pending ||
+        g_wii_cue.active || g_wii_cue.in_flight;
+    g_wii_cue.active = false;
+    g_wii_cue.result = -1;
+}
+
+void retire_wii_slot(uint8_t slot_index) {
+    if (g_wii_snapshot.slot == slot_index) g_wii_snapshot = {};
+    if (g_wii_cue.slot == slot_index) {
+        // The connection is gone or its owner is being reset on Core 1.
+        // Never send a deferred stop into a replacement generation.
+        g_wii_cue = {};
+    }
+}
+#endif
 
 // These fields are only read or written by Core 1 / BTstack.
 btstack_timer_source_t g_rumble_timer{};
@@ -1081,6 +1177,30 @@ bool lighting_target_is_current(
     return current;
 }
 
+Bluepad32ControllerLayout controller_layout(const BackendSlot& slot) {
+    if (!slot.active || slot.device == nullptr)
+        return Bluepad32ControllerLayout::kUnspecified;
+    const int side = joycon_side(slot.device);
+    if (side != 0) {
+        return slot.companion != nullptr
+            ? Bluepad32ControllerLayout::kJoyCon2MergedPair
+            : side < 0 ? Bluepad32ControllerLayout::kJoyCon2LeftSolo
+                       : Bluepad32ControllerLayout::kJoyCon2RightSolo;
+    }
+    switch (slot.device->controller_subtype) {
+        case CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL:
+        case CONTROLLER_SUBTYPE_WIIMOTE_ACCEL:
+            return Bluepad32ControllerLayout::kWiiHorizontal;
+        case CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL:
+            return Bluepad32ControllerLayout::kWiiVertical;
+        case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK:
+        case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL:
+            return Bluepad32ControllerLayout::kWiiNunchuk;
+        default:
+            return Bluepad32ControllerLayout::kUnspecified;
+    }
+}
+
 
 
 ConnectionStatus compute_connection_status() {
@@ -1127,6 +1247,28 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
         }
 #endif
         ++target.state_generation;
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        if (is_selected_wii(target)) {
+            const WiiMotionIngress& motion = target.wii_motion;
+            g_wii_snapshot.slot = slot;
+            g_wii_snapshot.controller = {
+                target.active, target.connection_generation, target.identity,
+                target.pre_hotkey_button_mask, target.state,
+                target.accelerometer, target.nunchuk_accelerometer};
+            g_wii_snapshot.layout = controller_layout(target);
+            g_wii_snapshot.state_generation = target.state_generation;
+            g_wii_snapshot.received_us = motion.received_us;
+            g_wii_snapshot.battery = device->controller.battery;
+            g_wii_snapshot.accel_valid = motion.accel_valid;
+            g_wii_snapshot.gyro_valid = motion.gyro_valid;
+            g_wii_snapshot.accel_sequence = motion.accel_sequence;
+            g_wii_snapshot.gyro_sequence = motion.gyro_sequence;
+            g_wii_snapshot.accel_received_us = motion.accel_received_us;
+            g_wii_snapshot.gyro_received_us = motion.gyro_received_us;
+            memcpy(g_wii_snapshot.accel_q13, motion.accel_q13, sizeof(motion.accel_q13));
+            memcpy(g_wii_snapshot.gyro_q10, motion.gyro_q10, sizeof(motion.gyro_q10));
+        }
+#endif
         g_macro_capture.observe(slot, target.connection_generation,
                                 time_us_32(), target.state);
     }
@@ -1139,6 +1281,10 @@ void publish_all_neutral() {
     wii_ir_pointer_reset();
 #endif
     for (BackendSlot& slot : g_slots) {
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        retire_wii_slot(static_cast<uint8_t>(&slot - g_slots));
+        retire_wii_motion(slot.wii_motion);
+#endif
         clear_switch2_ingress(slot);
         reset_switch2_outputs(slot);
         slot.state = make_neutral_state();
@@ -1671,6 +1817,10 @@ void reset_slot_hotkeys(BackendSlot& slot) {
                                slot.connection_generation, time_us_32());
     slot.wii_orientation_pending = false;
     slot.pending_wii_orientation = {};
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+    retire_wii_slot(static_cast<uint8_t>(&slot - g_slots));
+    retire_wii_motion(slot.wii_motion);
+#endif
 #ifdef SWITCH_PICO_WII_IR_GYRO
     slot.wii_aim = {};
 #endif
@@ -2245,6 +2395,134 @@ void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
     device->report_parser.play_dual_rumble(device, 0, duration_ms, weak, strong);
 }
 
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+struct WiiCueDispatch {
+    uni_hid_device_t* device = nullptr;
+    uint64_t token = 0;
+    uint32_t connection_generation = 0;
+    uint8_t slot = 0xff;
+    uint8_t phase = 0;
+    uint16_t duration_ms = 0;
+    bool cancellation_stop = false;
+};
+
+bool wii_cue_target_current() {
+    return g_wii_cue.slot < kSlotCount &&
+        is_selected_wii(g_slots[g_wii_cue.slot]) &&
+        g_slots[g_wii_cue.slot].connection_generation ==
+            g_wii_cue.connection_generation;
+}
+
+void restore_wii_host_rumble(BackendSlot& slot) {
+    if (slot.retained_host_rumble_valid) {
+        slot.pending_rumble = slot.retained_host_rumble;
+        slot.rumble_pending = true;
+    }
+}
+
+// Called under the backend lock, after profile/local arbitration. A waiting
+// cue yields to local feedback; a playing cue is canceled rather than replayed
+// after an interruption. A finite driver timer bounds even a stalled poller.
+bool prepare_wii_cue(uint8_t slot_index, uint32_t now_ms,
+                     bool local_active, bool local_dispatch,
+                     WiiCueDispatch* output) {
+    WiiCue& cue = g_wii_cue;
+    if (cue.slot != slot_index) return false;
+    BackendSlot& slot = g_slots[slot_index];
+    if (!wii_cue_target_current() ||
+        slot.device->report_parser.play_dual_rumble == nullptr) {
+        cue = {};
+        return false;
+    }
+    if ((cue.result == 0 &&
+         static_cast<uint32_t>(now_ms - cue.requested_ms) >= kWiiCueDeadlineMs) ||
+        (cue.active &&
+         static_cast<uint32_t>(now_ms - cue.started_ms) >= kWiiCueDeadlineMs)) {
+        cancel_wii_cue_locked();
+    }
+    if (local_active || local_dispatch) {
+        if (cue.active) cancel_wii_cue_locked();
+        // A local rumble command replaces our finite pulse; a later stop must
+        // not cut that higher-priority feedback short.
+        if (local_dispatch) cue.stop_pending = false;
+        return cue.result == 0 || cue.active || cue.stop_pending;
+    }
+    if (cue.in_flight) return true;
+    if (cue.result != 0 && !cue.active && !cue.stop_pending) return false;
+    uint8_t phase = 0;
+    uint16_t duration_ms = 0;
+    if (!cue.stop_pending && cue.sample_id != 0) {
+        const WiiCuePattern& pattern = kWiiCuePatterns[cue.sample_id];
+        uint32_t elapsed = cue.active ? now_ms - cue.started_ms : 0;
+        while (phase < pattern.count && elapsed >= pattern.phases_ms[phase]) {
+            elapsed -= pattern.phases_ms[phase++];
+        }
+        if (phase == pattern.count) {
+            cue.active = false;
+            restore_wii_host_rumble(slot);
+            return false;
+        }
+        // The driver's duration timer supplies the gaps. Skip missed phases,
+        // never replay a burst of old pulses to catch up after a scheduling gap.
+        if ((phase & 1u) != 0 || phase == cue.dispatched_phase) return true;
+        duration_ms = static_cast<uint16_t>(pattern.phases_ms[phase] - elapsed);
+    }
+    *output = {slot.device, cue.token, cue.connection_generation,
+               slot_index, phase, duration_ms, cue.stop_pending};
+    cue.in_flight = true;
+    return true;
+}
+
+void dispatch_wii_cue(const WiiCueDispatch& command) {
+    if (command.device == nullptr) return;
+    critical_section_enter_blocking(&g_state_lock);
+    const bool current = g_wii_cue.token == command.token &&
+        g_wii_cue.in_flight && wii_cue_target_current() &&
+        g_slots[command.slot].device == command.device &&
+        (command.cancellation_stop ? g_wii_cue.stop_pending
+                                  : g_wii_cue.result != -1);
+    critical_section_exit(&g_state_lock);
+    // Lifecycle/parser callbacks are serialized on Core 1. The readiness check
+    // excludes the Wii void hook's early-return path during topology setup.
+    const bool dispatched = current &&
+        command.device->report_parser.play_dual_rumble != nullptr &&
+        uni_hid_parser_wii_rumble_ready(command.device);
+    if (dispatched) {
+        __atomic_add_fetch(&g_rumble_dispatches, 1, __ATOMIC_RELAXED);
+        command.device->report_parser.play_dual_rumble(
+            command.device, 0, command.duration_ms, UINT8_MAX, UINT8_MAX);
+    }
+    critical_section_enter_blocking(&g_state_lock);
+    WiiCue& cue = g_wii_cue;
+    if (cue.token == command.token && cue.connection_generation == command.connection_generation) {
+        cue.in_flight = false;
+        if (!wii_cue_target_current()) {
+            cue = {};
+        } else if (command.cancellation_stop) {
+            if (dispatched) {
+                cue.stop_pending = false;
+                restore_wii_host_rumble(g_slots[command.slot]);
+            }
+        } else if (cue.result != -1 && dispatched) {
+            const uint32_t now_ms = btstack_run_loop_get_time_ms();
+            if (cue.result == 0 && now_ms - cue.requested_ms >= kWiiCueDeadlineMs) {
+                cue.stop_pending = command.duration_ms != 0;
+                cancel_wii_cue_locked();
+            } else {
+                if (cue.result == 0) {
+                    cue.started_ms = now_ms;
+                    cue.result = 1;  // Driver dispatch, not an application ACK.
+                }
+                cue.active = cue.sample_id != 0;
+                cue.dispatched_phase = command.phase;
+                if (!cue.active) restore_wii_host_rumble(g_slots[command.slot]);
+            }
+        }
+    }
+    critical_section_exit(&g_state_lock);
+}
+#endif
+
 // Core 1 only. The mailbox carries values, never a parser pointer supplied by
 // Core 0. Revalidate after lifecycle/topology work and before touching the parser.
 void process_wii_orientation(uint8_t slot_index) {
@@ -2398,6 +2676,9 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         bool profile_rumble_dispatch = false;
         bool feedback_dispatch = false;
         bool host_dispatch = false;
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        WiiCueDispatch wii_cue_dispatch{};
+#endif
 
         critical_section_enter_blocking(&g_state_lock);
         BackendSlot& slot = g_slots[slot_index];
@@ -2527,8 +2808,16 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             slot.profile_feedback.active ||
             static_cast<int32_t>(
                 now_ms - slot.feedback_until_ms) < 0;
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        const bool wii_cue_owns_rumble = prepare_wii_cue(
+            slot_index, now_ms, local_feedback_active,
+            profile_rumble_dispatch || feedback_dispatch, &wii_cue_dispatch);
+#endif
         if (!profile_rumble_dispatch && !feedback_dispatch &&
             !local_feedback_active && slot.rumble_pending
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+            && !wii_cue_owns_rumble
+#endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
             && !(xinput_host_mode &&
                  haptics_experiment_gameplay_owns(slot.device))
@@ -2602,6 +2891,9 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
                 dispatch_host_rumble(target, envelope.duration_ms, envelope.rumble);
             }
         }
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        dispatch_wii_cue(wii_cue_dispatch);
+#endif
     }
 
     update_status_led();
@@ -3277,22 +3569,16 @@ void platform_on_controller_data(uni_hid_device_t* device,
     }
 #ifdef SWITCH_PICO_WII_IR
     uni_wii_ir_snapshot_t infrared{};
-    const bool have_infrared = uni_hid_parser_wii_ir_snapshot(device, &infrared);
+    const bool have_infrared =
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        is_selected_wii(slot) && slot.device == device &&
+#endif
+        uni_hid_parser_wii_ir_snapshot(device, &infrared);
 #ifdef SWITCH_PICO_WII_IR_GYRO
     observe_wii_aim_chord(
         slot, device, controller->gamepad,
         have_infrared ? &infrared : nullptr, time_us_32());
 #endif
-    if (have_infrared) {
-        const bool nunchuk_c =
-            (device->controller_subtype == CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK ||
-             device->controller_subtype == CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL) &&
-            (controller->gamepad.buttons & BUTTON_X) != 0;
-        wii_ir_pointer_observe(static_cast<uint8_t>(slot_index),
-                             slot.connection_generation, infrared.sequence,
-                             infrared.buttons, infrared.x, infrared.y,
-                             infrared.valid_mask, nunchuk_c);
-    }
 #endif
     const uint8_t extras = uni_hid_parser_switch2_extra_buttons(device);
     if (slot.companion == device) {
@@ -3307,26 +3593,91 @@ void platform_on_controller_data(uni_hid_device_t* device,
     if (device->controller_type == CONTROLLER_TYPE_WiiController) {
         int32_t acceleration[3];
         uint32_t sequence;
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        WiiMotionIngress& motion = slot.wii_motion;
+        motion.received_us = time_us_32();
+#endif
         if (!uni_hid_parser_wii_accel_snapshot(device, acceleration, &sequence)) {
             slot.accelerometer = {};
-        } else if (!slot.accelerometer.valid || sequence != slot.accelerometer.sequence) {
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+            motion.accel_valid = false;
+#endif
+        } else if (
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+            sequence != motion.accel_sequence
+#else
+            !slot.accelerometer.valid || sequence != slot.accelerometer.sequence
+#endif
+        ) {
             slot.accelerometer = {
                 convert_accel(-static_cast<int64_t>(acceleration[2])),
                 convert_accel(-static_cast<int64_t>(acceleration[0])),
                 convert_accel(acceleration[1]), sequence,
                 btstack_run_loop_get_time_ms(), true};
         }
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+        if (slot.accelerometer.valid && sequence != motion.accel_sequence) {
+            motion.accel_sequence = sequence;
+            motion.accel_received_us = motion.received_us;
+            motion.accel_valid = true;
+            memcpy(motion.accel_q13, acceleration, sizeof(motion.accel_q13));
+        }
+        int32_t gyro[3];
+        if (!uni_hid_parser_wii_gyro_snapshot(device, gyro, &sequence)) {
+            motion.gyro_valid = false;
+        } else if (sequence != motion.gyro_sequence) {
+            motion.gyro_sequence = sequence;
+            motion.gyro_received_us = motion.received_us;
+            motion.gyro_valid = true;
+            memcpy(motion.gyro_q10, gyro, sizeof(motion.gyro_q10));
+        }
+#endif
         if (!uni_hid_parser_wii_nunchuk_accel_snapshot(device, acceleration, &sequence)) {
             slot.nunchuk_accelerometer = {};
-        } else if (!slot.nunchuk_accelerometer.valid ||
-                   sequence != slot.nunchuk_accelerometer.sequence) {
+        } else if (
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+            sequence != motion.nunchuk_sequence
+#else
+            !slot.nunchuk_accelerometer.valid ||
+            sequence != slot.nunchuk_accelerometer.sequence
+#endif
+        ) {
             slot.nunchuk_accelerometer = {
                 convert_accel(-static_cast<int64_t>(acceleration[2])),
                 convert_accel(-static_cast<int64_t>(acceleration[0])),
                 convert_accel(acceleration[1]), sequence,
                 btstack_run_loop_get_time_ms(), true};
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+            motion.nunchuk_sequence = sequence;
+#endif
         }
     }
+#ifdef SWITCH_PICO_WII_IR
+    if (have_infrared) {
+        const bool nunchuk_c =
+            (device->controller_subtype == CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK ||
+             device->controller_subtype == CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL) &&
+            (controller->gamepad.buttons & BUTTON_X) != 0;
+        float gravity_roll = 0.0f;
+        bool gravity_valid = false;
+#if SWITCH2_BRIDGE_WII_INPUT
+        const WiiMotionIngress& motion = slot.wii_motion;
+        if (motion.accel_valid && time_us_32() - motion.accel_received_us < 150000) {
+            const float x = static_cast<float>(motion.accel_q13[0]) / 8192.0f;
+            const float y = static_cast<float>(motion.accel_q13[1]) / 8192.0f;
+            const float z = static_cast<float>(motion.accel_q13[2]) / 8192.0f;
+            const float magnitude = x * x + y * y + z * z;
+            gravity_valid = magnitude >= 0.85f * 0.85f && magnitude <= 1.15f * 1.15f &&
+                            x * x + y * y >= 0.25f;
+            if (gravity_valid) gravity_roll = atan2f(-x, y);
+        }
+#endif
+        wii_ir_pointer_observe(static_cast<uint8_t>(slot_index),
+                             slot.connection_generation, infrared.sequence,
+                             infrared.buttons, infrared.x, infrared.y,
+                             infrared.valid_mask, nunchuk_c, gravity_roll, gravity_valid);
+    }
+#endif
     const uni_gamepad_t gamepad = logical_gamepad(slot);
     uni_hid_device_t* owner = slot.device;
     const bool fresh_motion =
@@ -3720,6 +4071,95 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
     g_last_snapshot_generation[slot_index] = state_generation;
 }
 
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+void bluepad32_input_backend_select_wii_source(const uint8_t address[6]) {
+    // Selection is configuration, not a live Core 0 parser mutation.
+    if (!g_initialized || g_started) return;
+    critical_section_enter_blocking(&g_state_lock);
+    g_wii_source_selected = address != nullptr;
+    if (address != nullptr) memcpy(g_wii_source_address, address, 6);
+    else memset(g_wii_source_address, 0, sizeof(g_wii_source_address));
+    g_wii_snapshot = {};
+    g_wii_cue = {};
+    for (BackendSlot& slot : g_slots) retire_wii_motion(slot.wii_motion);
+#ifdef SWITCH_PICO_WII_IR
+    // Lock order: backend exclusive, then pointer striped.
+    wii_ir_pointer_reset();
+#endif
+    critical_section_exit(&g_state_lock);
+}
+
+void bluepad32_input_backend_wii_snapshot(Bluepad32WiiBridgeSnapshot* output) {
+    if (output == nullptr) return;
+    *output = {};
+    if (!g_initialized) return;
+    critical_section_enter_blocking(&g_state_lock);
+    const uint8_t slot = g_wii_snapshot.slot;
+    if (slot < kSlotCount && is_selected_wii(g_slots[slot]) &&
+        g_slots[slot].connection_generation ==
+            g_wii_snapshot.controller.connection_generation) {
+        *output = g_wii_snapshot;
+    }
+    critical_section_exit(&g_state_lock);
+}
+
+bool bluepad32_input_backend_wii_sample_request(uint8_t sample_id, uint64_t* token) {
+    if (token == nullptr) return false;
+    *token = 0;
+    if (!g_initialized || sample_id >= 8) return false;
+    critical_section_enter_blocking(&g_state_lock);
+    bool accepted = false;
+    // Do not overwrite a command already being dispatched. Sample zero can
+    // replace a queued/running pattern; ordinary cues serialize until it ends.
+    if (g_next_wii_cue_token != 0 && !g_wii_cue.in_flight &&
+        (sample_id == 0 || (g_wii_cue.result != 0 &&
+                           !g_wii_cue.active && !g_wii_cue.stop_pending))) {
+        for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
+            const BackendSlot& slot = g_slots[slot_index];
+            if (!is_selected_wii(slot) ||
+                slot.device->report_parser.play_dual_rumble == nullptr) continue;
+            g_wii_cue = {};
+            g_wii_cue.token = g_next_wii_cue_token++;
+            g_wii_cue.slot = slot_index;
+            g_wii_cue.connection_generation = slot.connection_generation;
+            g_wii_cue.sample_id = sample_id;
+            g_wii_cue.requested_ms = btstack_run_loop_get_time_ms();
+            g_wii_cue.result = 0;
+            *token = g_wii_cue.token;
+            accepted = true;
+            break;
+        }
+    }
+    critical_section_exit(&g_state_lock);
+    return accepted;
+}
+
+int bluepad32_input_backend_wii_sample_result(uint64_t token) {
+    if (!g_initialized || token == 0) return -1;
+    critical_section_enter_blocking(&g_state_lock);
+    int result = -1;
+    if (g_wii_cue.token == token && !g_wii_cue.consumed) {
+        if (!wii_cue_target_current() ||
+            g_slots[g_wii_cue.slot].device->report_parser.play_dual_rumble == nullptr ||
+            (g_wii_cue.result == 0 &&
+             btstack_run_loop_get_time_ms() - g_wii_cue.requested_ms >= kWiiCueDeadlineMs)) {
+            cancel_wii_cue_locked();
+        }
+        result = g_wii_cue.result;
+        if (result != 0) g_wii_cue.consumed = true;
+    }
+    critical_section_exit(&g_state_lock);
+    return result;
+}
+
+void bluepad32_input_backend_wii_sample_cancel() {
+    if (!g_initialized) return;
+    critical_section_enter_blocking(&g_state_lock);
+    cancel_wii_cue_locked();
+    critical_section_exit(&g_state_lock);
+}
+#endif
+
 void bluepad32_input_backend_playtest_snapshot(
     uint8_t slot_index, Bluepad32PlaytestSnapshot* out) {
     if (out == nullptr) {
@@ -3745,35 +4185,7 @@ void bluepad32_input_backend_playtest_snapshot(
             (slot.device->report_parser.set_lightbar_color != nullptr ? 2u : 0u) |
             (slot.device->report_parser.set_player_leds != nullptr ? 4u : 0u) |
             (slot.state.motion_sample_count != 0 ? 8u : 0u);
-        if (slot.active) {
-            const int side = joycon_side(slot.device);
-            if (side != 0) {
-                out->controller_layout = slot.companion != nullptr
-                    ? Bluepad32ControllerLayout::kJoyCon2MergedPair
-                    : side < 0
-                        ? Bluepad32ControllerLayout::kJoyCon2LeftSolo
-                        : Bluepad32ControllerLayout::kJoyCon2RightSolo;
-            } else {
-                switch (slot.device->controller_subtype) {
-                    case CONTROLLER_SUBTYPE_WIIMOTE_HORIZONTAL:
-                    case CONTROLLER_SUBTYPE_WIIMOTE_ACCEL:
-                        out->controller_layout =
-                            Bluepad32ControllerLayout::kWiiHorizontal;
-                        break;
-                    case CONTROLLER_SUBTYPE_WIIMOTE_VERTICAL:
-                        out->controller_layout =
-                            Bluepad32ControllerLayout::kWiiVertical;
-                        break;
-                    case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK:
-                    case CONTROLLER_SUBTYPE_WIIMOTE_NUNCHUK_ACCEL:
-                        out->controller_layout =
-                            Bluepad32ControllerLayout::kWiiNunchuk;
-                        break;
-                    default:
-                        break;
-                }
-            }
-        }
+        out->controller_layout = controller_layout(slot);
     }
     critical_section_exit(&g_state_lock);
 }

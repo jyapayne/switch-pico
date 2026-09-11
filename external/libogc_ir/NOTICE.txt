@@ -1,0 +1,76 @@
+libogc Wiiuse IR math component port
+
+Upstream: https://github.com/devkitPro/libogc
+Pinned commit: a4064a86487c46d8ab76d4fdf99e8059a62c4fa2
+Modified for switch-pico on 2026-09-11.
+
+This directory is a source extraction from the Wiiuse component of libogc,
+not an independent reimplementation and not a copy of ordinary Wiiuse from
+another repository. Original sources in upstream/ are byte-for-byte copies
+from the pin; UPSTREAM.json records their URLs, checksums and retained ranges.
+
+LICENSE AND ATTRIBUTION
+
+The full, unchanged wiiuse/license_libogc.txt from that libogc revision is
+provided here as license_libogc.txt. It contains GNU GPL version 3 plus the
+section 18 exception for linking with independent modules. The opening scope
+restriction (libogc and its covered or combined works) is retained. This is a
+modified port of that libogc component; we explicitly extend and retain the
+section 18 linking exception for this version, including the portable header
+and generated IR translation unit. This component is not offered under MIT.
+The surrounding independent switch-pico project is not relicensed.
+
+Section 18 permits linking this library with independent modules under their
+own licenses and distributing the executable under terms of your choice,
+provided each independent module's license is satisfied. An independent
+module is not derived from or based on this library. The exception does not
+remove the GPL obligations for this component itself, including provision of
+its corresponding source when distributing it in object-code form. The
+original component, extraction script and portable header are supplied in
+source form. Recipients should retain these notices and the full license.
+
+The original Wiiuse notice in upstream/wiiuse_internal.h credits Michael
+Laforest, copyright 2006-2007, grants GPL version 3 or later, and disclaims
+warranty. It is retained intact in that file, the portable header, and the
+generated C. There is no copyright/license preamble in the pinned ir.c,
+ir.h, definitions.h or gc/wiiuse/wiiuse.h; none has been invented for them.
+
+The root libogc notice is preserved verbatim as libogc_license.txt. It credits
+Michael Wiedenbauer (shagkur) and Dave Murphy (WinterMute), copyright 2004-2009,
+and grants permission subject to origin, altered-source marking and notice
+retention restrictions. This root notice does not replace the Wiiuse-specific
+GPL plus exception. There is no root LICENSE file at the pinned revision;
+UPSTREAM.json records the failed LICENSE URL and the actual pinned root file.
+
+EXACT PORTABILITY CHANGES
+
+1. Keep upstream/ir.c untouched. tools/prepare_libogc_ir.py selects the exact
+   declared byte-preserving line ranges rather than rewriting any algorithm.
+   No function body, algorithm constant, comparison, arithmetic expression or
+   math-library call in the retained functions is changed.
+2. Omit transport, report decoding, device setup and platform includes. No
+   unused transport function is compiled, and no fake Wiiuse I/O implementation
+   is supplied. The caller supplies decoded dots and orientation.
+3. Supply a narrow C/C++ header instead of the Bluetooth/GEKKO headers. Keep
+   the original ubyte, orient_t, ir_dot_t, fdot_t, sb_t, aspect_t, ir_position_t
+   and ir_t declarations verbatim; supply the platform primitive f32 as float.
+   Copy the original anonymous IR state enum and original aspect-size macros
+   into this header. Add a unique include guard, C linkage and declarations
+   for the two already-external functions find_sensorbar/apply_ir_smoothing.
+   Retain the original calc_yaw/interpret_ir_data declarations.
+4. Generated C starts with #include "libogc_ir/ir.h", includes standard math.h,
+   and copies the original PI/angle conversion macros. The original disabled
+   WIIUSE_DEBUG(fmt, ...) definition is retained, then redefined as
+   WIIUSE_DEBUG(...) with the same empty expansion. This makes one-argument
+   debug calls valid strict C11 without enabling logging, changing call sites,
+   suppressing compiler warnings, or modifying algorithm bodies/constants.
+5. Add dated modification/license comments, blank separators and #line
+   directives around unchanged source sections. File names in those directives
+   are repository-relative, so output is independent of the build directory.
+   The extraction has no runtime dependency on Python or the filesystem.
+
+The native relative-output adapter is separate from these upstream math
+functions. It handles camera coordinate conventions, gravity units, camera
+sequence consumption, configurable relative scale and USB delta baselines.
+Those adaptations are not changes to the algorithm in this directory and do
+not provide absolute host cursor synchronization.

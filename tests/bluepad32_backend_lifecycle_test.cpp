@@ -40,6 +40,10 @@ struct WiiAccelFixture {
 };
 WiiAccelFixture remote_accel_fixture;
 WiiAccelFixture nunchuk_accel_fixture;
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+WiiAccelFixture gyro_fixture;
+bool wii_rumble_ready = true;
+#endif
 
 bool wii_accel_fixture_snapshot(const WiiAccelFixture& fixture,
                                 uni_hid_device_t* controller,
@@ -748,6 +752,17 @@ extern "C" bool uni_hid_parser_wii_nunchuk_accel_snapshot(
     uni_hid_device_t* controller, int32_t acceleration[3], uint32_t* sequence) {
     return wii_accel_fixture_snapshot(nunchuk_accel_fixture, controller, acceleration, sequence);
 }
+
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+extern "C" bool uni_hid_parser_wii_gyro_snapshot(
+    uni_hid_device_t* controller, int32_t gyro[3], uint32_t* sequence) {
+    return wii_accel_fixture_snapshot(gyro_fixture, controller, gyro, sequence);
+}
+extern "C" bool uni_hid_parser_wii_rumble_ready(uni_hid_device_t*) {
+    require(state_lock_depth == 0, "Wii dispatch readiness must be checked on Core 1 outside the state lock");
+    return wii_rumble_ready;
+}
+#endif
 
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
 namespace {
@@ -5605,6 +5620,186 @@ void dispatch_wii_requests() {
     wii_dispatch_active = false;
 }
 
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+void test_wii_bridge_sensors() {
+    auto selected = wii_device(1);
+    auto other = wii_device(0);
+    bluepad32_input_backend_init();
+    bluepad32_input_backend_select_wii_source(selected.conn.btaddr);
+    start_pairing_backend();
+    require(platform_on_device_ready(&other) == UNI_ERROR_SUCCESS, "unselected Wii must remain available normally");
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    input.gamepad.buttons = BUTTON_A;
+    remote_accel_fixture = {&other, {8193, -42, 91}, 7, true};
+    gyro_fixture = {&other, {123456, -45678, 91011}, 11, true};
+    platform_on_controller_data(&other, &input);
+    Bluepad32WiiBridgeSnapshot snapshot{};
+    bluepad32_input_backend_wii_snapshot(&snapshot);
+    require(!snapshot.controller.active && snapshot.slot == 0xff,
+            "an unrelated Wii cannot claim the selected native source");
+    selected.controller_type = CONTROLLER_TYPE_UnknownController;
+    require(platform_on_device_ready(&selected) == UNI_ERROR_SUCCESS, "non-Wii address match must connect normally");
+    platform_on_controller_data(&selected, &input);
+    bluepad32_input_backend_wii_snapshot(&snapshot);
+    require(!snapshot.controller.active, "matching address alone must not identify a Wii");
+    platform_on_device_disconnected(&selected);
+    auto replacement = wii_device(1);
+    require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS, "selected physical Wii must become ready");
+    const uint32_t generation = slot_snapshot(1).connection_generation;
+    if (kDefaultMotionEnabled) {
+        require(bluepad32_input_backend_toggle_motion(1, generation), "legacy motion toggle must be independent");
+    }
+    remote_accel_fixture = {&replacement, {8193, -42, 91}, 7, true};
+    gyro_fixture = {&replacement, {123456, -45678, 91011}, 11, true};
+    now_ms = 100;
+    platform_on_controller_data(&replacement, &input);
+    bluepad32_input_backend_wii_snapshot(&snapshot);
+    require(snapshot.controller.active && snapshot.slot == 1 &&
+                snapshot.controller.state.button_south &&
+                snapshot.controller.state.motion_sample_count == 0 &&
+                snapshot.accel_valid && snapshot.gyro_valid &&
+                snapshot.accel_q13[0] == 8193 && snapshot.gyro_q10[0] == 123456,
+            "native raw precision and ordinary buttons must survive legacy motion disable");
+    require(snapshot.accel_received_us == 100000 && snapshot.gyro_received_us == 100000,
+            "both first genuine sensor samples need ingress timestamps");
+    now_ms = 250;
+    ++remote_accel_fixture.sequence;
+    platform_on_controller_data(&replacement, &input);
+    now_ms = 300;  // Status/ACK callback has no new sensor sequence.
+    platform_on_controller_data(&replacement, &input);
+    bluepad32_input_backend_report_sent(1);
+    bluepad32_input_backend_wii_snapshot(&snapshot);
+    require(snapshot.received_us == 300000 && snapshot.accel_received_us == 250000 &&
+                snapshot.gyro_received_us == 100000 && snapshot.gyro_sequence == 11,
+            "accel interleaves, status and USB consumption cannot rejuvenate gyro");
+    require(bluepad32_input_backend_set_wii_orientation(
+                snapshot.controller.identity, generation, true), "orientation change must queue");
+    dispatch_wii_requests();
+    platform_on_controller_data(&replacement, &input);
+    bluepad32_input_backend_wii_snapshot(&snapshot);
+    require(snapshot.controller.connection_generation != generation &&
+                !snapshot.accel_valid && !snapshot.gyro_valid &&
+                !snapshot.controller.accelerometer.valid,
+            "a logical epoch must not republish cached parser samples as fresh");
+    ++remote_accel_fixture.sequence;
+    ++gyro_fixture.sequence;
+    now_ms = 320;
+    platform_on_controller_data(&replacement, &input);
+    bluepad32_input_backend_wii_snapshot(&snapshot);
+    require(snapshot.accel_valid && snapshot.gyro_valid && snapshot.gyro_received_us == 320000,
+            "distinct samples must recover the new logical epoch");
+    platform_on_device_disconnected(&replacement);
+    bluepad32_input_backend_wii_snapshot(&snapshot);
+    require(!snapshot.controller.active && !snapshot.accel_valid && !snapshot.gyro_valid &&
+                snapshot.slot == 0xff, "disconnect must retire source identity and samples together");
+}
+
+void (*during_wii_rumble)() = nullptr;
+void observe_wii_rumble(uni_hid_device_t* target, uint16_t delay,
+                         uint16_t duration, uint8_t weak, uint8_t strong) {
+    require(state_lock_depth == 0, "Wii transport must run without the backend lock");
+    play_rumble(target, delay, duration, weak, strong);
+    if (during_wii_rumble != nullptr) during_wii_rumble();
+}
+
+void test_wii_bridge_cues() {
+    auto selected = wii_device(1);
+    selected.report_parser.play_dual_rumble = observe_wii_rumble;
+    auto other = wii_device(0);
+    bluepad32_input_backend_init();
+    bluepad32_input_backend_select_wii_source(selected.conn.btaddr);
+    start_pairing_backend();
+    require(platform_on_device_ready(&other) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&selected) == UNI_ERROR_SUCCESS, "cue fixtures must connect");
+    uint64_t token = 0;
+    require(bluepad32_input_backend_wii_sample_request(3, &token) &&
+                bluepad32_input_backend_wii_sample_result(token) == 0 &&
+                selected.rumble_calls == 0, "Core 0 queue acceptance is not cue completion");
+    process_rumble_timer(&g_rumble_timer);
+    require(bluepad32_input_backend_wii_sample_result(token) == 1 &&
+                bluepad32_input_backend_wii_sample_result(token) == -1 &&
+                selected.rumble_calls == 1 && selected.last_rumble_duration_ms == 25,
+            "double-click completion must be consumable once after its first driver dispatch");
+    now_ms = 60;
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.rumble_calls == 1, "double-click gap must not vibrate");
+    now_ms = 115;
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.rumble_calls == 2 && selected.last_rumble_duration_ms == 25 &&
+                other.rumble_calls == 0, "double-click must dispatch exactly its second selected-Wii pulse");
+    now_ms = 2000;
+    process_rumble_timer(&g_rumble_timer);
+    uint64_t newer;
+    require(bluepad32_input_backend_wii_sample_request(1, &newer) && newer != token,
+            "finite patterns must release the cue ledger without reusing tokens");
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.last_rumble_duration_ms == 1000, "buzz must have a finite one-second driver timer");
+    require(bluepad32_input_backend_wii_sample_request(0, &token), "stop must replace a running pattern");
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.last_rumble_duration_ms == 0 &&
+                bluepad32_input_backend_wii_sample_result(token) == 1 &&
+                bluepad32_input_backend_wii_sample_result(newer) == -1,
+            "stop must retire the old ledger and complete only after dispatch");
+    const int stopped_calls = selected.rumble_calls;
+    now_ms += 3000;
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.rumble_calls == stopped_calls, "stopped patterns must never replay");
+}
+
+void test_wii_bridge_cue_races() {
+    auto selected = wii_device(0);
+    selected.report_parser.play_dual_rumble = observe_wii_rumble;
+    bluepad32_input_backend_init();
+    bluepad32_input_backend_select_wii_source(selected.conn.btaddr);
+    start_pairing_backend();
+    require(platform_on_device_ready(&selected) == UNI_ERROR_SUCCESS, "selected Wii must connect");
+    const auto connection = slot_snapshot(0);
+    bluepad32_input_backend_queue_profile_feedback(
+        0, connection.connection_generation, 1, ControllerProfileConfirmationPolicy::kRumble);
+    uint64_t token;
+    require(bluepad32_input_backend_wii_sample_request(3, &token), "cue must wait behind profile feedback");
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.last_rumble_duration_ms == 75 &&
+                bluepad32_input_backend_wii_sample_result(token) == 0,
+            "profile confirmation has priority and cannot count as cue dispatch");
+    now_ms = 150;
+    during_wii_rumble = [] { bluepad32_input_backend_wii_sample_cancel(); };
+    process_rumble_timer(&g_rumble_timer);
+    during_wii_rumble = nullptr;
+    require(bluepad32_input_backend_wii_sample_result(token) == -1,
+            "cancellation during driver dispatch must defeat its late completion");
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.last_rumble_duration_ms == 0, "canceled in-flight cue must receive a finite stop");
+    wii_rumble_ready = false;
+    require(bluepad32_input_backend_wii_sample_request(1, &token), "topology setup may defer cue dispatch");
+    const int calls = selected.rumble_calls;
+    process_rumble_timer(&g_rumble_timer);
+    require(bluepad32_input_backend_wii_sample_result(token) == 0 && selected.rumble_calls == calls,
+            "a Wii void-hook early return must not masquerade as dispatch");
+    now_ms += 2000;
+    require(bluepad32_input_backend_wii_sample_result(token) == -1, "undispatched cue deadline must expire");
+    wii_rumble_ready = true;
+    process_rumble_timer(&g_rumble_timer);
+    require(selected.rumble_calls == calls, "expired cue must not dispatch when setup finally completes");
+    uint64_t replacement_token;
+    require(bluepad32_input_backend_wii_sample_request(2, &replacement_token) && replacement_token != token,
+            "expiration must permit a uniquely identified new request");
+    during_wii_rumble = [] { platform_on_device_disconnected(g_slots[0].device); };
+    process_rumble_timer(&g_rumble_timer);
+    during_wii_rumble = nullptr;
+    auto replacement = wii_device(0);
+    require(platform_on_device_ready(&replacement) == UNI_ERROR_SUCCESS, "replacement must connect");
+    process_rumble_timer(&g_rumble_timer);
+    require(bluepad32_input_backend_wii_sample_result(replacement_token) == -1 &&
+                replacement.rumble_calls == 0,
+            "late driver completion must never cross a physical generation");
+    replacement.report_parser.play_dual_rumble = nullptr;
+    require(!bluepad32_input_backend_wii_sample_request(1, &token),
+            "a missing Wii rumble driver cannot accept a cue");
+}
+#endif
+
 void test_wii_orientation() {
     start_pairing_backend();
     initialize_runtime_profile_storage();
@@ -6021,6 +6216,20 @@ void test_transport_background_scan() {
 int main(int argc, char** argv) {
     require(argc == 2, "scenario argument required");
     const std::string scenario = argv[1];
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+    if (scenario == "wii-bridge-sensors") {
+        test_wii_bridge_sensors();
+        return 0;
+    }
+    if (scenario == "wii-bridge-cues") {
+        test_wii_bridge_cues();
+        return 0;
+    }
+    if (scenario == "wii-bridge-cue-races") {
+        test_wii_bridge_cue_races();
+        return 0;
+    }
+#endif
     if (scenario == "transport-policy") {
         test_transport_mode_policy();
         return 0;
