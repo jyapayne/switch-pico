@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "model.h"
 
 #define PROBE_COMMAND_MAX_SIZE 263u
 #define PROBE_REPLY_MAX_SIZE 96u
@@ -10,13 +11,15 @@
 #define PROBE_INPUT_SIZE 63u
 
 typedef struct {
+    bool is_left;
+    void* context; // Caller-owned context shared by this state's callbacks.
     bool initialized;
     uint8_t report_id;
     bool test_rail_buttons;
     bool runtime03_0c; // Observed USB toggle; full semantics remain unknown.
-    uint8_t right_stick_center[3];
+    uint8_t stick_center[3];
     bool controller_active;
-    uint8_t controller_buttons[2]; // Native right Joy-Con button ordering.
+    uint8_t controller_buttons[2]; // Selected model's native Joy-Con button ordering.
     uint8_t controller_stick[3]; // Raw packed 12-bit axes from the selected donor.
     uint8_t player_leds; // Virtual four-LED mask, exposed through UART diagnostics.
     bool player_leds_flashing;
@@ -39,15 +42,15 @@ typedef struct {
     uint8_t committed_host_addresses[PROBE_HOST_MAX_ADDRESSES][6];
     uint8_t committed_key[16]; // Standard AES byte order.
     // Synchronous durable save; NULL disables successful finalization.
-    bool (*save_pairing)(const uint8_t* blob, size_t length);
-    bool (*read_memory)(uint32_t address, uint8_t* output, size_t length);
+    bool (*save_pairing)(void* context, const uint8_t* blob, size_t length);
+    bool (*read_memory)(void* context, uint32_t address, uint8_t* output, size_t length);
     // Queue a physical sample, returning true only with a nonzero completion token.
     // Acceptance is not a Bluetooth application ACK.
-    bool (*play_sample)(uint8_t sample_id, uint64_t* token);
+    bool (*play_sample)(void* context, uint8_t sample_id, uint64_t* token);
     uint32_t report_counter;
 } probe_protocol_state;
 
-void probe_protocol_reset(probe_protocol_state* state);
+void probe_protocol_reset(probe_protocol_state* state, bool is_left);
 // Blob: own address[6], count[1], zero-padded host addresses[42][6], AES key[16].
 // Rejects other identities, invalid counts/padding/lengths without mutation.
 // A successful restore replaces the committed record and clears pending state.
@@ -66,3 +69,7 @@ size_t probe_protocol_command(probe_protocol_state* state, const uint8_t* comman
 // Button/stick snapshot without relative mouse events; safe for GET_REPORT.
 size_t probe_protocol_report(const probe_protocol_state* state, uint8_t report_id,
                              uint8_t* output, size_t capacity);
+// Apply virtual feature gates to one complete native payload in place.
+// Enabled mouse/motion and all opaque bytes remain unchanged.
+void probe_protocol_gate_native_report(const probe_protocol_state* state,
+                                       uint8_t input[PROBE_INPUT_SIZE]);

@@ -70,6 +70,9 @@ typedef enum {
 #if SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
     SW2_SECONDARY_DESCRIPTOR, SW2_SUBSCRIBE_SECONDARY,
 #endif
+#if SWITCH_PICO_SWITCH2_MEMORY_CAPTURE
+    SW2_CAPTURE_MEMORY,
+#endif
 } sw2_state_t;
 typedef enum { SW2_QUERY_NONE, SW2_QUERY_DISCOVERY, SW2_QUERY_CCCD, SW2_QUERY_COMMAND, SW2_QUERY_RUMBLE } sw2_query_t;
 typedef struct {
@@ -473,6 +476,11 @@ static void sw2_continue(sw2_instance_t* ins) {
         case SW2_GYRO_CALIBRATION:
             sw2_read_memory(ins, 0x13044, 12);
             break;
+#if SWITCH_PICO_SWITCH2_MEMORY_CAPTURE
+        case SW2_CAPTURE_MEMORY:
+            sw2_read_memory(ins, ins->memory_address, 64);
+            break;
+#endif
         case SW2_FEATURES: {
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
             // Match the console's complete native feature set, including the
@@ -537,8 +545,28 @@ static void sw2_complete_command(sw2_instance_t* ins) {
                 ins->state = SW2_GYRO_CALIBRATION;
             break;
         case SW2_GYRO_CALIBRATION:
+#if SWITCH_PICO_SWITCH2_MEMORY_CAPTURE
+            if (sw2_mouse_capture_enabled(ins)) {
+                ins->state = SW2_CAPTURE_MEMORY;
+                ins->memory_address = 0x13000;
+                break;
+            }
+#endif
             sw2_subscribe(ins, true);
             return;
+#if SWITCH_PICO_SWITCH2_MEMORY_CAPTURE
+        case SW2_CAPTURE_MEMORY:
+            // Only factory/user calibration banks; never pairing keys or
+            // write/erase commands. Each page requires its matching ACK.
+            ins->memory_address += 64;
+            if (ins->memory_address == 0x15000)
+                ins->memory_address = 0x1fc000;
+            if (ins->memory_address == 0x1fd000) {
+                sw2_subscribe(ins, true);
+                return;
+            }
+            break;
+#endif
         case SW2_FEATURES:
             if (++ins->step == 2) {
                 ins->state = SW2_READY;
@@ -580,6 +608,13 @@ static void sw2_response(sw2_instance_t* ins, const uint8_t* data, uint16_t leng
             little_endian_read_32(data, 12) != ins->memory_address || length < 16 + ins->memory_length)
             return; // Includes a stale memory response with the same cmd/subcmd.
         const uint8_t* value = data + 16;
+#if SWITCH_PICO_SWITCH2_MEMORY_CAPTURE
+        if (ins->state == SW2_CAPTURE_MEMORY) {
+            char label[24];
+            snprintf(label, sizeof(label), "MEMORY_%08lx", (unsigned long)ins->memory_address);
+            sw2_log_capture(label, ins, value, ins->memory_length);
+        }
+#endif
         if (ins->state == SW2_INFO) {
             if (little_endian_read_16(value, 18) != UNI_SW2_NINTENDO_VID ||
                 little_endian_read_16(value, 20) != ins->device->product_id) {

@@ -167,7 +167,7 @@ void uni_hid_device_set_ready(uni_hid_device_t* d) {
     uni_hid_parser_switch2_setup(d);
 }
 bool uni_hid_device_set_ready_complete(uni_hid_device_t* d) {
-    assert(d->conn.connected && connected_events == 1);
+    assert(d->conn.connected && connected_events > ready);
     ++ready;
     d->conn.state = UNI_BT_CONN_STATE_DEVICE_READY;
     return true;

@@ -119,9 +119,9 @@ static void publish(bool gyro_fresh = true) {
 static uint32_t poll(bool commit = true, bool gyro_fresh = true) {
     now_us += 4000;
     publish(gyro_fresh);
-    probe_controller_input_poll(to_ms_since_boot(now_us), &controls);
-    const uint32_t token = probe_controller_input_peek_native_report(to_ms_since_boot(now_us), packet);
-    if (commit && token) assert(probe_controller_input_commit_native_report(token));
+    probe_controller_input_poll(0, to_ms_since_boot(now_us), &controls);
+    const uint32_t token = probe_controller_input_peek_native_report(0, to_ms_since_boot(now_us), packet);
+    if (commit && token) assert(probe_controller_input_commit_native_report(0, token));
     return token;
 }
 
@@ -134,7 +134,7 @@ int main() {
     put_pair(calibration+6, 1600, 1700);
     probe_controller_input_set_stick_calibration(calibration);
     probe_controller_input_set_native_features(0x37);
-    probe_controller_input_set_native_stream(true);
+    probe_controller_input_set_native_stream(0, true);
     source.slot = 0;
     source.controller.active = true;
     source.controller.connection_generation = 7;
@@ -179,10 +179,10 @@ int main() {
     ir_x[0] += 8; ir_x[1] += 8;
     const uint32_t ticket = poll(false);
     uint8_t retry[63];
-    assert(ticket && probe_controller_input_peek_native_report(to_ms_since_boot(now_us), retry) == ticket);
+    assert(ticket && probe_controller_input_peek_native_report(0, to_ms_since_boot(now_us), retry) == ticket);
     assert(memcmp(packet, retry, sizeof(packet)) == 0);
-    assert(probe_controller_input_commit_native_report(ticket));
-    assert(!probe_controller_input_commit_native_report(ticket));
+    assert(probe_controller_input_commit_native_report(0, ticket));
+    assert(!probe_controller_input_commit_native_report(0, ticket));
 
     // Tilting the Wii up moves camera spots down. Native Joy-Con Y must
     // reverse the desktop-pointer convention without changing consumption.
@@ -247,17 +247,17 @@ int main() {
     const uint32_t obsolete = poll(false, false);
     ++source.controller.connection_generation;
     assert(poll(false));
-    assert(!probe_controller_input_commit_native_report(obsolete));
-    probe_controller_input_set_native_stream(false);
-    assert(probe_controller_input_peek_native_report(to_ms_since_boot(now_us), retry) == 0);
-    probe_controller_input_set_native_stream(true);
+    assert(!probe_controller_input_commit_native_report(0, obsolete));
+    probe_controller_input_set_native_stream(0, false);
+    assert(probe_controller_input_peek_native_report(0, to_ms_since_boot(now_us), retry) == 0);
+    probe_controller_input_set_native_stream(0, true);
     publish_during_snapshot = true;
     for (unsigned i = 0; i < 450; ++i) assert(poll());
     assert(packet[15] == 30);
     source.controller.active = false;
     now_us += 4000;
-    probe_controller_input_poll(to_ms_since_boot(now_us), &controls);
+    probe_controller_input_poll(0, to_ms_since_boot(now_us), &controls);
     assert(!controls.active);
-    assert(probe_controller_input_peek_native_report(to_ms_since_boot(now_us), retry) == 0);
+    assert(probe_controller_input_peek_native_report(0, to_ms_since_boot(now_us), retry) == 0);
     return 0;
 }

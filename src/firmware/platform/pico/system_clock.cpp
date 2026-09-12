@@ -15,8 +15,13 @@ SystemClockStatus g_status{};
 
 void system_clock_initialize() {
     static_assert(SWITCH_PICO_SYS_CLOCK_MHZ == 150 ||
+                  SWITCH_PICO_SYS_CLOCK_MHZ == 240 ||
                   SWITCH_PICO_SYS_CLOCK_MHZ == 300 ||
                   SWITCH_PICO_SYS_CLOCK_MHZ == 400);
+#if SWITCH2_PROBE_HUB
+    static_assert(SWITCH_PICO_SYS_CLOCK_MHZ == 240,
+                  "Native SIO hub requires a 240 MHz system clock");
+#endif
     // Flash timing was established by boot stage 2. Do not raise clk_sys if
     // another boot configuration failed to provide the required divider.
     const uint32_t flash_divider =

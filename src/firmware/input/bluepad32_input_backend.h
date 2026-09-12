@@ -141,13 +141,19 @@ struct Bluepad32BackendDiagnostics {
 
 
 
+// Core 0 startup. Normally start launches a dedicated Core 1 BTstack/storage
+// owner; SWITCH2_PROBE_HUB keeps that owner on Core 0 and leaves Core 1 to USB.
 void bluepad32_input_backend_init();
 void bluepad32_input_backend_start();
+// Hub only: call on Core 0 outside IRQs, without any application state lock
+// held, once per main-loop iteration. Services the existing SDK CYW43 async
+// context without waiting. Safe before start; a no-op in dedicated-Core 1 modes.
+void bluepad32_input_backend_poll();
 void bluepad32_input_backend_open_pairing_window();
-// Core 1 parser admission gate for fresh proprietary Switch 2 pairing; this
+// BTstack parser admission gate for fresh proprietary Switch 2 pairing; this
 // never opens a pairing window or changes the bounded connection policy.
 extern "C" bool switch_pico_switch2_pairing_allowed(void);
-// Repeated calls coalesce until Core 1 completes the operation and return the
+// Repeated calls coalesce until BTstack completes the operation and return the
 // same nonzero token.
 uint32_t bluepad32_input_backend_clear_pairings();
 void bluepad32_input_backend_snapshot(uint8_t slot,
@@ -197,8 +203,8 @@ struct Bluepad32CaptureSnapshot {
     CaptureEvent events[BLUEPAD32_CAPTURE_PAGE_EVENTS]{};
 };
 
-// Core 0 management operations; recording itself observes Core 1 input before
-// profile transforms. All recorder access uses the existing slot-state lock.
+// Core 0 management operations; recording observes BTstack input before profile
+// transforms. All recorder access uses the existing slot-state lock.
 bool bluepad32_input_backend_capture_start(
     uint8_t slot, uint32_t connection_generation, const CaptureOptions& options);
 bool bluepad32_input_backend_capture_stop(uint32_t run_id);

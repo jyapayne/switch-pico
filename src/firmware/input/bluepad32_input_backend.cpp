@@ -23,10 +23,15 @@
 #include <string.h>
 
 #include <btstack_run_loop.h>
+#if SWITCH2_PROBE_HUB
+#include <pico/async_context.h>
+#endif
 #include <pico/critical_section.h>
 #include <pico/cyw43_arch.h>
 #include <pico/flash.h>
+#if !SWITCH2_PROBE_HUB
 #include <pico/multicore.h>
+#endif
 #include <pico/stdlib.h>
 #include <uni.h>
 extern "C" {
@@ -37,6 +42,13 @@ extern "C" {
 #include "parser/uni_switch2_pairing.h"
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
 #include "adapter/adapter_usb_mode.h"
+#endif
+
+#if SWITCH2_PROBE_HUB && !PICO_CYW43_ARCH_POLL
+#error "Native hub Bluetooth requires pico_cyw43_arch_poll on Core 0"
+#endif
+#if SWITCH2_PROBE_HUB && !PICO_FLASH_ASSUME_CORE1_SAFE
+#error "Native hub flash writes require its IRQ-disabled SRAM-only Core 1 transport"
 #endif
 
 namespace {
@@ -77,7 +89,7 @@ constexpr uint32_t kWiiAimChordFreshUs = 150000;
 constexpr uint16_t kWiiAimChordButtons = 0x0002 | 0x0001;
 #endif
 // One initial indication can be followed by one committed switch before the
-// Core 1 timer drains the queue. Profile commits are rate-limited well beyond
+// BTstack timer drains the queue. Profile commits are rate-limited well beyond
 // the longest feedback sequence.
 constexpr uint8_t kProfileFeedbackQueueCapacity = 2;
 constexpr SwitchRgbColor kProfileLightbarPalette[CONTROLLER_PROFILE_COUNT] = {
@@ -301,9 +313,13 @@ critical_section_t g_state_lock;
 uni_hid_device_t* g_retired_devices[kSlotCount]{};
 BackendSlot g_slots[kSlotCount];
 ControllerMacroCapture g_macro_capture;
+#if !SWITCH2_PROBE_HUB
 // Catalog migration/compaction needs more than the 4 KiB scratch bank.
 // Supply a dedicated static stack in main SRAM rather than overflowing it.
 alignas(8) uint32_t g_core1_stack[4096];
+#else
+bool g_poll_ready = false;
+#endif
 BleIdentityMapping g_ble_identity_mappings[kSlotCount]{};
 
 // These acknowledgement generations and request producers are only used by
@@ -362,7 +378,7 @@ void retire_wii_slot(uint8_t slot_index) {
 }
 #endif
 
-// These fields are only read or written by Core 1 / BTstack.
+// These fields are only read or written by the BTstack execution context.
 btstack_timer_source_t g_rumble_timer{};
 btstack_timer_source_t g_configuration_timer{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
@@ -398,7 +414,7 @@ struct JoyConConnectionOverride {
 };
 JoyConConnectionOverride g_joycon_overrides[kSlotCount]{};
 
-// Core 1 physical-link state survives logical slot moves. Raw reports stay in
+// BTstack physical-link state survives logical slot moves. Raw reports stay in
 // BackendSlot; only the derived logical view consumes the reserved buttons.
 struct JoyConGesture {
     uni_hid_device_t* device = nullptr;
@@ -728,7 +744,7 @@ void stop_background_scan() {
         g_background_scan_active = false;
     }
 }
-// Core 1 only. Reconcile every ready physical Switch 2 link to the fast interval,
+// BTstack only. Reconcile every ready physical Switch 2 link to the fast interval,
 // independently of player grouping, controller count, or Classic connections.
 void apply_radio_connection_policy() {
     if (!SWITCH_PICO_ENABLE_BLE) {
@@ -776,7 +792,7 @@ void apply_radio_connection_policy() {
 }
 
 
-// Caller holds the cross-core state lock. Only Core 1 resets parser state.
+// Caller holds the state lock. Only the BTstack context resets parser state.
 void clear_switch2_ingress(BackendSlot& slot) {
     Switch2Ingress& ingress = slot.switch2_ingress;
     __atomic_add_fetch(&g_switch2_ingress_drops, ingress.count, __ATOMIC_RELAXED);
@@ -3014,7 +3030,7 @@ void stop_joycon_output(uni_hid_device_t* device) {
     }
 }
 
-// Core 1 only; shared by ready admission, saved defaults and explicit gestures.
+// BTstack only; shared by ready admission, saved defaults and explicit gestures.
 // Pair enrollment is atomic and idempotent, and always precedes topology
 // changes with no cross-core input lock held during storage I/O.
 bool merge_joycon_slots(int owner_index, int joining_index,
@@ -3728,17 +3744,17 @@ uni_platform* get_platform() {
     return &platform;
 }
 
+#if !SWITCH2_PROBE_HUB
 [[noreturn]] void halt_wireless_backend() {
     publish_all_neutral();
     while (true) {
         tight_loop_contents();
     }
 }
+#endif
 
-[[noreturn]] void core1_main() {
-    if (!flash_safe_execute_core_init()) {
-        halt_wireless_backend();
-    }
+// Called on the Bluetooth/storage owner after flash-safe registration.
+bool initialize_wireless_backend() {
     __atomic_store_n(&g_initialization_stage, 2, __ATOMIC_RELEASE);
     configuration_service_initialize_on_storage_core();
     profile_service_initialize_on_storage_core();
@@ -3750,7 +3766,7 @@ uni_platform* get_platform() {
     }
     __atomic_store_n(&g_initialization_stage, 3, __ATOMIC_RELEASE);
     if (cyw43_arch_init() != 0) {
-        halt_wireless_backend();
+        return false;
     }
     __atomic_store_n(&g_initialization_stage, 4, __ATOMIC_RELEASE);
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
@@ -3758,15 +3774,24 @@ uni_platform* get_platform() {
 
     uni_platform_set_custom(get_platform());
     if (uni_init(0, nullptr) != 0) {
-        halt_wireless_backend();
+        return false;
     }
     __atomic_store_n(&g_initialization_stage, 5, __ATOMIC_RELEASE);
+    return true;
+}
+
+#if !SWITCH2_PROBE_HUB
+[[noreturn]] void core1_main() {
+    if (!flash_safe_execute_core_init() || !initialize_wireless_backend()) {
+        halt_wireless_backend();
+    }
 
     btstack_run_loop_execute();
     while (true) {
         tight_loop_contents();
     }
 }
+#endif
 
 }  // namespace
 
@@ -3920,23 +3945,47 @@ void bluepad32_input_backend_init() {
 }
 
 void bluepad32_input_backend_start() {
+#if SWITCH2_PROBE_HUB
+    if (get_core_num() != 0) {
+        panic("native hub Bluetooth must start on Core 0");
+    }
+#endif
     if (!g_initialized) {
         bluepad32_input_backend_init();
     }
     if (g_started) {
         return;
     }
-    // Core 0 services USB from flash while Core 1 owns BTstack. Register both
-    // cores before either side can initiate a flash-backed BTstack TLV write.
+    // Non-hub builds register both cores before BTstack can write flash.
+    // Hub builds keep Core 1 in IRQ-disabled SRAM code, so the SDK's
+    // PICO_FLASH_ASSUME_CORE1_SAFE path only disables Core 0 interrupts.
     if (!flash_safe_execute_core_init()) {
         g_connection_policy_state = ConnectionPolicyState::FailedClosed;
         return;
     }
 
-
     g_started = true;
+#if SWITCH2_PROBE_HUB
+    g_poll_ready = initialize_wireless_backend();
+    if (!g_poll_ready) {
+        g_connection_policy_state = ConnectionPolicyState::FailedClosed;
+        publish_all_neutral();
+    }
+#else
     multicore_launch_core1_with_stack(
         core1_main, g_core1_stack, sizeof(g_core1_stack));
+#endif
+}
+
+void bluepad32_input_backend_poll() {
+#if SWITCH2_PROBE_HUB
+    if (!g_poll_ready) return;
+    async_context_t* context = cyw43_arch_async_context();
+    // The SDK checks both the owning core and non-IRQ context. Polling invokes
+    // the existing BTstack workers/timers; no second scheduler or wait loop.
+    async_context_lock_check(context);
+    async_context_poll(context);
+#endif
 }
 
 void bluepad32_input_backend_open_pairing_window() {

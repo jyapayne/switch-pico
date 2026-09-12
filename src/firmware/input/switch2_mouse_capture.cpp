@@ -13,9 +13,6 @@ uint8_t g_rows[SWITCH2_MOUSE_CAPTURE_CAPACITY][SWITCH2_MOUSE_CAPTURE_ROW_SIZE];
 uint8_t g_next;
 uint8_t g_count;
 uint32_t g_total_records;
-bool g_input_selected;
-uint8_t g_input_address[6];
-Switch2MouseCaptureInput g_latest_input;
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
 constexpr uint32_t kInputDeadlineMs = 500;
 constexpr uint32_t kSampleDeadlineMs = 2000;
@@ -25,40 +22,62 @@ struct NativeReport {
     uint32_t serial;
     uint32_t received_ms;
 };
-NativeReport g_native_reports[kNativeReportCapacity];
-uint8_t g_native_head;
-uint8_t g_native_count;
-bool g_native_stream;
 uint64_t g_sample_serial;
-bool g_source_active;
-struct {
+struct Sample {
     uint64_t token;
     uint32_t started_ms;
     uint32_t mouse_epoch;
     uint8_t sample_id;
     bool taken;
     bool acked;
-} g_sample;
+};
+#endif
 
-void clear_native_reports() {
-    g_native_head = 0;
-    g_native_count = 0;
+struct Source {
+    bool input_selected;
+    uint8_t input_address[6];
+    uint16_t input_product_id;
+    Switch2MouseCaptureInput latest_input;
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+    NativeReport native_reports[kNativeReportCapacity];
+    uint8_t native_head;
+    uint8_t native_count;
+    bool native_stream;
+    bool source_active;
+    Sample sample;
+#endif
+};
+Source g_sources[SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT];
+
+Source* selected_source(uint16_t product_id, const uint8_t address[6]) {
+    for (Source& source : g_sources) {
+        if (source.input_selected && product_id == source.input_product_id &&
+            memcmp(address, source.input_address, sizeof(source.input_address)) == 0)
+            return &source;
+    }
+    return nullptr;
 }
 
-bool source_fresh(uint32_t now_ms) {
-    return g_input_selected && g_source_active && g_latest_input.active &&
-           static_cast<int32_t>(now_ms - g_latest_input.received_ms) <
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+void clear_native_reports(Source& source) {
+    source.native_head = 0;
+    source.native_count = 0;
+}
+
+bool source_fresh(const Source& source, uint32_t now_ms) {
+    return source.input_selected && source.source_active && source.latest_input.active &&
+           static_cast<int32_t>(now_ms - source.latest_input.received_ms) <
                static_cast<int32_t>(kInputDeadlineMs);
 }
 
-bool sample_current(uint32_t now_ms) {
-    if (g_sample.token &&
-        (!source_fresh(now_ms) || g_sample.mouse_epoch != g_latest_input.mouse_epoch ||
-         static_cast<int32_t>(now_ms - g_sample.started_ms) >=
+bool sample_current(Source& source, uint32_t now_ms) {
+    if (source.sample.token &&
+        (!source_fresh(source, now_ms) || source.sample.mouse_epoch != source.latest_input.mouse_epoch ||
+         static_cast<int32_t>(now_ms - source.sample.started_ms) >=
              static_cast<int32_t>(kSampleDeadlineMs))) {
-        g_sample = {};
+        source.sample = {};
     }
-    return g_sample.token != 0;
+    return source.sample.token != 0;
 }
 #endif
 
@@ -108,20 +127,20 @@ extern "C" void switch_pico_switch2_mouse_report(
     }
 
     critical_section_enter_blocking(&g_lock);
+    Source* selected = selected_source(product_id, address);
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
     // Teardown must invalidate source ownership even after capture serials are
     // exhausted; this is independent of whether a ring event can be recorded.
-    if (report_id == 0 && g_input_selected && product_id == UNI_SW2_JOYCON_R_PID &&
-        memcmp(address, g_input_address, sizeof(g_input_address)) == 0) {
-        g_source_active = false;
-        clear_native_reports();
-        g_sample = {};
+    if (report_id == 0 && selected != nullptr) {
+        selected->source_active = false;
+        clear_native_reports(*selected);
+        selected->sample = {};
     }
 #endif
     // Never reuse a serial within one boot, even after UINT32_MAX records.
     if (g_total_records == UINT32_MAX) {
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
-        clear_native_reports();
+        for (Source& source : g_sources) clear_native_reports(source);
 #endif
         critical_section_exit(&g_lock);
         return;
@@ -130,7 +149,9 @@ extern "C" void switch_pico_switch2_mouse_report(
     write_u32(row, ++g_total_records);
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
     // Exhaustion is terminal for the relay, including the last recorded event.
-    if (g_total_records == UINT32_MAX) clear_native_reports();
+    if (g_total_records == UINT32_MAX) {
+        for (Source& source : g_sources) clear_native_reports(source);
+    }
 #endif
     write_u32(row + 4, received_ms);
     write_u16(row + 8, product_id);
@@ -141,42 +162,43 @@ extern "C" void switch_pico_switch2_mouse_report(
     if (length != 0) memcpy(row + 20, report, length);
     memset(row + 20 + length, 0, SWITCH2_MOUSE_CAPTURE_REPORT_SIZE - length);
     g_next = static_cast<uint8_t>((g_next + 1) % SWITCH2_MOUSE_CAPTURE_CAPACITY);
-    if (g_input_selected && product_id == UNI_SW2_JOYCON_R_PID &&
-        memcmp(address, g_input_address, sizeof(g_input_address)) == 0 &&
+    const uint8_t native_report_id = product_id == UNI_SW2_JOYCON_L_PID ? 0x07 : 0x08;
+    if (selected != nullptr &&
         (report_id == 0 ||
-         (report_id == 0x08 && length == SWITCH2_MOUSE_CAPTURE_NATIVE_INPUT_SIZE))) {
-        if (report_id == 0x08) {
-            if (!g_latest_input.active) {
-                g_latest_input.mouse_epoch = g_total_records;
-                g_latest_input.mouse_total_x = 0;
-                g_latest_input.mouse_total_y = 0;
+         (report_id == native_report_id && length == SWITCH2_MOUSE_CAPTURE_NATIVE_INPUT_SIZE))) {
+        Source& source = *selected;
+        if (report_id != 0) {
+            if (!source.latest_input.active) {
+                source.latest_input.mouse_epoch = g_total_records;
+                source.latest_input.mouse_total_x = 0;
+                source.latest_input.mouse_total_y = 0;
             }
-            g_latest_input.active = true;
+            source.latest_input.active = true;
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
-            g_source_active = true;
-            if (g_native_stream && g_total_records != UINT32_MAX) {
-                if (g_native_count == kNativeReportCapacity) clear_native_reports();
+            source.source_active = true;
+            if (source.native_stream && g_total_records != UINT32_MAX) {
+                if (source.native_count == kNativeReportCapacity) clear_native_reports(source);
                 NativeReport& packet =
-                    g_native_reports[(g_native_head + g_native_count) % kNativeReportCapacity];
+                    source.native_reports[(source.native_head + source.native_count) % kNativeReportCapacity];
                 memcpy(packet.report, report, sizeof(packet.report));
                 packet.serial = g_total_records;
                 packet.received_ms = received_ms;
-                ++g_native_count;
+                ++source.native_count;
             }
 #endif
-            memcpy(g_latest_input.buttons, report + 2, sizeof(g_latest_input.buttons));
-            memcpy(g_latest_input.stick, report + 5, sizeof(g_latest_input.stick));
-            g_latest_input.native_status = report[8];
+            memcpy(source.latest_input.buttons, report + 2, sizeof(source.latest_input.buttons));
+            memcpy(source.latest_input.stick, report + 5, sizeof(source.latest_input.stick));
+            source.latest_input.native_status = report[8];
             // At most UINT32_MAX signed16 additions per boot: magnitude < 2^47.
             // Every packet contributes, even when its delta matches the last.
-            g_latest_input.mouse_total_x += read_i16(report + 9);
-            g_latest_input.mouse_total_y += read_i16(report + 11);
-            g_latest_input.mouse_surface = report[13];
+            source.latest_input.mouse_total_x += read_i16(report + 9);
+            source.latest_input.mouse_total_y += read_i16(report + 11);
+            source.latest_input.mouse_surface = report[13];
         } else {
-            g_latest_input = {};
+            source.latest_input = {};
         }
-        g_latest_input.serial = g_total_records;
-        g_latest_input.received_ms = received_ms;
+        source.latest_input.serial = g_total_records;
+        source.latest_input.received_ms = received_ms;
     }
     if (g_count < SWITCH2_MOUSE_CAPTURE_CAPACITY) ++g_count;
     critical_section_exit(&g_lock);
@@ -212,52 +234,65 @@ size_t switch2_mouse_capture_snapshot(uint8_t* output, size_t capacity,
     return required;
 }
 
-void switch2_mouse_capture_select_input(const uint8_t address[6]) {
-    if (!g_initialized || address == nullptr) return;
+void switch2_mouse_capture_select_input(uint8_t instance, const uint8_t address[6], uint16_t product_id) {
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT || address == nullptr ||
+        (product_id != UNI_SW2_JOYCON_L_PID && product_id != UNI_SW2_JOYCON_R_PID)) return;
     critical_section_enter_blocking(&g_lock);
+    Source& source = g_sources[instance];
+    // A physical source has one owner; never duplicate its packets into both FIFOs.
+    Source* existing = selected_source(product_id, address);
+    if (existing != nullptr && existing != &source) {
+        critical_section_exit(&g_lock);
+        return;
+    }
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
-    g_source_active = false;
-    g_native_stream = false;
-    clear_native_reports();
-    g_sample = {};
+    source.source_active = false;
+    source.native_stream = false;
+    clear_native_reports(source);
+    source.sample = {};
 #endif
-    memcpy(g_input_address, address, sizeof(g_input_address));
-    g_latest_input = {};
-    g_input_selected = true;
+    memcpy(source.input_address, address, sizeof(source.input_address));
+    source.input_product_id = product_id;
+    source.latest_input = {};
+    source.input_selected = true;
     critical_section_exit(&g_lock);
 }
 
-bool switch2_mouse_capture_latest_input(uint32_t after_serial,
+bool switch2_mouse_capture_latest_input(uint8_t instance, uint32_t after_serial,
                                        Switch2MouseCaptureInput* output) {
-    if (!g_initialized || output == nullptr) return false;
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT || output == nullptr) return false;
     critical_section_enter_blocking(&g_lock);
-    const bool fresh = g_latest_input.serial > after_serial;
-    if (fresh) *output = g_latest_input;
+    Source& source = g_sources[instance];
+    const bool fresh = source.latest_input.serial > after_serial ||
+                       (source.latest_input.serial == 0 && after_serial != 0);
+    if (fresh) *output = source.latest_input;
     critical_section_exit(&g_lock);
     return fresh;
 }
 
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
-void switch2_mouse_capture_set_native_stream(bool enabled) {
-    if (!g_initialized) return;
+void switch2_mouse_capture_set_native_stream(uint8_t instance, bool enabled) {
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT) return;
     critical_section_enter_blocking(&g_lock);
-    g_native_stream = enabled;
-    if (!enabled) clear_native_reports();
+    Source& source = g_sources[instance];
+    source.native_stream = enabled;
+    if (!enabled) clear_native_reports(source);
     critical_section_exit(&g_lock);
 }
 
 uint32_t switch2_mouse_capture_peek_native_report(
-    uint32_t now_ms, uint8_t report[SWITCH2_MOUSE_CAPTURE_NATIVE_INPUT_SIZE]) {
-    if (!g_initialized || report == nullptr) return 0;
+    uint8_t instance, uint32_t now_ms, uint8_t report[SWITCH2_MOUSE_CAPTURE_NATIVE_INPUT_SIZE]) {
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT || report == nullptr) return 0;
     critical_section_enter_blocking(&g_lock);
+    Source& source = g_sources[instance];
     uint32_t serial = 0;
-    if (!g_native_stream || !source_fresh(now_ms) ||
-        (g_native_count != 0 &&
-         static_cast<int32_t>(now_ms - g_native_reports[g_native_head].received_ms) >=
+    if (!source.native_stream || !source_fresh(source, now_ms) ||
+        (source.native_count != 0 &&
+         static_cast<int32_t>(now_ms - source.native_reports[source.native_head].received_ms) >=
              static_cast<int32_t>(kInputDeadlineMs))) {
-        clear_native_reports();
-    } else if (g_native_count != 0) {
-        const NativeReport& packet = g_native_reports[g_native_head];
+        clear_native_reports(source);
+    } else if (source.native_count != 0) {
+        const NativeReport& packet = source.native_reports[source.native_head];
         memcpy(report, packet.report, sizeof(packet.report));
         serial = packet.serial;
     }
@@ -265,53 +300,57 @@ uint32_t switch2_mouse_capture_peek_native_report(
     return serial;
 }
 
-bool switch2_mouse_capture_commit_native_report(uint32_t serial) {
-    if (!g_initialized || serial == 0) return false;
+bool switch2_mouse_capture_commit_native_report(uint8_t instance, uint32_t serial) {
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT || serial == 0) return false;
     critical_section_enter_blocking(&g_lock);
-    const bool accepted = g_native_stream && g_native_count != 0 &&
-                          g_native_reports[g_native_head].serial == serial;
+    Source& source = g_sources[instance];
+    const bool accepted = source.native_stream && source.native_count != 0 &&
+                          source.native_reports[source.native_head].serial == serial;
     if (accepted) {
-        g_native_head = static_cast<uint8_t>((g_native_head + 1) % kNativeReportCapacity);
-        --g_native_count;
+        source.native_head = static_cast<uint8_t>((source.native_head + 1) % kNativeReportCapacity);
+        --source.native_count;
     }
     critical_section_exit(&g_lock);
     return accepted;
 }
 
-bool switch2_mouse_capture_request_sample(uint8_t sample_id, uint32_t now_ms,
+bool switch2_mouse_capture_request_sample(uint8_t instance, uint8_t sample_id, uint32_t now_ms,
                                           uint64_t* token) {
     if (token != nullptr) *token = 0;
-    if (!g_initialized || token == nullptr || sample_id > 7) return false;
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT || token == nullptr || sample_id > 7) return false;
     critical_section_enter_blocking(&g_lock);
-    const bool accepted = !sample_current(now_ms) && source_fresh(now_ms) &&
+    Source& source = g_sources[instance];
+    const bool accepted = !sample_current(source, now_ms) && source_fresh(source, now_ms) &&
                           g_sample_serial != UINT64_MAX;
     if (accepted) {
-        g_sample.token = ++g_sample_serial;
-        g_sample.started_ms = now_ms;
-        g_sample.mouse_epoch = g_latest_input.mouse_epoch;
-        g_sample.sample_id = sample_id;
-        *token = g_sample.token;
+        source.sample.token = ++g_sample_serial;
+        source.sample.started_ms = now_ms;
+        source.sample.mouse_epoch = source.latest_input.mouse_epoch;
+        source.sample.sample_id = sample_id;
+        *token = source.sample.token;
     }
     critical_section_exit(&g_lock);
     return accepted;
 }
 
-int switch2_mouse_capture_sample_result(uint64_t token, uint32_t now_ms) {
-    if (!g_initialized || token == 0) return -1;
+int switch2_mouse_capture_sample_result(uint8_t instance, uint64_t token, uint32_t now_ms) {
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT || token == 0) return -1;
     critical_section_enter_blocking(&g_lock);
+    Source& source = g_sources[instance];
     int result = -1;
-    if (sample_current(now_ms) && g_sample.token == token) {
-        result = g_sample.acked ? 1 : 0;
-        if (result == 1) g_sample = {};
+    if (source.sample.token == token && sample_current(source, now_ms)) {
+        result = source.sample.acked ? 1 : 0;
+        if (result == 1) source.sample = {};
     }
     critical_section_exit(&g_lock);
     return result;
 }
 
-void switch2_mouse_capture_cancel_sample() {
-    if (!g_initialized) return;
+void switch2_mouse_capture_cancel_sample(uint8_t instance) {
+    if (!g_initialized || instance >= SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT) return;
     critical_section_enter_blocking(&g_lock);
-    g_sample = {};
+    Source& source = g_sources[instance];
+    source.sample = {};
     critical_section_exit(&g_lock);
 }
 
@@ -321,13 +360,13 @@ extern "C" bool switch_pico_switch2_sample_take(
     if (!g_initialized || address == nullptr || sample_id == nullptr || token == nullptr)
         return false;
     critical_section_enter_blocking(&g_lock);
-    const bool accepted = sample_current(now_ms) && !g_sample.taken &&
-                          product_id == UNI_SW2_JOYCON_R_PID &&
-                          memcmp(address, g_input_address, sizeof(g_input_address)) == 0;
+    Source* source = selected_source(product_id, address);
+    const bool accepted = source != nullptr &&
+                          sample_current(*source, now_ms) && !source->sample.taken;
     if (accepted) {
-        g_sample.taken = true;
-        *sample_id = g_sample.sample_id;
-        *token = g_sample.token;
+        source->sample.taken = true;
+        *sample_id = source->sample.sample_id;
+        *token = source->sample.token;
     }
     critical_section_exit(&g_lock);
     return accepted;
@@ -338,12 +377,13 @@ extern "C" bool switch_pico_switch2_sample_result(
     int result, uint32_t now_ms) {
     if (!g_initialized || address == nullptr || token == 0) return false;
     critical_section_enter_blocking(&g_lock);
-    const bool accepted = sample_current(now_ms) && g_sample.taken &&
-                          g_sample.token == token && product_id == UNI_SW2_JOYCON_R_PID &&
-                          memcmp(address, g_input_address, sizeof(g_input_address)) == 0;
+    Source* source = selected_source(product_id, address);
+    const bool accepted = source != nullptr &&
+                          source->sample.token == token && source->sample.taken &&
+                          sample_current(*source, now_ms);
     if (accepted) {
-        if (result > 0) g_sample.acked = true;
-        else if (result < 0) g_sample = {};
+        if (result > 0) source->sample.acked = true;
+        else if (result < 0) source->sample = {};
     }
     critical_section_exit(&g_lock);
     return accepted;

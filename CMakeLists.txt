@@ -32,8 +32,23 @@ option(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
        "Experiment: capture Joy-Con 2 mouse reports through USB management" OFF)
 option(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE
        "Capture native Joy-Con mouse reports instead of common controller reports" OFF)
+option(SWITCH_PICO_SWITCH2_MEMORY_CAPTURE
+       "Research: log read-only Joy-Con factory/user calibration banks during setup" OFF)
 option(SWITCH_PICO_SWITCH2_USB_BRIDGE
-       "Experiment: forward a native right Joy-Con 2 through the verified USB probe" OFF)
+       "Experiment: forward a selected native Joy-Con 2 through the verified USB probe" OFF)
+option(SWITCH2_PROBE_COMPOSITE
+       "Experiment: independent right and left Joy-Con 2 functions on one USB port" OFF)
+option(SWITCH2_PROBE_HUB
+       "Native Joy-Con 2 R/L devices behind a stock-socket SIO USB hub" OFF)
+if(SWITCH2_PROBE_HUB AND (NOT SWITCH_PICO_SWITCH2_USB_BRIDGE OR SWITCH2_PROBE_COMPOSITE))
+    message(FATAL_ERROR "Native hub requires the Switch2 bridge and excludes composite mode")
+endif()
+if(SWITCH2_PROBE_COMPOSITE AND NOT SWITCH_PICO_SWITCH2_USB_BRIDGE)
+    message(FATAL_ERROR "The composite Joy-Con 2 experiment requires SWITCH_PICO_SWITCH2_USB_BRIDGE")
+endif()
+if(NOT SWITCH_PICO_SWITCH2_USB_BRIDGE)
+    add_compile_definitions(SWITCH2_PROBE_COMPOSITE=0 PROBE_CONTROLLER_COUNT=1)
+endif()
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
     set(SWITCH_PICO_NATIVE_DEFAULT ON)
     set(SWITCH_PICO_CLOCK_DEFAULT 300)
@@ -49,11 +64,17 @@ option(SWITCH_PICO_HAPTICS_EXPERIMENT_RAM
        "Execute the native haptics hot path from SRAM" ON)
 option(SWITCH_PICO_HD_RUMBLE
        "Auto-arm the first eligible DualSense native haptics stream" ${SWITCH_PICO_NATIVE_DEFAULT})
+if(SWITCH2_PROBE_HUB)
+    set(SWITCH_PICO_CLOCK_DEFAULT 240)
+endif()
 set(SWITCH_PICO_SYS_CLOCK_MHZ "${SWITCH_PICO_CLOCK_DEFAULT}" CACHE STRING
     "Pico 2 W CPU clock: 300 MHz default, 150 stock or 400 opt-in")
-set_property(CACHE SWITCH_PICO_SYS_CLOCK_MHZ PROPERTY STRINGS 150 300 400)
-if(NOT SWITCH_PICO_SYS_CLOCK_MHZ MATCHES "^(150|300|400)$")
-    message(FATAL_ERROR "SWITCH_PICO_SYS_CLOCK_MHZ must be 150, 300, or 400")
+set_property(CACHE SWITCH_PICO_SYS_CLOCK_MHZ PROPERTY STRINGS 150 240 300 400)
+if(NOT SWITCH_PICO_SYS_CLOCK_MHZ MATCHES "^(150|240|300|400)$")
+    message(FATAL_ERROR "SWITCH_PICO_SYS_CLOCK_MHZ must be 150, 240, 300, or 400")
+endif()
+if(SWITCH2_PROBE_HUB AND NOT SWITCH_PICO_SYS_CLOCK_MHZ STREQUAL "240")
+    message(FATAL_ERROR "Native SIO hub requires SWITCH_PICO_SYS_CLOCK_MHZ=240")
 endif()
 set(SWITCH_PICO_OVERCLOCK_MV "1300" CACHE STRING
     "Experimental core voltage: 1300 mV, or explicit 1400 mV at 400 MHz")
@@ -146,6 +167,14 @@ if(SWITCH_PICO_SWITCH2_MOUSE_CAPTURE)
         SWITCH_PICO_SWITCH2_MOUSE_CAPTURE=1
         SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE=$<BOOL:${SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE}>)
 endif()
+if(SWITCH_PICO_SWITCH2_MEMORY_CAPTURE)
+    if(NOT SWITCH_PICO_SWITCH2_MOUSE_CAPTURE OR NOT SWITCH_PICO_LOG
+            OR SWITCH_PICO_SWITCH2_USB_BRIDGE)
+        message(FATAL_ERROR
+            "Joy-Con memory capture requires a logging capture build, not the USB bridge")
+    endif()
+    add_compile_definitions(SWITCH_PICO_SWITCH2_MEMORY_CAPTURE=1)
+endif()
 set(SWITCH2_BRIDGE_WII_INPUT OFF)
 if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
     if(NOT SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32"
@@ -169,18 +198,6 @@ if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
     elseif(NOT SWITCH2_BRIDGE_INPUT STREQUAL "JOYCON2")
         message(FATAL_ERROR "SWITCH2_BRIDGE_INPUT must be JOYCON2 or WII")
     endif()
-    set(SWITCH2_BRIDGE_SOURCE_ADDRESS "" CACHE STRING
-        "Physical Bluetooth controller source address (xx:xx:xx:xx:xx:xx)")
-    string(TOLOWER "${SWITCH2_BRIDGE_SOURCE_ADDRESS}" bridge_source_address)
-    string(LENGTH "${bridge_source_address}" bridge_source_address_length)
-    if(NOT bridge_source_address_length EQUAL 17
-            OR NOT bridge_source_address MATCHES "^([0-9a-f][0-9a-f]:)+[0-9a-f][0-9a-f]$"
-            OR bridge_source_address STREQUAL "00:00:00:00:00:00"
-            OR bridge_source_address STREQUAL "ff:ff:ff:ff:ff:ff")
-        message(FATAL_ERROR "Provide SWITCH2_BRIDGE_SOURCE_ADDRESS as a physical six-byte Bluetooth address")
-    endif()
-    string(REPLACE ":" ",0x" SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES "${bridge_source_address}")
-    string(PREPEND SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES "0x")
     add_compile_definitions(SWITCH_PICO_SWITCH2_USB_BRIDGE=1)
 endif()
 set(PICO_BOARD pico CACHE STRING "Board type")
@@ -326,6 +343,19 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             ${BLUEPAD32_ROOT}/src/components/bluepad32
             ${CMAKE_CURRENT_BINARY_DIR}/libbluepad32
     )
+    if(SWITCH2_PROBE_HUB)
+        # Upstream Bluepad32 also links arch_none (background IRQ execution).
+        # Replace that transitive selection, not just the executable's link.
+        foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+            get_target_property(bluepad_links bluepad32 ${property})
+            if(bluepad_links)
+                list(REMOVE_ITEM bluepad_links pico_cyw43_arch_none)
+                list(APPEND bluepad_links pico_cyw43_arch_poll)
+                set_property(TARGET bluepad32 PROPERTY ${property} "${bluepad_links}")
+            endif()
+        endforeach()
+        target_compile_definitions(bluepad32 PUBLIC CYW43_LWIP=0)
+    endif()
     target_sources(bluepad32 PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_hid_parser_switch2.c
         ${CMAKE_CURRENT_LIST_DIR}/bluepad32_config/parser/uni_switch2_pairing.c
@@ -374,6 +404,10 @@ if(SWITCH_PICO_SWITCH2_USB_BRIDGE)
     endif()
     target_compile_definitions(switch-pico PRIVATE
         SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES=${SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES})
+    if(SWITCH2_PROBE_COMPOSITE OR SWITCH2_PROBE_HUB)
+        target_compile_definitions(switch-pico PRIVATE
+            SWITCH2_BRIDGE_SECOND_SOURCE_ADDRESS_BYTES=${SWITCH2_BRIDGE_SECOND_SOURCE_ADDRESS_BYTES})
+    endif()
 else()
     target_sources(switch-pico PRIVATE ${SWITCH_PICO_SOURCE_DIR}/main.cpp)
 endif()
@@ -438,8 +472,9 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
             SWITCH_PICO_NATIVE_SWITCH_RUMBLE=1
             SWITCH_PICO_HID_INSTANCE_COUNT=4
             $<$<NOT:$<OR:$<BOOL:${SWITCH_PICO_WII_IR_MOUSE}>,$<BOOL:${SWITCH_PICO_WII_IR_GYRO}>>>:SWITCH_PICO_USB_OUTPUT_MODES=1>
-            PICO_FLASH_ASSUME_CORE1_SAFE=0
-            PICO_STACK_SIZE=4096
+            PICO_FLASH_ASSUME_CORE1_SAFE=$<BOOL:${SWITCH2_PROBE_HUB}>
+            PICO_STACK_SIZE=$<IF:$<BOOL:${SWITCH2_PROBE_HUB}>,16384,4096>
+            PICO_CORE1_STACK_SIZE=4096
             PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT=$<IF:$<BOOL:${SWITCH_PICO_HAPTICS_EXPERIMENT}>,1,16>
             SWITCH2_WAKE_CONFIGURED=${SWITCH2_WAKE_CONFIGURED_VALUE}
     )
@@ -500,15 +535,21 @@ pico_enable_stdio_usb(switch-pico 0)
 # Add the standard library to the build
 target_link_libraries(switch-pico PRIVATE
         pico_stdlib
-        tinyusb_device
-        tinyusb_board
         hardware_uart
         pico_rand
 )
+if(NOT SWITCH2_PROBE_HUB)
+    target_link_libraries(switch-pico PRIVATE tinyusb_device tinyusb_board)
+endif()
 if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
+    if(SWITCH2_PROBE_HUB)
+        target_link_libraries(switch-pico PRIVATE pico_cyw43_arch_poll)
+        target_compile_definitions(switch-pico PRIVATE CYW43_LWIP=0)
+    else()
+        target_link_libraries(switch-pico PRIVATE pico_cyw43_arch_none)
+    endif()
     target_link_libraries(switch-pico PRIVATE
             bluepad32
-            pico_cyw43_arch_none
             pico_btstack_ble
             pico_btstack_classic
             pico_btstack_cyw43

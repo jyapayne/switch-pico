@@ -1,4 +1,5 @@
 #include "controller_input.h"
+#include "model.h"
 
 #include <string.h>
 
@@ -8,6 +9,10 @@
 #include "platform/pico/system_clock.h"
 #include "profile/controller_profile_runtime.h"
 #include "pico/stdlib.h"
+#if SWITCH2_PROBE_HUB
+#include <inttypes.h>
+extern "C" int probe_debug_printf(const char* format, ...);
+#endif
 #if SWITCH2_BRIDGE_WII_INPUT
 #include <math.h>
 #include "input/wii_ir_pointer.h"
@@ -25,17 +30,25 @@ extern "C" int probe_debug_printf(const char* format, ...);
 namespace {
 constexpr uint8_t kSourceAddress[] = {SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES};
 static_assert(sizeof(kSourceAddress) == 6, "Select one physical Bluetooth address");
+#if SWITCH2_PROBE_COMPOSITE || SWITCH2_PROBE_HUB
+constexpr uint8_t kSecondSourceAddress[] = {SWITCH2_BRIDGE_SECOND_SOURCE_ADDRESS_BYTES};
+static_assert(sizeof(kSecondSourceAddress) == 6, "Select the second physical Bluetooth address");
+#endif
 constexpr uint32_t kInputDeadlineMs = 500;
+#if !SWITCH2_PROBE_HUB
 constexpr uint32_t kFlashCoordinationTimeoutMs = 1000;
-// The backend publishes stage 2 only after Core 1's flash-safe registration;
-// reaching Core 1 already required successful Core 0 registration in start().
+#endif
+// Stage 2 publishes flash safety: both cores registered in dedicated-radio
+// modes, or Core 0 registered with an SRAM-only/IRQ-disabled Core 1 in hub mode.
 constexpr uint32_t kFlashCoordinationStage = 2;
 bool g_initialized;
 bool g_start_attempted;
 bool g_flash_ready;
+#if SWITCH2_BRIDGE_WII_INPUT
 probe_controller_input g_input;
-#if !SWITCH2_BRIDGE_WII_INPUT
-uint32_t g_received_ms;
+#else
+probe_controller_input g_inputs[PROBE_CONTROLLER_COUNT];
+uint32_t g_received_times[PROBE_CONTROLLER_COUNT];
 #endif
 #if SWITCH2_BRIDGE_WII_INPUT
 #ifndef SWITCH2_WII_IR_SCREEN_CONFIG
@@ -368,8 +381,13 @@ extern "C" void probe_controller_input_init(void) {
     if (!g_screen_configured) probe_debug_printf("[PROBE] Invalid native IR viewport configuration\n");
     wii_ir_mouse_set_output_enabled(false);
 #else
+    static_assert(SWITCH2_MOUSE_CAPTURE_SOURCE_COUNT == PROBE_CONTROLLER_COUNT,
+                  "Each native controller requires an independent capture channel");
     switch2_mouse_capture_init();
-    switch2_mouse_capture_select_input(kSourceAddress);
+    switch2_mouse_capture_select_input(0, kSourceAddress, probe_model_pid(0));
+#if SWITCH2_PROBE_COMPOSITE || SWITCH2_PROBE_HUB
+    switch2_mouse_capture_select_input(1, kSecondSourceAddress, probe_model_pid(1));
+#endif
     bluepad32_input_backend_init();
 #endif
     controller_profile_runtime_reset();
@@ -384,6 +402,14 @@ extern "C" bool probe_controller_input_start(void) {
 #endif
     g_start_attempted = true;
     bluepad32_input_backend_start();
+#if SWITCH2_PROBE_HUB
+    // Initialization is synchronous on Core 0; there is no radio Core 1 to
+    // wait for. The SDK async context advances radio startup in task().
+    Bluepad32BackendDiagnostics diagnostics;
+    bluepad32_input_backend_diagnostics(&diagnostics);
+    g_flash_ready = diagnostics.initialization_stage >= kFlashCoordinationStage;
+    return g_flash_ready;
+#else
     const absolute_time_t deadline = make_timeout_time_ms(kFlashCoordinationTimeoutMs);
     do {
         Bluepad32BackendDiagnostics diagnostics;
@@ -397,6 +423,25 @@ extern "C" bool probe_controller_input_start(void) {
     // Do not reset Core 1 or retry a partially launched backend. It may still
     // be running; a false return keeps USB and its flash writes fail-closed.
     return false;
+#endif
+}
+
+extern "C" void probe_controller_input_task(void) {
+#if SWITCH2_PROBE_HUB
+    if (!g_flash_ready) return;
+    bluepad32_input_backend_poll();
+    static uint32_t last_diagnostics;
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if ((uint32_t)(now - last_diagnostics) >= 1000u) {
+        last_diagnostics = now;
+        Bluepad32BackendDiagnostics diagnostics;
+        bluepad32_input_backend_diagnostics(&diagnostics);
+        probe_debug_printf("[HUB_RADIO] stage=%" PRIu32 " timers=%" PRIu32 "/%" PRIu32
+                           " reports=%" PRIu32 "\n", diagnostics.initialization_stage,
+                           diagnostics.rumble_timer_ticks, diagnostics.configuration_timer_ticks,
+                           diagnostics.controller_reports);
+    }
+#endif
 }
 
 extern "C" bool probe_controller_input_pairing_task(void) {
@@ -426,30 +471,31 @@ extern "C" void probe_controller_input_set_native_features(uint8_t features) {
 }
 #endif
 
-extern "C" void probe_controller_input_set_native_stream(bool enabled) {
+extern "C" void probe_controller_input_set_native_stream(uint8_t instance, bool enabled) {
+    if (instance >= PROBE_CONTROLLER_COUNT) return;
 #if SWITCH2_BRIDGE_WII_INPUT
     enabled = enabled && g_flash_ready;
     if (g_native_stream != enabled || !enabled) discard_wii_output();
     g_native_stream = enabled;
     update_wii_ir_gate(time_us_32());
 #else
-    switch2_mouse_capture_set_native_stream(g_flash_ready && enabled);
+    switch2_mouse_capture_set_native_stream(instance, g_flash_ready && enabled);
 #endif
 }
 
 extern "C" uint32_t probe_controller_input_peek_native_report(
-    uint32_t now_ms, uint8_t report[63]) {
-    if (!g_flash_ready) return 0;
+    uint8_t instance, uint32_t now_ms, uint8_t report[63]) {
+    if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) return 0;
 #if SWITCH2_BRIDGE_WII_INPUT
     (void)now_ms;
     return prepare_wii_report(report);
 #else
-    return switch2_mouse_capture_peek_native_report(now_ms, report);
+    return switch2_mouse_capture_peek_native_report(instance, now_ms, report);
 #endif
 }
 
-extern "C" bool probe_controller_input_commit_native_report(uint32_t serial) {
-    if (!g_flash_ready) return false;
+extern "C" bool probe_controller_input_commit_native_report(uint8_t instance, uint32_t serial) {
+    if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) return false;
 #if SWITCH2_BRIDGE_WII_INPUT
     if (!g_native_stream || !serial || serial != g_pending_serial ||
         g_pending_generation != g_wii_generation || !g_wii_active) return false;
@@ -462,12 +508,12 @@ extern "C" bool probe_controller_input_commit_native_report(uint32_t serial) {
     ++g_report_counter;
     return true;
 #else
-    return switch2_mouse_capture_commit_native_report(serial);
+    return switch2_mouse_capture_commit_native_report(instance, serial);
 #endif
 }
 
-extern "C" bool probe_controller_input_play_sample(uint8_t sample_id, uint64_t* token) {
-    if (!g_flash_ready) {
+extern "C" bool probe_controller_input_play_sample(uint8_t instance, uint8_t sample_id, uint64_t* token) {
+    if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) {
         if (token != nullptr) *token = 0;
         return false;
     }
@@ -475,40 +521,43 @@ extern "C" bool probe_controller_input_play_sample(uint8_t sample_id, uint64_t* 
     return bluepad32_input_backend_wii_sample_request(sample_id, token);
 #else
     return switch2_mouse_capture_request_sample(
-        sample_id, to_ms_since_boot(get_absolute_time()), token);
+        instance, sample_id, to_ms_since_boot(get_absolute_time()), token);
 #endif
 }
 
-extern "C" int probe_controller_input_sample_result(uint64_t token, uint32_t now_ms) {
-    if (!g_flash_ready) return -1;
+extern "C" int probe_controller_input_sample_result(uint8_t instance, uint64_t token, uint32_t now_ms) {
+    if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) return -1;
 #if SWITCH2_BRIDGE_WII_INPUT
     (void)now_ms;
     return bluepad32_input_backend_wii_sample_result(token);
 #else
-    return switch2_mouse_capture_sample_result(token, now_ms);
+    return switch2_mouse_capture_sample_result(instance, token, now_ms);
 #endif
 }
 
-extern "C" void probe_controller_input_cancel_sample(void) {
+extern "C" void probe_controller_input_cancel_sample(uint8_t instance) {
+    if (instance >= PROBE_CONTROLLER_COUNT) return;
 #if SWITCH2_BRIDGE_WII_INPUT
     bluepad32_input_backend_wii_sample_cancel();
 #else
-    switch2_mouse_capture_cancel_sample();
+    switch2_mouse_capture_cancel_sample(instance);
 #endif
 }
 
-extern "C" void probe_controller_input_poll(uint32_t now_ms,
+extern "C" void probe_controller_input_poll(uint8_t instance, uint32_t now_ms,
                                             probe_controller_input* out) {
     if (out == nullptr) return;
-    if (!g_flash_ready) {
+    if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) {
         *out = {};
         return;
     }
 #if SWITCH2_BRIDGE_WII_INPUT
     poll_wii_source(now_ms);
 #else
+    probe_controller_input& g_input = g_inputs[instance];
+    uint32_t& g_received_ms = g_received_times[instance];
     Switch2MouseCaptureInput sample;
-    if (switch2_mouse_capture_latest_input(g_input.serial, &sample)) {
+    if (switch2_mouse_capture_latest_input(instance, g_input.serial, &sample)) {
         g_input.serial = sample.serial;
         g_input.active = sample.active;
         g_received_ms = sample.received_ms;

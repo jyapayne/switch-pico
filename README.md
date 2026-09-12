@@ -483,10 +483,12 @@ Protocol references: [WiiBrew Wiimote](https://wiibrew.org/wiki/Wiimote), [Motio
 
 `SWITCH_PICO_SWITCH2_USB_BRIDGE=ON` selects the separate USB protocol probe in
 `tools/switch2_usb_probe`, not the ordinary four-Pro-controller AIO output.
-`SWITCH2_BRIDGE_INPUT=JOYCON2` preserves complete packets from one selected right
-Joy-Con 2; `SWITCH2_BRIDGE_INPUT=WII` generates native right-Joy-Con reports from
-Wii input. Select the physical Bluetooth address with
-`SWITCH2_BRIDGE_SOURCE_ADDRESS`.
+`SWITCH2_BRIDGE_INPUT=JOYCON2` preserves complete packets from one selected
+Joy-Con 2. Choose `SWITCH2_PROBE_SIDE=LEFT` or `RIGHT` (default), with matching
+identity, firmware and calibration captures, and select the physical Bluetooth
+address with `SWITCH2_BRIDGE_SOURCE_ADDRESS`. Left uses USB PID `2067`/report
+`07`; right uses PID `2066`/report `08`. `SWITCH2_BRIDGE_INPUT=WII` generates
+native right-Joy-Con reports and rejects `LEFT`.
 
 The Wii source requires Pico 2 W, the Bluepad32 backend, Bluetooth `MIXED` mode,
 and the bridge's native capture prerequisites
@@ -501,6 +503,107 @@ factory-memory and user-calibration inputs, a distinct virtual controller addres
 `SWITCH2_PROBE_*_FILE` inputs are checked by `probe_build.cmake`; private captures,
 pairing records and firmware backups are not bundled with the source.
 Keep a known-good UF2 and use a separate build directory for experiments.
+
+For read-only **donor capture**, use a separate ordinary Bluepad32 build with
+`SWITCH_PICO_SWITCH2_USB_BRIDGE=OFF`, `SWITCH_PICO_LOG=ON`,
+`SWITCH_PICO_SWITCH2_MOUSE_CAPTURE=ON`, and
+`SWITCH_PICO_SWITCH2_MEMORY_CAPTURE=ON`. After normal pairing/calibration,
+each connected Joy-Con reads 192 acknowledged 64-byte pages covering factory
+`0x13000..0x14fff` and user calibration `0x1fc000..0x1fcfff`, logged as
+`SW2_MEMORY_<address>`. Setup identity/version logs identify the donor.
+The capture adds no memory writes or erases; normal pairing rules still apply.
+Keep these private captures out of commits. Add
+`SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE=ON` to capture raw left `07` or right
+`08` input through USB management after setup. This is capture firmware, not
+left-side or dual-Joy-Con USB emulation; composite L/R acceptance is unverified.
+
+**Left-only passthrough:** firmware `0.34-left-trace` has enumerated as a left
+Joy-Con on Linux. A live USB check verified all 192 factory/user memory pages
+and received 402 native `07` packets, including 400 motion-bearing packets whose
+IMU blocks decoded and reconstructed exactly. The donor's separate stationary
+capture also reconstructed all 539 blocks and measured approximately 0.995 g;
+left directional axes and console gameplay remain unqualified. Fifteen targeted
+tests pass, and left, right and Wii variants build.
+The Switch subsequently completed left-side pairing and activation (runtime
+`03/0C=1`, player LED mask 1), received motion-bearing `07` reports, and requested
+its connection vibration cue, acknowledged by the physical donor. All 54 sampled
+console motion blocks reconstructed exactly. The user confirmed menu navigation
+with the left stick. Perceived vibration and directional IMU behavior remain
+unconfirmed.
+
+Left and right native USB pairing records use independent two-sector banks.
+On the 4 MiB Pico 2 W, left occupies flash offsets `0x3b7000..0x3b8fff`; the
+existing right bank stays at `0x3b9000..0x3bafff`. Profiles, configuration and
+Bluetooth storage do not move. Host fault-injection checks verified old-right
+record recovery, opposite-bank preservation, torn-write recovery and refusal
+of foreign sector ownership.
+
+**Simultaneous L/R experiment:** `SWITCH2_PROBE_COMPOSITE=ON` builds
+`0.35-pair[-trace]` with two live native donor paths. It requires
+`SWITCH2_PROBE_SIDE=RIGHT`, `SWITCH2_BRIDGE_INPUT=JOYCON2`, distinct physical
+`SWITCH2_BRIDGE_SOURCE_ADDRESS` / `SWITCH2_BRIDGE_SECOND_SOURCE_ADDRESS`, and
+distinct advertised controller addresses. The existing capture inputs describe
+R; `SWITCH2_PROBE_SECOND_IDENTITY_FILE`, `SWITCH2_PROBE_SECOND_VERSION_FILE`,
+`SWITCH2_PROBE_SECOND_FACTORY_FILE`, `SWITCH2_PROBE_SECOND_USER_CALIBRATION_FILE`
+and `SWITCH2_PROBE_SECOND_CONTROLLER_ADDRESS` describe L.
+
+The 151-byte USB configuration exposes R HID/vendor interfaces 0/1 and L
+interfaces 2/3, using endpoint pairs 1/2 and 3/4 respectively. Both functions
+have independent protocol state, native report consumption, feature gates,
+command/reply queues, cue tokens and pairing records. Device-level VID/PID
+remains `057e:2066`; explicit control indexes 2/3 address L, while index 0
+continues to identify R. No identity is inferred from request timing.
+Composite discovery uses the native device class `EF/02/01` and interface
+associations. Single-side builds retain their published 80-byte configuration.
+The flat per-interface trial described below was reverted in source.
+
+Seventeen targeted tests pass across single and composite modes. A host smoke
+through the actual USB callbacks exercised simultaneous report delivery,
+cross-interface backpressure, deferred cue replies, fragmented commands,
+indexed identities and disconnect/reset boundaries. Indexed storage
+fault-injection and right, left, Wii, donor-capture, standalone-probe and
+composite builds also pass. These checks do not establish Switch acceptance
+of both functions; that requires the console enumeration trial.
+
+Full-controller input splitting and continuous USB HD-rumble forwarding are
+not implemented yet. This experiment relays two genuine Joy-Cons, including
+their opaque motion/mouse packets and acknowledged built-in vibration cues.
+
+The composite image has now been flashed with both pairing banks and all other
+persistent storage verified unchanged. Linux enumerates all four interfaces;
+indexed R/L identity reads and independent initialization succeed. A live check
+received 250 reports from each function: L carried 248 motion blocks, while R
+correctly remained neutral because its physical donor was not connected.
+Both saved virtual pairing records restored. After reconnecting R, a simultaneous
+live USB check received 376 reports from each donor, all 752 carrying motion
+blocks that decoded and reconstructed exactly. On Switch, however, 0.35 only
+initialized and displayed R: L was Bluetooth-active but USB-uninitialized, with
+no commands or reports on its function. Connection order is not an adequate
+explanation for the missing USB initialization.
+
+Firmware 0.36 tested device class `00/00/00` without association descriptors.
+Its interfaces, endpoints, reports, identities and protocol behavior were
+unchanged. Binary comparison, 17 targeted tests, USB callback smoke and Linux
+descriptor checks passed, but the user reported neither controller appearing on
+Switch. R completed bulk initialization yet its input count stayed at one;
+L remained USB-uninitialized, despite both Bluetooth sources being active.
+The source was restored to 0.35 and rebuilt byte-identically to its saved image.
+A later capture included USB restart and grip-screen activity: R resumed reports
+and player assignment, but L remained uninitialized and its L press was not
+detected by the console. This does not establish that opening the grip screen
+alone caused R to recover.
+
+The user-requested `SWITCH2_PROBE_JOIN_CHORD_GATE=ON` experiment builds
+`0.37-pair-chord[-trace]` on the 0.35 native layout. It requires composite output
+and suppresses each real L/R shoulder bit until both active physical sources
+hold their shoulders. Release or stale/disconnected input closes the gate.
+Both sources are polled before USB submissions. Native and common GET_REPORT
+paths are gated; other buttons and opaque motion bytes are retained. The gate
+does not synthesize presses, force initialization or make two USB device PIDs.
+`JOIN_CHORD` traces record raw shoulder states and initialization status.
+Host smoke checks covered these boundaries; the ungated firmware remained
+byte-identical to 0.35. Firmware 0.37 was flashed with persistent storage
+unchanged and both pairing records restored; its console chord test is pending.
 
 - **Motion:** factory-calibrated Wii acceleration and MotionPlus gyro have
   independent freshness counters. Keep the Remote still at startup for at least
@@ -615,7 +718,7 @@ protocol adaptations belong in the separate adapter.
 
 Both native bridge sources support the existing software **BOOTSEL reboot**
 without erasing pairings, profiles or configuration. The standalone USB diagnostic
-probe does not. Connect the bridge to a PC and disconnect any genuine USB right
+probe does not. Connect the bridge to a PC and disconnect any genuine USB
 Joy-Con 2 before running this from the repository:
 
 ```sh
@@ -623,9 +726,10 @@ uv run python - <<'PY'
 import usb.core
 from switch_pico_bridge.config_manager import request_bootsel_reboot
 
-devices = list(usb.core.find(find_all=True, idVendor=0x057e, idProduct=0x2066))
+product_id = 0x2066  # Use 0x2067 for a LEFT bridge build.
+devices = list(usb.core.find(find_all=True, idVendor=0x057e, idProduct=product_id))
 if len(devices) != 1:
-    raise SystemExit("Connect exactly one native bridge (057e:2066).")
+    raise SystemExit(f"Connect exactly one native bridge (057e:{product_id:04x}).")
 request_bootsel_reboot(devices[0])
 print("Rebooting into USB BOOTSEL mode.")
 PY
@@ -645,6 +749,76 @@ enters ROM USB boot mode. Invalid envelopes cannot schedule a reboot. Nintendo's
 separate request `0x04`, value `0x0276`, index `0`, length `0` remains an ordinary
 setup acknowledgement. No configuration writes or extra management capabilities
 are enabled in native mode.
+
+### Experimental stock-socket native Joy-Con 2 hub
+
+`SWITCH2_PROBE_HUB=ON` exposes a `057e:2068` hub with separate right
+`057e:2066` and left `057e:2067` devices through the unchanged Pico 2 W USB
+socket. It uses the native USB PHY/SIE and a Core 1 SIO observer, not USB
+wiring on GPIO pins. Each child retains its own native HID/vendor interfaces,
+EP1/EP2 state, identity, protocol state and pairing bank.
+
+This mode requires `SWITCH_PICO_SWITCH2_USB_BRIDGE=ON`,
+`SWITCH2_BRIDGE_INPUT=JOYCON2`, `SWITCH2_PROBE_SIDE=RIGHT`,
+`SWITCH2_PROBE_COMPOSITE=OFF`, and `SWITCH_PICO_SYS_CLOCK_MHZ=240`.
+Configure both private donor captures and source addresses as for the paired
+native probe. Bluetooth runs cooperatively on Core 0; Core 1 is reserved for
+USB observation. Receive PID state is selected before accepting OUT traffic.
+Transmit payloads are prepared outside the bank lock and published by Core 0;
+unavailable IN buffers NAK rather than expose another device's packet.
+
+**Qualification history:** the earlier RAM-only
+probe established three-address EP0 routing, not Joy-Con output. The
+`0.65-native-hub-ready` bridge subsequently passed interleaved native descriptor,
+identity and short control reads, both initialization sequences and bulk
+isolation. Two consecutive 60-second captures received 7,504 and 7,496 native
+HID packets, with correct R/L report IDs and lengths and no USB protocol error
+or hub reset. All packets lacked live donor IMU, so both captures correctly
+failed the live-input requirement.
+
+An awake-controller trial exposed a separate hub-mode bug: the input capture
+mailbox still allocated one channel unless composite mode was enabled, silently
+rejecting L registration. Firmware `0.66-native-hub-input` enables both capture
+channels for hub mode and checks that their count matches the controller models.
+The dual-source BLE/capture regression failed on L packet delivery before this
+fix; its new hub case and all 16 focused regression cases now pass.
+
+Live PC qualification then passed with 575 R and 703 L decoded IMU reports and
+changing sensor counters. A follow-up run received 587 R and 588 L live IMU
+reports while completing 37 interleaved read-isolation rounds and matching the
+Bluetooth-backed built-in motor-sample-0 acknowledgement independently on each
+side. Neither run reported malformed or wrong-side packets or qualification
+errors. These captures did not exercise deliberate button presses or establish
+physical motor feel. The user subsequently confirmed that 0.66 works on Switch,
+with some noticeable input lag. This is console smoke-test evidence, not a
+latency measurement or exhaustive compatibility test. This mode does not add
+arbitrary full-controller splitting or continuous USB HD-rumble forwarding.
+
+With the existing private build configured, qualify on a PC using:
+
+```sh
+uv run python tools/native_joycon_hub_check.py \
+  --build-dir build-switch2-native-hub \
+  --output build-switch2-native-hub/qualification.json
+```
+
+Wake both physical Joy-Cons and move them during the manual-wake window.
+The checker rejects neutral/zero-length IMU reports and requires fresh,
+decodable motion with changing counters from both devices. It does not pair,
+reset, change profiles or write flash. `--rumble-sample 0` is an explicit
+optional motor-cue test, not a continuous HD-rumble test. Captures and flash
+backups contain private device data and must remain untracked.
+
+`HUB_RADIO reports` counts normal parsed gamepad callbacks, which native packed
+input bypasses. Zero is not evidence that a native donor is asleep or inactive;
+use per-source activation and the host's fresh native IMU results instead.
+
+The hardware trials verified the complete persistent region
+`0x103b7000..0x10400000` unchanged before and after application-only flashing.
+Software BOOTSEL recovery uses the existing helper above on the verified
+`057e:2068` root, not either child. UART remains available during qualification.
+Watchdog recovery and failure to configure the initial root hub enter BOOTSEL
+without erasing storage; neither mechanism proves successful controller output.
 
 ### Switch 2 controller input
 

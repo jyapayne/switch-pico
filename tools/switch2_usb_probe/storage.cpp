@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "model.h"
 
 #include <string.h>
 
@@ -16,13 +17,16 @@ namespace {
 constexpr size_t kSlotCount = 2;
 constexpr size_t kMaximumPayloadSize = 512;
 constexpr size_t kStorageSize = kSlotCount * FLASH_SECTOR_SIZE;
+constexpr size_t kReservedStorageSize = 2 * kStorageSize;
 constexpr size_t kConfigurationStorageSize =
     CONFIGURATION_STORAGE_COPY_COUNT * FLASH_SECTOR_SIZE;
 constexpr size_t kConfigurationStorageOffset =
     PICO_FLASH_BANK_STORAGE_OFFSET - kConfigurationStorageSize;
 constexpr size_t kProfileStorageOffset =
     kConfigurationStorageOffset - PROFILE_STORAGE_TOTAL_SIZE;
-constexpr uint32_t kStorageOffset = kProfileStorageOffset - kStorageSize;
+// Keep the original right bank adjacent to profiles; reserve the left bank below.
+constexpr uint32_t kRightStorageOffset = kProfileStorageOffset - kStorageSize;
+constexpr uint32_t kLeftStorageOffset = kRightStorageOffset - kStorageSize;
 constexpr uint32_t kFlashSafeTimeoutMs = 5000;
 constexpr uint32_t kFormatVersion = 1;
 
@@ -66,9 +70,11 @@ static_assert(PROFILE_STORAGE_TOTAL_SIZE % FLASH_SECTOR_SIZE == 0);
 static_assert(PICO_FLASH_BANK_STORAGE_OFFSET % FLASH_SECTOR_SIZE == 0);
 static_assert(PICO_FLASH_BANK_STORAGE_OFFSET >=
               kConfigurationStorageSize + PROFILE_STORAGE_TOTAL_SIZE +
-                  kStorageSize,
+                  kReservedStorageSize,
               "pairing storage offset underflows flash");
-static_assert(kStorageOffset + kStorageSize == kProfileStorageOffset);
+static_assert(kLeftStorageOffset + kStorageSize == kRightStorageOffset);
+static_assert(kRightStorageOffset + kStorageSize == kProfileStorageOffset);
+static_assert(kLeftStorageOffset + kReservedStorageSize == kProfileStorageOffset);
 static_assert(kProfileStorageOffset + PROFILE_STORAGE_TOTAL_SIZE ==
               kConfigurationStorageOffset);
 static_assert(kConfigurationStorageOffset + kConfigurationStorageSize ==
@@ -119,22 +125,23 @@ bool is_erased(const uint8_t *bytes, size_t size) {
     return true;
 }
 
-bool storage_region_available() {
+bool storage_region_available(uint32_t storage_offset) {
     const uintptr_t binary_end = reinterpret_cast<uintptr_t>(&__flash_binary_end);
     return binary_end >= XIP_BASE &&
-           binary_end - XIP_BASE <= kStorageOffset &&
-           kStorageOffset % FLASH_SECTOR_SIZE == 0 &&
-           kStorageOffset <= PICO_FLASH_SIZE_BYTES &&
-           kStorageSize <= PICO_FLASH_SIZE_BYTES - kStorageOffset &&
-           kStorageOffset + kStorageSize == kProfileStorageOffset;
+           binary_end - XIP_BASE <= kLeftStorageOffset &&
+           storage_offset % FLASH_SECTOR_SIZE == 0 &&
+           storage_offset <= PICO_FLASH_SIZE_BYTES &&
+           kStorageSize <= PICO_FLASH_SIZE_BYTES - storage_offset &&
+           storage_offset >= kLeftStorageOffset &&
+           storage_offset + kStorageSize <= kProfileStorageOffset;
 }
 
-uint32_t slot_offset(size_t slot) {
-    return static_cast<uint32_t>(kStorageOffset + slot * FLASH_SECTOR_SIZE);
+uint32_t slot_offset(uint32_t storage_offset, size_t slot) {
+    return static_cast<uint32_t>(storage_offset + slot * FLASH_SECTOR_SIZE);
 }
 
-const uint8_t *slot_bytes(size_t slot) {
-    return reinterpret_cast<const uint8_t *>(XIP_BASE + slot_offset(slot));
+const uint8_t *slot_bytes(uint32_t storage_offset, size_t slot) {
+    return reinterpret_cast<const uint8_t *>(XIP_BASE + slot_offset(storage_offset, slot));
 }
 
 bool owner_valid(const uint8_t *bytes, uint32_t offset) {
@@ -180,10 +187,10 @@ bool commit_valid(const uint8_t *bytes, uint32_t offset) {
                      FLASH_PAGE_SIZE - kDescriptorSize);
 }
 
-Slot inspect_slot(size_t index) {
-    const uint8_t *bytes = slot_bytes(index);
+Slot inspect_slot(uint32_t storage_offset, size_t index) {
+    const uint8_t *bytes = slot_bytes(storage_offset, index);
     Slot slot{SlotKind::Unknown, bytes, 0, 0};
-    if (!owner_valid(bytes, slot_offset(index))) {
+    if (!owner_valid(bytes, slot_offset(storage_offset, index))) {
         if (is_erased(bytes, FLASH_SECTOR_SIZE)) {
             slot.kind = SlotKind::Erased;
         }
@@ -198,7 +205,7 @@ Slot inspect_slot(size_t index) {
     // A complete ownership page plus an erased tail proves ownership of the
     // bounded body/commit area, even if either subsequent write was interrupted.
     slot.kind = SlotKind::OwnedIncomplete;
-    if (body_valid(bytes) && commit_valid(bytes, slot_offset(index))) {
+    if (body_valid(bytes) && commit_valid(bytes, slot_offset(storage_offset, index))) {
         slot.kind = SlotKind::Committed;
         slot.generation = read_u32(bytes + kBodyOffset + 8);
         slot.size = read_u32(bytes + kBodyOffset + 16);
@@ -245,37 +252,37 @@ void perform_flash_mutation(void *context) {
 
 // The caller has classified BOTH sectors before permitting any erase. Only
 // the inactive, explicitly owned sector is passed here; the active one survives.
-bool erase_slot(size_t index) {
-    if (index >= kSlotCount || !storage_region_available()) {
+bool erase_slot(uint32_t storage_offset, size_t index) {
+    if (index >= kSlotCount || !storage_region_available(storage_offset)) {
         return false;
     }
-    FlashMutation mutation{slot_offset(index), nullptr};
+    FlashMutation mutation{slot_offset(storage_offset, index), nullptr};
     return flash_safe_execute(perform_flash_mutation, &mutation,
                               kFlashSafeTimeoutMs) == PICO_OK &&
-           is_erased(slot_bytes(index), FLASH_SECTOR_SIZE);
+           is_erased(slot_bytes(storage_offset, index), FLASH_SECTOR_SIZE);
 }
 
-bool program_page(size_t index, size_t offset, const uint8_t *page) {
+bool program_page(uint32_t storage_offset, size_t index, size_t offset, const uint8_t *page) {
     if (index >= kSlotCount || offset % FLASH_PAGE_SIZE != 0 ||
         offset > kRecordFootprint - FLASH_PAGE_SIZE ||
-        !storage_region_available() ||
-        !is_erased(slot_bytes(index) + offset, FLASH_PAGE_SIZE)) {
+        !storage_region_available(storage_offset) ||
+        !is_erased(slot_bytes(storage_offset, index) + offset, FLASH_PAGE_SIZE)) {
         return false;
     }
     FlashMutation mutation{
-        static_cast<uint32_t>(slot_offset(index) + offset), page,
+        static_cast<uint32_t>(slot_offset(storage_offset, index) + offset), page,
     };
     return flash_safe_execute(perform_flash_mutation, &mutation,
                               kFlashSafeTimeoutMs) == PICO_OK &&
-           memcmp(slot_bytes(index) + offset, page, FLASH_PAGE_SIZE) == 0;
+           memcmp(slot_bytes(storage_offset, index) + offset, page, FLASH_PAGE_SIZE) == 0;
 }
 
-void prepare_record(size_t target, uint32_t generation,
+void prepare_record(uint32_t storage_offset, size_t target, uint32_t generation,
                     const uint8_t *data, size_t size) {
     memset(staging, 0xff, sizeof(staging));
     memcpy(staging, kOwnerMagic, sizeof(kOwnerMagic));
     write_u32(staging + 16, kFormatVersion);
-    write_u32(staging + 20, slot_offset(target));
+    write_u32(staging + 20, slot_offset(storage_offset, target));
     write_u32(staging + 24, kMaximumPayloadSize);
     write_u32(staging + 28, FLASH_PAGE_SIZE);
     write_u32(staging + 32, FLASH_SECTOR_SIZE);
@@ -300,19 +307,23 @@ void prepare_record(size_t target, uint32_t generation,
     write_u32(commit + 20, header_crc);
     write_u32(commit + 24, payload_crc);
     write_u32(commit + 28, static_cast<uint32_t>(size));
-    write_u32(commit + 32, slot_offset(target));
+    write_u32(commit + 32, slot_offset(storage_offset, target));
     write_u32(commit + kDescriptorCrcOffset,
               configuration_crc32(commit, kDescriptorCrcOffset));
 }
 
 } // namespace
 
-bool probe_storage_load(uint8_t *output, size_t size) {
+bool probe_storage_load(uint8_t instance, uint8_t *output, size_t size) {
+    if (instance >= PROBE_CONTROLLER_COUNT) return false;
+    const uint32_t storage_offset = probe_storage_offset(instance);
     if (output == nullptr || size == 0 || size > kMaximumPayloadSize ||
-        !storage_region_available()) {
+        !storage_region_available(storage_offset)) {
         return false;
     }
-    const Slot slots[kSlotCount] = {inspect_slot(0), inspect_slot(1)};
+    const Slot slots[kSlotCount] = {
+        inspect_slot(storage_offset, 0), inspect_slot(storage_offset, 1),
+    };
     int active;
     if (!newest_slot(slots, &active) || active < 0 || slots[active].size != size) {
         return false;
@@ -321,12 +332,16 @@ bool probe_storage_load(uint8_t *output, size_t size) {
     return true;
 }
 
-bool probe_storage_save(const uint8_t *data, size_t size) {
+bool probe_storage_save(uint8_t instance, const uint8_t *data, size_t size) {
+    if (instance >= PROBE_CONTROLLER_COUNT) return false;
+    const uint32_t storage_offset = probe_storage_offset(instance);
     if (data == nullptr || size == 0 || size > kMaximumPayloadSize ||
-        !storage_region_available()) {
+        !storage_region_available(storage_offset)) {
         return false;
     }
-    const Slot slots[kSlotCount] = {inspect_slot(0), inspect_slot(1)};
+    const Slot slots[kSlotCount] = {
+        inspect_slot(storage_offset, 0), inspect_slot(storage_offset, 1),
+    };
     if (slots[0].kind == SlotKind::Unknown || slots[1].kind == SlotKind::Unknown) {
         return false; // Never erase through an unrecognized region.
     }
@@ -342,32 +357,33 @@ bool probe_storage_save(const uint8_t *data, size_t size) {
                               ? static_cast<size_t>(active) ^ 1u
                               : (slots[0].kind == SlotKind::Erased ? 0u : 1u);
     const uint32_t generation = active >= 0 ? slots[active].generation + 1u : 1u;
-    prepare_record(target, generation, data, size);
+    prepare_record(storage_offset, target, generation, data, size);
 
-    if (slots[target].kind != SlotKind::Erased && !erase_slot(target)) {
+    if (slots[target].kind != SlotKind::Erased && !erase_slot(storage_offset, target)) {
         return false;
     }
-    if (!program_page(target, 0, staging)) {
+    if (!program_page(storage_offset, target, 0, staging)) {
         return false;
     }
     for (size_t offset = kBodyOffset; offset < kCommitOffset;
          offset += FLASH_PAGE_SIZE) {
         if (!is_erased(staging + offset, FLASH_PAGE_SIZE) &&
-            !program_page(target, offset, staging + offset)) {
+            !program_page(storage_offset, target, offset, staging + offset)) {
             return false;
         }
     }
-    if (!body_valid(slot_bytes(target)) ||
-        !program_page(target, kCommitOffset, staging + kCommitOffset)) {
+    if (!body_valid(slot_bytes(storage_offset, target)) ||
+        !program_page(storage_offset, target, kCommitOffset, staging + kCommitOffset)) {
         return false;
     }
-    const Slot committed = inspect_slot(target);
+    const Slot committed = inspect_slot(storage_offset, target);
     return committed.kind == SlotKind::Committed &&
            committed.generation == generation && committed.size == size &&
            memcmp(committed.bytes + kPayloadOffset,
                   staging + kPayloadOffset, size) == 0;
 }
 
-uint32_t probe_storage_offset(void) {
-    return kStorageOffset;
+uint32_t probe_storage_offset(uint8_t instance) {
+    if (instance >= PROBE_CONTROLLER_COUNT) return UINT32_MAX;
+    return probe_model_is_left(instance) ? kLeftStorageOffset : kRightStorageOffset;
 }

@@ -3,7 +3,7 @@
 #include <string.h>
 
 // Wire contracts: ndeadly/switch2_controller_research commands.md (03/0D,
-// 03/0A, 07/01, 09/01-08, 16/01, 15/01-04) and hid_reports.md (05/08). USB reply headers
+// 03/0A, 07/01, 09/01-08, 16/01, 15/01-04) and hid_reports.md (05/07/08). USB reply headers
 // and status payloads match captures/usb/rumble-procon-gccon.pcapng.gz.
 // This public component is not a pairing key. The host supplies the other half.
 static const uint8_t device_key_component[16] = {
@@ -71,7 +71,7 @@ static bool finalize_pairing(probe_protocol_state* state, const uint8_t* key) {
     memcpy(blob + 7, state->pending_host_addresses, 6u * state->pending_host_count);
     memcpy(blob + sizeof(blob) - 16u, key, 16);
     // Preserve both the old committed key and pending retry on any save failure.
-    if (!state->save_pairing(blob, sizeof(blob))) return false;
+    if (!state->save_pairing(state->context, blob, sizeof(blob))) return false;
     state->committed_host_count = blob[6];
     memcpy(state->committed_host_addresses, blob + 7, sizeof(state->committed_host_addresses));
     memcpy(state->committed_key, blob + sizeof(blob) - 16u, sizeof(state->committed_key));
@@ -81,11 +81,12 @@ static bool finalize_pairing(probe_protocol_state* state, const uint8_t* key) {
     return true;
 }
 
-void probe_protocol_reset(probe_protocol_state* state) {
+void probe_protocol_reset(probe_protocol_state* state, bool is_left) {
     memset(state, 0, sizeof(*state));
-    state->report_id = 0x08;
-    state->right_stick_center[1] = 0x08;
-    state->right_stick_center[2] = 0x80;
+    state->is_left = is_left;
+    state->report_id = is_left ? 0x07 : 0x08;
+    state->stick_center[1] = 0x08;
+    state->stick_center[2] = 0x80;
 }
 
 bool probe_protocol_restore_pairing(probe_protocol_state* state,
@@ -226,14 +227,14 @@ size_t probe_protocol_command(probe_protocol_state* state, const uint8_t* comman
     if (capacity < reply_length) return 0;
     if (vibration_sample) {
         uint64_t token = 0;
-        if (!state->play_sample(command[8], &token) || !token) return 0;
+        if (!state->play_sample(state->context, command[8], &token) || !token) return 0;
         *deferred_token = token;
     }
     uint8_t encrypted_challenge[16];
     if (confirm_key && !challenge_response(pairing_key, command + 9, encrypted_challenge)) return 0;
     if (finalize && !finalize_pairing(state, pairing_key)) return 0;
     if (memory_read &&
-        !state->read_memory(memory_address, reply + 16, memory_length)) return 0;
+        !state->read_memory(state->context, memory_address, reply + 16, memory_length)) return 0;
     const uint8_t header[] = {command[0], 0x01, 0, command[3], 0, 0xf8, 0, 0};
     memcpy(reply, header, sizeof(header));
     if (info11_03) {
@@ -255,7 +256,8 @@ size_t probe_protocol_command(probe_protocol_state* state, const uint8_t* comman
         reply[8] = 1;
     } else if (select_report) {
         // The real controller acknowledges but ignores unsupported report IDs.
-        if (command[8] == 0x05 || command[8] == 0x08) state->report_id = command[8];
+        if (command[8] == 0x05 || command[8] == (state->is_left ? 0x07 : 0x08))
+            state->report_id = command[8];
     } else if (exchange_addresses) {
         if (length != 8) {
             clear_pending_pairing(state);
@@ -337,38 +339,71 @@ size_t probe_protocol_command(probe_protocol_state* state, const uint8_t* comman
 size_t probe_protocol_report(const probe_protocol_state* state, uint8_t report_id,
                              uint8_t* output, size_t capacity) {
     if (!state || !state->initialized || !output || capacity < PROBE_INPUT_SIZE ||
-        (report_id != 0x05 && report_id != 0x08)) return 0;
+        (report_id != 0x05 && report_id != (state->is_left ? 0x07 : 0x08))) return 0;
     memset(output, 0, PROBE_INPUT_SIZE);
     const bool buttons_enabled = (state->enabled_features & 1) != 0;
     const uint8_t buttons0 = state->controller_active && buttons_enabled ? state->controller_buttons[0] : 0;
-    const uint8_t buttons1 = state->controller_active && buttons_enabled ? state->controller_buttons[1] & 0xd1 : 0;
+    const uint8_t buttons1 = state->controller_active && buttons_enabled ?
+        state->controller_buttons[1] & (state->is_left ? 0xc1 : 0xd1) : 0;
     const uint8_t* stick = state->controller_active && (state->enabled_features & 2) ?
-                           state->controller_stick : state->right_stick_center;
-    if (report_id == 0x08) {
+                           state->controller_stick : state->stick_center;
+    if (report_id != 0x05) {
         output[0] = (uint8_t)state->report_counter;
         output[1] = 0x25;  // Virtual full battery, external USB power.
         output[2] = buttons0;
         output[3] = buttons1;
         if (state->test_rail_buttons && (state->enabled_features & 1))
-            output[3] |= 0xc0; // Joy-Con R native SL + SR.
+            output[3] |= 0xc0; // Both models' native SL + SR.
         output[4] = 0x07;
         memcpy(output + 5, stick, 3);
         // Diagnostic snapshot only; complete live native packets bypass this generator.
     } else {
         for (unsigned i = 0; i < 4; ++i) output[i] = (uint8_t)(state->report_counter >> (8 * i));
-        output[4] = (uint8_t)(((buttons0 & 0x03) << 2) | ((buttons0 & 0x0c) >> 2) |
-                              ((buttons0 & 0x30) << 2) | ((buttons1 & 0xc0) >> 2));
-        output[5] = (uint8_t)(((buttons0 & 0xc0) >> 5) | ((buttons1 & 0x01) << 4) |
-                              ((buttons1 & 0x10) << 2));
-        if (state->test_rail_buttons && (state->enabled_features & 1))
-            output[4] |= 0x30; // Common report: right SL + SR.
-        output[11] = 0x08;
-        output[12] = 0x80;
-        memcpy(output + 13, stick, 3);
+        if (state->is_left) {
+            output[5] = (uint8_t)(((buttons0 & 0x40) >> 6) | ((buttons0 & 0x80) >> 4) |
+                                  ((buttons1 & 0x01) << 5));
+            output[6] = (uint8_t)((buttons0 & 0x01) | ((buttons0 & 0x06) << 1) |
+                                  ((buttons0 & 0x08) >> 2) | ((buttons0 & 0x30) << 2) |
+                                  ((buttons1 & 0xc0) >> 2));
+            if (state->test_rail_buttons && buttons_enabled)
+                output[6] |= 0x30; // Common report: left SL + SR.
+            memcpy(output + 10, stick, 3);
+            output[14] = 0x08;
+            output[15] = 0x80;
+        } else {
+            output[4] = (uint8_t)(((buttons0 & 0x03) << 2) | ((buttons0 & 0x0c) >> 2) |
+                                  ((buttons0 & 0x30) << 2) | ((buttons1 & 0xc0) >> 2));
+            output[5] = (uint8_t)(((buttons0 & 0xc0) >> 5) | ((buttons1 & 0x01) << 4) |
+                                  ((buttons1 & 0x10) << 2));
+            if (state->test_rail_buttons && buttons_enabled)
+                output[4] |= 0x30; // Common report: right SL + SR.
+            output[11] = 0x08;
+            output[12] = 0x80;
+            memcpy(output + 13, stick, 3);
+        }
         output[31] = 0xa0;
         output[32] = 0x0f; // Virtual battery voltage 4000mV.
         output[33] = 0x20;
         output[41] = 1;
     }
     return PROBE_INPUT_SIZE;
+}
+
+void probe_protocol_gate_native_report(const probe_protocol_state* state,
+                                       uint8_t input[PROBE_INPUT_SIZE]) {
+    const uint8_t imu_length_offset = state->is_left ? 14u : 15u;
+    if (!(state->enabled_features & 1)) memset(input + 2, 0, 2);
+    if (!(state->enabled_features & 2))
+        memcpy(input + 5, state->stick_center, sizeof(state->stick_center));
+    if (!(state->enabled_features & 0x10)) memset(input + 9, 0, 5);
+#ifdef SWITCH2_PROBE_OMIT_NATIVE_IMU
+    // Deliberate A/B fault injection: leave every other field and feature bit intact.
+    memset(input + imu_length_offset, 0, 41);
+#elif defined(SWITCH2_PROBE_ZERO_NATIVE_IMU_PAYLOAD)
+    if (!(state->enabled_features & 4)) input[imu_length_offset] = 0;
+    memset(input + imu_length_offset + 1u, 0, 40); // Preserve enabled genuine length.
+#else
+    if (!(state->enabled_features & 4))
+        memset(input + imu_length_offset, 0, 41);
+#endif
 }
