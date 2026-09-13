@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "parser/uni_hid_parser_wii.h"
+#include "parser/uni_hid_parser_native_motion.h"
 #include "uni_hid_device.h"
 
 // The real staged parser and gamepad definitions are linked. Only transport and
@@ -501,11 +502,21 @@ static void accelerometer_snapshot_requires_fresh_calibrated_reports(void) {
     assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
     expect_vector(acceleration, -8192, 2048, -4096);
     const uint32_t first = sequence;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_native_motion_snapshot_t native;
+    assert(uni_hid_parser_native_motion_snapshot(&f.device, &native));
+    assert(native.accel_valid && !native.gyro_valid && !native.report_tracked);
+    expect_vector(native.accel_q13, -8192, 2048, -4096);
+#endif
     send_ack(0x16, 0);
     const uint8_t short_report[5] = {0x31};
     feed(short_report, sizeof(short_report));
     assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
     assert(sequence == first);
+#if SWITCH2_BRIDGE_FULL_INPUT
+    assert(uni_hid_parser_native_motion_snapshot(&f.device, &native));
+    assert(native.accel_sequence == first && !native.gyro_valid);
+#endif
     send_core_and_accel();
     assert(uni_hid_parser_wii_accel_snapshot(&f.device, acceleration, &sequence));
     assert(sequence != first);  // Identical readings can still be fresh.
@@ -528,6 +539,12 @@ static void gyro_snapshot_advances_only_on_calibrated_motionplus_packets(void) {
     assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
     expect_vector(gyro, 360 * 1024, -120 * 1024, 40 * 1024);
     const uint32_t first = sequence;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_native_motion_snapshot_t native;
+    assert(uni_hid_parser_native_motion_snapshot(&f.device, &native));
+    assert(native.accel_valid && native.gyro_valid);
+    expect_vector(native.gyro_q10, 360 * 1024, -120 * 1024, 40 * 1024);
+#endif
     send_nunchuk_controls(true);
     send_ack(0x16, 0);
     send_status(true);
@@ -537,6 +554,10 @@ static void gyro_snapshot_advances_only_on_calibrated_motionplus_packets(void) {
     assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
     assert(sequence == first);
     expect_vector(gyro, 360 * 1024, -120 * 1024, 40 * 1024);
+#if SWITCH2_BRIDGE_FULL_INPUT
+    assert(uni_hid_parser_native_motion_snapshot(&f.device, &native));
+    assert(native.gyro_sequence == first);
+#endif
     send_motion(7760, 8200, 7560, false, true, false);
     assert(uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
     assert(sequence != first);  // Equal values do not mean a duplicate packet.
@@ -592,10 +613,23 @@ static void gyro_snapshot_invalidates_on_topology_and_teardown(void) {
     uni_hid_parser_wii_teardown(&f.device);
     assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
     assert(!uni_hid_parser_wii_rumble_ready(&f.device));
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_native_motion_snapshot_t retired;
+    assert(uni_hid_parser_native_motion_snapshot(&f.device, &retired));
+    assert(!retired.accel_valid && !retired.gyro_valid);
+#endif
     f.ready_count = 0;  // A new parser connection gets its own ready notification.
     uni_hid_parser_wii_setup(&f.device);
     finish_setup();
     assert(!uni_hid_parser_wii_gyro_snapshot(&f.device, gyro, &sequence));
+#if SWITCH2_BRIDGE_FULL_INPUT
+    send_motion(7760, 8200, 7560, false, true, false);
+    // An already-active MP first resolves its downstream topology after reconnect.
+    finish_setup();
+    send_motion(7760, 8200, 7560, false, true, false);
+    assert(uni_hid_parser_native_motion_snapshot(&f.device, &retired));
+    assert(retired.gyro_valid && retired.gyro_sequence != first);
+#endif
 }
 
 static void setup_read_and_write_errors_leave_buttons_ready(void) {
@@ -808,6 +842,11 @@ static void legacy_plain_nunchuk_and_wii_u_pro(void) {
     assert(f.device.controller.gamepad.misc_buttons == MISC_BUTTON_START);
     expect_vector(f.device.controller.gamepad.accel, 0, 0, 0);
     expect_vector(f.device.controller.gamepad.gyro, 0, 0, 0);
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_native_motion_snapshot_t native;
+    assert(uni_hid_parser_native_motion_snapshot(&f.device, &native));
+    assert(!native.accel_valid && !native.gyro_valid);
+#endif
 }
 
 static void plus_selects_vertical_without_disabling_motion(void) {

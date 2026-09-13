@@ -2,8 +2,8 @@
 """Bounded, non-pairing qualification of the switch-pico native Joy-Con USB hub.
 
 Requires Linux, PyUSB/libusb, and the existing sudo -n setfacl permission policy.
-Uses the already-paired real R/L donors; it cannot wake or pair them. The JSON
-capture is created exclusively before USB access and retains partial failures.
+Uses already-paired R/L donors or one full gamepad; it cannot wake or pair them.
+The JSON capture is created exclusively before USB access and retains failures.
 No reset, configuration change, pairing exchange, profile access, flash write,
 or HID output is sent. Motor sample playback requires --rumble-sample explicitly.
 """
@@ -37,14 +37,17 @@ MODELS = {
 }
 
 
-def model_references(build_dir: Path) -> dict[str, dict[str, Any]]:
+def model_references(
+    build_dir: Path, *, require_imu: bool = True
+) -> dict[str, dict[str, Any]]:
     cache = {}
     for line in (build_dir / "CMakeCache.txt").read_text().splitlines():
         if line.startswith("SWITCH2_") and ":" in line and "=" in line:
             field, value = line.split("=", 1)
             cache[field.split(":", 1)[0]] = value
     if (
-        cache.get("SWITCH2_BRIDGE_INPUT") == "DUALSENSE"
+        require_imu
+        and cache.get("SWITCH2_BRIDGE_INPUT") in ("DUALSENSE", "GAMEPAD")
         and cache.get("SWITCH2_BRIDGE_IMU_TARGET", "BOTH") != "BOTH"
     ):
         raise ValueError(
@@ -145,6 +148,7 @@ class Check:
                 "duration_seconds": args.duration,
                 "usb_timeout_ms": args.usb_timeout_ms,
                 "rumble_sample": args.rumble_sample,
+                "require_imu": not args.input_only,
             },
             "safety": {
                 "pairing_writes": False,
@@ -170,6 +174,7 @@ class Check:
                 side: {
                     "packets": 0,
                     "valid_native_imu": 0,
+                    "valid_native_packets": 0,
                     "imu_counter_changes": 0,
                     "wrong_side": 0,
                     "unexpected_report": 0,
@@ -186,6 +191,7 @@ class Check:
                     "first_valid_seconds": None,
                     "last_valid_seconds": None,
                     "last_counter_change_seconds": None,
+                    "last_control_change_seconds": None,
                 }
                 for side in SIDES
             },
@@ -697,15 +703,29 @@ class Check:
             rejection = f"native report is {len(packet)} bytes, expected 64"
         else:
             payload = packet[1:]
+            stream["valid_native_packets"] += 1
+            controls = (payload[2:4], payload[5:8])
+            sample["buttons_hex"], sample["stick_hex"] = (
+                part.hex() for part in controls
+            )
+            if any(controls[0]):
+                stream["buttons_nonzero"] += 1
+            if side in self.last_controls and self.last_controls[side] != controls:
+                stream["control_changes"] += 1
+                stream["last_control_change_seconds"] = self.elapsed()
+            self.last_controls[side] = controls
             length_offset = 14 if side == "L" else 15
             length = payload[length_offset]
             key = str(length)
             stream["imu_lengths"][key] = stream["imu_lengths"].get(key, 0) + 1
             if length == 0:
                 stream["zero_length_imu"] += 1
-                rejection = (
-                    "zero-length IMU: inactive donor/neutral fallback is not live input"
-                )
+                if self.args.input_only:
+                    if len(stream["samples"]) < 4:
+                        stream["samples"].append(sample)
+                    stream["last_sample"] = sample
+                else:
+                    rejection = "zero-length IMU: inactive donor/neutral fallback is not live motion"
             else:
                 try:
                     block = (
@@ -743,18 +763,6 @@ class Check:
                     self.last_counter[side] = counter
                     if len(self.imu_evidence[side]) < 512:
                         self.imu_evidence[side].add(block)
-                    controls = (payload[2:4], payload[5:8])
-                    sample["buttons_hex"], sample["stick_hex"] = (
-                        part.hex() for part in controls
-                    )
-                    if any(controls[0]):
-                        stream["buttons_nonzero"] += 1
-                    if (
-                        side in self.last_controls
-                        and self.last_controls[side] != controls
-                    ):
-                        stream["control_changes"] += 1
-                    self.last_controls[side] = controls
                     format_key = f"{decoded['format']:02x}"
                     first_format = format_key not in stream["imu_formats"]
                     stream["imu_formats"][format_key] = (
@@ -783,7 +791,10 @@ class Check:
 
     def counts(self) -> dict[str, int]:
         return {
-            side: self.result["streams"][side]["valid_native_imu"] for side in SIDES
+            side: self.result["streams"][side][
+                "valid_native_packets" if self.args.input_only else "valid_native_imu"
+            ]
+            for side in SIDES
         }
 
     def donors_ready(self) -> None:
@@ -793,23 +804,31 @@ class Check:
             self.poll_pair(until, bool(iteration % 2))
             iteration += 1
             if all(
-                stream["valid_native_imu"] >= 3 and stream["imu_counter_changes"] >= 2
+                (stream["buttons_nonzero"] > 0 and stream["control_changes"] >= 2)
+                if self.args.input_only
+                else (
+                    stream["valid_native_imu"] >= 3
+                    and stream["imu_counter_changes"] >= 2
+                )
                 for stream in self.result["streams"].values()
             ):
                 return
         details = "; ".join(
-            f"{side}: valid={stream['valid_native_imu']}, counter_changes={stream['imu_counter_changes']}, zero_imu={stream['zero_length_imu']}, invalid={stream['invalid']}, timeouts={stream['timeouts']}"
+            f"{side}: imu={stream['valid_native_imu']}, counter_changes={stream['imu_counter_changes']}, buttons={stream['buttons_nonzero']}, control_changes={stream['control_changes']}, zero_imu={stream['zero_length_imu']}, invalid={stream['invalid']}, timeouts={stream['timeouts']}"
             for side, stream in self.result["streams"].items()
         )
         raise RuntimeError(
-            f"donors did not produce fresh decodable native IMU during the manual-wake window; {details}; no pairing/wake/reset was attempted"
+            f"sources did not satisfy the requested live-input evidence during the manual-input window; {details}; no pairing/wake/reset was attempted"
         )
 
     def active(self) -> None:
         until = min(self.deadline, time.monotonic() + self.args.duration)
         initial_counts = self.counts()
         initial_changes = {
-            side: self.result["streams"][side]["imu_counter_changes"] for side in SIDES
+            side: self.result["streams"][side][
+                "control_changes" if self.args.input_only else "imu_counter_changes"
+            ]
+            for side in SIDES
         }
         next_query = time.monotonic()
         round_number = 0
@@ -851,10 +870,12 @@ class Check:
                 "no interleaved control/bulk round was bracketed by valid input from both donors"
             )
         shared = self.imu_evidence["R"] & self.imu_evidence["L"]
-        shared_source = self.models["R"].get("source_mode") == "DUALSENSE"
+        shared_source = self.models["R"].get("source_mode") in ("DUALSENSE", "GAMEPAD")
         self.result["imu_isolation"] = {
             "sample_limit_per_side": 512,
-            "policy": "shared_physical_source"
+            "policy": "not_required_input_only"
+            if self.args.input_only
+            else "shared_physical_source"
             if shared_source
             else "independent_physical_sources",
             "identical_blocks_seen_on_both_sides": len(shared),
@@ -865,7 +886,7 @@ class Check:
                 side: len(blocks - shared) for side, blocks in self.imu_evidence.items()
             },
         }
-        for side in SIDES:
+        for side in () if self.args.input_only else SIDES:
             evidence = (
                 self.imu_evidence[side]
                 if shared_source
@@ -881,18 +902,26 @@ class Check:
         for side in SIDES:
             stream = self.result["streams"][side]
             if (
-                stream["valid_native_imu"] - initial_counts[side] < 3
-                or stream["imu_counter_changes"] - initial_changes[side] < 2
+                self.counts()[side] - initial_counts[side] < 3
+                or stream[
+                    "control_changes" if self.args.input_only else "imu_counter_changes"
+                ]
+                - initial_changes[side]
+                < 2
             ):
                 self.error(
-                    "insufficient fresh native donor IMU during active control/bulk reads",
+                    "insufficient fresh controller transitions"
+                    if self.args.input_only
+                    else "insufficient fresh native source IMU during active control/bulk reads",
                     side,
                 )
-            last_change = stream["last_counter_change_seconds"]
+            last_change = stream[
+                "last_control_change_seconds"
+                if self.args.input_only
+                else "last_counter_change_seconds"
+            ]
             if last_change is None or self.elapsed() - last_change > 2:
-                self.error(
-                    "donor IMU stopped advancing before streaming finished", side
-                )
+                self.error("source stopped advancing before streaming finished", side)
             if stream["wrong_side"] or stream["unexpected_report"] or stream["invalid"]:
                 self.error(
                     f"rejected wrong-side={stream['wrong_side']}, unexpected={stream['unexpected_report']}, malformed={stream['invalid']} HID packets",
@@ -938,7 +967,9 @@ class Check:
                 import usb.util
 
             with self.stage("references"):
-                self.models = model_references(self.args.build_dir)
+                self.models = model_references(
+                    self.args.build_dir, require_imu=not self.args.input_only
+                )
                 self.core, self.util = usb.core, usb.util
             with self.stage("discovery"):
                 self.discover()
@@ -1043,6 +1074,11 @@ def main() -> int:
         type=int,
         default=500,
         help="per control/bulk transfer timeout, 20..3000 ms (default: 500)",
+    )
+    parser.add_argument(
+        "--input-only",
+        action="store_true",
+        help="qualify controllers without IMU; requires real button presses and continued control changes on both halves",
     )
     parser.add_argument(
         "--rumble-sample",

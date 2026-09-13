@@ -1,6 +1,6 @@
-#include "dualsense_input.h"
+#include "native_gamepad_input.h"
 
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_FULL_INPUT
 #include <limits.h>
 #include <string.h>
 
@@ -11,7 +11,7 @@
 #include "profile/controller_profile_runtime.h"
 
 #if !SWITCH2_PROBE_HUB || SWITCH2_BRIDGE_WII_INPUT
-#error "One DualSense requires the native R/L USB hub source mode"
+#error "A full gamepad source requires the native R/L USB hub"
 #endif
 static_assert(PROBE_CONTROLLER_COUNT == 2);
 extern "C" int probe_debug_printf(const char* format, ...);
@@ -40,15 +40,17 @@ struct Child {
     uint32_t pending_token = 0;
     uint32_t pending_us = 0;
     uint32_t pending_ticks = 0;
-    uint32_t pending_motion_sequence = 0;
+    uint32_t pending_accel_sequence = 0;
+    uint32_t pending_gyro_sequence = 0;
     bool pending_motion = false;
     uint8_t pending_report[63]{};
     bool have_committed_motion = false;
-    uint32_t committed_motion_sequence = 0;
+    uint32_t committed_accel_sequence = 0;
+    uint32_t committed_gyro_sequence = 0;
     uint32_t committed_ticks = 0;
 };
 Child g_children[PROBE_CONTROLLER_COUNT];
-Bluepad32DualSenseBridgeSnapshot g_source;
+Bluepad32NativeGamepadSnapshot g_source;
 ControllerProfileTransformResult g_mapped;
 ProbeNativeMotion g_motion;
 bool g_active;
@@ -78,8 +80,10 @@ void discard_output(Child& child) {
     child.have_committed_motion = false;
 }
 
-bool sensors_fresh(uint32_t now_us) {
-    return g_source.motion_valid && now_us - g_source.motion_received_us < kSensorDeadlineUs;
+bool sensors_fresh(const Bluepad32NativeGamepadSnapshot& source, uint32_t now_us) {
+    return source.accel_valid && source.gyro_valid &&
+        now_us - source.accel_received_us < kSensorDeadlineUs &&
+        now_us - source.gyro_received_us < kSensorDeadlineUs;
 }
 
 void unpack_stick_pair(const uint8_t* bytes, uint16_t pair[2]) {
@@ -147,7 +151,7 @@ void lose_source(uint32_t now_ms) {
         g_motion.reset();
         for (uint8_t i = 0; i < PROBE_CONTROLLER_COUNT; ++i) {
             discard_output(g_children[i]);
-            bluepad32_input_backend_dualsense_sample_cancel(i);
+            bluepad32_input_backend_native_sample_cancel(i);
         }
         g_sensor_status = -1;
     }
@@ -156,8 +160,8 @@ void lose_source(uint32_t now_ms) {
 }
 
 void refresh(uint32_t now_ms) {
-    Bluepad32DualSenseBridgeSnapshot source;
-    bluepad32_input_backend_dualsense_snapshot(&source);
+    Bluepad32NativeGamepadSnapshot source;
+    bluepad32_input_backend_native_snapshot(&source);
     // Snapshot first: source receipt timestamps must not be ahead of this clock.
     const uint32_t now_us = time_us_32();
     advance_clock(now_us);
@@ -174,13 +178,15 @@ void refresh(uint32_t now_ms) {
     // motion evaluation. A real publication in the same millisecond still wins.
     if (!changed_connection && g_evaluated && g_evaluated_ms == now_ms &&
         source.state_generation == g_source.state_generation && source.received_us == g_source.received_us &&
-        source.motion_sequence == g_source.motion_sequence &&
-        source.motion_received_us == g_source.motion_received_us && source.motion_valid == g_source.motion_valid) return;
+        source.accel_sequence == g_source.accel_sequence && source.gyro_sequence == g_source.gyro_sequence &&
+        source.accel_received_us == g_source.accel_received_us && source.gyro_received_us == g_source.gyro_received_us &&
+        source.accel_valid == g_source.accel_valid && source.gyro_valid == g_source.gyro_valid &&
+        source.requires_stationary_bias == g_source.requires_stationary_bias) return;
     if (changed_connection) {
         lose_source(now_ms);
         g_motion.reset();
         for (Child& child : g_children) discard_output(child);
-        probe_debug_printf("[PROBE] DualSense source active in slot %u; using validated factory IMU calibration\n", source.slot);
+        probe_debug_printf("[PROBE] Native gamepad source active in slot %u\n", source.slot);
     }
     g_source = source;
     g_active = true;
@@ -194,9 +200,12 @@ void refresh(uint32_t now_ms) {
             feedback.active_profile_number, feedback.policy);
     }
     ProbeNativeMotionSample sample{};
-    sample.accel_valid = sample.gyro_valid = source.motion_valid;
-    sample.accel_sequence = sample.gyro_sequence = source.motion_sequence;
-    sample.accel_us = sample.gyro_us = source.motion_received_us;
+    sample.accel_valid = source.accel_valid;
+    sample.gyro_valid = source.gyro_valid;
+    sample.accel_sequence = source.accel_sequence;
+    sample.gyro_sequence = source.gyro_sequence;
+    sample.accel_us = source.accel_received_us;
+    sample.gyro_us = source.gyro_received_us;
     // SDL -> upright native body [X,-Z,Y], the same physical transform used by
     // the Wii adapter before its mouse-mount rotation. Both halves represent
     // one rigid, full controller: no solo-Joy-Con or mouse mounting rotation.
@@ -206,12 +215,15 @@ void refresh(uint32_t now_ms) {
     sample.gyro_dps[0] = static_cast<float>(source.gyro_q10[0]) / 1024.0f;
     sample.gyro_dps[1] = -static_cast<float>(source.gyro_q10[2]) / 1024.0f;
     sample.gyro_dps[2] = static_cast<float>(source.gyro_q10[1]) / 1024.0f;
-    g_motion.update(now_us, source.controller.connection_generation, sample);
-    const int status = !sensors_fresh(now_us) ? 0 : g_motion.ready() ? 2 : 1;
+    g_motion.update(now_us, source.controller.connection_generation, sample,
+        source.requires_stationary_bias ? ProbeNativeMotionBias::kEstimateStationary :
+                                          ProbeNativeMotionBias::kAlreadyCalibrated);
+    const int status = !sensors_fresh(g_source, now_us) ? 0 : g_motion.ready() ? 2 : 1;
     if (status != g_sensor_status) {
         g_sensor_status = status;
-        probe_debug_printf("[PROBE] DualSense native IMU %s\n", status == 2 ? "ready" :
-            status == 1 ? "waiting for a usable acceleration sample" : "waiting for fresh complete sensors");
+        probe_debug_printf("[PROBE] Native gamepad IMU %s\n", status == 2 ? "ready" :
+            status == 1 ? (source.requires_stationary_bias ? "Wii calibrating: keep still" :
+                          "waiting for a usable acceleration sample") : "waiting for supported fresh sensors");
     }
     for (uint8_t i = 0; i < PROBE_CONTROLLER_COUNT; ++i) {
         // Latest-only: a blocked endpoint never queues obsolete controls/IMU.
@@ -221,15 +233,15 @@ void refresh(uint32_t now_ms) {
 }
 } // namespace
 
-void probe_dualsense_input_init() {
+void probe_native_gamepad_input_init() {
 #if SWITCH2_BRIDGE_SOURCE_AUTO
-    bluepad32_input_backend_select_dualsense_source(nullptr);
+    bluepad32_input_backend_select_native_source(nullptr);
 #else
-    bluepad32_input_backend_select_dualsense_source(kSourceAddress);
+    bluepad32_input_backend_select_native_source(kSourceAddress);
 #endif
 }
 
-void probe_dualsense_input_set_stick_calibration(uint8_t instance, const uint8_t calibration[9]) {
+void probe_native_gamepad_input_set_stick_calibration(uint8_t instance, const uint8_t calibration[9]) {
     if (instance >= PROBE_CONTROLLER_COUNT) return;
     Child& child = g_children[instance];
     child.calibrated = false;
@@ -248,30 +260,31 @@ void probe_dualsense_input_set_stick_calibration(uint8_t instance, const uint8_t
     pack_controls(instance);
 }
 
-void probe_dualsense_input_set_native_stream(uint8_t instance, bool enabled) {
+void probe_native_gamepad_input_set_native_stream(uint8_t instance, bool enabled) {
     if (instance >= PROBE_CONTROLLER_COUNT) return;
     Child& child = g_children[instance];
     if (child.enabled != enabled || !enabled) discard_output(child);
     child.enabled = enabled;
-    if (!enabled) bluepad32_input_backend_dualsense_sample_cancel(instance);
+    if (!enabled) bluepad32_input_backend_native_sample_cancel(instance);
 }
 
-void probe_dualsense_input_poll(uint8_t instance, uint32_t now_ms, probe_controller_input* out) {
+void probe_native_gamepad_input_poll(uint8_t instance, uint32_t now_ms, probe_controller_input* out) {
     if (!out) return;
     if (instance >= PROBE_CONTROLLER_COUNT) { *out = {}; return; }
     refresh(now_ms);
     *out = g_children[instance].input;
 }
 
-uint32_t probe_dualsense_input_peek_native_report(uint8_t instance, uint32_t now_ms, uint8_t report[63]) {
+uint32_t probe_native_gamepad_input_peek_native_report(uint8_t instance, uint32_t now_ms, uint8_t report[63]) {
     if (instance >= PROBE_CONTROLLER_COUNT || !report) return 0;
     refresh(now_ms);
     Child& child = g_children[instance];
     if (!child.enabled || !child.input.active) return 0;
     const uint32_t now_us = time_us_32();
     const bool motion_ready = (SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance)) != 0 &&
-        g_motion.ready() && sensors_fresh(now_us) &&
-        (!child.have_committed_motion || child.committed_motion_sequence != g_source.motion_sequence);
+        g_motion.ready() && sensors_fresh(g_source, now_us) &&
+        (!child.have_committed_motion || child.committed_accel_sequence != g_source.accel_sequence ||
+         child.committed_gyro_sequence != g_source.gyro_sequence);
     if (child.pending_token && (now_us - child.pending_us >= kOutputDeadlineUs ||
         child.pending_motion != motion_ready)) child.pending_token = 0;
     if (!child.pending_token) {
@@ -293,7 +306,8 @@ uint32_t probe_dualsense_input_peek_native_report(uint8_t instance, uint32_t now
             g_motion.quaternion(), g_motion.acceleration(), static_cast<uint16_t>(child.pending_ticks & 0xfff),
             wire_elapsed, 0, child.pending_report + probe_model_imu_data_offset(instance));
         if (child.pending_motion) child.pending_report[probe_model_imu_length_offset(instance)] = 30;
-        child.pending_motion_sequence = g_source.motion_sequence;
+        child.pending_accel_sequence = g_source.accel_sequence;
+        child.pending_gyro_sequence = g_source.gyro_sequence;
         child.pending_us = now_us;
         child.pending_token = ++g_report_token;
     }
@@ -301,27 +315,28 @@ uint32_t probe_dualsense_input_peek_native_report(uint8_t instance, uint32_t now
     return child.pending_token;
 }
 
-bool probe_dualsense_input_commit_native_report(uint8_t instance, uint32_t token) {
+bool probe_native_gamepad_input_commit_native_report(uint8_t instance, uint32_t token) {
     if (instance >= PROBE_CONTROLLER_COUNT || !token) return false;
     Child& child = g_children[instance];
     // Check the live source even when the caller did not poll after a disconnect.
-    Bluepad32DualSenseBridgeSnapshot source;
-    bluepad32_input_backend_dualsense_snapshot(&source);
+    Bluepad32NativeGamepadSnapshot source;
+    bluepad32_input_backend_native_snapshot(&source);
     const uint32_t now_us = time_us_32();
     if (!child.enabled || !g_active || child.pending_token != token ||
         !source.controller.active || source.slot != g_source.slot ||
         source.controller.connection_generation != g_source.controller.connection_generation ||
         source.state_generation != g_source.state_generation ||
-        source.motion_sequence != g_source.motion_sequence ||
-        source.motion_received_us != g_source.motion_received_us ||
-        source.motion_valid != g_source.motion_valid ||
+        source.accel_sequence != g_source.accel_sequence || source.gyro_sequence != g_source.gyro_sequence ||
+        source.accel_received_us != g_source.accel_received_us || source.gyro_received_us != g_source.gyro_received_us ||
+        source.accel_valid != g_source.accel_valid || source.gyro_valid != g_source.gyro_valid ||
+        source.requires_stationary_bias != g_source.requires_stationary_bias ||
         now_us - source.received_us >= kInputDeadlineUs || now_us - child.pending_us >= kOutputDeadlineUs ||
-        (child.pending_motion && (!source.motion_valid ||
-            now_us - g_source.motion_received_us >= kSensorDeadlineUs))) return false;
+        (child.pending_motion && !sensors_fresh(source, now_us))) return false;
     child.pending_token = 0;
     if (child.pending_motion) {
         child.have_committed_motion = true;
-        child.committed_motion_sequence = child.pending_motion_sequence;
+        child.committed_accel_sequence = child.pending_accel_sequence;
+        child.committed_gyro_sequence = child.pending_gyro_sequence;
         child.committed_ticks = child.pending_ticks;
     }
     ++child.counter;

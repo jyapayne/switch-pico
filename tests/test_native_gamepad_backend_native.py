@@ -4,15 +4,18 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 
-def test_dualsense_backend_native(tmp_path: Path) -> None:
+
+@pytest.mark.parametrize("source", ("GAMEPAD", "DUALSENSE"))
+def test_native_gamepad_backend_native(tmp_path: Path, source: str) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
-    executable = tmp_path / "dualsense_backend_test"
+    executable = tmp_path / "native_gamepad_backend_test"
     firmware = root / "src" / "firmware"
     sources = [
-        root / "tests" / "dualsense_backend_test.cpp",
+        root / "tests" / "native_gamepad_backend_test.cpp",
         firmware / "profile" / "controller_profile.cpp",
         firmware / "profile" / "controller_profile_transform.cpp",
         firmware / "profile" / "controller_synthetic_input.cpp",
@@ -34,7 +37,8 @@ def test_dualsense_backend_native(tmp_path: Path) -> None:
             "-DSWITCH_PICO_USB_OUTPUT_MODES=1",
             "-DSWITCH_PICO_ENABLE_BLE=1",
             "-DSWITCH_PICO_ENABLE_CLASSIC=1",
-            "-DSWITCH2_BRIDGE_DUALSENSE_INPUT=1",
+            "-DSWITCH2_BRIDGE_FULL_INPUT=1",
+            f"-DSWITCH2_BRIDGE_{source}_INPUT=1",
             f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
             f"-I{firmware}",
             f"-I{root / 'bluepad32_config'}",
@@ -52,3 +56,12 @@ def test_dualsense_backend_native(tmp_path: Path) -> None:
         "cue-races",
     ):
         subprocess.run([str(executable), scenario], check=True, cwd=root)
+    if source == "GAMEPAD":
+        for scenario in (
+            "sensorless-admission",
+            "independent-motion",
+            "paired-source",
+            "pair-cue-races",
+            "mono-rumble",
+        ):
+            subprocess.run([str(executable), scenario], check=True, cwd=root)

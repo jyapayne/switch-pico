@@ -13,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from prepare_bluepad32 import prepare_bluepad32
 
 
-def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
+@pytest.mark.parametrize("full_input", [False, True])
+def test_switch2_parser_protocol_and_lifecycle(
+    tmp_path: Path, full_input: bool
+) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("cc") or shutil.which("gcc")
     assert compiler is not None, "a host C compiler is required"
@@ -24,12 +27,17 @@ def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
     if sdk_path := os.environ.get("PICO_SDK_PATH"):
         sdk_candidates.insert(0, Path(sdk_path))
     btstack = next(
-        (sdk / "lib" / "btstack" / "src" for sdk in sdk_candidates
-         if (sdk / "lib" / "btstack" / "src" / "ble" / "gatt_client.h").is_file()),
+        (
+            sdk / "lib" / "btstack" / "src"
+            for sdk in sdk_candidates
+            if (sdk / "lib" / "btstack" / "src" / "ble" / "gatt_client.h").is_file()
+        ),
         None,
     )
     if btstack is None:
-        pytest.skip("Pico SDK BTstack headers required; configure firmware or set PICO_SDK_PATH")
+        pytest.skip(
+            "Pico SDK BTstack headers required; configure firmware or set PICO_SDK_PATH"
+        )
     prepared = prepare_bluepad32(
         root / "external" / "bluepad32",
         root / "patches" / "bluepad32-sdl3-imu.patch",
@@ -48,6 +56,7 @@ def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
             "-fdata-sections",
             "-DENABLE_BLE",
             "-DENABLE_CLASSIC",
+            f"-DSWITCH2_BRIDGE_FULL_INPUT={int(full_input)}",
             f"-I{root / 'tests' / 'switch2_parser_native_stubs'}",
             f"-I{root / 'bluepad32_config'}",
             f"-I{component / 'include'}",
@@ -58,6 +67,9 @@ def test_switch2_parser_protocol_and_lifecycle(tmp_path: Path) -> None:
             str(root / "tests" / "switch2_parser_native_test.c"),
             str(root / "bluepad32_config" / "parser" / "uni_hid_parser_switch2.c"),
             str(root / "bluepad32_config" / "parser" / "uni_switch2_haptics.c"),
+            str(
+                root / "bluepad32_config" / "parser" / "uni_hid_parser_native_motion.c"
+            ),
             str(btstack / "btstack_util.c"),
             "-Wl,--gc-sections",
             "-o",

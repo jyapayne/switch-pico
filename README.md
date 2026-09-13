@@ -879,6 +879,50 @@ the checker below. Its configured shared-source policy permits identical IMU
 blocks across the halves while retaining per-child identity, report-ID,
 fresh-counter and control/bulk isolation checks.
 
+**Any supported gamepad (0.70):** `SWITCH2_BRIDGE_INPUT=GAMEPAD` uses the same
+native R/L hub and private identity/calibration captures, but accepts the normal
+Bluepad32 gamepad families instead of filtering for a DualSense. Use a separate
+private hub build with `SWITCH_PICO_BLUETOOTH_MODE=MIXED` to enable both Classic
+and BLE controllers, and disable both `SWITCH_PICO_SWITCH2_MOUSE_CAPTURE` and
+`SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE`. This is one logical controller
+feeding one virtual R/L pair, not additional players. An empty source address
+requires one uniquely eligible logical controller; multiple eligible sources
+fail closed. An explicit address selects that controller (either member of an
+existing Switch2 Joy-Con pair). Ordinary AIO pairing, identity, layout and
+profile behavior is retained; original Switch Joy-Con grouping is not added.
+
+- Buttons, sticks and profiles work independently of motion capability.
+- Calibrated motion providers cover DS4, DS5/Edge, Switch/Joy-Con-compatible
+  parsers, Switch2 Pro/Joy-Con, PS Move, and Wii/MotionPlus. Motion requires actual
+  supported, calibrated and fresh acceleration **and** gyro samples. A pad with
+  absent/invalid sensors remains usable for controls; no IMU is invented.
+- Sensor counters advance at parser ingress, not when polled or when buttons
+  arrive. A paired left Joy-Con cannot refresh the right-owned sensor stream.
+  Wii acceleration cannot refresh a stalled MotionPlus gyro stream.
+- `SWITCH2_BRIDGE_IMU_TARGET=LEFT|RIGHT|BOTH` also applies to `GAMEPAD`; Wii alone
+  estimates residual bias while stationary. Factory calibration already runs;
+  caching residual Wii bias across boots without revalidation is not implemented.
+- Native cue requests use each source driver's bounded compatibility vibration.
+  Mono drivers combine the two logical contributions; paired Switch2 Joy-Cons
+  target their actual halves. This does not promise stereo, HD-waveform fidelity
+  or physical actuator onset. Completion means driver dispatch (accepted L2CAP
+  submission for DS5), not a remote application ACK. Missing rumble capability
+  fails the request rather than claiming a motor response.
+- The dedicated `WII` source remains the IR/native-mouse path. `GAMEPAD` does not
+  synthesize mouse movement or rail buttons.
+
+The private `build-switch2-native-gamepad` image uses mixed Bluetooth and the
+unchanged stock USB socket. Software regressions cover real parser calibration,
+report integrity/freshness, source selection, split/reset/backpressure, Wii-only
+settling and cue lifetimes. DualSense, generic, existing Joy-Con/Wii, and ordinary
+AIO mixed/BLE/Classic firmware builds pass. The new generic image has not been
+flashed or physically qualified across these controller families.
+
+For sensorless hardware, the checker supports `--input-only`: press real buttons
+and keep changing controls on both halves during the run. Neutral fallback
+alone cannot qualify. The result explicitly records that IMU was not required;
+omit this option to retain the strict dual-IMU check.
+
 With the existing private build configured, qualify on a PC using:
 
 ```sh

@@ -47,7 +47,7 @@ void probe_controller_input_set_stick_calibration(const uint8_t calibration[9]);
 // Native feature changes are output barriers, not Bluetooth/IMU resets.
 void probe_controller_input_set_native_features(uint8_t features);
 #endif
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_FULL_INPUT
 // Supply each child's advertised, validated nine-byte stick record. Native
 // output stays unavailable until that child's calibration has been supplied.
 void probe_controller_input_set_full_stick_calibration(uint8_t instance, const uint8_t calibration[9]);
@@ -55,7 +55,7 @@ void probe_controller_input_set_full_stick_calibration(uint8_t instance, const u
 // Core0 native07/08 output. Disable discards queued/prepared data; repeated
 // enable preserves it. Joy-Con mode relays its bounded FIFO; right-only Wii
 // mode synthesizes fresh calibrated sensors and the selected IR pointer.
-// DualSense mode splits one full controller into independent R/L output streams;
+// Full-controller mode splits one supported gamepad into independent R/L output streams;
 // controls remain live while motion is unavailable. Only Wii estimates stationary bias.
 // No pairing changes.
 void probe_controller_input_set_native_stream(uint8_t instance, bool enabled);

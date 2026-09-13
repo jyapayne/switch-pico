@@ -13,7 +13,7 @@
 namespace {
 uint64_t now_us = 1000000;
 uint32_t stage;
-Bluepad32DualSenseBridgeSnapshot source;
+Bluepad32NativeGamepadSnapshot source;
 ControllerProfile profile;
 bool alternating_shortcut;
 bool shortcut_phase;
@@ -32,11 +32,11 @@ void bluepad32_input_backend_start() { stage = 2; }
 void bluepad32_input_backend_poll() {}
 void bluepad32_input_backend_diagnostics(Bluepad32BackendDiagnostics* out) { *out = {}; out->initialization_stage = stage; }
 void bluepad32_input_backend_open_pairing_window() {}
-void bluepad32_input_backend_select_dualsense_source(const uint8_t*) {}
-void bluepad32_input_backend_dualsense_snapshot(Bluepad32DualSenseBridgeSnapshot* out) { *out = source; }
-bool bluepad32_input_backend_dualsense_sample_request(uint8_t, uint8_t, uint64_t*) { return false; }
-int bluepad32_input_backend_dualsense_sample_result(uint8_t, uint64_t) { return -1; }
-void bluepad32_input_backend_dualsense_sample_cancel(uint8_t) {}
+void bluepad32_input_backend_select_native_source(const uint8_t*) {}
+void bluepad32_input_backend_native_snapshot(Bluepad32NativeGamepadSnapshot* out) { *out = source; }
+bool bluepad32_input_backend_native_sample_request(uint8_t, uint8_t, uint64_t*) { return false; }
+int bluepad32_input_backend_native_sample_result(uint8_t, uint64_t) { return -1; }
+void bluepad32_input_backend_native_sample_cancel(uint8_t) {}
 void bluepad32_input_backend_queue_profile_feedback(uint8_t, uint32_t, uint8_t, ControllerProfileConfirmationPolicy) {}
 void controller_profile_runtime_reset() { profile = controller_profile_default(controller_identity_global(), 0); }
 bool controller_profile_runtime_take_initial_profile_indication(uint8_t, ControllerProfileRuntimeProfileChangeEvent*) { return false; }
@@ -94,8 +94,9 @@ void publish(bool motion = true) {
     source.received_us = time_us_32();
     ++source.state_generation;
     if (motion) {
-        source.motion_received_us = time_us_32();
-        ++source.motion_sequence;
+        source.accel_received_us = source.gyro_received_us = time_us_32();
+        ++source.accel_sequence;
+        ++source.gyro_sequence;
     }
 }
 uint32_t peek(uint8_t instance) {
@@ -210,7 +211,7 @@ void independent_backpressure_and_resets() {
 }
 
 void real_motion_admission_and_loss() {
-    source.motion_valid = true;
+    source.accel_valid = source.gyro_valid = true;
     source.accel_q13[1] = 8192; // SDL face-up gravity -> native +Z, no mouse mounting.
     // These values have already passed the DS5 factory-calibration path.
     // Even a controller rotating at connection must not wait for stationary bias estimation.
@@ -262,11 +263,11 @@ void real_motion_admission_and_loss() {
     source.gyro_q10[1] -= 90 * 1024;
     publish();
     const uint32_t obsolete = peek(0);
-    source.motion_valid = false;
+    source.accel_valid = source.gyro_valid = false;
     assert(!probe_controller_input_commit_native_report(0, obsolete));
     publish(false); pair();
     assert(controls[0].active && reports[0][2] == 2 && imu_length(0) == 0 && imu_length(1) == 0);
-    source.motion_valid = true;
+    source.accel_valid = source.gyro_valid = true;
     publish(); pair();
     assert(imu_length(0) == 30);
     for (unsigned i = 0; i < 38; ++i) { publish(false); pair(); }
@@ -275,7 +276,7 @@ void real_motion_admission_and_loss() {
     const uint32_t old_right = peek(0), old_left = peek(1);
     // Even a reconnect whose teardown was missed retires both USB identities.
     ++source.controller.connection_generation;
-    source.motion_valid = false; // The backend withholds motion until a new report in the new epoch.
+    source.accel_valid = source.gyro_valid = false; // New epochs require fresh reports.
     assert(!probe_controller_input_commit_native_report(0, old_right));
     assert(!probe_controller_input_commit_native_report(1, old_left));
     pair();
@@ -299,7 +300,7 @@ void selected_motion_target_keeps_both_control_halves() {
     source.controller.connection_generation = 99;
     source.controller.state.button_south = true;
     source.controller.state.dpad_up = true;
-    source.motion_valid = true;
+    source.accel_valid = source.gyro_valid = true;
     source.accel_q13[1] = 8192;
     profile = controller_profile_default(controller_identity_global(), 0);
     calibrate(0, 2048, 2048, 2047, 2047, 2048, 2048);
@@ -318,6 +319,43 @@ void selected_motion_target_keeps_both_control_halves() {
     no_mouse_or_rails();
 }
 
+void wii_bias_and_independent_sensor_freshness() {
+    ++source.controller.connection_generation;
+    source.requires_stationary_bias = true;
+    source.gyro_q10[1] = 2 * 1024;
+    publish(); pair();
+    assert(controls[0].active && controls[1].active);
+    assert(reports[0][2] == 0x01 && reports[1][2] == 0x08);
+    assert(imu_length(0) == 0 && imu_length(1) == 0);
+    for (unsigned i = 0; i < 400; ++i) { publish(); pair(); }
+    for (uint8_t instance = 0; instance < 2; ++instance) {
+        assert(imu_length(instance) == ((SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance)) ? 30 : 0));
+    }
+    // Accelerometer-only reports must not refresh a stalled MotionPlus stream.
+    for (unsigned i = 0; i < 38; ++i) {
+        publish(false);
+        source.accel_received_us = time_us_32();
+        ++source.accel_sequence;
+        pair();
+    }
+    assert(controls[0].active && controls[1].active);
+    assert(imu_length(0) == 0 && imu_length(1) == 0);
+    source.gyro_valid = false;
+    publish(); pair();
+    assert(reports[0][2] == 0x01 && reports[1][2] == 0x08);
+    assert(imu_length(0) == 0 && imu_length(1) == 0);
+    // Returning real Wii sensors must settle again, not reuse the old bias.
+    source.gyro_valid = true;
+    publish(); pair();
+    assert(imu_length(0) == 0 && imu_length(1) == 0);
+    // A factory-calibrated source switching policy must initialize immediately.
+    source.requires_stationary_bias = false;
+    publish(); pair();
+    for (uint8_t instance = 0; instance < 2; ++instance) {
+        assert(imu_length(instance) == ((SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance)) ? 30 : 0));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -331,5 +369,6 @@ int main() {
     independent_backpressure_and_resets();
     if (SWITCH2_BRIDGE_IMU_TARGET_MASK == 3) real_motion_admission_and_loss();
     selected_motion_target_keeps_both_control_halves();
+    wii_bias_and_independent_sensor_freshness();
     return 0;
 }

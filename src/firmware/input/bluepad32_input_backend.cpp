@@ -36,8 +36,9 @@
 #include <uni.h>
 extern "C" {
 #include "parser/uni_hid_parser_wii.h"
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_FULL_INPUT
 #include "parser/uni_hid_parser_ds5.h"
+#include "parser/uni_hid_parser_native_motion.h"
 #endif
 }
 #include "parser/uni_hid_parser_switch2.h"
@@ -257,19 +258,30 @@ constexpr WiiCuePattern kWiiCuePatterns[8] = {
 constexpr uint32_t kWiiCueDeadlineMs = 2000;
 #endif
 
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-struct DualSenseIngress {
-    uint32_t report_sequence = 0;
+#if SWITCH2_BRIDGE_FULL_INPUT
+struct NativeGamepadIngress {
     uint32_t received_us = 0;
-    uint32_t motion_sequence = 0;
-    uint32_t motion_received_us = 0;
+    uint32_t accel_sequence = 0;
+    uint32_t gyro_sequence = 0;
+    uint32_t accel_received_us = 0;
+    uint32_t gyro_received_us = 0;
     bool has_report = false;
-    bool motion_valid = false;
+    bool accel_valid = false;
+    bool gyro_valid = false;
     int32_t accel_q13[3]{};
     int32_t gyro_q10[3]{};
 };
 
-struct DualSenseCue {
+// Physical parser counters survive logical pairing/reselection epochs. They
+// are retired only with the Bluetooth connection, never by a snapshot getter.
+struct NativeGamepadReportIngress {
+    uni_hid_device_t* device = nullptr;
+    uint32_t report_sequence = 0;
+    uint32_t accel_sequence = 0;
+    uint32_t gyro_sequence = 0;
+};
+
+struct NativeGamepadCue {
     uint64_t token = 0;
     uint32_t connection_generation = 0;
     uint32_t requested_ms = 0;
@@ -282,20 +294,20 @@ struct DualSenseCue {
     bool in_flight = false;
 };
 
-struct DualSenseMotorOutput {
+struct NativeGamepadMotorOutput {
     uint32_t deadline_ms = 0;
     uint8_t magnitude[2]{};
     bool owned = false;
 };
 
-// Same bounded pulse vocabulary as Wii, with real per-motor magnitudes.
+// Same bounded pulse vocabulary as Wii, with source-driver motor magnitudes.
 // These are compatibility-vibration approximations, not uploaded HD waveforms.
-struct DualSenseCuePattern {
+struct NativeGamepadCuePattern {
     uint16_t phases_ms[7];
     uint8_t count;
     uint8_t magnitude;
 };
-constexpr DualSenseCuePattern kDualSenseCuePatterns[8] = {
+constexpr NativeGamepadCuePattern kNativeGamepadCuePatterns[8] = {
     {{0}, 0, 0},
     {{1000}, 1, 160},
     {{100, 180, 100, 180, 100, 180, 100}, 7, 200},
@@ -305,7 +317,7 @@ constexpr DualSenseCuePattern kDualSenseCuePatterns[8] = {
     {{60}, 1, 96},
     {{120}, 1, 220},
 };
-constexpr uint32_t kDualSenseCueDeadlineMs = 2000;
+constexpr uint32_t kNativeGamepadCueDeadlineMs = 2000;
 #endif
 
 
@@ -345,9 +357,9 @@ struct BackendSlot {
 #ifdef SWITCH2_BRIDGE_WII_INPUT
     WiiMotionIngress wii_motion;
 #endif
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    DualSenseIngress dualsense_motion;
-    DualSenseMotorOutput dualsense_output;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    NativeGamepadIngress native_motion;
+    NativeGamepadMotorOutput native_output;
 #endif
 #ifdef SWITCH_PICO_WII_IR_GYRO
     WiiAimSource wii_aim;
@@ -436,79 +448,97 @@ void retire_wii_slot(uint8_t slot_index) {
 }
 #endif
 
+#if SWITCH2_BRIDGE_FULL_INPUT
+bool g_native_explicit_address = false;
+uint8_t g_native_address[6]{};
+uint8_t g_native_slot = 0xff;
+uint32_t g_native_generation = 0;
+Bluepad32NativeGamepadSnapshot g_native_snapshot{};
+NativeGamepadCue g_native_cues[2]{};
+uint64_t g_next_native_token = 1;
+uni_hid_device_t* g_native_pending_devices[kSlotCount]{};
+NativeGamepadReportIngress g_native_reports[kSlotCount]{};
+
+bool native_device_allowed(const uni_hid_device_t* device) {
+    if (device == nullptr || !uni_hid_device_is_gamepad(device)) return false;
 #if SWITCH2_BRIDGE_DUALSENSE_INPUT
-bool g_dualsense_explicit_address = false;
-uint8_t g_dualsense_address[6]{};
-uint8_t g_dualsense_slot = 0xff;
-uint32_t g_dualsense_generation = 0;
-Bluepad32DualSenseBridgeSnapshot g_dualsense_snapshot{};
-DualSenseCue g_dualsense_cues[2]{};
-uint64_t g_next_dualsense_token = 1;
-uni_hid_device_t* g_dualsense_pending_devices[kSlotCount]{};
-
-bool dualsense_source_matches(const uni_hid_device_t* device) {
-    return device != nullptr &&
-        device->controller_type == CONTROLLER_TYPE_PS5Controller &&
-        device->report_parser.parse_input_report == uni_hid_parser_ds5_parse_input_report &&
-        (!g_dualsense_explicit_address ||
-         memcmp(device->conn.btaddr, g_dualsense_address, 6) == 0);
+    return device->controller_type == CONTROLLER_TYPE_PS5Controller &&
+        device->report_parser.parse_input_report == uni_hid_parser_ds5_parse_input_report;
+#else
+    return true;
+#endif
 }
 
-bool eligible_dualsense(const BackendSlot& slot) {
-    return slot.active && slot.companion == nullptr && dualsense_source_matches(slot.device);
+bool native_address_matches(const uni_hid_device_t* device) {
+    return device != nullptr && memcmp(device->conn.btaddr, g_native_address, 6) == 0;
 }
 
-void cancel_dualsense_cue_locked(DualSenseCue& cue) {
+bool eligible_native_gamepad(const BackendSlot& slot) {
+    return slot.active && native_device_allowed(slot.device) &&
+        (slot.companion == nullptr || native_device_allowed(slot.companion)) &&
+        (!g_native_explicit_address || native_address_matches(slot.device) ||
+         native_address_matches(slot.companion));
+}
+
+uni_hid_device_t* native_rumble_target(const BackendSlot& slot, uint8_t side) {
+    // Paired Joy-Cons have a real left owner and right companion. A solo pad's
+    // driver owns its motor topology, including mono OR/max mixing.
+    return slot.companion != nullptr && side == 0 ? slot.companion : slot.device;
+}
+
+bool native_rumble_capable(const BackendSlot& slot, uint8_t side) {
+    const uni_hid_device_t* device = native_rumble_target(slot, side);
+    return device != nullptr && device->report_parser.play_dual_rumble != nullptr;
+}
+
+void cancel_native_cue_locked(NativeGamepadCue& cue) {
     cue.active = false;
     cue.result = -1;
     // The slot's last motor output remains owned until the timer replaces it.
 }
 
-void refresh_dualsense_source_locked(bool reselection = false) {
+void refresh_native_source_locked(bool reselection = false) {
     uint8_t selected = 0xff;
     for (uint8_t index = 0; index < kSlotCount; ++index) {
-        if (!eligible_dualsense(g_slots[index])) continue;
+        if (!eligible_native_gamepad(g_slots[index])) continue;
         if (selected != 0xff) {
             selected = 0xff;  // Never blend or choose by connection order.
             break;
         }
         selected = index;
     }
-    if (!reselection && selected == g_dualsense_slot &&
+    if (!reselection && selected == g_native_slot &&
         (selected == 0xff ||
-         g_slots[selected].connection_generation == g_dualsense_generation)) return;
-    for (DualSenseCue& cue : g_dualsense_cues) cancel_dualsense_cue_locked(cue);
-    g_dualsense_snapshot = {};
-    g_dualsense_slot = selected;
-    g_dualsense_generation = 0;
+         g_slots[selected].connection_generation == g_native_generation)) return;
+    for (NativeGamepadCue& cue : g_native_cues) cancel_native_cue_locked(cue);
+    g_native_snapshot = {};
+    g_native_slot = selected;
+    g_native_generation = 0;
     if (selected != 0xff) {
         BackendSlot& slot = g_slots[selected];
         g_macro_capture.disconnect(selected, slot.connection_generation, time_us_32());
         // A missed inactive snapshot must still retire the adapter's old epoch.
-        g_dualsense_generation = ++slot.connection_generation;
+        g_native_generation = ++slot.connection_generation;
         ++slot.state_generation;
-        slot.dualsense_motion.has_report = false;
-        slot.dualsense_motion.motion_valid = false;
-        slot.dualsense_motion.received_us = 0;
-        slot.dualsense_motion.motion_received_us = 0;
+        slot.native_motion = {};
     }
 }
 
-void retire_dualsense_slot(uint8_t index) {
-    if (g_dualsense_slot == index) {
-        g_dualsense_slot = 0xff;
-        g_dualsense_generation = 0;
-        g_dualsense_snapshot = {};
+void retire_native_slot(uint8_t index) {
+    if (g_native_slot == index) {
+        g_native_slot = 0xff;
+        g_native_generation = 0;
+        g_native_snapshot = {};
     }
-    for (DualSenseCue& cue : g_dualsense_cues)
+    for (NativeGamepadCue& cue : g_native_cues)
         if (cue.slot == index) cue = {};
-    g_slots[index].dualsense_motion = {};
-    g_slots[index].dualsense_output = {};
+    g_slots[index].native_motion = {};
+    g_slots[index].native_output = {};
 }
 
-bool dualsense_cue_current(const DualSenseCue& cue) {
-    return cue.slot < kSlotCount && cue.slot == g_dualsense_slot &&
-        cue.connection_generation == g_dualsense_generation &&
+bool native_cue_current(const NativeGamepadCue& cue) {
+    return cue.slot < kSlotCount && cue.slot == g_native_slot &&
+        cue.connection_generation == g_native_generation &&
         cue.connection_generation == g_slots[cue.slot].connection_generation;
 }
 #endif
@@ -615,8 +645,8 @@ bool has_free_slot() {
         physical_count += slot.device != nullptr;
         physical_count += slot.companion != nullptr;
     }
-    #if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    for (const auto* pending : g_dualsense_pending_devices) physical_count += pending != nullptr;
+    #if SWITCH2_BRIDGE_FULL_INPUT
+    for (const auto* pending : g_native_pending_devices) physical_count += pending != nullptr;
     #endif
     critical_section_exit(&g_state_lock);
     return physical_count < kSlotCount;
@@ -661,7 +691,7 @@ int reserve_device_slot(uni_hid_device_t* device) {
     }
     const int tracked = slot_for_device(device);
     if (g_retired_devices[physical_index] == device) {
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_FULL_INPUT
         return -1;
 #else
         if (uni_hid_parser_switch2_is_ble_device(device)) return -1;
@@ -678,7 +708,7 @@ int reserve_device_slot(uni_hid_device_t* device) {
             return -1;
         }
     }
-#if !SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if !SWITCH2_BRIDGE_FULL_INPUT
     if (g_slots[physical_index].device == nullptr) {
         return physical_index;
     }
@@ -1374,8 +1404,8 @@ ConnectionStatus compute_connection_status() {
         all_ready = all_ready && (!has_device || slot.active);
         any_connecting = any_connecting || (!slot.active && has_device);
     }
-    #if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    for (const auto* pending : g_dualsense_pending_devices) {
+    #if SWITCH2_BRIDGE_FULL_INPUT
+    for (const auto* pending : g_native_pending_devices) {
         if (pending != nullptr) {
             ++physical_count;
             all_ready = false;
@@ -1437,23 +1467,28 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
             memcpy(g_wii_snapshot.gyro_q10, motion.gyro_q10, sizeof(motion.gyro_q10));
         }
 #endif
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-        if (slot == g_dualsense_slot && target.dualsense_motion.has_report &&
-            target.connection_generation == g_dualsense_generation) {
-            const DualSenseIngress& motion = target.dualsense_motion;
-            g_dualsense_snapshot.slot = slot;
-            g_dualsense_snapshot.controller = {
+#if SWITCH2_BRIDGE_FULL_INPUT
+        if (slot == g_native_slot && target.native_motion.has_report &&
+            target.connection_generation == g_native_generation) {
+            const NativeGamepadIngress& motion = target.native_motion;
+            g_native_snapshot.slot = slot;
+            g_native_snapshot.controller = {
                 target.active, target.connection_generation, target.identity,
                 target.pre_hotkey_button_mask, target.state,
                 target.accelerometer, target.nunchuk_accelerometer};
-            g_dualsense_snapshot.state_generation = target.state_generation;
-            g_dualsense_snapshot.received_us = motion.received_us;
-            g_dualsense_snapshot.battery = device->controller.battery;
-            g_dualsense_snapshot.motion_valid = motion.motion_valid;
-            g_dualsense_snapshot.motion_sequence = motion.motion_sequence;
-            g_dualsense_snapshot.motion_received_us = motion.motion_received_us;
-            memcpy(g_dualsense_snapshot.accel_q13, motion.accel_q13, sizeof(motion.accel_q13));
-            memcpy(g_dualsense_snapshot.gyro_q10, motion.gyro_q10, sizeof(motion.gyro_q10));
+            g_native_snapshot.state_generation = target.state_generation;
+            g_native_snapshot.received_us = motion.received_us;
+            g_native_snapshot.battery = device->controller.battery;
+            g_native_snapshot.requires_stationary_bias =
+                device->controller_type == CONTROLLER_TYPE_WiiController;
+            g_native_snapshot.accel_valid = motion.accel_valid;
+            g_native_snapshot.gyro_valid = motion.gyro_valid;
+            g_native_snapshot.accel_sequence = motion.accel_sequence;
+            g_native_snapshot.gyro_sequence = motion.gyro_sequence;
+            g_native_snapshot.accel_received_us = motion.accel_received_us;
+            g_native_snapshot.gyro_received_us = motion.gyro_received_us;
+            memcpy(g_native_snapshot.accel_q13, motion.accel_q13, sizeof(motion.accel_q13));
+            memcpy(g_native_snapshot.gyro_q10, motion.gyro_q10, sizeof(motion.gyro_q10));
         }
 #endif
         g_macro_capture.observe(slot, target.connection_generation,
@@ -1468,8 +1503,8 @@ void publish_all_neutral() {
     wii_ir_pointer_reset();
 #endif
     for (BackendSlot& slot : g_slots) {
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-        retire_dualsense_slot(static_cast<uint8_t>(&slot - g_slots));
+#if SWITCH2_BRIDGE_FULL_INPUT
+        retire_native_slot(static_cast<uint8_t>(&slot - g_slots));
 #endif
 #ifdef SWITCH2_BRIDGE_WII_INPUT
         retire_wii_slot(static_cast<uint8_t>(&slot - g_slots));
@@ -2007,8 +2042,8 @@ void reset_slot_hotkeys(BackendSlot& slot) {
                                slot.connection_generation, time_us_32());
     slot.wii_orientation_pending = false;
     slot.pending_wii_orientation = {};
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    retire_dualsense_slot(static_cast<uint8_t>(&slot - g_slots));
+#if SWITCH2_BRIDGE_FULL_INPUT
+    retire_native_slot(static_cast<uint8_t>(&slot - g_slots));
 #endif
 #ifdef SWITCH2_BRIDGE_WII_INPUT
     retire_wii_slot(static_cast<uint8_t>(&slot - g_slots));
@@ -2577,7 +2612,7 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
 
 void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
                      uint8_t weak, uint8_t strong) {
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_FULL_INPUT
     if (device->controller_type == CONTROLLER_TYPE_PS5Controller &&
         device->report_parser.parse_input_report == uni_hid_parser_ds5_parse_input_report) {
         // Local feedback shares the bounded writer. Its stale compatibility
@@ -2726,9 +2761,10 @@ void dispatch_wii_cue(const WiiCueDispatch& command) {
 }
 #endif
 
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-struct DualSenseCueDispatch {
+#if SWITCH2_BRIDGE_FULL_INPUT
+struct NativeGamepadCueDispatch {
     uni_hid_device_t* device = nullptr;
+    uni_hid_device_t* companion = nullptr;
     uint32_t connection_generation = 0;
     uint32_t prepared_ms = 0;
     uint64_t token[2]{};
@@ -2737,27 +2773,27 @@ struct DualSenseCueDispatch {
     uint8_t slot = 0xff;
 };
 
-// One DS5 driver timer controls both motors. Recompute a combined packet at
-// each boundary; use the shortest ON remainder, then refresh the surviving
-// side. Absolute cue timelines skip missed pulses, never accumulate a backlog.
-bool prepare_dualsense_cues(uint8_t index, uint32_t now_ms,
+// Source drivers use a shared finite timer (or one per paired half). Recompute
+// both contributions at each boundary; the shortest ON remainder protects a
+// mono actuator too. Absolute timelines skip missed pulses, never queue them.
+bool prepare_native_cues(uint8_t index, uint32_t now_ms,
                             bool local_active, bool local_dispatch,
-                            DualSenseCueDispatch* command) {
+                            NativeGamepadCueDispatch* command) {
     BackendSlot& slot = g_slots[index];
-    DualSenseMotorOutput& previous = slot.dualsense_output;
+    NativeGamepadMotorOutput& previous = slot.native_output;
     bool busy = false;
     bool pending = false;
     uint16_t duration = UINT16_MAX;
     uint8_t magnitude[2]{};
     for (uint8_t side = 0; side < 2; ++side) {
-        DualSenseCue& cue = g_dualsense_cues[side];
+        NativeGamepadCue& cue = g_native_cues[side];
         if (cue.slot != index) continue;
-        if (!dualsense_cue_current(cue) ||
-            (cue.result == 0 && now_ms - cue.requested_ms >= kDualSenseCueDeadlineMs) ||
-            (cue.active && now_ms - cue.started_ms >= kDualSenseCueDeadlineMs))
-            cancel_dualsense_cue_locked(cue);
+        if (!native_cue_current(cue) ||
+            (cue.result == 0 && now_ms - cue.requested_ms >= kNativeGamepadCueDeadlineMs) ||
+            (cue.active && now_ms - cue.started_ms >= kNativeGamepadCueDeadlineMs))
+            cancel_native_cue_locked(cue);
         if (local_active || local_dispatch) {
-            if (cue.active) cancel_dualsense_cue_locked(cue);
+            if (cue.active) cancel_native_cue_locked(cue);
             busy |= cue.result == 0;
             continue;
         }
@@ -2766,7 +2802,7 @@ bool prepare_dualsense_cues(uint8_t index, uint32_t now_ms,
         command->token[side] = cue.token;
         pending |= cue.result == 0;
         if (cue.sample_id == 0) continue;
-        const DualSenseCuePattern& pattern = kDualSenseCuePatterns[cue.sample_id];
+        const NativeGamepadCuePattern& pattern = kNativeGamepadCuePatterns[cue.sample_id];
         uint32_t elapsed = cue.active ? now_ms - cue.started_ms : 0;
         uint8_t phase = 0;
         while (phase < pattern.count && elapsed >= pattern.phases_ms[phase])
@@ -2795,13 +2831,14 @@ bool prepare_dualsense_cues(uint8_t index, uint32_t now_ms,
         (duration != 0 && deadline != previous.deadline_ms);
     if (!pending && !changed) return busy || previous.owned;
     if (!slot.active || slot.device == nullptr ||
-        slot.device->report_parser.play_dual_rumble == nullptr) {
-        for (DualSenseCue& cue : g_dualsense_cues)
-            if (cue.slot == index) cancel_dualsense_cue_locked(cue);
+        (!native_rumble_capable(slot, 0) && !native_rumble_capable(slot, 1))) {
+        for (NativeGamepadCue& cue : g_native_cues)
+            if (cue.slot == index) cancel_native_cue_locked(cue);
         previous = {};
         return false;
     }
     command->device = slot.device;
+    command->companion = slot.companion;
     command->connection_generation = slot.connection_generation;
     command->prepared_ms = now_ms;
     command->duration_ms = duration;
@@ -2809,52 +2846,88 @@ bool prepare_dualsense_cues(uint8_t index, uint32_t now_ms,
     command->magnitude[1] = magnitude[1];
     command->slot = index;
     for (uint8_t side = 0; side < 2; ++side)
-        if (command->token[side] != 0) g_dualsense_cues[side].in_flight = true;
+        if (command->token[side] != 0) g_native_cues[side].in_flight = true;
     return true;
 }
 
-void dispatch_dualsense_cues(const DualSenseCueDispatch& command) {
+bool submit_native_rumble(uni_hid_device_t* device, uint16_t duration,
+                          uint8_t right, uint8_t left) {
+    if (device == nullptr || device->report_parser.play_dual_rumble == nullptr)
+        return false;
+    if (device->controller_type == CONTROLLER_TYPE_PS5Controller &&
+        device->report_parser.parse_input_report == uni_hid_parser_ds5_parse_input_report) {
+        return uni_hid_parser_ds5_bridge_rumble(device, duration, right, left);
+    }
+    // Existing finite-duration dispatch is the strongest observable result
+    // most drivers expose. It is not transport acceptance or a remote ACK.
+    dispatch_rumble(device, duration, right, left);
+    return true;
+}
+
+void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
     if (command.device == nullptr) return;
-    critical_section_enter_blocking(&g_state_lock);
     BackendSlot& slot = g_slots[command.slot];
-    bool current = slot.active && slot.device == command.device &&
-        slot.connection_generation == command.connection_generation;
-    for (uint8_t side = 0; side < 2; ++side) {
-        const DualSenseCue& cue = g_dualsense_cues[side];
-        if (command.token[side] != 0)
-            current &= cue.token == command.token[side] && cue.in_flight &&
-                cue.result != -1 && dualsense_cue_current(cue);
-    }
-    critical_section_exit(&g_state_lock);
-    // BTstack owns parser/lifecycle callbacks (Core 0 in HUB). No backend lock
-    // crosses a driver call. Account for time spent in higher-priority output.
-    const uint32_t dispatch_ms = btstack_run_loop_get_time_ms();
-    const uint32_t delay = dispatch_ms - command.prepared_ms;
-    current &= delay < kRumblePollIntervalMs;
-    const uint16_t duration = command.duration_ms > delay
-        ? static_cast<uint16_t>(command.duration_ms - delay) : 0;
-    current &= command.duration_ms == 0 || duration != 0;
-    if (current) {
-        current = uni_hid_parser_ds5_bridge_rumble(
-            command.device, duration, command.magnitude[0], command.magnitude[1]);
-        if (current) __atomic_add_fetch(&g_rumble_dispatches, 1, __ATOMIC_RELAXED);
+    const bool paired = command.companion != nullptr;
+    bool submitted[2]{};
+    uint32_t dispatch_ms = btstack_run_loop_get_time_ms();
+    for (uint8_t target = 0; target < (paired ? 2 : 1); ++target) {
+        critical_section_enter_blocking(&g_state_lock);
+        bool current = slot.active && slot.device == command.device &&
+            slot.companion == command.companion &&
+            slot.connection_generation == command.connection_generation;
+        for (uint8_t side = 0; side < 2; ++side) {
+            if (paired && side != target) continue;
+            const NativeGamepadCue& cue = g_native_cues[side];
+            if (command.token[side] != 0)
+                current &= cue.token == command.token[side] && cue.in_flight &&
+                    cue.result != -1 && native_cue_current(cue);
+        }
+        critical_section_exit(&g_state_lock);
+        // No backend lock crosses a driver call. Recheck every real target:
+        // cancel/reselection or a stall during R dispatch must not send stale L.
+        dispatch_ms = btstack_run_loop_get_time_ms();
+        const uint32_t delay = dispatch_ms - command.prepared_ms;
+        const uint16_t duration = command.duration_ms > delay
+            ? static_cast<uint16_t>(command.duration_ms - delay) : 0;
+        current &= delay < kRumblePollIntervalMs &&
+            (command.duration_ms == 0 || duration != 0);
+        if (!current) continue;
+        uni_hid_device_t* device = paired && target == 0
+            ? command.companion : command.device;
+        const uint8_t right = command.magnitude[paired ? target : 0];
+        const uint8_t left = command.magnitude[paired ? target : 1];
+        if (!submit_native_rumble(
+                device, (right | left) == 0 ? 0 : duration, right, left)) continue;
+        __atomic_add_fetch(&g_rumble_dispatches, 1, __ATOMIC_RELAXED);
+        if (paired) submitted[target] = true;
+        else submitted[0] = submitted[1] = true;
+
+        critical_section_enter_blocking(&g_state_lock);
+        if (slot.active && slot.device == command.device &&
+            slot.companion == command.companion) {
+            // Retain each actual submission even if USB canceled/reselected
+            // during its driver call, or the other half cannot be submitted.
+            NativeGamepadMotorOutput& output = slot.native_output;
+            if (paired) output.magnitude[target] = command.magnitude[target];
+            else {
+                output.magnitude[0] = command.magnitude[0];
+                output.magnitude[1] = command.magnitude[1];
+            }
+            output.owned = (output.magnitude[0] | output.magnitude[1]) != 0;
+            output.deadline_ms = output.owned
+                ? command.prepared_ms + command.duration_ms : 0;
+        }
+        critical_section_exit(&g_state_lock);
     }
     critical_section_enter_blocking(&g_state_lock);
-    if (current && slot.active && slot.device == command.device) {
-        // Retain ownership even if USB canceled/reselected during dispatch:
-        // the next timer must stop/replace exactly the packet just submitted.
-        slot.dualsense_output = {
-            duration == 0 ? 0 : dispatch_ms + duration,
-            {command.magnitude[0], command.magnitude[1]}, duration != 0};
-    }
     for (uint8_t side = 0; side < 2; ++side) {
-        DualSenseCue& cue = g_dualsense_cues[side];
+        NativeGamepadCue& cue = g_native_cues[side];
         if (command.token[side] == 0 || cue.token != command.token[side]) continue;
         cue.in_flight = false;
-        if (!dualsense_cue_current(cue) ||
-            (cue.result == 0 && dispatch_ms - cue.requested_ms >= kDualSenseCueDeadlineMs)) {
-            cancel_dualsense_cue_locked(cue);
-        } else if (current && cue.result == 0) {
+        if (!native_cue_current(cue) ||
+            (cue.result == 0 && dispatch_ms - cue.requested_ms >= kNativeGamepadCueDeadlineMs)) {
+            cancel_native_cue_locked(cue);
+        } else if (submitted[side] && cue.result == 0) {
             cue.result = 1;  // Accepted source submission, never a native ACK.
             cue.started_ms = command.prepared_ms;
             cue.active = cue.sample_id != 0;
@@ -2890,6 +2963,9 @@ void process_wii_orientation(uint8_t slot_index) {
     invalidate_slot(slot);
     slot.gamepad = {};
     slot.extra_buttons = 0;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    refresh_native_source_locked();
+#endif
     critical_section_exit(&g_state_lock);
 
     // The setter can synchronously re-enter the platform ready callback, so
@@ -3020,8 +3096,8 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 #ifdef SWITCH2_BRIDGE_WII_INPUT
         WiiCueDispatch wii_cue_dispatch{};
 #endif
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-        DualSenseCueDispatch dualsense_dispatch{};
+#if SWITCH2_BRIDGE_FULL_INPUT
+        NativeGamepadCueDispatch native_dispatch{};
 #endif
 
         critical_section_enter_blocking(&g_state_lock);
@@ -3157,18 +3233,18 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             slot_index, now_ms, local_feedback_active,
             profile_rumble_dispatch || feedback_dispatch, &wii_cue_dispatch);
 #endif
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-        const bool dualsense_owns_rumble = prepare_dualsense_cues(
+#if SWITCH2_BRIDGE_FULL_INPUT
+        const bool native_owns_rumble = prepare_native_cues(
             slot_index, now_ms, local_feedback_active,
-            profile_rumble_dispatch || feedback_dispatch, &dualsense_dispatch);
+            profile_rumble_dispatch || feedback_dispatch, &native_dispatch);
 #endif
         if (!profile_rumble_dispatch && !feedback_dispatch &&
             !local_feedback_active && slot.rumble_pending
 #ifdef SWITCH2_BRIDGE_WII_INPUT
             && !wii_cue_owns_rumble
 #endif
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-            && !dualsense_owns_rumble
+#if SWITCH2_BRIDGE_FULL_INPUT
+            && !native_owns_rumble
 #endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
             && !(xinput_host_mode &&
@@ -3246,8 +3322,8 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 #ifdef SWITCH2_BRIDGE_WII_INPUT
         dispatch_wii_cue(wii_cue_dispatch);
 #endif
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-        dispatch_dualsense_cues(dualsense_dispatch);
+#if SWITCH2_BRIDGE_FULL_INPUT
+        dispatch_native_cues(native_dispatch);
 #endif
     }
 
@@ -3459,6 +3535,9 @@ bool merge_joycon_slots(int owner_index, int joining_index,
         {owner.companion, static_cast<uint8_t>(owner_index)};
     g_joycon_pair_hints[physical_index_for_device(owner.companion)] =
         {owner.device, static_cast<uint8_t>(owner_index)};
+#if SWITCH2_BRIDGE_FULL_INPUT
+    refresh_native_source_locked();
+#endif
     critical_section_exit(&g_state_lock);
     apply_slot_lighting(static_cast<uint8_t>(owner_index), owner.device);
     apply_slot_lighting(static_cast<uint8_t>(owner_index), owner.companion);
@@ -3529,6 +3608,9 @@ bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
                              kProfileFeedbackWeakMagnitude,
                              kProfileFeedbackStrongMagnitude);
     }
+#if SWITCH2_BRIDGE_FULL_INPUT
+    refresh_native_source_locked();
+#endif
     critical_section_exit(&g_state_lock);
     apply_slot_lighting(owner_index, owner.device);
     apply_slot_lighting(static_cast<uint8_t>(right_index), right.device);
@@ -3737,7 +3819,7 @@ void platform_on_device_connected(uni_hid_device_t* device) {
         uni_hid_device_disconnect(device);
         return;
     }
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_FULL_INPUT
     // Classification completes after connection. Reserve transport capacity,
     // not a player/color slot, until a supported source reaches ready.
     const int pending_index = physical_index_for_device(device);
@@ -3748,7 +3830,11 @@ void platform_on_device_connected(uni_hid_device_t* device) {
     critical_section_enter_blocking(&g_state_lock);
     g_retired_devices[pending_index] = nullptr;
     g_switch2_interval_requests[pending_index] = {};
-    if (slot_for_device(device) < 0) g_dualsense_pending_devices[pending_index] = device;
+    if (slot_for_device(device) < 0) {
+        g_native_reports[pending_index] = {};
+        reset_joycon_connection(device);
+    }
+    if (slot_for_device(device) < 0) g_native_pending_devices[pending_index] = device;
     critical_section_exit(&g_state_lock);
     recompute_connection_status();
 #else
@@ -3780,23 +3866,30 @@ void platform_on_device_connected(uni_hid_device_t* device) {
 }
 
 void platform_on_device_disconnected(uni_hid_device_t* device) {
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_FULL_INPUT
     const int pending_index = physical_index_for_device(device);
     if (pending_index >= 0) {
         critical_section_enter_blocking(&g_state_lock);
-        if (g_dualsense_pending_devices[pending_index] == device)
-            g_dualsense_pending_devices[pending_index] = nullptr;
+        if (g_native_pending_devices[pending_index] == device)
+            g_native_pending_devices[pending_index] = nullptr;
         g_retired_devices[pending_index] = device;
         critical_section_exit(&g_state_lock);
     }
 #endif
     const int slot_index = slot_for_device(device);
     if (slot_index < 0) {
-        #if SWITCH2_BRIDGE_DUALSENSE_INPUT
+        #if SWITCH2_BRIDGE_FULL_INPUT
         recompute_connection_status();
         #endif
         return;
     }
+#if SWITCH2_BRIDGE_FULL_INPUT
+    // DS4/PSMove and other finite-rumble drivers keep timers in parser_data.
+    // Retire those timers before Bluepad32 reuses that memory. Call the real
+    // driver directly: a feedback scheduler must not defer this local teardown.
+    if (device->report_parser.play_dual_rumble != nullptr)
+        device->report_parser.play_dual_rumble(device, 0, 0, 0, 0);
+#endif
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
     switch_native_output_detach(device);
 #endif
@@ -3826,8 +3919,8 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
     } else {
         release_slot(slot);
     }
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    refresh_dualsense_source_locked();
+#if SWITCH2_BRIDGE_FULL_INPUT
+    refresh_native_source_locked();
 #endif
     critical_section_exit(&g_state_lock);
     clear_ble_identity_for_device(device);
@@ -3863,8 +3956,8 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     uni_hid_device_t* companion = nullptr;
     ControllerIdentity connection_identity = identity_for_device(device);
     critical_section_enter_blocking(&g_state_lock);
-    #if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    if (!dualsense_source_matches(device)) {
+    #if SWITCH2_BRIDGE_FULL_INPUT
+    if (!native_device_allowed(device)) {
         critical_section_exit(&g_state_lock);
         return UNI_ERROR_INVALID_CONTROLLER;
     }
@@ -3874,10 +3967,10 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         critical_section_exit(&g_state_lock);
         return UNI_ERROR_NO_SLOTS;
     }
-    #if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    #if SWITCH2_BRIDGE_FULL_INPUT
     const int pending_index = physical_index_for_device(device);
-    if (g_dualsense_pending_devices[pending_index] == device)
-        g_dualsense_pending_devices[pending_index] = nullptr;
+    if (g_native_pending_devices[pending_index] == device)
+        g_native_pending_devices[pending_index] = nullptr;
     #endif
     BackendSlot& pending = g_slots[slot_index];
     if (!pending.active) {
@@ -3901,8 +3994,8 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         }
         became_active = true;
     }
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    refresh_dualsense_source_locked();
+#if SWITCH2_BRIDGE_FULL_INPUT
+    refresh_native_source_locked();
 #endif
     const BackendSlot& current = g_slots[slot_index];
     owner = current.device;
@@ -3968,28 +4061,45 @@ void platform_on_controller_data(uni_hid_device_t* device,
         critical_section_exit(&g_state_lock);
         return;
     }
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-    if (device->controller_type == CONTROLLER_TYPE_PS5Controller) {
-        uni_ds5_bridge_snapshot_t sensor{};
-        DualSenseIngress& motion = slot.dualsense_motion;
-        if (!uni_hid_parser_ds5_bridge_snapshot(device, &sensor) ||
-            sensor.report_sequence == motion.report_sequence) {
-            critical_section_exit(&g_state_lock);
-            return;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    const int physical_index = physical_index_for_device(device);
+    if (physical_index < 0) {
+        critical_section_exit(&g_state_lock);
+        return;
+    }
+    uni_native_motion_snapshot_t sensor{};
+    uni_hid_parser_native_motion_snapshot(device, &sensor);
+    NativeGamepadReportIngress& ingress = g_native_reports[physical_index];
+    if (ingress.device != device) ingress = {device, 0, 0, 0};
+    if (sensor.report_tracked &&
+        (!sensor.report_valid || sensor.report_sequence == ingress.report_sequence)) {
+        critical_section_exit(&g_state_lock);
+        return;
+    }
+    ingress.report_sequence = sensor.report_sequence;
+    NativeGamepadIngress& motion = slot.native_motion;
+    motion.has_report = true;
+    motion.received_us = time_us_32();
+    // Read only the reporting physical device. The right half is the existing
+    // pair's motion owner; left controls must not refresh or invalidate its IMU.
+    if (slot.companion == nullptr || slot.companion == device) {
+        if (!sensor.accel_valid) motion.accel_valid = false;
+        else if (sensor.accel_sequence != ingress.accel_sequence) {
+            motion.accel_valid = true;
+            motion.accel_sequence = sensor.accel_sequence;
+            motion.accel_received_us = motion.received_us;
+            memcpy(motion.accel_q13, sensor.accel_q13, sizeof(motion.accel_q13));
         }
-        motion.has_report = true;
-        motion.report_sequence = sensor.report_sequence;
-        motion.received_us = time_us_32();
-        motion.motion_valid = sensor.motion_valid &&
-            sensor.motion_sequence != motion.motion_sequence;
-        if (sensor.motion_valid && sensor.motion_sequence != motion.motion_sequence) {
-            motion.motion_sequence = sensor.motion_sequence;
-            motion.motion_received_us = motion.received_us;
-            motion.motion_valid = true;
-            memcpy(motion.accel_q13, controller->gamepad.accel, sizeof(motion.accel_q13));
-            memcpy(motion.gyro_q10, controller->gamepad.gyro, sizeof(motion.gyro_q10));
+        if (!sensor.gyro_valid) motion.gyro_valid = false;
+        else if (sensor.gyro_sequence != ingress.gyro_sequence) {
+            motion.gyro_valid = true;
+            motion.gyro_sequence = sensor.gyro_sequence;
+            motion.gyro_received_us = motion.received_us;
+            memcpy(motion.gyro_q10, sensor.gyro_q10, sizeof(motion.gyro_q10));
         }
     }
+    if (sensor.accel_valid) ingress.accel_sequence = sensor.accel_sequence;
+    if (sensor.gyro_valid) ingress.gyro_sequence = sensor.gyro_sequence;
 #endif
 #ifdef SWITCH_PICO_WII_IR
     uni_wii_ir_snapshot_t infrared{};
@@ -4323,8 +4433,9 @@ void bluepad32_input_backend_init() {
         g_joycon_pair_hints[slot_index] = {};
         g_joycon_gestures[slot_index] = {};
         g_joycon_overrides[slot_index] = {};
-        #if SWITCH2_BRIDGE_DUALSENSE_INPUT
-        g_dualsense_pending_devices[slot_index] = nullptr;
+        #if SWITCH2_BRIDGE_FULL_INPUT
+        g_native_pending_devices[slot_index] = nullptr;
+        g_native_reports[slot_index] = {};
         #endif
     }
     g_joycon_mode = JoyConMode::kPaired;
@@ -4531,42 +4642,42 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
     g_last_snapshot_generation[slot_index] = state_generation;
 }
 
-#if SWITCH2_BRIDGE_DUALSENSE_INPUT
-void bluepad32_input_backend_select_dualsense_source(const uint8_t address[6]) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+void bluepad32_input_backend_select_native_source(const uint8_t address[6]) {
     if (!g_initialized) return;
     critical_section_enter_blocking(&g_state_lock);
-    g_dualsense_explicit_address = address != nullptr;
-    if (address != nullptr) memcpy(g_dualsense_address, address, 6);
-    else memset(g_dualsense_address, 0, sizeof(g_dualsense_address));
-    refresh_dualsense_source_locked(true);
+    g_native_explicit_address = address != nullptr;
+    if (address != nullptr) memcpy(g_native_address, address, 6);
+    else memset(g_native_address, 0, sizeof(g_native_address));
+    refresh_native_source_locked(true);
     critical_section_exit(&g_state_lock);
 }
 
-void bluepad32_input_backend_dualsense_snapshot(Bluepad32DualSenseBridgeSnapshot* output) {
+void bluepad32_input_backend_native_snapshot(Bluepad32NativeGamepadSnapshot* output) {
     if (output == nullptr) return;
     *output = {};
     if (!g_initialized) return;
     critical_section_enter_blocking(&g_state_lock);
-    *output = g_dualsense_snapshot;
+    *output = g_native_snapshot;
     critical_section_exit(&g_state_lock);
 }
 
-bool bluepad32_input_backend_dualsense_sample_request(
+bool bluepad32_input_backend_native_sample_request(
     uint8_t instance, uint8_t sample_id, uint64_t* token) {
     if (token == nullptr) return false;
     *token = 0;
     if (!g_initialized || instance >= 2 || sample_id >= 8) return false;
     critical_section_enter_blocking(&g_state_lock);
-    DualSenseCue& cue = g_dualsense_cues[instance];
-    const uint8_t index = g_dualsense_slot;
-    const bool accepted = index < kSlotCount && g_next_dualsense_token != 0 &&
-        g_slots[index].device->report_parser.play_dual_rumble != nullptr &&
+    NativeGamepadCue& cue = g_native_cues[instance];
+    const uint8_t index = g_native_slot;
+    const bool accepted = index < kSlotCount && g_next_native_token != 0 &&
+        native_rumble_capable(g_slots[index], instance) &&
         !cue.in_flight && (sample_id == 0 || (cue.result != 0 && !cue.active));
     if (accepted) {
         cue = {};
-        cue.token = g_next_dualsense_token++;
+        cue.token = g_next_native_token++;
         cue.slot = index;
-        cue.connection_generation = g_dualsense_generation;
+        cue.connection_generation = g_native_generation;
         cue.requested_ms = btstack_run_loop_get_time_ms();
         cue.sample_id = sample_id;
         cue.result = 0;
@@ -4576,16 +4687,16 @@ bool bluepad32_input_backend_dualsense_sample_request(
     return accepted;
 }
 
-int bluepad32_input_backend_dualsense_sample_result(uint8_t instance, uint64_t token) {
+int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t token) {
     if (!g_initialized || instance >= 2 || token == 0) return -1;
     critical_section_enter_blocking(&g_state_lock);
-    DualSenseCue& cue = g_dualsense_cues[instance];
+    NativeGamepadCue& cue = g_native_cues[instance];
     int result = -1;
     if (cue.token == token && !cue.consumed) {
-        if (!dualsense_cue_current(cue) ||
+        if (!native_cue_current(cue) ||
             (cue.result == 0 &&
-             btstack_run_loop_get_time_ms() - cue.requested_ms >= kDualSenseCueDeadlineMs))
-            cancel_dualsense_cue_locked(cue);
+             btstack_run_loop_get_time_ms() - cue.requested_ms >= kNativeGamepadCueDeadlineMs))
+            cancel_native_cue_locked(cue);
         result = cue.result;
         if (result != 0) cue.consumed = true;
     }
@@ -4593,10 +4704,10 @@ int bluepad32_input_backend_dualsense_sample_result(uint8_t instance, uint64_t t
     return result;
 }
 
-void bluepad32_input_backend_dualsense_sample_cancel(uint8_t instance) {
+void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
     if (!g_initialized || instance >= 2) return;
     critical_section_enter_blocking(&g_state_lock);
-    cancel_dualsense_cue_locked(g_dualsense_cues[instance]);
+    cancel_native_cue_locked(g_native_cues[instance]);
     critical_section_exit(&g_state_lock);
 }
 #endif

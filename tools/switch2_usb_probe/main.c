@@ -319,7 +319,7 @@ static void reset_controller_protocol(uint8_t instance) {
 #if SWITCH2_BRIDGE_WII_INPUT
     probe_controller_input_set_stick_calibration(stick_calibration);
     probe_controller_input_set_native_features(0);
-#elif SWITCH2_BRIDGE_DUALSENSE_INPUT
+#elif SWITCH2_BRIDGE_FULL_INPUT
     probe_controller_input_set_full_stick_calibration(instance, stick_calibration);
 #endif
     protocol->read_memory = read_memory;
@@ -487,8 +487,8 @@ static void protocol_task(probe_usb_controller* controller, uint32_t now) {
 #if SWITCH2_BRIDGE_WII_INPUT
                 probe_debug_printf("[PROBE] Wii cue dispatched itf=%u token=%" PRIu64 "\n",
                                    instance, reply->deferred_token);
-#elif SWITCH2_BRIDGE_DUALSENSE_INPUT
-                probe_debug_printf("[PROBE] DualSense cue dispatched itf=%u token=%" PRIu64 "\n",
+#elif SWITCH2_BRIDGE_FULL_INPUT
+                probe_debug_printf("[PROBE] Native gamepad cue dispatched itf=%u token=%" PRIu64 "\n",
                                    instance, reply->deferred_token);
 #else
                 probe_debug_printf("[PROBE] Source sample ACK itf=%u token=%" PRIu64 "\n",
@@ -528,7 +528,7 @@ static void protocol_task(probe_usb_controller* controller, uint32_t now) {
             native_serial = probe_controller_input_peek_native_report(instance, now, input);
             if (!native_serial) return;
             length = sizeof(input);
-#if SWITCH2_BRIDGE_WII_INPUT || SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if SWITCH2_BRIDGE_WII_INPUT || SWITCH2_BRIDGE_FULL_INPUT
             input[8] = (uint8_t)(0x30 | ((protocol->enabled_features & 0x20) ? 8 : 0));
 #endif
             probe_protocol_gate_native_report(protocol, input);
@@ -792,6 +792,8 @@ int main(void) {
     probe_controller_input_init();
 #if SWITCH2_BRIDGE_WII_INPUT
     probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; selected Wii IR/MotionPlus source enabled\n");
+#elif SWITCH2_BRIDGE_FULL_INPUT
+    probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; one supported gamepad feeds the native R/L pair\n");
 #else
     probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; %u selected Joy-Con Bluetooth source(s)\n",
                        PROBE_CONTROLLER_COUNT);
@@ -819,6 +821,10 @@ int main(void) {
 #if SWITCH2_BRIDGE_WII_INPUT
     probe_debug_printf("[PROBE] Wii IR drives native mouse movement; buttons retain profile mapping; keep Wii still for MotionPlus calibration\n");
     probe_debug_printf("[PROBE] Hold BOOTSEL2s for pairing; Wii cue feedback uses bounded ERM patterns, not HD audio waveforms\n");
+#elif SWITCH2_BRIDGE_FULL_INPUT
+    probe_debug_printf("[PROBE] Full gamepad controls on R/L; IMU mask=%u; only Wii requires settling\n",
+                       (unsigned)SWITCH2_BRIDGE_IMU_TARGET_MASK);
+    probe_debug_printf("[PROBE] Hold BOOTSEL 2s for Bluetooth pairing (never clears pairings); cues use source capabilities\n");
 #else
     probe_debug_printf("[PROBE] Live Joy-Con buttons/stick/native mouse; hold BOOTSEL 2s for Bluetooth pairing (never clears pairings)\n");
 #endif

@@ -4,9 +4,19 @@
 
 #include "protocol_fixture.h"
 #include "parser/uni_hid_parser_switch2.h"
+#include "parser/uni_hid_parser_native_motion.h"
 #include "parser/uni_switch2_pairing.h"
 #include "sdkconfig.h"
 
+#if SWITCH2_BRIDGE_FULL_INPUT
+void uni_hid_parser_wii_setup(uni_hid_device_t* d) { (void)d; assert(false); }
+bool uni_hid_parser_wii_accel_snapshot(uni_hid_device_t* d, int32_t v[3], uint32_t* s) {
+    (void)d; (void)v; (void)s; assert(false); return false;
+}
+bool uni_hid_parser_wii_gyro_snapshot(uni_hid_device_t* d, int32_t v[3], uint32_t* s) {
+    (void)d; (void)v; (void)s; assert(false); return false;
+}
+#endif
 #define PEERS CONFIG_BLUEPAD32_MAX_DEVICES
 #define SERVICE_START 0x100
 #define INPUT_HANDLE 0x104
@@ -367,7 +377,10 @@ static unsigned response_data(struct fixture_peer* peer, uint8_t* out, bool eras
         if (address == 0x13000) {
             little_endian_store_16(out, 16 + 18, UNI_SW2_NINTENDO_VID);
             little_endian_store_16(out, 16 + 20, peer->device.product_id);
-        } else if (address != 0x13044) {
+        } else if (address == 0x13044) {
+            if (erased)
+                memset(out + 16, 0xff, length);
+        } else {
             if (erased)
                 memset(out + 16, 0xff, length);
             else {
@@ -657,8 +670,19 @@ static void test_calibration_physical_inputs_and_sensor_units(void) {
     }
     assert(gp->accel[0] == 8192 && gp->accel[1] == -8192 && gp->accel[2] == -16384);
     assert(gp->gyro[0] >= 2041740 && gp->gyro[0] <= 2041750);
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_native_motion_snapshot_t first, duplicate;
+    assert(uni_hid_parser_native_motion_snapshot(&peer->device, &first));
+    assert(first.accel_valid && first.gyro_valid && first.accel_q13[2] == -16384);
+#endif
     notify(peer, INPUT_HANDLE, report, sizeof(report)); // Repeated sensor sample must not become zero.
+#if SWITCH2_BRIDGE_FULL_INPUT
+    assert(uni_hid_parser_native_motion_snapshot(&peer->device, &duplicate));
+    assert(duplicate.accel_sequence == first.accel_sequence && duplicate.gyro_sequence == first.gyro_sequence);
+    assert(duplicate.gyro_q10[0] >= 2041740);
+#else
     assert(gp->gyro[0] >= 2041740);
+#endif
     reset();
     peer = connect_peer(UNI_SW2_JOYCON_L_PID, false);
     discover(peer);
@@ -671,6 +695,59 @@ static void test_calibration_physical_inputs_and_sensor_units(void) {
     assert(peer->device.controller.gamepad.misc_buttons == 0); // Rail buttons are NOT Home/Capture.
     assert(uni_hid_parser_switch2_extra_buttons(&peer->device) == (UNI_SW2_BUTTON_LEFT_SL | UNI_SW2_BUTTON_LEFT_SR));
 }
+
+#if SWITCH2_BRIDGE_FULL_INPUT
+static void test_native_independent_motion_and_lifetime(void) {
+    const uint16_t products[] = {UNI_SW2_PRO_PID, UNI_SW2_JOYCON_L_PID, UNI_SW2_JOYCON_R_PID};
+    uint32_t previous_sequence = 0;
+    for (unsigned product = 0; product < 3; ++product) {
+        for (unsigned invalid_bias = 0; invalid_bias < 2; ++invalid_bias) {
+            reset();
+            struct fixture_peer* peer = connect_peer(products[product], false);
+            discover(peer);
+            subscribe_response(peer);
+            for (unsigned step = 0; step < 10; ++step) {
+                if (peer->command[0] == 2 && little_endian_read_32(peer->command, 12) == 0x13044)
+                    break;
+                acknowledge(peer, false);
+            }
+            assert(little_endian_read_32(peer->command, 12) == 0x13044);
+            acknowledge(peer, invalid_bias);
+            finish_setup(peer);
+            uni_native_motion_snapshot_t native;
+            assert(uni_hid_parser_native_motion_snapshot(&peer->device, &native));
+            assert(!native.report_valid && !native.accel_valid && !native.gyro_valid);
+            uint8_t report[63] = {0};
+            little_endian_store_16(report, 48, 4096);
+            little_endian_store_16(report, 54, 32767);
+            little_endian_store_32(report, 42, 1000);
+            notify(peer, INPUT_HANDLE, report, sizeof(report));
+            assert(uni_hid_parser_native_motion_snapshot(&peer->device, &native));
+            assert(native.report_valid && native.accel_valid && native.accel_q13[0] == 8192);
+            assert(!native.gyro_valid && native.accel_sequence != previous_sequence);
+            for (unsigned sample = 1; sample < 46; ++sample) {
+                advance(10);
+                little_endian_store_32(report, 42, 1000 + sample * 10000);
+                notify(peer, INPUT_HANDLE, report, sizeof(report));
+            }
+            assert(uni_hid_parser_native_motion_snapshot(&peer->device, &native));
+            assert(native.accel_valid && native.gyro_valid == !invalid_bias);
+            uint32_t accel = native.accel_sequence, gyro = native.gyro_sequence;
+            little_endian_store_32(report, 42, 1000); // Regressed sensor clock.
+            notify(peer, INPUT_HANDLE, report, sizeof(report));
+            assert(uni_hid_parser_native_motion_snapshot(&peer->device, &native));
+            assert(native.accel_sequence == accel && native.gyro_sequence == gyro);
+            uni_hid_parser_switch2_parse_input_report(&peer->device, report, 62);
+            assert(uni_hid_parser_native_motion_snapshot(&peer->device, &native));
+            assert(!native.report_valid && native.accel_sequence == accel);
+            previous_sequence = accel;
+            uni_hid_parser_switch2_teardown(&peer->device);
+            assert(!uni_hid_parser_native_motion_snapshot(&peer->device, &native));
+            assert(!native.accel_valid && !native.gyro_valid);
+        }
+    }
+}
+#endif
 
 static uint64_t rumble_frame(const struct fixture_peer* peer) {
     uint64_t value = 0;
@@ -1223,6 +1300,9 @@ static void test_neutral_budget_waits_for_success_and_stale_active_completion(vo
 }
 
 int main(void) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+    test_native_independent_motion_and_lifetime();
+#endif
     test_connected_callback_rejection();
     test_advertisement_bounds_and_admission();
     test_discovery_metadata_and_rejection_isolation();

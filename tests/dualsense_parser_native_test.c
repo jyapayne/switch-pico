@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "parser/uni_hid_parser_ds5.h"
+#include "parser/uni_hid_parser_native_motion.h"
 #include "uni_hid_device.h"
 #include "uni_utils.h"
 
@@ -59,6 +60,14 @@ uni_hid_device_t* uni_hid_device_create_virtual(uni_hid_device_t* d) { (void)d; 
 void uni_hid_device_set_cod(uni_hid_device_t* d, uint32_t cod) { (void)d; (void)cod; }
 void uni_hid_device_connect(uni_hid_device_t* d) { (void)d; }
 void uni_hid_device_process_controller(uni_hid_device_t* d) { (void)d; }
+// The common accessor must not select a different family in this fixture.
+void uni_hid_parser_wii_setup(uni_hid_device_t* d) { (void)d; assert(false); }
+bool uni_hid_parser_wii_accel_snapshot(uni_hid_device_t* d, int32_t v[3], uint32_t* seq) {
+    (void)d; (void)v; (void)seq; assert(false); return false;
+}
+bool uni_hid_parser_wii_gyro_snapshot(uni_hid_device_t* d, int32_t v[3], uint32_t* seq) {
+    (void)d; (void)v; (void)seq; assert(false); return false;
+}
 uint8_t uni_hid_parser_hat_to_dpad(uint8_t hat) {
     const uint8_t values[8] = {DPAD_UP, DPAD_UP | DPAD_RIGHT, DPAD_RIGHT,
         DPAD_RIGHT | DPAD_DOWN, DPAD_DOWN, DPAD_DOWN | DPAD_LEFT,
@@ -144,11 +153,12 @@ static void input(uint8_t bytes[78], uint32_t timestamp) {
     put32(bytes + 29, timestamp);
     seal(bytes, 78, 0xa1);
 }
-static uni_ds5_bridge_snapshot_t feed(uint8_t* bytes, uint16_t len, bool admitted) {
+static uni_native_motion_snapshot_t feed(uint8_t* bytes, uint16_t len, bool admitted) {
     uni_hid_parser_ds5_init_report(&device);
     uni_hid_parser_ds5_parse_input_report(&device, bytes, len);
-    uni_ds5_bridge_snapshot_t snapshot = {0};
-    assert(uni_hid_parser_ds5_bridge_snapshot(&device, &snapshot) == admitted);
+    uni_native_motion_snapshot_t snapshot;
+    assert(uni_hid_parser_native_motion_snapshot(&device, &snapshot));
+    assert(snapshot.report_tracked && snapshot.report_valid == admitted);
     return snapshot;
 }
 
@@ -178,27 +188,32 @@ int main(void) {
     assert(ready_count == 1);
     uint8_t report[78];
     input(report, 100);
-    uni_ds5_bridge_snapshot_t snapshot = feed(report, sizeof(report), true);
-    assert(!snapshot.motion_valid && snapshot.motion_sequence == 0);
+    uni_native_motion_snapshot_t snapshot = feed(report, sizeof(report), true);
+    assert(!snapshot.accel_valid && !snapshot.gyro_valid);
     assert(device.controller.gamepad.buttons & BUTTON_A); // Controls survive fallback.
     calibration(calib, false);
     feature(calib, sizeof(calib));
     snapshot = feed(report, sizeof(report), true);
-    assert(!snapshot.motion_valid && snapshot.motion_sequence == 0); // Calibration alone is not fresh motion.
+    assert(!snapshot.accel_valid && !snapshot.gyro_valid); // Calibration alone is not fresh motion.
     input(report, 101);
     snapshot = feed(report, sizeof(report), true);
-    assert(snapshot.motion_valid && snapshot.motion_sequence == 1);
+    assert(snapshot.accel_valid && snapshot.gyro_valid);
     assert(device.controller.gamepad.gyro[0] == 1024 && device.controller.gamepad.gyro[1] == 0);
     assert(device.controller.gamepad.accel[1] == 8192);
     assert(device.controller.gamepad.misc_buttons & MISC_BUTTON_CAPTURE);
+    uni_native_motion_snapshot_t common;
+    assert(uni_hid_parser_native_motion_snapshot(&device, &common));
+    assert(common.accel_valid && common.gyro_valid &&
+           common.accel_q13[1] == 8192 && common.gyro_q10[0] == 1024);
+    const uint32_t common_sequence = common.accel_sequence;
     const uint32_t report_sequence = snapshot.report_sequence;
-    uni_ds5_bridge_snapshot_t polled;
-    assert(uni_hid_parser_ds5_bridge_snapshot(&device, &polled) && polled.report_sequence == report_sequence);
+    uni_native_motion_snapshot_t polled;
+    assert(uni_hid_parser_native_motion_snapshot(&device, &polled) && polled.report_sequence == report_sequence);
     snapshot = feed(report, sizeof(report), true);
-    assert(!snapshot.motion_valid && snapshot.motion_sequence == 1);
+    assert(snapshot.accel_sequence == common_sequence && !snapshot.accel_valid && !snapshot.gyro_valid);
     input(report, 99);
     snapshot = feed(report, sizeof(report), true);
-    assert(!snapshot.motion_valid && snapshot.motion_sequence == 1);
+    assert(snapshot.accel_sequence == common_sequence && !snapshot.accel_valid && !snapshot.gyro_valid);
     input(report, 102);
     feed(report, 77, false);
     report[9] ^= 0x20;
@@ -206,7 +221,7 @@ int main(void) {
     feed(NULL, 0, false);
     input(report, 102);
     snapshot = feed(report, sizeof(report), true);
-    assert(snapshot.motion_valid && snapshot.motion_sequence == 2);
+    assert(snapshot.accel_valid && snapshot.gyro_valid && snapshot.accel_sequence != common_sequence);
 
     // A real uint32 sensor-clock wrap is forward progress, not a duplicate.
     uni_hid_parser_ds5_setup(&device);
@@ -214,10 +229,12 @@ int main(void) {
     feature(calib, sizeof(calib));
     input(report, UINT32_MAX - 15);
     snapshot = feed(report, sizeof(report), true);
-    assert(snapshot.motion_valid && snapshot.motion_sequence == 1);
+    assert(snapshot.accel_valid && snapshot.gyro_valid);
+    assert(uni_hid_parser_native_motion_snapshot(&device, &common));
+    assert(common.accel_valid && common.accel_sequence != common_sequence);
     input(report, 16);
     snapshot = feed(report, sizeof(report), true);
-    assert(snapshot.motion_valid && snapshot.motion_sequence == 2);
+    assert(snapshot.accel_valid && snapshot.gyro_valid && snapshot.accel_sequence != common.accel_sequence);
 
     const unsigned before_busy = output_count;
     transport_available = false;
@@ -236,7 +253,9 @@ int main(void) {
     const unsigned sent = output_count;
     uni_hid_parser_ds5_bridge_teardown(&device);
     advance(2000);
-    assert(output_count == sent && !uni_hid_parser_ds5_bridge_snapshot(&device, &snapshot));
+    assert(output_count == sent);
+    assert(!uni_hid_parser_native_motion_snapshot(&device, &common));
+    assert(!common.report_valid && !common.accel_valid && !common.gyro_valid);
     uni_hid_parser_ds5_play_dual_rumble(&device, 0, 1000, 0, 90);
     const unsigned active_sent = output_count;
     uni_hid_parser_ds5_bridge_teardown(&device);

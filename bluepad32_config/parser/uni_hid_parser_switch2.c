@@ -6,6 +6,9 @@
 // Sensor conversion independently adapted from SDL_hidapi_switch2.c (SDL/Valve).
 
 #include "parser/uni_hid_parser_switch2.h"
+#if SWITCH2_BRIDGE_FULL_INPUT
+#include "parser/uni_hid_parser_native_motion.h"
+#endif
 
 #include <math.h>
 #include <stdatomic.h>
@@ -125,6 +128,9 @@ typedef struct {
     uint8_t memory_length;
     sw2_stick_t sticks[2];
     int32_t gyro_bias[3];
+#if SWITCH2_BRIDGE_FULL_INPUT
+    bool gyro_calibrated;
+#endif
     uint8_t extra_buttons, leds;
     bool leds_pending;
     uint8_t rumble_id, weak, strong;
@@ -216,6 +222,9 @@ static void sw2_disarm_timeout(sw2_instance_t* ins) {
 }
 
 void uni_hid_parser_switch2_teardown(uni_hid_device_t* d) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_hid_parser_native_motion_forget(d);
+#endif
     sw2_instance_t* ins = sw2_instance(d);
     if (!ins)
         return;
@@ -643,13 +652,21 @@ static void sw2_response(sw2_instance_t* ins, const uint8_t* data, uint16_t leng
                     ins->calibration_done = true;
             }
         } else if (ins->state == SW2_GYRO_CALIBRATION) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+            ins->gyro_calibrated = true;
+#endif
             for (unsigned i = 0; i < 3; ++i) {
                 uint32_t bits = little_endian_read_32(value, 4 * i);
                 float bias;
                 memcpy(&bias, &bits, sizeof(bias));
                 // Erased/invalid flash is not a floating-point sensor value.
-                if (isfinite(bias) && bias >= -40.0f && bias <= 40.0f)
+                bool valid = isfinite(bias) && bias >= -40.0f && bias <= 40.0f;
+                if (valid)
                     ins->gyro_bias[i] = (int32_t)(bias * (57.295779513f * UNI_IMU_GYRO_RES_PER_DEG_S));
+#if SWITCH2_BRIDGE_FULL_INPUT
+                if (!valid)
+                    ins->gyro_calibrated = false;
+#endif
             }
         }
     } else if (ins->state == SW2_PAIR) {
@@ -1029,6 +1046,9 @@ void uni_hid_parser_switch2_setup(uni_hid_device_t* d) {
     if (!ins || ins->state != SW2_ADMITTED)
         return;
     ins->handle = d->conn.handle;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_hid_parser_native_motion_reset(d);
+#endif
     // Standard-compliant 7.5ms minimum; negotiation failure is not setup failure.
     int status = gap_update_connection_parameters(ins->handle, 6, 6, 0, 600);
     if (status != ERROR_CODE_SUCCESS)
@@ -1053,6 +1073,9 @@ bool uni_hid_parser_switch2_identity_address_type(const uni_hid_device_t* d, uin
 }
 
 void uni_hid_parser_switch2_init_report(uni_hid_device_t* d) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_hid_parser_native_motion_begin(d);
+#endif
     (void)d; // Full snapshots replace state only after their complete length is validated.
 }
 
@@ -1066,6 +1089,16 @@ static int32_t sw2_axis(uint16_t raw, const sw2_stick_t* stick, unsigned axis, b
 
 static void sw2_motion(sw2_instance_t* ins, uni_gamepad_t* gp, const uint8_t* report) {
     uint32_t timestamp = little_endian_read_32(report, 42);
+#if SWITCH2_BRIDGE_FULL_INPUT
+    if (!timestamp || !uni_hid_parser_native_motion_fresh(ins->device, timestamp, UINT32_MAX))
+        return;
+    // Acceleration has a known fixed range and does not need gyro clock
+    // detection or factory gyro bias. Keep its provenance independent.
+    gp->accel[0] = uni_imu_scale((int16_t)little_endian_read_16(report, 48), 32767, 8 * UNI_IMU_ACCEL_RES_PER_G);
+    gp->accel[1] = uni_imu_scale((int16_t)little_endian_read_16(report, 52), 32767, 8 * UNI_IMU_ACCEL_RES_PER_G);
+    gp->accel[2] = -uni_imu_scale((int16_t)little_endian_read_16(report, 50), 32767, 8 * UNI_IMU_ACCEL_RES_PER_G);
+    uni_hid_parser_native_motion_accel(ins->device, gp->accel);
+#endif
     if (!timestamp || (timestamp == ins->sensor_last && !ins->gyro_full_scale))
         return;
     ins->sensor_last = timestamp;
@@ -1099,18 +1132,30 @@ static void sw2_motion(sw2_instance_t* ins, uni_gamepad_t* gp, const uint8_t* re
     static const uint8_t axes[3] = {0, 2, 1};
     for (unsigned i = 0; i < 3; ++i) {
         unsigned axis = axes[i];
+#if !SWITCH2_BRIDGE_FULL_INPUT
         int32_t accel = (int16_t)little_endian_read_16(report, 48 + 2 * axis);
+#endif
         int32_t gyro = (int16_t)little_endian_read_16(report, 54 + 2 * axis);
+#if !SWITCH2_BRIDGE_FULL_INPUT
         gp->accel[i] = uni_imu_scale(accel, 32767, 8 * UNI_IMU_ACCEL_RES_PER_G);
+#endif
         gp->gyro[i] = uni_imu_scale(gyro, 32767, ins->gyro_full_scale) - ins->gyro_bias[axis];
         if (i == 2) {
+#if !SWITCH2_BRIDGE_FULL_INPUT
             gp->accel[i] = -gp->accel[i];
+#endif
             gp->gyro[i] = -gp->gyro[i];
         }
     }
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_hid_parser_native_motion_gyro(ins->device, ins->gyro_calibrated ? gp->gyro : NULL);
+#endif
 }
 
 void uni_hid_parser_switch2_parse_input_report(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_hid_parser_native_motion_begin(d);
+#endif
     sw2_instance_t* ins = sw2_instance(d);
     if (!ins || ins->state != SW2_READY || !report || len != SW2_REPORT_SIZE)
         return;
@@ -1148,6 +1193,9 @@ void uni_hid_parser_switch2_parse_input_report(uni_hid_device_t* d, const uint8_
     }
     sw2_motion(ins, gp, report);
     d->controller.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    uni_hid_parser_native_motion_accept(d);
+#endif
 }
 
 void uni_hid_parser_switch2_set_player_leds(uni_hid_device_t* d, uint8_t leds) {

@@ -209,6 +209,15 @@ static inline bool uni_psmove_normalize_imu(
 
         const int32_t gyro_bias_value = uni_psmove_read_calibration_value(
             calibration->data, model, gyro_bias[axis]);
+#if SWITCH2_BRIDGE_FULL_INPUT
+        // Complete feature blocks alone do not make erased/degenerate factory
+        // extrema calibrated. Never label the helper's zero-span fallback IMU.
+        if (accel_low_value >= accel_high_value ||
+            uni_psmove_read_calibration_value(calibration->data, model, gyro_high[axis]) <= gyro_bias_value ||
+            (model == UNI_PSMOVE_IMU_MODEL_ZCM2 &&
+             uni_psmove_read_calibration_value(calibration->data, model, zcm2_gyro_low[axis]) >= gyro_bias_value))
+            return false;
+#endif
         const int32_t gyro_raw =
             (uni_psmove_decode_value(model, gyro_first[axis]) +
              uni_psmove_decode_value(model, gyro_second[axis])) /

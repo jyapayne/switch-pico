@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from prepare_bluepad32 import prepare_bluepad32
 
 
-def test_dualsense_parser_native(tmp_path: Path) -> None:
+def test_native_gamepad_motion_parser_provenance(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("cc") or shutil.which("gcc")
     assert compiler is not None, "a host C compiler is required"
@@ -20,7 +20,7 @@ def test_dualsense_parser_native(tmp_path: Path) -> None:
         tmp_path / "bluepad32-src",
     )
     component = prepared / "src" / "components" / "bluepad32"
-    executable = tmp_path / "dualsense_parser_native_test"
+    executable = tmp_path / "native_gamepad_motion_parser_test"
     subprocess.run(
         [
             compiler,
@@ -38,12 +38,16 @@ def test_dualsense_parser_native(tmp_path: Path) -> None:
             f"-I{root / 'tests' / 'switch_parser_native_stubs'}",
             f"-I{root / 'bluepad32_config'}",
             f"-I{component / 'include'}",
-            str(root / "tests" / "dualsense_parser_native_test.c"),
-            str(component / "parser" / "uni_hid_parser_ds5.c"),
+            str(root / "tests" / "native_gamepad_motion_parser_test.c"),
             str(
                 root / "bluepad32_config" / "parser" / "uni_hid_parser_native_motion.c"
             ),
+            str(component / "parser" / "uni_hid_parser_ds4.c"),
+            str(component / "parser" / "uni_hid_parser_psmove.c"),
+            str(component / "parser" / "uni_hid_parser_switch.c"),
+            str(component / "uni_circular_buffer.c"),
             str(component / "uni_utils.c"),
+            str(component / "controller" / "uni_gamepad.c"),
             "-Wl,--gc-sections",
             "-o",
             str(executable),

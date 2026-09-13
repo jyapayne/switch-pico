@@ -1,5 +1,6 @@
 #pragma once
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -23,6 +24,12 @@ typedef struct btstack_timer_source {
 #define HID_MESSAGE_TYPE_DATA 0x0a
 #define HID_REPORT_TYPE_OUTPUT 0x02
 #define btstack_min(a, b) ((a) < (b) ? (a) : (b))
+#define btstack_max(a, b) ((a) > (b) ? (a) : (b))
+
+static inline uint32_t little_endian_read_32(const uint8_t* bytes, int offset) {
+    return (uint32_t)bytes[offset] | ((uint32_t)bytes[offset + 1] << 8) |
+        ((uint32_t)bytes[offset + 2] << 16) | ((uint32_t)bytes[offset + 3] << 24);
+}
 
 void btstack_run_loop_set_timer(btstack_timer_source_t* timer, uint32_t ms);
 void btstack_run_loop_add_timer(btstack_timer_source_t* timer);

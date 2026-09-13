@@ -85,8 +85,12 @@ enum {
 
 typedef enum {
     CONTROLLER_TYPE_UnknownController = 0,
+    CONTROLLER_TYPE_XBoxOneController = 32,
+    CONTROLLER_TYPE_PS4Controller = 34,
     CONTROLLER_TYPE_WiiController = 35,
-    CONTROLLER_TYPE_PS5Controller = 46,
+    CONTROLLER_TYPE_SwitchProController = 38,
+    CONTROLLER_TYPE_PS5Controller = 45,
+    CONTROLLER_TYPE_PSMoveController = 56,
 } uni_controller_type_t;
 
 typedef enum {
