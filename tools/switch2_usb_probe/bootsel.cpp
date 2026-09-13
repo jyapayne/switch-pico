@@ -26,8 +26,8 @@ uint32_t bootsel_deadline_ms;
 #endif
 }
 
-bool probe_bootsel_vendor_control(uint8_t rhport, uint8_t stage,
-                                  const tusb_control_request_t* request) {
+bool probe_management_vendor_control(uint8_t rhport, uint8_t stage,
+                                     const tusb_control_request_t* request) {
     using namespace UsbConfigurationManagement;
 #if SWITCH2_PROBE_HUB
     if (rhport > PROBE_CONTROLLER_COUNT) return false;
@@ -41,7 +41,12 @@ bool probe_bootsel_vendor_control(uint8_t rhport, uint8_t stage,
         request->bRequest != static_cast<uint8_t>(Operation::kBootselReboot) ||
         request->wValue != kRequestValue || request->wIndex != kRequestIndex ||
         request->wLength != kRequestHeaderSize) {
+#if SWITCH2_PROBE_HUB
+        return rhport == 0 &&
+            usb_configuration_management_vendor_control(rhport, stage, request);
+#else
         return false;
+#endif
     }
 #if SWITCH2_PROBE_HUB
     if (stage == CONTROL_STAGE_SETUP) {

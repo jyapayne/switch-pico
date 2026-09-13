@@ -1,5 +1,7 @@
-# Development USB identities used by switch-pico XInput and generic HID modes.
+# USB identities used by switch-pico native hub, XInput, and generic HID modes.
 # Restrict configuration access to the active local seat and plugdev members.
+# Native hub root only; host tools still validate the switch-pico management response.
+SUBSYSTEM=="usb", ATTR{idVendor}=="057e", ATTR{idProduct}=="2068", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4010", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4020", MODE="0660", GROUP="plugdev", TAG+="uaccess"
 SUBSYSTEM=="usb", ATTR{idVendor}=="cafe", ATTR{idProduct}=="4021", MODE="0660", GROUP="plugdev", TAG+="uaccess"

@@ -41,6 +41,7 @@ class FakeDevice:
     bus = 1
     address = 7
     port_numbers = (1,)
+    firmware_version = (0, 2, 0)
 
     def __init__(self) -> None:
         self.configuration = struct.pack(
@@ -300,9 +301,7 @@ class FakeDevice:
                     request,
                     bytes(
                         [
-                            0,
-                            2,
-                            0,
+                            *self.firmware_version,
                             2,
                             self.active_mode,
                             self.capabilities,
@@ -376,7 +375,9 @@ class FakeDevice:
                     make_response(
                         request,
                         self.profiles[self.selected_profile],
-                        schema=struct.unpack_from("<H", self.profiles[self.selected_profile])[0],
+                        schema=struct.unpack_from(
+                            "<H", self.profiles[self.selected_profile]
+                        )[0],
                         generation=self.profile_generation,
                     )
                 )
@@ -718,7 +719,11 @@ def native_rumble_configuration(
 ) -> bytes:
     return (
         struct.pack(
-            "<HBBB3x", 90, config_manager.REQUESTED_MODE_XINPUT, len(identities), joycon_mode
+            "<HBBB3x",
+            90,
+            config_manager.REQUESTED_MODE_XINPUT,
+            len(identities),
+            joycon_mode,
         )
         + b"".join(identity.to_bytes() for identity in identities)
         + bytes((16 - len(identities)) * 14)
@@ -770,7 +775,11 @@ def test_native_rumble_configuration_canonical_wire_round_trip(schema: int) -> N
     config_manager.write_configuration(
         device,
         config_manager.AdapterConfiguration(
-            90, 0, 0, config_manager.REQUESTED_MODE_XINPUT, tuple(reversed(identities)),
+            90,
+            0,
+            0,
+            config_manager.REQUESTED_MODE_XINPUT,
+            tuple(reversed(identities)),
             schema_version=schema,
         ),
         1.0,
@@ -830,7 +839,8 @@ def test_native_rumble_configuration_rejects_invalid_lists(malformation: str) ->
 
 
 @pytest.mark.parametrize(
-    "malformation", ("duplicate", "overflow", "global", "ble", "pair", "vendor", "product")
+    "malformation",
+    ("duplicate", "overflow", "global", "ble", "pair", "vendor", "product"),
 )
 def test_native_rumble_write_rejects_invalid_approvals_before_transaction(
     malformation: str,
@@ -865,11 +875,16 @@ def test_native_rumble_write_rejects_invalid_approvals_before_transaction(
 
 @pytest.mark.parametrize(
     ("schema", "joycon_mode"),
-    ((3, config_manager.JOYCON_MODE_PAIRED), (4, config_manager.JOYCON_MODE_INDIVIDUAL)),
+    (
+        (3, config_manager.JOYCON_MODE_PAIRED),
+        (4, config_manager.JOYCON_MODE_INDIVIDUAL),
+    ),
 )
 def test_native_rumble_cli_approval_is_physical_and_preserves_other_settings(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    schema: int, joycon_mode: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    schema: int,
+    joycon_mode: int,
 ) -> None:
     device = FakeDevice()
     device.configuration_schema = schema
@@ -1038,8 +1053,10 @@ def test_configuration_transaction_and_reset() -> None:
     ),
 )
 def test_joycon_mode_legacy_read_and_write_refusal(
-    schema: int, payload: bytes,
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    schema: int,
+    payload: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = FakeDevice()
     device.configuration_schema = schema
@@ -1047,7 +1064,9 @@ def test_joycon_mode_legacy_read_and_write_refusal(
     monkeypatch.setattr(config_manager, "_candidate_devices", lambda: (device,))
     assert config_manager.main(["joycon-mode", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
-        "mode": "paired", "generation": 3, "supported": False,
+        "mode": "paired",
+        "generation": 3,
+        "supported": False,
     }
     configuration = config_manager.read_configuration(device)
     assert configuration.joycon_mode == config_manager.JOYCON_MODE_PAIRED
@@ -1058,7 +1077,8 @@ def test_joycon_mode_legacy_read_and_write_refusal(
         assert capsys.readouterr().out == ""
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.write_configuration(
-            device, replace(configuration, joycon_mode=config_manager.JOYCON_MODE_INDIVIDUAL),
+            device,
+            replace(configuration, joycon_mode=config_manager.JOYCON_MODE_INDIVIDUAL),
             1.0,
         )
     assert device.configuration == payload
@@ -1097,12 +1117,15 @@ def test_joycon_mode_rejects_invalid_values_before_transaction(mode: object) -> 
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.set_joycon_mode(device, mode, 1.0)
     with pytest.raises(config_manager.ConfigManagerError):
-        config_manager.write_configuration(device, replace(before, joycon_mode=mode), 1.0)
+        config_manager.write_configuration(
+            device, replace(before, joycon_mode=mode), 1.0
+        )
     assert not device.out_requests
 
 
 def test_joycon_mode_cli_commits_and_reads_without_reboot_or_profile_changes(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = FakeDevice()
     device.configuration_schema = 4
@@ -1140,7 +1163,8 @@ def test_joycon_mode_cli_commits_and_reads_without_reboot_or_profile_changes(
 
 
 def test_joycon_mode_cli_commit_failure_does_not_claim_new_preference(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = FakeDevice()
     device.configuration_schema = 4
@@ -1627,19 +1651,53 @@ def test_requested_and_active_mode_response_validation() -> None:
         config_manager.read_info(device)
 
 
+def test_native_hub_reports_capabilities_but_refuses_mode_changes() -> None:
+    device = FakeDevice()
+    device.firmware_version = (0, 72, 0)
+    device.active_mode = 5
+    device.capabilities = 7
+    before = config_manager.read_configuration(device)
+
+    info = config_manager.read_info(device)
+    assert info.firmware_version == (0, 72, 0)
+    assert info.mode_name() == "Native Joy-Con hub"
+    assert info.capability_names() == ("input", "rumble", "motion")
+    with pytest.raises(config_manager.ConfigManagerError, match="fixed USB output"):
+        config_manager.configure_mode(device, before.requested_mode, 1.0)
+    with pytest.raises(config_manager.ConfigManagerError, match="fixed USB output"):
+        config_manager.set_mode(device, config_manager.REQUESTED_MODE_SWITCH, 1.0)
+    with pytest.raises(config_manager.ConfigManagerError, match="fixed USB output"):
+        config_manager.request_reboot(device, 1)
+    assert config_manager.read_configuration(device) == before
+    assert device.out_requests == []
+
+    config_manager.request_bootsel_reboot(device)
+    assert device.bootsel_reboot_requested
+
+
 @pytest.mark.parametrize(
     ("left_type", "right_type", "flags"), [(0, 0, 1), (1, 0, 3), (0, 1, 5), (1, 1, 7)]
 )
 def test_joycon_pair_wire_round_trip_preserves_both_typed_members(
-    left_type: int, right_type: int, flags: int,
+    left_type: int,
+    right_type: int,
+    flags: int,
 ) -> None:
     left = config_manager.ControllerIdentity(
-        True, config_manager.TRANSPORT_BLE, left_type,
-        bytes.fromhex("C10203040506"), 0x057E, 0x2067,
+        True,
+        config_manager.TRANSPORT_BLE,
+        left_type,
+        bytes.fromhex("C10203040506"),
+        0x057E,
+        0x2067,
     )
     right = config_manager.ControllerIdentity(
-        True, config_manager.TRANSPORT_BLE, right_type,
-        bytes.fromhex("D11213141516"), 0x057E, 0x2066,
+        True,
+        config_manager.TRANSPORT_BLE,
+        right_type,
+        bytes.fromhex("D11213141516"),
+        0x057E,
+        0x2066,
     )
     pair = config_manager.ControllerIdentity.make_joycon_pair(left, right)
     wire = bytes((flags, 3)) + left.address + right.address
@@ -1653,34 +1711,51 @@ def test_joycon_pair_wire_round_trip_preserves_both_typed_members(
 
 def test_joycon_pair_distinguishes_address_types_without_normalizing_members() -> None:
     left = config_manager.ControllerIdentity(
-        True, config_manager.TRANSPORT_BLE, 0,
-        bytes.fromhex("C10203040506"), 0x057E, 0x2067,
+        True,
+        config_manager.TRANSPORT_BLE,
+        0,
+        bytes.fromhex("C10203040506"),
+        0x057E,
+        0x2067,
     )
     right = replace(left, address_type=1, product_id=0x2066)
     pair = config_manager.ControllerIdentity.make_joycon_pair(left, right)
     assert pair.to_bytes() == bytes.fromhex("0503C10203040506C10203040506")
     assert pair.joycon_pair_members() == (left, right)
     with pytest.raises(config_manager.ConfigManagerError):
-        config_manager.ControllerIdentity.make_joycon_pair(left, replace(right, address_type=0))
+        config_manager.ControllerIdentity.make_joycon_pair(
+            left, replace(right, address_type=0)
+        )
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerIdentity.make_joycon_pair(right, left)
 
 
-@pytest.mark.parametrize("wire", [
-    "0003102030405060C12233445566",  # Stable flag missing.
-    "0D03102030405060C12233445566",  # Reserved flag.
-    "0303102030405060C12233445566",  # Left random address is not static.
-    "0503C12233445566102030405060",  # Right random address is not static.
-    "0103102030405060102030405060",  # Duplicate typed members.
-])
+@pytest.mark.parametrize(
+    "wire",
+    [
+        "0003102030405060C12233445566",  # Stable flag missing.
+        "0D03102030405060C12233445566",  # Reserved flag.
+        "0303102030405060C12233445566",  # Left random address is not static.
+        "0503C12233445566102030405060",  # Right random address is not static.
+        "0103102030405060102030405060",  # Duplicate typed members.
+    ],
+)
 def test_joycon_pair_rejects_malformed_wire(wire: str) -> None:
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerIdentity.from_bytes(bytes.fromhex(wire))
 
 
-@pytest.mark.parametrize("malformation", [
-    "global", "classic", "vendor", "model", "address_type", "random_address",
-])
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "global",
+        "classic",
+        "vendor",
+        "model",
+        "address_type",
+        "random_address",
+    ],
+)
 def test_joycon_pair_requires_legitimate_ble_members(malformation: str) -> None:
     pair = config_manager.ControllerIdentity.from_bytes(
         bytes.fromhex("0503102030405060C12233445566")
@@ -1698,14 +1773,19 @@ def test_joycon_pair_requires_legitimate_ble_members(malformation: str) -> None:
         config_manager.ControllerIdentity.make_joycon_pair(left, invalid)
 
 
-@pytest.mark.parametrize("fields", [
-    {"stable": False},
-    {"vendor_id": 0x045E},
-    {"product_id": 0x2066},
-    {"address_type": 2},
-    {"partner_address_type": 3},
-])
-def test_joycon_pair_rejects_inconsistent_in_memory_identity(fields: dict[str, object]) -> None:
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"stable": False},
+        {"vendor_id": 0x045E},
+        {"product_id": 0x2066},
+        {"address_type": 2},
+        {"partner_address_type": 3},
+    ],
+)
+def test_joycon_pair_rejects_inconsistent_in_memory_identity(
+    fields: dict[str, object],
+) -> None:
     pair = config_manager.ControllerIdentity.from_bytes(
         bytes.fromhex("0503102030405060C12233445566")
     )
@@ -1713,10 +1793,13 @@ def test_joycon_pair_rejects_inconsistent_in_memory_identity(fields: dict[str, o
         replace(pair, **fields)
 
 
-@pytest.mark.parametrize("fields", [
-    {"partner_address_type": 1},
-    {"partner_address": bytes.fromhex("C12233445566")},
-])
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"partner_address_type": 1},
+        {"partner_address": bytes.fromhex("C12233445566")},
+    ],
+)
 def test_physical_identity_cannot_hide_pair_members(fields: dict[str, object]) -> None:
     with pytest.raises(config_manager.ConfigManagerError):
         replace(native_rumble_identity(), **fields)
@@ -1724,13 +1807,16 @@ def test_physical_identity_cannot_hide_pair_members(fields: dict[str, object]) -
 
 def test_pairing_inventory_rejects_logical_profile_owners() -> None:
     device = FakeDevice()
-    device.records = [(config_manager.TRANSPORT_JOYCON_PAIR, 0, bytes.fromhex("102030405060"))]
+    device.records = [
+        (config_manager.TRANSPORT_JOYCON_PAIR, 0, bytes.fromhex("102030405060"))
+    ]
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.read_pairings(device)
 
 
 def test_profile_cli_lists_both_pair_addresses_but_native_inventory_omits_pair(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     device = FakeDevice()
     pair = config_manager.ControllerIdentity.from_bytes(
@@ -1870,8 +1956,14 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
     legacy_json_object["schema_version"] = config_manager.PROFILE_LEGACY_SCHEMA_VERSION
     legacy_json_object["size"] = config_manager.PROFILE_LEGACY_SIZE
     for field in (
-        "shortcuts", "shift", "turbo_settings", "extra_button_map", "swing",
-        "nunchuk_swing", "combined_swing", "combination_window_ms",
+        "shortcuts",
+        "shift",
+        "turbo_settings",
+        "extra_button_map",
+        "swing",
+        "nunchuk_swing",
+        "combined_swing",
+        "combination_window_ms",
     ):
         del legacy_json_object[field]
     del legacy_json_object["motion_toggle_chord"]
@@ -1936,8 +2028,14 @@ def test_schema5_full_macro_stream_migrates_bytes_and_json(monkeypatch) -> None:
     obj["schema_version"] = 5
     obj["size"] = 256
     for field in (
-        "shortcuts", "shift", "turbo_settings", "extra_button_map", "swing",
-        "nunchuk_swing", "combined_swing", "combination_window_ms",
+        "shortcuts",
+        "shift",
+        "turbo_settings",
+        "extra_button_map",
+        "swing",
+        "nunchuk_swing",
+        "combined_swing",
+        "combination_window_ms",
     ):
         del obj[field]
     for macro in obj["macros"]:
@@ -1997,31 +2095,53 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     device.profiles[(device.stable_identity.to_bytes(), 1)] = bytes(legacy_wire)
     assert config_manager.read_profile(device, device.stable_identity, 1) == profile
     device.profile_aliases[device.stable_identity.to_bytes()] = "Custom controller"
-    old_listing = config_manager.parse_profile_list(config_manager.parse_response(
-        make_response(config_manager.OP_PROFILE_LIST, device._profile_list_payload(), schema=6),
-        config_manager.OP_PROFILE_LIST,
-    ))
-    assert old_listing[1] == config_manager.ProfileListEntry(device.stable_identity, 1, "Custom controller")
+    old_listing = config_manager.parse_profile_list(
+        config_manager.parse_response(
+            make_response(
+                config_manager.OP_PROFILE_LIST, device._profile_list_payload(), schema=6
+            ),
+            config_manager.OP_PROFILE_LIST,
+        )
+    )
+    assert old_listing[1] == config_manager.ProfileListEntry(
+        device.stable_identity, 1, "Custom controller"
+    )
 
 
 @pytest.mark.parametrize("version", [7, 8, 9])
-def test_schema7_extra_controls_keep_output_channels_and_wire_layout(version: int) -> None:
+def test_schema7_extra_controls_keep_output_channels_and_wire_layout(
+    version: int,
+) -> None:
     obj = custom_profile().to_json_object()
-    obj["extra_button_map"] = dict(zip(
-        config_manager.EXTRA_BUTTONS,
-        ("south", "right_trigger", "left_trigger", None, "dpad_left", "start", "capture"),
-    ))
+    obj["extra_button_map"] = dict(
+        zip(
+            config_manager.EXTRA_BUTTONS,
+            (
+                "south",
+                "right_trigger",
+                "left_trigger",
+                None,
+                "dpad_left",
+                "start",
+                "capture",
+            ),
+        )
+    )
     obj["shift"]["mode"] = "hold"
     obj["shift"]["modifier"] = "gl"
-    obj["shift"]["extra_button_map"] = dict(zip(
-        config_manager.EXTRA_BUTTONS,
-        ("east", None, "west", "north", "system", "dpad_up", "dpad_right"),
-    ))
+    obj["shift"]["extra_button_map"] = dict(
+        zip(
+            config_manager.EXTRA_BUTTONS,
+            ("east", None, "west", "north", "system", "dpad_up", "dpad_right"),
+        )
+    )
     obj["shortcuts"]["modifier"] = "left_sr"
     obj["shortcuts"]["profiles"][0] = "south"
     obj["switching_chord"] = ["left_trigger", "c", "right_sr"]
     obj["motion_toggle_chord"] = ["right_trigger", "gl", "left_sl"]
-    for index, names in enumerate((["c", "gl"], ["gr"], ["left_sl", "left_sr"], ["right_sl", "right_sr"])):
+    for index, names in enumerate(
+        (["c", "gl"], ["gr"], ["left_sl", "left_sr"], ["right_sl", "right_sr"])
+    ):
         obj["macros"][index]["trigger"] = names
         obj["macros"][index]["cancel"] = config_manager.EXTRA_BUTTONS[index + 3]
     obj["schema_version"] = version
@@ -2040,7 +2160,12 @@ def test_schema7_extra_controls_keep_output_channels_and_wire_layout(version: in
     assert encoded[358:364] == bytes((3, 4, 24, 96, 65, 10))
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
     assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
-    assert len(profile.button_map) == len(profile.shift.button_map) == len(profile.turbo_modes) == 16
+    assert (
+        len(profile.button_map)
+        == len(profile.shift.button_map)
+        == len(profile.turbo_modes)
+        == 16
+    )
     assert profile.swing.button == config_manager.PROFILE_NONE_BUTTON
     legacy_wire = bytearray(encoded)
     struct.pack_into("<H", legacy_wire, 0, version)
@@ -2051,20 +2176,29 @@ def test_schema7_extra_controls_keep_output_channels_and_wire_layout(version: in
     device = FakeDevice()
     device.profiles[(device.stable_identity.to_bytes(), 1)] = bytes(legacy_wire)
     assert config_manager.read_profile(device, device.stable_identity, 1) == profile
-    listing = config_manager.parse_profile_list(config_manager.parse_response(
-        make_response(config_manager.OP_PROFILE_LIST, device._profile_list_payload(), schema=version),
-        config_manager.OP_PROFILE_LIST,
-    ))
+    listing = config_manager.parse_profile_list(
+        config_manager.parse_response(
+            make_response(
+                config_manager.OP_PROFILE_LIST,
+                device._profile_list_payload(),
+                schema=version,
+            ),
+            config_manager.OP_PROFILE_LIST,
+        )
+    )
     assert listing[1].identity == device.stable_identity
     assert listing[1].active_profile_index == 1
 
 
-@pytest.mark.parametrize("path", [
-    ("button_map", "south"),
-    ("extra_button_map", "c"),
-    ("triggers", "left", "output"),
-    ("shift", "extra_button_map", "c"),
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("button_map", "south"),
+        ("extra_button_map", "c"),
+        ("triggers", "left", "output"),
+        ("shift", "extra_button_map", "c"),
+    ],
+)
 def test_extra_controls_cannot_be_output_destinations(path: tuple[str, ...]) -> None:
     obj = config_manager.ControllerProfile.default().to_json_object()
     target = obj
@@ -2075,10 +2209,20 @@ def test_extra_controls_cannot_be_output_destinations(path: tuple[str, ...]) -> 
         config_manager.ControllerProfile.from_json_object(obj)
 
 
-@pytest.mark.parametrize("offset,value", [
-    (98, 18 << 2), (256, 18), (266, 24), (344, 1), (358, 1), (363, 1),
-])
-def test_schema6_rejects_schema7_controls_in_old_fields(offset: int, value: int) -> None:
+@pytest.mark.parametrize(
+    "offset,value",
+    [
+        (98, 18 << 2),
+        (256, 18),
+        (266, 24),
+        (344, 1),
+        (358, 1),
+        (363, 1),
+    ],
+)
+def test_schema6_rejects_schema7_controls_in_old_fields(
+    offset: int, value: int
+) -> None:
     payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
     struct.pack_into("<H", payload, 0, 6)
     payload[344:] = bytes(40)
@@ -2087,9 +2231,17 @@ def test_schema6_rejects_schema7_controls_in_old_fields(offset: int, value: int)
         config_manager.ControllerProfile.from_bytes(payload)
 
 
-@pytest.mark.parametrize("offset,value", [
-    (344, 18), (351, 16), (358, 128), (362, 128), (363, 128), (364, 1),
-])
+@pytest.mark.parametrize(
+    "offset,value",
+    [
+        (344, 18),
+        (351, 16),
+        (358, 128),
+        (362, 128),
+        (363, 128),
+        (364, 1),
+    ],
+)
 def test_schema7_rejects_extra_map_and_mask_overflow(offset: int, value: int) -> None:
     payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
     struct.pack_into("<H", payload, 0, 7)
@@ -2129,27 +2281,40 @@ def test_legacy_control_profiles_preserve_custom_actions(version: int) -> None:
     macro["steps"].append(config_manager.MacroStep.end().to_json_object())
     obj["macro"] = macro
     for key in (
-        "shortcuts", "shift", "turbo_settings", "extra_button_map", "swing",
-        "nunchuk_swing", "combined_swing", "combination_window_ms",
+        "shortcuts",
+        "shift",
+        "turbo_settings",
+        "extra_button_map",
+        "swing",
+        "nunchuk_swing",
+        "combined_swing",
+        "combination_window_ms",
     ):
         del obj[key]
     assert config_manager.ControllerProfile.from_json_object(obj) == profile
     assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()) == profile
 
 
-@pytest.mark.parametrize(("button", "sensitivity", "modifier"), [
-    ("south", "low", "right_sr"),
-    ("dpad_right", "high", "south"),
-    ("west", "medium", "right_trigger"),
-    (None, "high", None),
-])
+@pytest.mark.parametrize(
+    ("button", "sensitivity", "modifier"),
+    [
+        ("south", "low", "right_sr"),
+        ("dpad_right", "high", "south"),
+        ("west", "medium", "right_trigger"),
+        (None, "high", None),
+    ],
+)
 def test_swing_profile_round_trip_preserves_other_settings(
-    button: str | None, sensitivity: str, modifier: str | None,
+    button: str | None,
+    sensitivity: str,
+    modifier: str | None,
 ) -> None:
     before = custom_profile()
     obj = before.to_json_object()
     obj["swing"] = {
-        "button": button, "sensitivity": sensitivity, "modifier": modifier,
+        "button": button,
+        "sensitivity": sensitivity,
+        "modifier": modifier,
         "macro": None,
     }
     profile = config_manager.ControllerProfile.from_json_object(obj)
@@ -2162,17 +2327,23 @@ def test_swing_profile_round_trip_preserves_other_settings(
     assert config_manager.read_profile(device, device.stable_identity, 2) == profile
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("button", "left_trigger"),
-    ("button", "right_sr"),
-    ("button", 0),
-    ("sensitivity", "extreme"),
-    ("sensitivity", None),
-    ("sensitivity", 1),
-    ("modifier", "unknown"),
-    ("modifier", False),
-    ("macro", 0), ("macro", 5), ("macro", True), ("macro", "1"),
-])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("button", "left_trigger"),
+        ("button", "right_sr"),
+        ("button", 0),
+        ("sensitivity", "extreme"),
+        ("sensitivity", None),
+        ("sensitivity", 1),
+        ("modifier", "unknown"),
+        ("modifier", False),
+        ("macro", 0),
+        ("macro", 5),
+        ("macro", True),
+        ("macro", "1"),
+    ],
+)
 def test_swing_rejects_invalid_json_settings(field: str, value: object) -> None:
     obj = config_manager.ControllerProfile.default().to_json_object()
     obj["swing"][field] = value
@@ -2180,22 +2351,47 @@ def test_swing_rejects_invalid_json_settings(field: str, value: object) -> None:
         config_manager.ControllerProfile.from_json_object(obj)
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("button", -1), ("button", 16), ("button", True),
-    ("sensitivity", -1), ("sensitivity", 3), ("sensitivity", False),
-    ("modifier", -1), ("modifier", 25), ("modifier", 256),
-    ("macro", -1), ("macro", 4), ("macro", False),
-])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("button", -1),
+        ("button", 16),
+        ("button", True),
+        ("sensitivity", -1),
+        ("sensitivity", 3),
+        ("sensitivity", False),
+        ("modifier", -1),
+        ("modifier", 25),
+        ("modifier", 256),
+        ("macro", -1),
+        ("macro", 4),
+        ("macro", False),
+    ],
+)
 def test_swing_rejects_invalid_in_memory_settings(field: str, value: object) -> None:
     with pytest.raises(config_manager.ConfigManagerError):
         replace(config_manager.ProfileSwing(), **{field: value})
 
 
-@pytest.mark.parametrize(("offset", "value"), [
-    (364, 16), (365, 3), (366, 25), (367, 4),
-    (368, 16), (369, 3), (370, 25), (371, 4),
-    (372, 16), (373, 4), (374, 25), (375, 29), (375, 201), (376, 1),
-])
+@pytest.mark.parametrize(
+    ("offset", "value"),
+    [
+        (364, 16),
+        (365, 3),
+        (366, 25),
+        (367, 4),
+        (368, 16),
+        (369, 3),
+        (370, 25),
+        (371, 4),
+        (372, 16),
+        (373, 4),
+        (374, 25),
+        (375, 29),
+        (375, 201),
+        (376, 1),
+    ],
+)
 def test_swing_rejects_corrupt_wire_settings(offset: int, value: int) -> None:
     payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
     payload[offset] = value
@@ -2203,11 +2399,18 @@ def test_swing_rejects_corrupt_wire_settings(offset: int, value: int) -> None:
         config_manager.ControllerProfile.from_bytes(payload)
 
 
-@pytest.mark.parametrize("mutation", [
-    "missing", "unknown", "missing_button", "missing_sensitivity", "missing_modifier",
-    "missing_macro",
-    "legacy_field",
-])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing",
+        "unknown",
+        "missing_button",
+        "missing_sensitivity",
+        "missing_modifier",
+        "missing_macro",
+        "legacy_field",
+    ],
+)
 def test_swing_json_fields_are_strict(mutation: str) -> None:
     obj = config_manager.ControllerProfile.default().to_json_object()
     if mutation == "missing":
@@ -2246,7 +2449,9 @@ def test_schema8_swing_migration_preserves_remote_binding() -> None:
 def test_gesture_macro_json_indices_and_wire_layout(macro_number: int) -> None:
     obj = custom_profile().to_json_object()
     obj["macros"][macro_number - 1] = {
-        **obj["macros"][0], "trigger": [], "playback": "toggle",
+        **obj["macros"][0],
+        "trigger": [],
+        "playback": "toggle",
     }
     obj["swing"].update(macro=macro_number, sensitivity="high", modifier="right_sr")
     obj["nunchuk_swing"].update(button="dpad_right", sensitivity="low", modifier="c")
@@ -2255,10 +2460,22 @@ def test_gesture_macro_json_indices_and_wire_layout(macro_number: int) -> None:
     profile = config_manager.ControllerProfile.from_json_object(obj)
     assert profile.swing.macro == profile.combined_swing.macro == macro_number - 1
     encoded = profile.to_bytes()
-    assert encoded[364:376] == bytes((
-        255, 2, 24, macro_number - 1, 15, 0, 18, 255,
-        255, macro_number - 1, 16, 200,
-    ))
+    assert encoded[364:376] == bytes(
+        (
+            255,
+            2,
+            24,
+            macro_number - 1,
+            15,
+            0,
+            18,
+            255,
+            255,
+            macro_number - 1,
+            16,
+            200,
+        )
+    )
     assert encoded[376:] == bytes(8)
     assert config_manager.ControllerProfile.from_bytes(encoded) == profile
     assert profile.to_json_object() == obj
@@ -2271,14 +2488,17 @@ def test_gesture_actions_are_exclusive(gesture: str) -> None:
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerProfile.from_json_object(obj)
     action_type = (
-        config_manager.ProfileCombinedSwing if gesture == "combined_swing"
+        config_manager.ProfileCombinedSwing
+        if gesture == "combined_swing"
         else config_manager.ProfileSwing
     )
     with pytest.raises(config_manager.ConfigManagerError):
         action_type(button=0, macro=0)
     payload = bytearray(custom_profile().to_bytes())
     button_offset, macro_offset = {
-        "swing": (364, 367), "nunchuk_swing": (368, 371), "combined_swing": (372, 373),
+        "swing": (364, 367),
+        "nunchuk_swing": (368, 371),
+        "combined_swing": (372, 373),
     }[gesture]
     payload[button_offset] = payload[macro_offset] = 0
     with pytest.raises(config_manager.ConfigManagerError):
@@ -2288,7 +2508,8 @@ def test_gesture_actions_are_exclusive(gesture: str) -> None:
 @pytest.mark.parametrize("gesture", ["swing", "nunchuk_swing", "combined_swing"])
 @pytest.mark.parametrize("empty", [False, True])
 def test_gesture_macro_requires_configured_positive_duration_target(
-    gesture: str, empty: bool,
+    gesture: str,
+    empty: bool,
 ) -> None:
     obj = custom_profile().to_json_object()
     target = obj["macros"][0]
@@ -2315,17 +2536,26 @@ def test_combination_window_inclusive_bounds_round_trip(window: int) -> None:
     obj = config_manager.ControllerProfile.default().to_json_object()
     obj["combination_window_ms"] = window
     profile = config_manager.ControllerProfile.from_json_object(obj)
-    assert config_manager.ControllerProfile.from_bytes(profile.to_bytes()).combination_window_ms == window
+    assert (
+        config_manager.ControllerProfile.from_bytes(
+            profile.to_bytes()
+        ).combination_window_ms
+        == window
+    )
 
 
 @pytest.mark.parametrize("window", [29, 201, True, 100.0, None])
-def test_combination_window_rejects_out_of_range_or_noninteger_values(window: object) -> None:
+def test_combination_window_rejects_out_of_range_or_noninteger_values(
+    window: object,
+) -> None:
     obj = config_manager.ControllerProfile.default().to_json_object()
     obj["combination_window_ms"] = window
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerProfile.from_json_object(obj)
     with pytest.raises(config_manager.ConfigManagerError):
-        replace(config_manager.ControllerProfile.default(), combination_window_ms=window)
+        replace(
+            config_manager.ControllerProfile.default(), combination_window_ms=window
+        )
 
 
 @pytest.mark.parametrize(
@@ -2610,20 +2840,31 @@ def test_profile_playtest_decodes_raw_controller_state() -> None:
 
 def test_playtest_layout_and_extra_inputs_preserve_legacy_firmware() -> None:
     device = FakeDevice()
-    device.stable_identity = replace(device.stable_identity, vendor_id=0x057E, product_id=0x2067)
+    device.stable_identity = replace(
+        device.stable_identity, vendor_id=0x057E, product_id=0x2067
+    )
     device.playtest_extra_buttons = 0x55
     device.playtest_layout = 3
     payload, flags = device._profile_playtest_payload()
 
     def parse(data: bytes, schema: int) -> config_manager.ProfilePlaytest:
-        return config_manager.parse_profile_playtest(config_manager.parse_response(
-            make_response(config_manager.OP_PROFILE_PLAYTEST, data, flags=flags, schema=schema),
-            config_manager.OP_PROFILE_PLAYTEST,
-        ))
+        return config_manager.parse_profile_playtest(
+            config_manager.parse_response(
+                make_response(
+                    config_manager.OP_PROFILE_PLAYTEST, data, flags=flags, schema=schema
+                ),
+                config_manager.OP_PROFILE_PLAYTEST,
+            )
+        )
 
     current = parse(payload, 4)
     assert current.to_json_object()["layout"] == "joycon2-pair"
-    assert current.to_json_object()["extra_buttons"] == ["c", "gr", "left_sr", "right_sr"]
+    assert current.to_json_object()["extra_buttons"] == [
+        "c",
+        "gr",
+        "left_sr",
+        "right_sr",
+    ]
     assert current.to_json_object()["buttons"] == ["south", "dpad_up", "dpad_right"]
     assert parse(payload[:55], 3) == replace(current, layout=None)
     assert parse(payload[:54], 2) == replace(current, extra_buttons=0, layout=None)
@@ -3085,31 +3326,80 @@ def test_mode_parser_accepts_all_implemented_modes() -> None:
         assert args.mode == mode
 
 
-def test_candidate_discovery_checks_all_usb_identities(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lookups: list[tuple[int, int]] = []
-
-    assert config_manager.USB_IDENTITIES == (
+@pytest.mark.parametrize(
+    "identity",
+    [
         (0x057E, 0x2009),
+        (0x057E, 0x2068),
         (0xCAFE, 0x4010),
         (0xCAFE, 0x4020),
         (0xCAFE, 0x4021),
-    )
+    ],
+)
+def test_discovery_finds_one_adapter_without_its_native_children(
+    monkeypatch: pytest.MonkeyPatch,
+    identity: tuple[int, int],
+) -> None:
+    device = FakeDevice()
+    if identity == (0x057E, 0x2068):
+        device.firmware_version = (0, 72, 0)
+        device.active_mode = 5
+    right = FakeDevice()
+    right.address = 8
+    left = FakeDevice()
+    left.address = 9
+    devices = {
+        identity: (device,),
+        (0x057E, 0x2066): (right,),
+        (0x057E, 0x2067): (left,),
+    }
 
-    def find(**arguments: object) -> tuple[object, ...]:
-        lookups.append(
-            (
-                int(arguments["idVendor"]),
-                int(arguments["idProduct"]),
-            )
+    def find(**arguments: object) -> tuple[FakeDevice, ...]:
+        return devices.get(
+            (int(arguments["idVendor"]), int(arguments["idProduct"])), ()
         )
+
+    monkeypatch.setattr(config_manager.usb.core, "find", find)
+    assert config_manager.find_pico(None, None, timeout=0) is device
+    for child in (right, left):
+        with pytest.raises(config_manager.ConfigManagerError, match="no USB-connected"):
+            config_manager.find_pico(child.bus, child.address, timeout=0)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        config_manager.usb.core.USBError("management request stalled", errno=32),
+        b"Nintendo",
+        make_response(config_manager.OP_INFO, b""),
+        make_response(config_manager.OP_INFO, bytes((0, 72, 0, 2, 5, 0x80, 0, 2))),
+    ],
+)
+def test_native_discovery_requires_validated_management_info(
+    monkeypatch: pytest.MonkeyPatch,
+    response: bytes | Exception,
+) -> None:
+    class NintendoDevice(FakeDevice):
+        address = 8
+
+        def ctrl_transfer(self, *args: object, **kwargs: object) -> bytes:
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+    nintendo = NintendoDevice()
+    hub = FakeDevice()
+    hub.active_mode = 5
+
+    def find(**arguments: object) -> tuple[FakeDevice, ...]:
+        if (arguments["idVendor"], arguments["idProduct"]) == (0x057E, 0x2068):
+            return nintendo, hub
         return ()
 
     monkeypatch.setattr(config_manager.usb.core, "find", find)
-
-    assert list(config_manager._candidate_devices()) == []
-    assert tuple(lookups) == config_manager.USB_IDENTITIES
+    assert config_manager.find_pico(None, None, timeout=0) is hub
+    with pytest.raises(config_manager.ConfigManagerError, match="none accepted"):
+        config_manager.find_pico(nintendo.bus, nintendo.address, timeout=0)
 
 
 def test_find_requires_selector_for_multiple_picos(
@@ -4241,7 +4531,9 @@ def test_haptics_fixture_metadata_follows_reported_frame_count(
     )
     pattern = snapshot.to_json_object()["pattern"]
     assert pattern["stereo_frames_per_packet"] == packet_frames
-    assert pattern["packet_interval_us"] == pytest.approx(packet_frames * 1000000 / 3000)
+    assert pattern["packet_interval_us"] == pytest.approx(
+        packet_frames * 1000000 / 3000
+    )
     assert pattern["total_packets"] == total_packets
     assert pattern["priming_silence_packets"] == silence_packets
     assert pattern["trailing_silence_packets"] == silence_packets
@@ -4261,7 +4553,9 @@ def test_haptics_fixture_metadata_follows_reported_frame_count(
 
 @pytest.mark.parametrize("mode", [0, 1])
 @pytest.mark.parametrize("packet_frames", [0, 48])
-def test_haptics_rejects_unadvertised_frame_sizes(mode: int, packet_frames: int) -> None:
+def test_haptics_rejects_unadvertised_frame_sizes(
+    mode: int, packet_frames: int
+) -> None:
     device = HapticsDevice(
         [haptics_response(2, slot=0, mode=mode, packet_frames=packet_frames)]
     )

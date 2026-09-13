@@ -669,7 +669,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     if (stage == CONTROL_STAGE_SETUP)
         log_packet("VENDOR_CONTROL", rhport, 0, (const uint8_t*)request, sizeof(*request));
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
-    if (probe_bootsel_vendor_control(rhport, stage, request))
+    if (probe_management_vendor_control(rhport, stage, request))
         return true;
 #endif
 #if SWITCH2_PROBE_HUB

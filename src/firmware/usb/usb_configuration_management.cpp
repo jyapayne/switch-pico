@@ -20,6 +20,9 @@
 #endif
 #include "tusb.h"
 #include "usb/usb_output_driver.h"
+#if SWITCH2_PROBE_HUB
+#include "usb/native_hub/native_hub.h"
+#endif
 
 namespace UsbConfigurationManagement {
 namespace {
@@ -188,9 +191,16 @@ size_t encode_transaction(uint8_t* output, size_t output_size) {
 
 size_t encode_info(uint8_t* output, size_t output_size) {
     uint8_t payload[8] = {
+#if SWITCH2_PROBE_HUB
+        0, 72, 0, 2,
+        kNativeHubActiveMode,
+        USB_OUTPUT_CAPABILITY_INPUT | USB_OUTPUT_CAPABILITY_RUMBLE |
+            USB_OUTPUT_CAPABILITY_MOTION,
+#else
         0, 2, 0, 2,
         static_cast<uint8_t>(usb_output_driver_mode()),
         usb_output_driver_capabilities(),
+#endif
         static_cast<uint8_t>(CONFIGURATION_STORAGE_MAX_PAYLOAD_SIZE),
         static_cast<uint8_t>(
             CONFIGURATION_STORAGE_MAX_PAYLOAD_SIZE >> 8),
@@ -696,6 +706,21 @@ UsbConfigurationManagement::Operation g_pending_operation =
 bool g_out_pending = false;
 bool g_out_processed = false;
 size_t g_pending_request_size = 0;
+uint8_t g_pending_rhport = 0;
+tusb_control_request_t g_pending_setup{};
+#if SWITCH2_PROBE_HUB
+bool g_out_validated = false;
+#endif
+
+bool management_control_xfer(uint8_t rhport,
+                             const tusb_control_request_t* request,
+                             void* buffer, uint16_t length) {
+#if SWITCH2_PROBE_HUB
+    return native_hub_control_xfer(rhport, request, buffer, length);
+#else
+    return tud_control_xfer(rhport, request, buffer, length);
+#endif
+}
 
 bool process_out_request() {
     using namespace UsbConfigurationManagement;
@@ -981,14 +1006,24 @@ bool process_out_request() {
 bool usb_configuration_management_vendor_control(
     uint8_t rhport, uint8_t stage,
     tusb_control_request_t const* request) {
+#if SWITCH2_PROBE_HUB
+    // Native children have independent EP0 protocols and must never touch the
+    // root management buffers, even to abort a pending root request.
+    if (rhport != 0) return false;
+#endif
     if (stage == CONTROL_STAGE_SETUP) {
         g_out_pending = false;
         g_out_processed = false;
         g_pending_request_size = 0;
+#if SWITCH2_PROBE_HUB
+        g_out_validated = false;
+#endif
     }
+#if !SWITCH2_PROBE_HUB
     if (adapter_host_probe_vendor_control(rhport, stage, request)) {
         return true;
     }
+#endif
     using namespace UsbConfigurationManagement;
     if (request == nullptr ||
         request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR ||
@@ -1000,6 +1035,12 @@ bool usb_configuration_management_vendor_control(
 
     const Operation operation =
         static_cast<Operation>(request->bRequest);
+#if SWITCH2_PROBE_HUB
+    // This image has a fixed native output. BOOTSEL uses the probe's private,
+    // independently validated path so its status ACK retains the reboot delay.
+    if (operation == Operation::kModeSet || operation == Operation::kReboot ||
+        operation == Operation::kBootselReboot) return false;
+#endif
     if ((operation == Operation::kHapticsTransportProbe ||
          operation == Operation::kSwitch2MouseCapture ||
          operation == Operation::kWiiIrGyro) &&
@@ -1010,16 +1051,32 @@ bool usb_configuration_management_vendor_control(
         if (request->bmRequestType_bit.direction == TUSB_DIR_IN) {
             return true;
         }
-        if (!g_out_pending || operation != g_pending_operation) {
+        if (!g_out_pending || rhport != g_pending_rhport ||
+            memcmp(request, &g_pending_setup, sizeof(*request)) != 0 ||
+            operation != g_pending_operation) {
             return false;
         }
         g_out_pending = false;
+#if SWITCH2_PROBE_HUB
+        if (!g_out_validated) return false;
+        g_out_validated = false;
+#endif
         if (operation == Operation::kHapticsExperiment) {
             return g_out_processed;
         }
         return process_out_request();
     }
     if (stage == CONTROL_STAGE_DATA) {
+#if SWITCH2_PROBE_HUB
+        if (request->bmRequestType_bit.direction == TUSB_DIR_OUT) {
+            DecodedRequest decoded{};
+            g_out_validated = g_out_pending && rhport == g_pending_rhport &&
+                memcmp(request, &g_pending_setup, sizeof(*request)) == 0 &&
+                decode_request(operation, g_request_buffer,
+                               g_pending_request_size, &decoded);
+            if (!g_out_validated) return false;
+        }
+#endif
         if (operation == Operation::kHapticsExperiment &&
             request->bmRequestType_bit.direction == TUSB_DIR_OUT) {
             if (!g_out_pending || operation != g_pending_operation ||
@@ -1042,10 +1099,12 @@ bool usb_configuration_management_vendor_control(
         }
         g_pending_operation = operation;
         g_pending_request_size = request->wLength;
-        g_out_pending = true;
+        g_pending_rhport = rhport;
+        g_pending_setup = *request;
+        g_out_pending = management_control_xfer(
+            rhport, request, g_request_buffer, request->wLength);
         g_out_processed = false;
-        return tud_control_xfer(rhport, request, g_request_buffer,
-                                request->wLength);
+        return g_out_pending;
     }
 
     static uint8_t response[kMaximumResponseSize]{};
@@ -1149,7 +1208,7 @@ bool usb_configuration_management_vendor_control(
             return false;
     }
     return response_size != 0 &&
-           tud_control_xfer(
+           management_control_xfer(
                rhport, request, response,
                static_cast<uint16_t>(response_size));
 }

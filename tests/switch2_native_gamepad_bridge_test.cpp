@@ -358,6 +358,36 @@ void wii_bias_and_independent_sensor_freshness() {
     }
 }
 
+void nunchuk_buttons_map_to_native_left_shoulders() {
+    ++source.controller.connection_generation;
+    source.controller.state = {};
+    source.accel_valid = source.gyro_valid = false;
+    profile = controller_profile_default(controller_identity_global(), 0);
+    // The real Wii parser maps Nunchuk C to west and Z to north. These are
+    // ordinary profile inputs, not the unrelated Switch2 extra "C" control.
+    profile.button_map[static_cast<unsigned>(ControllerProfileLogicalButton::kWest)] =
+        CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+    profile.button_map[static_cast<unsigned>(ControllerProfileLogicalButton::kNorth)] =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kLeftShoulder);
+    source.controller.state.button_west = true; // C -> ZL.
+    publish(false); pair();
+    assert(reports[0][2] == 0 && reports[1][2] == 0x20);
+    source.controller.state.button_west = false;
+    source.controller.state.button_north = true; // Z -> L.
+    publish(false); pair();
+    assert(reports[0][2] == 0 && reports[1][2] == 0x10);
+    source.controller.state.button_right_shoulder = true; // Remote 2 -> R.
+    publish(false); pair();
+    assert(reports[0][2] == 0x10 && reports[1][2] == 0x10); // Real L+R across the pair.
+    source.controller.state.button_west = true;
+    publish(false); pair();
+    assert(reports[0][2] == 0x10 && reports[1][2] == 0x30);
+    source.controller.state = {};
+    publish(false); pair();
+    assert(reports[0][2] == 0 && reports[1][2] == 0); // No sticky synthetic chord.
+    no_mouse_or_rails();
+}
+
 } // namespace
 
 int main() {
@@ -372,5 +402,6 @@ int main() {
     if (SWITCH2_BRIDGE_IMU_TARGET_MASK == 3) real_motion_admission_and_loss();
     selected_motion_target_keeps_both_control_halves();
     wii_bias_and_independent_sensor_freshness();
+    nunchuk_buttons_map_to_native_left_shoulders();
     return 0;
 }

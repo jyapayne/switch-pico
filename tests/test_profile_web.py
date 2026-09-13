@@ -18,7 +18,7 @@ from tests.test_config_manager import FakeDevice, custom_profile, native_rumble_
 
 @contextmanager
 def running_server(
-    monkeypatch: pytest.MonkeyPatch, device: FakeDevice
+    monkeypatch: pytest.MonkeyPatch, device: FakeDevice | None
 ) -> Iterator[tuple[str, str]]:
     server = profile_web.ProfileEditorServer(
         ("127.0.0.1", 0),
@@ -26,7 +26,8 @@ def running_server(
         device_address=None,
         timeout=1.0,
     )
-    monkeypatch.setattr(server, "find_device", lambda: device)
+    if device is not None:
+        monkeypatch.setattr(server, "find_device", lambda: device)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -118,13 +119,80 @@ def test_editor_serves_assets_and_complete_schema(
     )
 
 
-@pytest.mark.parametrize(("product_id", "extras"), [
-    (0x2069, {"c", "gl", "gr"}),
-    (0x2067, {"left_sl", "left_sr"}),
-    (0x2066, {"c", "right_sl", "right_sr"}),
-])
+def test_native_hub_editor_discovers_root_and_preserves_saved_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    device.firmware_version = (0, 72, 0)
+    device.active_mode = 5
+    device.capabilities = 7
+    device.profiles[(device.global_identity.to_bytes(), 2)] = (
+        custom_profile().to_bytes()
+    )
+    configuration = config_manager.read_configuration(device)
+    pairings = config_manager.read_pairings(device)
+    profiles = device.profiles.copy()
+    active_profiles = device.active_profiles.copy()
+
+    def find(**arguments: object) -> tuple[FakeDevice, ...]:
+        if (arguments["idVendor"], arguments["idProduct"]) == (0x057E, 0x2068):
+            return (device,)
+        return ()
+
+    monkeypatch.setattr(config_manager.usb.core, "find", find)
+    with running_server(monkeypatch, None) as (base_url, token):
+        status, listing = request_json(f"{base_url}/api/profiles")
+        assert status == 200
+        assert [entry["key"] for entry in listing["identities"]] == [
+            identity.to_bytes().hex() for identity in device.profile_identities
+        ]
+        status, selected = request_json(f"{base_url}/api/profiles/1/8")
+        assert status == 200
+        assert (
+            selected["profile"]
+            == config_manager.ControllerProfile.default().to_json_object()
+        )
+
+        draft = custom_profile().to_json_object()
+        status, _ = request_json(
+            f"{base_url}/api/profiles/1/8", method="PUT", value=draft, token=token
+        )
+        assert status == 200
+        status, _ = request_json(
+            f"{base_url}/api/profiles/1/8/activate", method="POST", token=token
+        )
+        assert status == 200
+        status, stored = request_json(f"{base_url}/api/profiles/1/8")
+        assert status == 200
+        assert stored["profile"] == draft
+        assert stored["active"] is True
+
+    profiles[(device.stable_identity.to_bytes(), 7)] = custom_profile().to_bytes()
+    active_profiles[device.stable_identity.to_bytes()] = 7
+    assert device.profiles == profiles
+    assert device.active_profiles == active_profiles
+    assert config_manager.read_configuration(device) == configuration
+    assert config_manager.read_pairings(device) == pairings
+    assert device.active_mode == 5
+    assert not {
+        config_manager.OP_MODE_SET,
+        config_manager.OP_REBOOT,
+        config_manager.OP_BOOTSEL_REBOOT,
+    }.intersection(device.requests)
+
+
+@pytest.mark.parametrize(
+    ("product_id", "extras"),
+    [
+        (0x2069, {"c", "gl", "gr"}),
+        (0x2067, {"left_sl", "left_sr"}),
+        (0x2066, {"c", "right_sl", "right_sr"}),
+    ],
+)
 def test_switch2_input_choices_are_never_output_targets(
-    monkeypatch: pytest.MonkeyPatch, product_id: int, extras: set[str],
+    monkeypatch: pytest.MonkeyPatch,
+    product_id: int,
+    extras: set[str],
 ) -> None:
     device = FakeDevice()
     identity = replace(device.stable_identity, vendor_id=0x057E, product_id=product_id)
@@ -145,7 +213,8 @@ def test_switch2_input_choices_are_never_output_targets(
 
 @pytest.mark.parametrize("version", [6, 7, 8])
 def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
-    monkeypatch: pytest.MonkeyPatch, version: int,
+    monkeypatch: pytest.MonkeyPatch,
+    version: int,
 ) -> None:
     device = FakeDevice()
     key = (device.stable_identity.to_bytes(), 1)
@@ -167,10 +236,15 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
     with running_server(monkeypatch, device) as (base_url, token):
         status, migrated = request_json(f"{base_url}/api/profiles/1/2")
         assert status == 200
-        assert config_manager.ControllerProfile.from_json_object(migrated["profile"]) == profile
+        assert (
+            config_manager.ControllerProfile.from_json_object(migrated["profile"])
+            == profile
+        )
         assert migrated["profile"]["swing"] == profile.swing.to_json_object()
         draft = migrated["profile"]
-        draft["extra_button_map"] = dict(zip(config_manager.EXTRA_BUTTONS, config_manager.LOGICAL_BUTTONS[:7]))
+        draft["extra_button_map"] = dict(
+            zip(config_manager.EXTRA_BUTTONS, config_manager.LOGICAL_BUTTONS[:7])
+        )
         draft["shift"]["mode"] = "hold"
         draft["shift"]["modifier"] = "c"
         draft["shift"]["extra_button_map"]["right_sr"] = "dpad_right"
@@ -179,26 +253,40 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
         draft["switching_chord"] = ["left_sl", "left_sr"]
         draft["motion_toggle_chord"] = ["right_sl", "c"]
         draft["swing"] = {
-            "button": "west", "sensitivity": "high", "modifier": "right_trigger",
+            "button": "west",
+            "sensitivity": "high",
+            "modifier": "right_trigger",
             "macro": None,
         }
         draft["nunchuk_swing"].update(macro=1, sensitivity="low", modifier="c")
         draft["combined_swing"].update(macro=2, modifier="left_trigger")
         draft["combination_window_ms"] = 30
         status, validated = request_json(
-            f"{base_url}/api/profiles/validate", method="POST", value=draft, token=token,
+            f"{base_url}/api/profiles/validate",
+            method="POST",
+            value=draft,
+            token=token,
         )
         assert status == 200
         expected_profile = config_manager.ControllerProfile.from_json_object(draft)
-        assert config_manager.ControllerProfile.from_json_object(validated["profile"]) == expected_profile
+        assert (
+            config_manager.ControllerProfile.from_json_object(validated["profile"])
+            == expected_profile
+        )
         assert device.profiles[key] == bytes(legacy_wire)
         status, _ = request_json(
-            f"{base_url}/api/profiles/1/2", method="PUT", value=draft, token=token,
+            f"{base_url}/api/profiles/1/2",
+            method="PUT",
+            value=draft,
+            token=token,
         )
         assert status == 200
         status, stored = request_json(f"{base_url}/api/profiles/1/2")
         assert status == 200
-        assert config_manager.ControllerProfile.from_json_object(stored["profile"]) == expected_profile
+        assert (
+            config_manager.ControllerProfile.from_json_object(stored["profile"])
+            == expected_profile
+        )
         assert stored["alias"] == "Living room"
         assert stored["name"] == "Racing"
         assert stored["active"] is True
@@ -210,7 +298,8 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
 
 @pytest.mark.parametrize("gesture", ["swing", "nunchuk_swing", "combined_swing"])
 def test_editor_rejects_unconfigured_gesture_macro_without_saving(
-    monkeypatch: pytest.MonkeyPatch, gesture: str,
+    monkeypatch: pytest.MonkeyPatch,
+    gesture: str,
 ) -> None:
     device = FakeDevice()
     key = (device.stable_identity.to_bytes(), 1)
@@ -219,10 +308,14 @@ def test_editor_rejects_unconfigured_gesture_macro_without_saving(
     draft[gesture]["macro"] = 4
     with running_server(monkeypatch, device) as (base_url, token):
         for endpoint, method in (
-            ("/api/profiles/validate", "POST"), ("/api/profiles/1/2", "PUT"),
+            ("/api/profiles/validate", "POST"),
+            ("/api/profiles/1/2", "PUT"),
         ):
             status, result = request_json(
-                f"{base_url}{endpoint}", method=method, value=draft, token=token,
+                f"{base_url}{endpoint}",
+                method=method,
+                value=draft,
+                token=token,
             )
             assert status == 400
             assert "error" in result
@@ -267,8 +360,10 @@ def test_editor_identifies_connected_controller_artwork(
         (identity["controller"]["style"], identity["controller"]["layout"])
         for identity in listing["identities"]
     ] == [
-        ("generic", "generic"), ("switch", "switch-pro"),
-        ("playstation", "dualsense"), ("xbox", "xbox"),
+        ("generic", "generic"),
+        ("switch", "switch-pro"),
+        ("playstation", "dualsense"),
+        ("xbox", "xbox"),
     ]
     assert [identity["key"] for identity in listing["identities"]] == [
         identity.to_bytes().hex() for identity in device.profile_identities
@@ -285,7 +380,8 @@ def joycon_pair_device() -> FakeDevice:
     device.profile_identities = [device.global_identity, left, right, pair]
     device.stable_identity = pair
     device.active_profiles = {
-        identity.to_bytes(): index for index, identity in enumerate(device.profile_identities)
+        identity.to_bytes(): index
+        for index, identity in enumerate(device.profile_identities)
     }
     default_profile = config_manager.ControllerProfile.default().to_bytes()
     device.profiles = {
@@ -299,7 +395,8 @@ def joycon_pair_device() -> FakeDevice:
 
 
 def test_persistent_pair_owner_is_offline_capable_and_isolated_from_solo_banks(
-    monkeypatch: pytest.MonkeyPatch, joycon_pair_device: FakeDevice,
+    monkeypatch: pytest.MonkeyPatch,
+    joycon_pair_device: FakeDevice,
 ) -> None:
     device = joycon_pair_device
     _, left, right, pair = device.profile_identities
@@ -312,7 +409,9 @@ def test_persistent_pair_owner_is_offline_capable_and_isolated_from_solo_banks(
             identity.to_bytes().hex() for identity in device.profile_identities
         ]
         assert [owner["controller"]["layout"] for owner in owners[1:]] == [
-            "joycon2-left", "joycon2-right", "joycon2-pair",
+            "joycon2-left",
+            "joycon2-right",
+            "joycon2-pair",
         ]
         owner = owners[3]
         assert owner["controller"]["model"] != owners[1]["controller"]["model"]
@@ -322,7 +421,11 @@ def test_persistent_pair_owner_is_offline_capable_and_isolated_from_solo_banks(
         assert owner["identity"]["members"]["right"]["address"] == right.address_text
         assert owner["identity"]["members"]["right"]["address_type"] == 1
         assert set(owner["source_controls"]) & set(config_manager.EXTRA_BUTTONS) == {
-            "c", "left_sl", "left_sr", "right_sl", "right_sr",
+            "c",
+            "left_sl",
+            "left_sr",
+            "right_sl",
+            "right_sr",
         }
         status, offline = request_json(f"{base_url}/api/profiles/3/8/playtest")
         assert status == 200
@@ -337,8 +440,10 @@ def test_persistent_pair_owner_is_offline_capable_and_isolated_from_solo_banks(
         for bank, output in ((3, "north"), (1, "east"), (2, "west")):
             expected[bank]["button_map"]["south"] = output
             status, _ = request_json(
-                f"{base_url}/api/profiles/{bank}/8", method="PUT",
-                value=expected[bank], token=token,
+                f"{base_url}/api/profiles/{bank}/8",
+                method="PUT",
+                value=expected[bank],
+                token=token,
             )
             assert status == 200
             for other_bank, expected_profile in expected.items():
@@ -350,16 +455,26 @@ def test_persistent_pair_owner_is_offline_capable_and_isolated_from_solo_banks(
             ("identities/3/alias", "Couch pair"),
         ):
             status, _ = request_json(
-                f"{base_url}/api/{path}", method="PUT", value={"value": value}, token=token,
+                f"{base_url}/api/{path}",
+                method="PUT",
+                value={"value": value},
+                token=token,
             )
             assert status == 200
         status, _ = request_json(
-            f"{base_url}/api/profiles/3/8/activate", method="POST", token=token,
+            f"{base_url}/api/profiles/3/8/activate",
+            method="POST",
+            token=token,
         )
         assert status == 200
         status, listing = request_json(f"{base_url}/api/profiles")
         assert status == 200
-        assert [owner["active_profile"] for owner in listing["identities"]] == [1, 2, 3, 8]
+        assert [owner["active_profile"] for owner in listing["identities"]] == [
+            1,
+            2,
+            3,
+            8,
+        ]
         assert listing["identities"][3]["label"] == "Couch pair"
         assert listing["identities"][3]["key"] == pair.to_bytes().hex()
         for bank in (1, 2, 3):
@@ -388,7 +503,8 @@ def test_persistent_pair_owner_is_offline_capable_and_isolated_from_solo_banks(
 
 
 def test_capture_cannot_bind_pair_input_to_a_solo_owner(
-    monkeypatch: pytest.MonkeyPatch, joycon_pair_device: FakeDevice,
+    monkeypatch: pytest.MonkeyPatch,
+    joycon_pair_device: FakeDevice,
 ) -> None:
     device = joycon_pair_device
     left = device.profile_identities[1]
@@ -396,7 +512,9 @@ def test_capture_cannot_bind_pair_input_to_a_solo_owner(
         status, _ = request_json(f"{base_url}/api/profiles/1/1/playtest")
         assert status == 200
         status, _ = request_json(
-            f"{base_url}/api/profiles/1/1/capture/start", method="POST", token=token,
+            f"{base_url}/api/profiles/1/1/capture/start",
+            method="POST",
+            token=token,
             value={
                 "owner_key": left.to_bytes().hex(),
                 "capture_id": "solo-bank-paired-input",
@@ -416,37 +534,56 @@ def test_capture_cannot_bind_pair_input_to_a_solo_owner(
 
 @pytest.mark.parametrize("owner_index", [0, 1])
 def test_live_layout_transitions_do_not_infer_topology_from_profile_owner(
-    monkeypatch: pytest.MonkeyPatch, owner_index: int,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_index: int,
 ) -> None:
     device = FakeDevice()
     left = replace(device.stable_identity, vendor_id=0x057E, product_id=0x2067)
     device.stable_identity = left
     device.profile_identities = [device.global_identity, left]
     device.active_profiles[left.to_bytes()] = 0
-    device.profiles[(left.to_bytes(), 0)] = config_manager.ControllerProfile.default().to_bytes()
+    device.profiles[(left.to_bytes(), 0)] = (
+        config_manager.ControllerProfile.default().to_bytes()
+    )
     device.playtest_motion = None
     with running_server(monkeypatch, device) as (base_url, _):
-        for code, expected in ((1, "joycon2-left"), (3, "joycon2-pair"), (1, "joycon2-left")):
+        for code, expected in (
+            (1, "joycon2-left"),
+            (3, "joycon2-pair"),
+            (1, "joycon2-left"),
+        ):
             device.playtest_layout = code
-            status, sample = request_json(f"{base_url}/api/profiles/{owner_index}/1/playtest")
+            status, sample = request_json(
+                f"{base_url}/api/profiles/{owner_index}/1/playtest"
+            )
             assert status == 200
             assert sample["controller"]["layout"] == expected
-            assert sample["owner_key"] == device.profile_identities[owner_index].to_bytes().hex()
+            assert (
+                sample["owner_key"]
+                == device.profile_identities[owner_index].to_bytes().hex()
+            )
             assert sample["identity_key"] == left.to_bytes().hex()
             assert sample["identity"]["is_joycon_pair"] is False
             expected_extras = (
                 {"c", "left_sl", "left_sr", "right_sl", "right_sr"}
-                if code == 3 else {"left_sl", "left_sr"}
+                if code == 3
+                else {"left_sl", "left_sr"}
             )
-            assert set(sample["source_controls"]) & set(config_manager.EXTRA_BUTTONS) == expected_extras
+            assert (
+                set(sample["source_controls"]) & set(config_manager.EXTRA_BUTTONS)
+                == expected_extras
+            )
         status, listing = request_json(f"{base_url}/api/profiles")
         assert status == 200
         assert [owner["key"] for owner in listing["identities"]] == [
-            device.global_identity.to_bytes().hex(), left.to_bytes().hex(),
+            device.global_identity.to_bytes().hex(),
+            left.to_bytes().hex(),
         ]
         assert listing["identities"][1]["controller"]["layout"] == "joycon2-left"
         device.playtest_connected = False
-        status, offline = request_json(f"{base_url}/api/profiles/{owner_index}/1/playtest")
+        status, offline = request_json(
+            f"{base_url}/api/profiles/{owner_index}/1/playtest"
+        )
         assert status == 200
         assert offline["connected"] is False
         assert offline["layout"] is None
@@ -468,7 +605,9 @@ def test_wii_pid_does_not_claim_a_remote_or_extension_without_live_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     device = FakeDevice()
-    device.stable_identity = replace(device.stable_identity, vendor_id=0x057E, product_id=0x0330)
+    device.stable_identity = replace(
+        device.stable_identity, vendor_id=0x057E, product_id=0x0330
+    )
     device.profile_identities = [device.global_identity, device.stable_identity]
     device.active_profiles[device.stable_identity.to_bytes()] = 0
     with running_server(monkeypatch, device) as (base_url, _):
@@ -488,8 +627,11 @@ def test_wii_pid_does_not_claim_a_remote_or_extension_without_live_metadata(
             assert status == 200
             assert sample["controller"]["layout"] == expected
             if code:
-                assert set(sample["source_controls"]).isdisjoint(config_manager.EXTRA_BUTTONS)
+                assert set(sample["source_controls"]).isdisjoint(
+                    config_manager.EXTRA_BUTTONS
+                )
                 assert ("left_shoulder" in sample["source_controls"]) == (code == 5)
+
 
 def test_editor_reads_writes_and_activates_profiles_atomically(
     monkeypatch: pytest.MonkeyPatch,
@@ -651,13 +793,17 @@ def test_editor_rejects_invalid_or_unauthorized_mutations(
 
 
 def test_joycon_mode_preserves_configuration_and_all_profile_banks(
-    monkeypatch: pytest.MonkeyPatch, joycon_pair_device: FakeDevice,
+    monkeypatch: pytest.MonkeyPatch,
+    joycon_pair_device: FakeDevice,
 ) -> None:
     device = joycon_pair_device
     config_manager.write_configuration(
         device,
         config_manager.AdapterConfiguration(
-            135, 0, 0, config_manager.REQUESTED_MODE_XINPUT,
+            135,
+            0,
+            0,
+            config_manager.REQUESTED_MODE_XINPUT,
             (native_rumble_identity(),),
         ),
         1.0,
@@ -677,24 +823,35 @@ def test_joycon_mode_preserves_configuration_and_all_profile_banks(
         status, initial = request_json(f"{base_url}/api/joycon-mode")
         assert status == 200
         assert initial == {
-            "mode": "paired", "generation": before.generation, "supported": True,
+            "mode": "paired",
+            "generation": before.generation,
+            "supported": True,
         }
         for mode in ("individual", "paired"):
             status, committed = request_json(
-                f"{base_url}/api/joycon-mode", method="PUT",
-                value={"mode": mode}, token=token,
+                f"{base_url}/api/joycon-mode",
+                method="PUT",
+                value={"mode": mode},
+                token=token,
             )
             assert status == 200
             stored = config_manager.read_configuration(device)
             assert committed == {
-                "mode": mode, "generation": stored.generation, "supported": True,
+                "mode": mode,
+                "generation": stored.generation,
+                "supported": True,
             }
             assert stored.joycon_mode == config_manager.JOYCON_MODE_NAMES.index(mode)
             assert stored.generation > before.generation
-            assert replace(
-                stored, joycon_mode=before.joycon_mode,
-                generation=before.generation, crc=before.crc,
-            ) == before
+            assert (
+                replace(
+                    stored,
+                    joycon_mode=before.joycon_mode,
+                    generation=before.generation,
+                    crc=before.crc,
+                )
+                == before
+            )
             assert request_json(f"{base_url}/api/joycon-mode") == (200, committed)
     assert device.profiles == profiles
     assert device.profile_names == names
@@ -706,14 +863,19 @@ def test_joycon_mode_preserves_configuration_and_all_profile_banks(
 
 @pytest.mark.parametrize("schema", [1, 2, 3])
 def test_joycon_mode_legacy_reads_default_and_refuses_mutations(
-    monkeypatch: pytest.MonkeyPatch, schema: int,
+    monkeypatch: pytest.MonkeyPatch,
+    schema: int,
 ) -> None:
     device = FakeDevice()
     config_manager.write_configuration(
         device,
         config_manager.AdapterConfiguration(
-            95, 0, 0,
-            native_switch_controllers=(native_rumble_identity(),) if schema == 3 else (),
+            95,
+            0,
+            0,
+            native_switch_controllers=(native_rumble_identity(),)
+            if schema == 3
+            else (),
             schema_version=schema,
         ),
         1.0,
@@ -723,12 +885,16 @@ def test_joycon_mode_legacy_reads_default_and_refuses_mutations(
         status, legacy = request_json(f"{base_url}/api/joycon-mode")
         assert status == 200
         assert legacy == {
-            "mode": "paired", "generation": before.generation, "supported": False,
+            "mode": "paired",
+            "generation": before.generation,
+            "supported": False,
         }
         for mode in ("paired", "individual"):
             status, _ = request_json(
-                f"{base_url}/api/joycon-mode", method="PUT",
-                value={"mode": mode}, token=token,
+                f"{base_url}/api/joycon-mode",
+                method="PUT",
+                value={"mode": mode},
+                token=token,
             )
             assert status == 400
     assert config_manager.read_configuration(device) == before
@@ -739,29 +905,48 @@ def test_joycon_mode_rejects_unauthorized_and_malformed_requests(
 ) -> None:
     device = FakeDevice()
     config_manager.write_configuration(
-        device, config_manager.AdapterConfiguration(110, 0, 0), 1.0,
+        device,
+        config_manager.AdapterConfiguration(110, 0, 0),
+        1.0,
     )
     before = config_manager.read_configuration(device)
     with running_server(monkeypatch, device) as (base_url, token):
         endpoint = f"{base_url}/api/joycon-mode"
         for supplied_token in (None, "invalid"):
             status, _ = request_json(
-                endpoint, method="PUT", value={"mode": "individual"},
+                endpoint,
+                method="PUT",
+                value={"mode": "individual"},
                 token=supplied_token,
             )
             assert status == 403
         for body in (
-            {}, [], {"mode": 1}, {"mode": True}, {"mode": None},
-            {"mode": ["individual"]}, {"mode": "Individual"},
+            {},
+            [],
+            {"mode": 1},
+            {"mode": True},
+            {"mode": None},
+            {"mode": ["individual"]},
+            {"mode": "Individual"},
             {"mode": "individual", "pairing_window_seconds": 10},
         ):
             status, _ = request_json(
-                endpoint, method="PUT", value=body, token=token,
+                endpoint,
+                method="PUT",
+                value=body,
+                token=token,
             )
             assert status == 400
-        for raw in (b"", b"{", b"\xff", b" " * (profile_web._MAXIMUM_REQUEST_BYTES + 1)):
+        for raw in (
+            b"",
+            b"{",
+            b"\xff",
+            b" " * (profile_web._MAXIMUM_REQUEST_BYTES + 1),
+        ):
             request = urllib.request.Request(
-                endpoint, data=raw, method="PUT",
+                endpoint,
+                data=raw,
+                method="PUT",
                 headers={"X-Switch-Pico-Token": token},
             )
             with pytest.raises(urllib.error.HTTPError) as rejected:
@@ -769,7 +954,8 @@ def test_joycon_mode_rejects_unauthorized_and_malformed_requests(
             assert rejected.value.code == 400
         for method in ("GET", "PUT"):
             request = urllib.request.Request(
-                endpoint, method=method,
+                endpoint,
+                method=method,
                 data=b'{"mode":"individual"}' if method == "PUT" else None,
                 headers={"Host": "untrusted.example", "X-Switch-Pico-Token": token},
             )
@@ -784,12 +970,16 @@ def test_joycon_mode_commit_is_not_reported_as_confirmed_when_readback_fails(
 ) -> None:
     device = FakeDevice()
     config_manager.write_configuration(
-        device, config_manager.AdapterConfiguration(110, 0, 0), 1.0,
+        device,
+        config_manager.AdapterConfiguration(110, 0, 0),
+        1.0,
     )
     read_configuration = config_manager.read_configuration
     before = read_configuration(device)
 
-    def disconnect_after_commit(device: config_manager.UsbDevice) -> config_manager.AdapterConfiguration:
+    def disconnect_after_commit(
+        device: config_manager.UsbDevice,
+    ) -> config_manager.AdapterConfiguration:
         configuration = read_configuration(device)
         if configuration.generation != before.generation:
             raise usb.core.USBError("device disconnected")
@@ -798,18 +988,23 @@ def test_joycon_mode_commit_is_not_reported_as_confirmed_when_readback_fails(
     monkeypatch.setattr(config_manager, "read_configuration", disconnect_after_commit)
     with running_server(monkeypatch, device) as (base_url, token):
         status, response = request_json(
-            f"{base_url}/api/joycon-mode", method="PUT",
-            value={"mode": "individual"}, token=token,
+            f"{base_url}/api/joycon-mode",
+            method="PUT",
+            value={"mode": "individual"},
+            token=token,
         )
     assert status == 503
     assert "error" in response
     assert "mode" not in response
-    assert read_configuration(device).joycon_mode == config_manager.JOYCON_MODE_INDIVIDUAL
+    assert (
+        read_configuration(device).joycon_mode == config_manager.JOYCON_MODE_INDIVIDUAL
+    )
 
 
 @pytest.mark.parametrize("method", ["GET", "PUT"])
 def test_joycon_mode_usb_failure_returns_service_unavailable(
-    monkeypatch: pytest.MonkeyPatch, method: str,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
 ) -> None:
     device = FakeDevice()
     before = device.configuration
@@ -820,8 +1015,10 @@ def test_joycon_mode_usb_failure_returns_service_unavailable(
     monkeypatch.setattr(device, "ctrl_transfer", disconnected)
     with running_server(monkeypatch, device) as (base_url, token):
         status, response = request_json(
-            f"{base_url}/api/joycon-mode", method=method,
-            value={"mode": "individual"} if method == "PUT" else None, token=token,
+            f"{base_url}/api/joycon-mode",
+            method=method,
+            value={"mode": "individual"} if method == "PUT" else None,
+            token=token,
         )
     assert status == 503
     assert "error" in response
@@ -906,7 +1103,6 @@ def test_recorder_accepts_first_connection_generation_zero(
         assert status == 200 and stopped["state_name"] == "stopped"
 
 
-
 def test_wii_orientation_endpoint_validation_and_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -951,9 +1147,7 @@ def test_wii_orientation_endpoint_validation_and_failures(
         def failing_config(*args: Any, **kwargs: Any) -> None:
             raise config_manager.ConfigManagerError("firmware rejected orientation")
 
-        monkeypatch.setattr(
-            config_manager, "set_wii_orientation", failing_config
-        )
+        monkeypatch.setattr(config_manager, "set_wii_orientation", failing_config)
         status, err = request_json(
             f"{base_url}/api/identities/1/wii-orientation",
             method="POST",
@@ -967,9 +1161,7 @@ def test_wii_orientation_endpoint_validation_and_failures(
         def usb_failing_config(*args: Any, **kwargs: Any) -> None:
             raise usb.core.USBError("USB pipe error")
 
-        monkeypatch.setattr(
-            config_manager, "set_wii_orientation", usb_failing_config
-        )
+        monkeypatch.setattr(config_manager, "set_wii_orientation", usb_failing_config)
         status, err = request_json(
             f"{base_url}/api/identities/1/wii-orientation",
             method="POST",

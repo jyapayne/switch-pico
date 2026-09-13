@@ -14,6 +14,8 @@ namespace UsbConfigurationManagement {
 constexpr uint16_t kRequestValue = 0x5350;
 constexpr uint16_t kRequestIndex = 0x0001;
 constexpr uint8_t kProtocolVersion = 1;
+// INFO-only active mode; never persisted as an AdapterRequestedMode.
+constexpr uint8_t kNativeHubActiveMode = 5;
 constexpr size_t kRequestHeaderSize = 16;
 constexpr size_t kResponseHeaderSize = 20;
 constexpr size_t kPairingRecordSize = 8;

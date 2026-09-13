@@ -21,6 +21,7 @@ import usb.core
 
 USB_IDENTITIES = (
     (0x057E, 0x2009),
+    (0x057E, 0x2068),  # Native hub root only; its Joy-Con children are not adapters.
     (0xCAFE, 0x4010),
     (0xCAFE, 0x4020),
     (0xCAFE, 0x4021),
@@ -125,7 +126,15 @@ ACTIVE_MODE_SWITCH_PROBE = 1
 ACTIVE_MODE_XINPUT = 2
 ACTIVE_MODE_DINPUT = 3
 ACTIVE_MODE_MAC = 4
-ACTIVE_MODE_NAMES = ("Switch", "Switch probe", "XInput", "DInput", "Mac")
+ACTIVE_MODE_NATIVE_HUB = 5
+ACTIVE_MODE_NAMES = (
+    "Switch",
+    "Switch probe",
+    "XInput",
+    "DInput",
+    "Mac",
+    "Native Joy-Con hub",
+)
 # USB management info byte 5 capability flags.
 CAPABILITY_INPUT = 1 << 0
 CAPABILITY_RUMBLE = 1 << 1
@@ -638,7 +647,9 @@ class PairingRecord:
 
     def __post_init__(self) -> None:
         if self.transport not in (TRANSPORT_CLASSIC, TRANSPORT_BLE):
-            raise ConfigManagerError("pairing record must identify a physical Bluetooth peer")
+            raise ConfigManagerError(
+                "pairing record must identify a physical Bluetooth peer"
+            )
 
     @property
     def address_text(self) -> str:
@@ -724,7 +735,11 @@ def _control_index(
 ) -> int:
     if value is None:
         return PROFILE_NONE_BUTTON
-    controls = LOGICAL_CONTROLS if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION else OUTPUT_CONTROLS
+    controls = (
+        LOGICAL_CONTROLS
+        if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION
+        else OUTPUT_CONTROLS
+    )
     if type(value) is not str or value not in controls:
         choices = ", ".join(controls)
         raise ConfigManagerError(f"{name} must be null or one of: {choices}")
@@ -796,7 +811,9 @@ class ControllerIdentity:
             raise ConfigManagerError("identity address must contain six bytes")
         _require_int(self.vendor_id, "identity vendor_id", 0, 0xFFFF)
         _require_int(self.product_id, "identity product_id", 0, 0xFFFF)
-        _require_int(self.partner_address_type, "identity partner_address_type", 0, 0xFF)
+        _require_int(
+            self.partner_address_type, "identity partner_address_type", 0, 0xFF
+        )
         if type(self.partner_address) is not bytes or len(self.partner_address) != 6:
             raise ConfigManagerError("identity partner_address must contain six bytes")
         if self.is_joycon_pair:
@@ -817,7 +834,9 @@ class ControllerIdentity:
                 raise ConfigManagerError("invalid Joy-Con 2 pair identity")
             return
         if self.partner_address_type != 0 or self.partner_address != bytes(6):
-            raise ConfigManagerError("physical identity cannot contain a partner address")
+            raise ConfigManagerError(
+                "physical identity cannot contain a partner address"
+            )
         if self.stable:
             if self.transport not in (TRANSPORT_CLASSIC, TRANSPORT_BLE):
                 raise ConfigManagerError(
@@ -855,8 +874,14 @@ class ControllerIdentity:
                     "pair members must be stable BLE Joy-Con 2 (L) and (R) identities"
                 )
         return cls(
-            True, TRANSPORT_JOYCON_PAIR, left.address_type, left.address,
-            0x057E, 0x2067, right.address_type, right.address,
+            True,
+            TRANSPORT_JOYCON_PAIR,
+            left.address_type,
+            left.address,
+            0x057E,
+            0x2067,
+            right.address_type,
+            right.address,
         )
 
     def joycon_pair_members(self) -> tuple[ControllerIdentity, ControllerIdentity]:
@@ -864,11 +889,20 @@ class ControllerIdentity:
             raise ConfigManagerError("identity is not a Joy-Con 2 pair")
         return (
             ControllerIdentity(
-                True, TRANSPORT_BLE, self.address_type, self.address, 0x057E, 0x2067,
+                True,
+                TRANSPORT_BLE,
+                self.address_type,
+                self.address,
+                0x057E,
+                0x2067,
             ),
             ControllerIdentity(
-                True, TRANSPORT_BLE, self.partner_address_type, self.partner_address,
-                0x057E, 0x2066,
+                True,
+                TRANSPORT_BLE,
+                self.partner_address_type,
+                self.partner_address,
+                0x057E,
+                0x2066,
             ),
         )
 
@@ -882,8 +916,14 @@ class ControllerIdentity:
             if flags & ~0x07 or not flags & 1:
                 raise ConfigManagerError("invalid Joy-Con 2 pair flags")
             return cls(
-                True, TRANSPORT_JOYCON_PAIR, (flags >> 1) & 1, payload[2:8],
-                0x057E, 0x2067, (flags >> 2) & 1, payload[8:14],
+                True,
+                TRANSPORT_JOYCON_PAIR,
+                (flags >> 1) & 1,
+                payload[2:8],
+                0x057E,
+                0x2067,
+                (flags >> 2) & 1,
+                payload[8:14],
             )
         stable, transport, address_type, reserved = payload[:4]
         if stable not in (0, 1) or reserved != 0:
@@ -901,10 +941,12 @@ class ControllerIdentity:
     def to_bytes(self) -> bytes:
         if self.is_joycon_pair:
             return (
-                bytes((
-                    1 | (self.address_type << 1) | (self.partner_address_type << 2),
-                    TRANSPORT_JOYCON_PAIR,
-                ))
+                bytes(
+                    (
+                        1 | (self.address_type << 1) | (self.partner_address_type << 2),
+                        TRANSPORT_JOYCON_PAIR,
+                    )
+                )
                 + self.address
                 + self.partner_address
             )
@@ -962,7 +1004,10 @@ class ControllerIdentity:
             result.update(
                 partner_address=self.partner_address_text,
                 partner_address_type=self.partner_address_type,
-                members={"left": left.to_json_object(), "right": right.to_json_object()},
+                members={
+                    "left": left.to_json_object(),
+                    "right": right.to_json_object(),
+                },
             )
         return result
 
@@ -1041,14 +1086,13 @@ class ProfilePlaytest:
             "connection_generation": self.connection_generation,
             "state_generation": self.state_generation,
             "identity": (
-                self.identity.to_json_object()
-                if self.identity is not None
-                else None
+                self.identity.to_json_object() if self.identity is not None else None
             ),
             "layout": self.layout,
             "buttons": _button_mask_to_json(self.button_mask),
             "extra_buttons": [
-                name for index, name in enumerate(EXTRA_BUTTONS)
+                name
+                for index, name in enumerate(EXTRA_BUTTONS)
                 if self.extra_buttons & (1 << index)
             ],
             "left_stick": {
@@ -1583,7 +1627,11 @@ class ProfileShortcuts:
         if type(obj["profiles"]) is not list:
             raise ConfigManagerError("profile.shortcuts.profiles must be an array")
         return cls(
-            _control_index(obj["modifier"], "profile.shortcuts.modifier", schema_version=schema_version),
+            _control_index(
+                obj["modifier"],
+                "profile.shortcuts.modifier",
+                schema_version=schema_version,
+            ),
             tuple(
                 _button_index(selector, f"profile.shortcuts.profiles[{index}]")
                 for index, selector in enumerate(obj["profiles"])
@@ -1611,8 +1659,12 @@ class ProfileShift:
             LOGICAL_BUTTONS
         ):
             raise ConfigManagerError("Shift button map must contain 16 mappings")
-        if type(self.extra_button_map) is not tuple or len(self.extra_button_map) != len(EXTRA_BUTTONS):
-            raise ConfigManagerError("Shift extra button map must contain seven mappings")
+        if type(self.extra_button_map) is not tuple or len(
+            self.extra_button_map
+        ) != len(EXTRA_BUTTONS):
+            raise ConfigManagerError(
+                "Shift extra button map must contain seven mappings"
+            )
         for output in (*self.button_map, *self.extra_button_map):
             if type(output) is not int or (
                 output != PROFILE_NONE_BUTTON and not 0 <= output < len(LOGICAL_BUTTONS)
@@ -1645,12 +1697,17 @@ class ProfileShift:
             obj["button_map"], LOGICAL_BUTTONS, "profile.shift.button_map"
         )
         extras = (
-            _require_object(obj["extra_button_map"], EXTRA_BUTTONS, "profile.shift.extra_button_map")
-            if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION else dict.fromkeys(EXTRA_BUTTONS)
+            _require_object(
+                obj["extra_button_map"], EXTRA_BUTTONS, "profile.shift.extra_button_map"
+            )
+            if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION
+            else dict.fromkeys(EXTRA_BUTTONS)
         )
         return cls(
             _require_enum(obj["mode"], SHIFT_MODES, "profile.shift.mode"),
-            _control_index(obj["modifier"], "profile.shift.modifier", schema_version=schema_version),
+            _control_index(
+                obj["modifier"], "profile.shift.modifier", schema_version=schema_version
+            ),
             tuple(
                 _button_index(mappings[name], f"profile.shift.button_map.{name}")
                 for name in LOGICAL_BUTTONS
@@ -1767,8 +1824,12 @@ class ControllerMacro:
         if type(steps) is not list or len(steps) > PROFILE_MACRO_STEPS_PER_MACRO:
             raise ConfigManagerError(f"{name}.steps must contain zero to eight steps")
         return cls(
-            _control_mask_from_json(obj["trigger"], f"{name}.trigger", schema_version=schema_version),
-            _control_index(obj["cancel"], f"{name}.cancel", schema_version=schema_version),
+            _control_mask_from_json(
+                obj["trigger"], f"{name}.trigger", schema_version=schema_version
+            ),
+            _control_index(
+                obj["cancel"], f"{name}.cancel", schema_version=schema_version
+            ),
             tuple(
                 MacroStep.from_json_object(step, f"{name}.steps[{index}]")
                 for index, step in enumerate(steps)
@@ -1778,7 +1839,9 @@ class ControllerMacro:
                 if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION
                 else 0
             ),
-            obj["repeat_count"] if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION else 1,
+            obj["repeat_count"]
+            if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION
+            else 1,
         )
 
 
@@ -1792,7 +1855,9 @@ def _validate_swing_action(button: int, macro: int, modifier: int) -> None:
     ):
         raise ConfigManagerError("invalid swing macro index")
     if button != PROFILE_NONE_BUTTON and macro != PROFILE_NONE_BUTTON:
-        raise ConfigManagerError("swing action must select either a button or a macro, not both")
+        raise ConfigManagerError(
+            "swing action must select either a button or a macro, not both"
+        )
     if type(modifier) is not int or (
         modifier != PROFILE_NONE_BUTTON and not 0 <= modifier < len(LOGICAL_CONTROLS)
     ):
@@ -1828,8 +1893,11 @@ class ProfileSwing:
 
     @classmethod
     def from_json_object(
-        cls, value: Any, name: str = "profile.swing",
-        *, schema_version: int = PROFILE_SCHEMA_VERSION,
+        cls,
+        value: Any,
+        name: str = "profile.swing",
+        *,
+        schema_version: int = PROFILE_SCHEMA_VERSION,
     ) -> ProfileSwing:
         fields = ["button", "sensitivity", "modifier"]
         if schema_version >= PROFILE_SCHEMA_VERSION:
@@ -1837,10 +1905,15 @@ class ProfileSwing:
         obj = _require_object(value, fields, name)
         return cls(
             _button_index(obj["button"], f"{name}.button"),
-            _require_enum(obj["sensitivity"], SWING_SENSITIVITIES, f"{name}.sensitivity"),
-            _control_index(obj["modifier"], f"{name}.modifier", schema_version=schema_version),
+            _require_enum(
+                obj["sensitivity"], SWING_SENSITIVITIES, f"{name}.sensitivity"
+            ),
+            _control_index(
+                obj["modifier"], f"{name}.modifier", schema_version=schema_version
+            ),
             _swing_macro_index(obj["macro"], f"{name}.macro")
-            if schema_version >= PROFILE_SCHEMA_VERSION else PROFILE_NONE_BUTTON,
+            if schema_version >= PROFILE_SCHEMA_VERSION
+            else PROFILE_NONE_BUTTON,
         )
 
 
@@ -1900,7 +1973,9 @@ class ControllerProfile:
             LOGICAL_BUTTONS
         ):
             raise ConfigManagerError("button map must contain 16 logical mappings")
-        if type(self.extra_button_map) is not tuple or len(self.extra_button_map) != len(EXTRA_BUTTONS):
+        if type(self.extra_button_map) is not tuple or len(
+            self.extra_button_map
+        ) != len(EXTRA_BUTTONS):
             raise ConfigManagerError("extra button map must contain seven mappings")
         for mapping in (*self.button_map, *self.extra_button_map):
             if type(mapping) is not int or (
@@ -1983,17 +2058,23 @@ class ControllerProfile:
         ):
             gesture = getattr(self, name)
             if not isinstance(gesture, gesture_type):
-                raise ConfigManagerError(f"profile {name} must be {gesture_type.__name__}")
+                raise ConfigManagerError(
+                    f"profile {name} must be {gesture_type.__name__}"
+                )
             if gesture.macro != PROFILE_NONE_BUTTON:
                 target = self.macros[gesture.macro]
-                if not target.steps or not any(step.duration_ms for step in target.steps):
+                if not target.steps or not any(
+                    step.duration_ms for step in target.steps
+                ):
                     raise ConfigManagerError(
                         f"profile.{name} macro {gesture.macro + 1} must contain "
                         "at least one step and a positive total duration"
                     )
         _require_int(
-            self.combination_window_ms, "profile.combination_window_ms",
-            PROFILE_COMBINATION_WINDOW_MIN, PROFILE_COMBINATION_WINDOW_MAX,
+            self.combination_window_ms,
+            "profile.combination_window_ms",
+            PROFILE_COMBINATION_WINDOW_MIN,
+            PROFILE_COMBINATION_WINDOW_MAX,
         )
         if not isinstance(self.turbo_defaults, TurboSettings):
             raise ConfigManagerError("Turbo defaults must be TurboSettings")
@@ -2048,7 +2129,9 @@ class ControllerProfile:
             raise ConfigManagerError("invalid profile size")
         version, size = struct.unpack_from("<HH", payload)
         expected_size = (
-            PROFILE_SIZE if version >= PROFILE_EXPANDED_SCHEMA_VERSION else PROFILE_LEGACY_SIZE
+            PROFILE_SIZE
+            if version >= PROFILE_EXPANDED_SCHEMA_VERSION
+            else PROFILE_LEGACY_SIZE
         )
         if (
             version < PROFILE_LEGACY_SCHEMA_VERSION
@@ -2063,7 +2146,9 @@ class ControllerProfile:
         has_extra_buttons = version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION
         has_swing = version >= PROFILE_SWING_SCHEMA_VERSION
         has_combined_swing = version >= PROFILE_SCHEMA_VERSION
-        control_count = len(LOGICAL_CONTROLS) if has_extra_buttons else len(OUTPUT_CONTROLS)
+        control_count = (
+            len(LOGICAL_CONTROLS) if has_extra_buttons else len(OUTPUT_CONTROLS)
+        )
         if sparse_macros:
             if payload[75] & 0xCC:
                 raise ConfigManagerError("profile action flags are invalid")
@@ -2178,7 +2263,10 @@ class ControllerProfile:
                     0 if legacy_trigger == PROFILE_NONE_BUTTON else 1 << legacy_trigger
                 )
                 cancel_control = payload[79]
-            if cancel_control != PROFILE_NONE_BUTTON and cancel_control >= control_count:
+            if (
+                cancel_control != PROFILE_NONE_BUTTON
+                and cancel_control >= control_count
+            ):
                 raise ConfigManagerError("invalid legacy macro cancel control")
             if has_action_controls:
                 switching_chord |= (payload[75] & 0x03) << 16
@@ -2213,12 +2301,19 @@ class ControllerProfile:
         turbo_defaults = TurboSettings()
         turbo_overrides: list[TurboSettings | None] = [None] * len(LOGICAL_BUTTONS)
         if version >= PROFILE_EXPANDED_SCHEMA_VERSION:
-            if any(value != PROFILE_NONE_BUTTON and value >= control_count for value in (payload[256], payload[266])):
+            if any(
+                value != PROFILE_NONE_BUTTON and value >= control_count
+                for value in (payload[256], payload[266])
+            ):
                 raise ConfigManagerError("invalid profile modifier")
             shortcuts = ProfileShortcuts(payload[256], tuple(payload[257:265]))
             shift = ProfileShift(
-                payload[265], payload[266], tuple(payload[267:283]),
-                tuple(payload[351:358]) if has_extra_buttons else (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS),
+                payload[265],
+                payload[266],
+                tuple(payload[267:283]),
+                tuple(payload[351:358])
+                if has_extra_buttons
+                else (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS),
             )
             turbo_defaults = TurboSettings(*payload[283:286])
             override_mask = struct.unpack_from("<H", payload, 286)[0]
@@ -2232,9 +2327,13 @@ class ControllerProfile:
             if payload[settings_offset:336] != bytes(336 - settings_offset):
                 raise ConfigManagerError("nonzero Turbo override padding")
             reserved_offset = (
-                376 if has_combined_swing else
-                367 if has_swing else
-                364 if has_extra_buttons else 344
+                376
+                if has_combined_swing
+                else 367
+                if has_swing
+                else 364
+                if has_extra_buttons
+                else 344
             )
             if any(payload[reserved_offset:]):
                 raise ConfigManagerError("profile reserved fields must be zero")
@@ -2258,14 +2357,25 @@ class ControllerProfile:
             shift=shift,
             turbo_defaults=turbo_defaults,
             turbo_overrides=tuple(turbo_overrides),
-            extra_button_map=tuple(payload[344:351]) if has_extra_buttons else (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS),
+            extra_button_map=tuple(payload[344:351])
+            if has_extra_buttons
+            else (PROFILE_NONE_BUTTON,) * len(EXTRA_BUTTONS),
             swing=(
-                ProfileSwing(*payload[364:368]) if has_combined_swing else
-                ProfileSwing(*payload[364:367]) if has_swing else ProfileSwing()
+                ProfileSwing(*payload[364:368])
+                if has_combined_swing
+                else ProfileSwing(*payload[364:367])
+                if has_swing
+                else ProfileSwing()
             ),
-            nunchuk_swing=ProfileSwing(*payload[368:372]) if has_combined_swing else ProfileSwing(),
-            combined_swing=ProfileCombinedSwing(*payload[372:375]) if has_combined_swing else ProfileCombinedSwing(),
-            combination_window_ms=payload[375] if has_combined_swing else PROFILE_COMBINATION_WINDOW_DEFAULT,
+            nunchuk_swing=ProfileSwing(*payload[368:372])
+            if has_combined_swing
+            else ProfileSwing(),
+            combined_swing=ProfileCombinedSwing(*payload[372:375])
+            if has_combined_swing
+            else ProfileCombinedSwing(),
+            combination_window_ms=payload[375]
+            if has_combined_swing
+            else PROFILE_COMBINATION_WINDOW_DEFAULT,
         )
 
     def to_bytes(self) -> bytes:
@@ -2346,15 +2456,28 @@ class ControllerProfile:
         payload[362] = (self.switching_chord >> 18) & 0x7F
         payload[363] = (self.motion_toggle_chord >> 18) & 0x7F
         payload[364:368] = bytes(
-            (self.swing.button, self.swing.sensitivity, self.swing.modifier, self.swing.macro)
+            (
+                self.swing.button,
+                self.swing.sensitivity,
+                self.swing.modifier,
+                self.swing.macro,
+            )
         )
         payload[368:372] = bytes(
-            (self.nunchuk_swing.button, self.nunchuk_swing.sensitivity,
-             self.nunchuk_swing.modifier, self.nunchuk_swing.macro)
+            (
+                self.nunchuk_swing.button,
+                self.nunchuk_swing.sensitivity,
+                self.nunchuk_swing.modifier,
+                self.nunchuk_swing.macro,
+            )
         )
         payload[372:376] = bytes(
-            (self.combined_swing.button, self.combined_swing.macro,
-             self.combined_swing.modifier, self.combination_window_ms)
+            (
+                self.combined_swing.button,
+                self.combined_swing.macro,
+                self.combined_swing.modifier,
+                self.combination_window_ms,
+            )
         )
         return bytes(payload)
 
@@ -2461,8 +2584,11 @@ class ControllerProfile:
             obj["button_map"], LOGICAL_BUTTONS, "profile.button_map"
         )
         extras = (
-            _require_object(obj["extra_button_map"], EXTRA_BUTTONS, "profile.extra_button_map")
-            if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION else dict.fromkeys(EXTRA_BUTTONS)
+            _require_object(
+                obj["extra_button_map"], EXTRA_BUTTONS, "profile.extra_button_map"
+            )
+            if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION
+            else dict.fromkeys(EXTRA_BUTTONS)
         )
         sticks = _require_object(obj["sticks"], ("left", "right"), "profile.sticks")
         triggers = _require_object(
@@ -2491,7 +2617,11 @@ class ControllerProfile:
             right_trigger = _migrate_legacy_trigger_threshold(right_trigger)
 
         mask_parser = (
-            (lambda value, name: _control_mask_from_json(value, name, schema_version=schema_version))
+            (
+                lambda value, name: _control_mask_from_json(
+                    value, name, schema_version=schema_version
+                )
+            )
             if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
             else _button_mask_from_json
         )
@@ -2541,7 +2671,11 @@ class ControllerProfile:
             if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
                 trigger_mask = mask_parser(macro["trigger"], "profile.macro.trigger")
                 cancel_control = (
-                    _control_index(macro["cancel"], "profile.macro.cancel", schema_version=schema_version)
+                    _control_index(
+                        macro["cancel"],
+                        "profile.macro.cancel",
+                        schema_version=schema_version,
+                    )
                     if schema_version >= PROFILE_ACTION_CONTROL_SCHEMA_VERSION
                     else _button_index(macro["cancel"], "profile.macro.cancel")
                 )
@@ -2559,8 +2693,12 @@ class ControllerProfile:
         turbo_defaults = TurboSettings()
         turbo_overrides: list[TurboSettings | None] = [None] * len(LOGICAL_BUTTONS)
         if schema_version >= PROFILE_EXPANDED_SCHEMA_VERSION:
-            shortcuts = ProfileShortcuts.from_json_object(obj["shortcuts"], schema_version=schema_version)
-            shift = ProfileShift.from_json_object(obj["shift"], schema_version=schema_version)
+            shortcuts = ProfileShortcuts.from_json_object(
+                obj["shortcuts"], schema_version=schema_version
+            )
+            shift = ProfileShift.from_json_object(
+                obj["shift"], schema_version=schema_version
+            )
             settings = _require_object(
                 obj["turbo_settings"],
                 ("defaults", "overrides"),
@@ -2633,20 +2771,27 @@ class ControllerProfile:
                 for name in EXTRA_BUTTONS
             ),
             swing=(
-                ProfileSwing.from_json_object(obj["swing"], schema_version=schema_version)
+                ProfileSwing.from_json_object(
+                    obj["swing"], schema_version=schema_version
+                )
                 if schema_version >= PROFILE_SWING_SCHEMA_VERSION
                 else ProfileSwing()
             ),
             nunchuk_swing=(
-                ProfileSwing.from_json_object(obj["nunchuk_swing"], "profile.nunchuk_swing")
-                if schema_version >= PROFILE_SCHEMA_VERSION else ProfileSwing()
+                ProfileSwing.from_json_object(
+                    obj["nunchuk_swing"], "profile.nunchuk_swing"
+                )
+                if schema_version >= PROFILE_SCHEMA_VERSION
+                else ProfileSwing()
             ),
             combined_swing=(
                 ProfileCombinedSwing.from_json_object(obj["combined_swing"])
-                if schema_version >= PROFILE_SCHEMA_VERSION else ProfileCombinedSwing()
+                if schema_version >= PROFILE_SCHEMA_VERSION
+                else ProfileCombinedSwing()
             ),
             combination_window_ms=(
-                obj["combination_window_ms"] if schema_version >= PROFILE_SCHEMA_VERSION
+                obj["combination_window_ms"]
+                if schema_version >= PROFILE_SCHEMA_VERSION
                 else PROFILE_COMBINATION_WINDOW_DEFAULT
             ),
         )
@@ -3681,9 +3826,7 @@ def write_configuration(
     return _wait_for_transaction(device, transaction_id, timeout)
 
 
-def set_joycon_mode(
-    device: UsbDevice, mode: int, timeout: float
-) -> TransactionStatus:
+def set_joycon_mode(device: UsbDevice, mode: int, timeout: float) -> TransactionStatus:
     """Persist the adapter-wide player mode without rebooting or changing profiles."""
     _require_int(mode, "Joy-Con2 mode", 0, 1)
     before = read_configuration(device)
@@ -3731,6 +3874,10 @@ def set_mode(
         REQUESTED_MODE_MAC,
     ):
         raise ConfigManagerError("requested USB mode is not available")
+    if read_info(device).active_mode == ACTIVE_MODE_NATIVE_HUB:
+        raise ConfigManagerError(
+            "Native Joy-Con hub firmware has fixed USB output; mode changes are unavailable"
+        )
     transaction_id = _host_transaction_id()
     _control_out(
         device,
@@ -3742,6 +3889,10 @@ def set_mode(
 
 def request_reboot(device: UsbDevice, transaction_id: int) -> None:
     _require_int(transaction_id, "transaction ID", 1, HOST_TRANSACTION_ID_MASK)
+    if read_info(device).active_mode == ACTIVE_MODE_NATIVE_HUB:
+        raise ConfigManagerError(
+            "Native Joy-Con hub firmware has fixed USB output; reboot-to-mode is unavailable"
+        )
     _control_out(device, OP_REBOOT, struct.pack("<I", transaction_id))
 
 
@@ -3977,9 +4128,15 @@ def parse_profile_playtest(envelope: Envelope) -> ProfilePlaytest:
     if len(envelope.payload) != expected_size:
         raise ConfigManagerError("invalid profile playtest payload")
     payload = envelope.payload
-    extra_buttons = payload[54] if len(payload) >= PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE else 0
+    extra_buttons = (
+        payload[54] if len(payload) >= PROFILE_PLAYTEST_EXTRA_BUTTON_SIZE else 0
+    )
     layout_code = payload[55] if len(payload) >= PROFILE_PLAYTEST_SIZE else 0
-    layout_count = 6 if envelope.schema_version == PROFILE_PLAYTEST_TOPOLOGY_SCHEMA_VERSION else len(PROFILE_PLAYTEST_LAYOUTS)
+    layout_count = (
+        6
+        if envelope.schema_version == PROFILE_PLAYTEST_TOPOLOGY_SCHEMA_VERSION
+        else len(PROFILE_PLAYTEST_LAYOUTS)
+    )
     if layout_code >= layout_count:
         raise ConfigManagerError("invalid playtest controller layout")
     if extra_buttons & ~0x7F:
@@ -4441,6 +4598,10 @@ def configure_mode(
     ):
         raise ConfigManagerError("requested USB mode is not available")
     before_info = read_info(device)
+    if before_info.active_mode == ACTIVE_MODE_NATIVE_HUB:
+        raise ConfigManagerError(
+            "Native Joy-Con hub firmware has fixed USB output; mode changes are unavailable"
+        )
     before_configuration = read_configuration(device)
     if before_configuration.requested_mode == requested_mode and _mode_is_active(
         requested_mode, before_info.active_mode
@@ -4829,7 +4990,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Configuration generation: {configuration.generation}")
             print(f"Configuration CRC: {configuration.crc:08x}")
             print(f"Pairing window: {configuration.pairing_window_seconds} seconds")
-            print(f"Joy-Con2 player mode: {JOYCON_MODE_NAMES[configuration.joycon_mode]}")
+            print(
+                f"Joy-Con2 player mode: {JOYCON_MODE_NAMES[configuration.joycon_mode]}"
+            )
         elif args.command == "diagnostics":
             diagnostics = read_runtime_diagnostics(device)
             print(f"Initialization stage: {diagnostics.initialization_stage}")
@@ -4860,7 +5023,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"USB mode is already {args.mode}.")
         elif args.command == "joycon-mode":
             if args.mode is not None:
-                set_joycon_mode(device, JOYCON_MODE_NAMES.index(args.mode), args.timeout)
+                set_joycon_mode(
+                    device, JOYCON_MODE_NAMES.index(args.mode), args.timeout
+                )
             configuration = read_configuration(device)
             mode_name = JOYCON_MODE_NAMES[configuration.joycon_mode]
             supported = configuration.schema_version >= CONFIGURATION_SCHEMA_VERSION

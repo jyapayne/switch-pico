@@ -65,6 +65,7 @@ typedef struct {
     endpoint_t ep[CHANNELS];
     control_t control;
     uint32_t generation;
+    uint32_t reset_generation;
     // Control SETUP aborts only EP0, never unrelated HID/vendor completions.
     uint32_t endpoint_generation[CHANNELS];
     uint8_t configuration, idle_rate, protocol;
@@ -74,6 +75,7 @@ typedef struct {
     uint8_t device, channel, kind;
     uint16_t length;
     uint32_t generation;
+    uint32_t reset_generation;
     uint8_t data[64];
 } event_t;
 
@@ -266,6 +268,7 @@ static __force_inline bool push_event(uint8_t device, uint8_t channel, uint8_t k
     event->length = length;
     event->generation = device < DEVICES ? (channel < 2 ? devices[device].generation :
         devices[device].endpoint_generation[channel]) : 0;
+    event->reset_generation = device < DEVICES ? devices[device].reset_generation : 0;
     if (kind == 2 && (channel & 1u) && channel != 1) copy_from_usb(event->data,data,length);
     else if (length) memcpy(event->data,data,length);
     __dmb(); event_head = next;
@@ -279,6 +282,7 @@ static void __not_in_flash_func(usb_interrupt)(void) {
         // Reset wins over stale transfers and setup snapshots.
         for (uint8_t i = 0; i < DEVICES; ++i) {
             ++devices[i].generation;
+            ++devices[i].reset_generation;
             for (unsigned ch = 2; ch < CHANNELS; ++ch) ++devices[i].endpoint_generation[ch];
         }
         for (unsigned i = 0; i < CHANNELS; ++i) buffer_regs()[i] = 0;
@@ -432,7 +436,8 @@ bool native_hub_control_xfer(uint8_t slot, const tusb_control_request_t* request
                              void* buffer, uint16_t length) {
     if (slot >= DEVICES || request == NULL || (length && buffer == NULL)) return false;
     control_t* c = &devices[slot].control;
-    if (memcmp(request,&c->request,sizeof(*request)) != 0) return false;
+    if (c->generation != devices[slot].generation ||
+        memcmp(request,&c->request,sizeof(*request)) != 0) return false;
     if (request->bmRequestType & 0x80) reply(slot,buffer,length);
     else if (!request->wLength) status_in(slot,NO_ACTION);
     else {
@@ -444,6 +449,9 @@ bool native_hub_control_xfer(uint8_t slot, const tusb_control_request_t* request
 }
 bool native_hub_control_status(uint8_t slot, const tusb_control_request_t* request) {
     if (slot >= DEVICES || request == NULL || request->wLength) return false;
+    control_t* c = &devices[slot].control;
+    if (c->generation != devices[slot].generation ||
+        memcmp(request,&c->request,sizeof(*request)) != 0) return false;
     if (request->bmRequestType & 0x80) {
         devices[slot].control.stage = STATUS_OUT; arm_packet(slot,1,NULL,0);
     } else status_in(slot,NO_ACTION);
@@ -453,6 +461,7 @@ bool native_hub_control_status(uint8_t slot, const tusb_control_request_t* reque
 static void reset_device(uint8_t slot) {
     uint32_t flags = spin_lock_blocking(bank_lock);
     ++devices[slot].generation;
+    ++devices[slot].reset_generation;
     for (unsigned ch = 2; ch < CHANNELS; ++ch) ++devices[slot].endpoint_generation[ch];
     memset(devices[slot].buffers,0,sizeof(devices[slot].buffers));
     memset(devices[slot].endpoint_controls,0,sizeof(devices[slot].endpoint_controls));
@@ -720,6 +729,7 @@ static void transmit_next(uint8_t slot, uint8_t channel) {
 static void transfer_complete(const event_t* event) {
     uint8_t slot = event->device, channel = event->channel;
     device_t* d = &devices[slot];
+    if (event->reset_generation != d->reset_generation) return;
     if (channel >= 2 && event->generation != d->endpoint_generation[channel]) return;
     if (channel < 2) {
         control_t* c = &d->control;
@@ -727,9 +737,19 @@ static void transfer_complete(const event_t* event) {
             probe_debug_printf("[HUB_CTRL] complete g=%" PRIu32 "/%" PRIu32 " ch=%u len=%u expected=%u state=%u\n",
                                event->generation, c->generation, channel, event->length,
                                c->packet_length, (unsigned)c->stage);
+        // Preserve a real status ACK queued before the next SETUP. Unlike
+        // SETUP, reset invalidates even these queued completions (above).
         if (event->generation != c->generation) return;
         if ((c->stage == STATUS_IN && channel == 0) || (c->stage == STATUS_OUT && channel == 1)) {
-            if (event->length) stall(slot); else control_complete(slot);
+            if (event->length) stall(slot);
+            else {
+                // Do not let a reset IRQ revoke ownership between checking it
+                // and publishing the acknowledged service transaction.
+                uint32_t flags = save_and_disable_interrupts();
+                if (event->reset_generation == d->reset_generation)
+                    control_complete(slot);
+                restore_interrupts(flags);
+            }
         } else if (c->stage == DATA_IN && channel == 0) {
             if (event->generation != d->generation) return;
             if (event->length != c->packet_length) { stall(slot); return; }

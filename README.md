@@ -717,7 +717,7 @@ tracking. Changes to upstream require an explicit pin/manifest update; native
 protocol adaptations belong in the separate adapter.
 
 
-Both native bridge sources support the existing software **BOOTSEL reboot**
+Native bridge builds support the existing software **BOOTSEL reboot**
 without erasing pairings, profiles or configuration. The standalone USB diagnostic
 probe does not. Connect the bridge to a PC and disconnect any genuine USB
 Joy-Con 2 before running this from the repository:
@@ -738,18 +738,18 @@ PY
 
 USB access requires permission to the matching `/dev/bus/usb` device. With
 multiple bridges, select the intended PyUSB device by its `bus` and `address`
-instead of sending to every matching device. The ordinary
-`switch-pico-config reboot bootsel` CLI uses management discovery, which this
-native USB identity deliberately does not expose; the direct helper above needs
-no discovery request or interface claim.
+instead of sending to every matching device. Standalone native identities still
+require the direct helper above, with no discovery request or interface claim.
+Native **hub** builds from 0.72 expose management on their `057e:2068` root, so
+the ordinary `switch-pico-config reboot bootsel` CLI and profile editor work there.
 
-Only vendor-device OUT `0x40`, request `0x04`, value `0x5350`, index `1`, with the
-existing validated 16-byte management envelope is accepted. The shared handler
-validates and dispatches at the control status ACK, then the existing 50 ms guard
-enters ROM USB boot mode. Invalid envelopes cannot schedule a reboot. Nintendo's
-separate request `0x04`, value `0x0276`, index `0`, length `0` remains an ordinary
-setup acknowledgement. No configuration writes or extra management capabilities
-are enabled in native mode.
+The standalone bridge's only management command is vendor-device OUT `0x40`,
+request `0x04`, value `0x5350`, index `1`, with the validated 16-byte envelope.
+Reboot is scheduled only after its control status ACK, followed by the existing
+50 ms guard. Invalid envelopes cannot schedule it. Nintendo's separate request
+`0x04`, value `0x0276`, index `0`, length `0` remains an ordinary setup
+acknowledgement. Hub 0.72 additionally exposes the existing profile/configuration
+management protocol on the root only; native child identities remain separate.
 
 ### Experimental stock-socket native Joy-Con 2 hub
 
@@ -947,6 +947,43 @@ Version 0.71 was then flashed and verified, with the saved-storage region
 byte-for-byte unchanged. The hub and both native children enumerated, and UART
 confirmed the nonblocking policy. Physical Wii startup/drift qualification is
 still pending.
+
+**Native hub profile editor (0.72):** connect the Pico's built-in USB socket to
+the computer, then run:
+
+```sh
+uv run switch-pico-config profiles edit
+```
+
+The local editor runs at `http://127.0.0.1:8765/`. Save the profile before moving
+the USB cable back to the Switch. The editor discovers only the hub root
+`057e:2068`, validates its management response, and does not mistake the two
+native children for extra adapters. Linux access is covered by the updated
+`udev/99-switch-pico.rules`. USB output remains fixed to the native hub; ordinary
+output-mode switching/reboot-to-mode is unavailable.
+
+Select the Wii profile owner and its active profile. With the Nunchuk connected,
+Auto uses its live layout; while offline, choose **Preview · Wii Remote + Nunchuk**.
+The physical Nunchuk **C** is logical `west` and **Z** is logical `north`, not the
+unrelated Switch2 extra control named `c`. Both can target buttons or triggers.
+For example, **Z → L**, **C → ZL**, with **Remote 2 → R**, makes **Z + 2** the
+physical L+R combination. Save changes to that Wii profile, not the global
+default or another controller's profile.
+
+This fixes the omitted editor integration: earlier hub builds accepted only
+the private BOOTSEL management command, and host discovery excluded their root.
+The existing profile service and storage transactions are reused. Root requests
+cannot borrow child EP0 buffers; aborted/short/corrupt transfers and reset-stale
+status completions cannot dispatch profile writes. Valid status ACKs preceding
+a subsequent SETUP remain valid.
+
+Qualification: 390 focused tests pass. The actual browser editor saved the
+Wii C/Z example and read it back after a Pico reboot. All 80 stored profiles
+were compared: only the two intended mappings changed; the other 79 profiles,
+metadata and active selections were unchanged. The configuration/pairing flash
+region matched the pre-update backup. Native R/L descriptors, EP0 identity,
+initialization and bulk-isolation checks passed while editor traffic was active.
+No physical Switch L+R button press was claimed by that transport check.
 
 For sensorless hardware, the checker supports `--input-only`: press real buttons
 and keep changing controls on both halves during the run. Neutral fallback
