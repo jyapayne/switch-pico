@@ -80,7 +80,7 @@ int g_sensor_status = -1;
 uint16_t g_stick_center[2]{2048, 2048};
 uint16_t g_stick_positive[2]{2047, 2047};
 uint16_t g_stick_negative[2]{2048, 2048};
-uint8_t g_power_info = 0x24; // Nominal battery until source status; no USB-power flag.
+uint8_t g_power_info = 0x01; // USB powered; no invented source charge or charging state.
 uint8_t g_report_counter;
 uint32_t g_report_serial;
 uint32_t g_pending_serial;
@@ -254,8 +254,8 @@ void poll_wii_source(uint32_t now_ms) {
 #ifdef SWITCH2_PROBE_TRACE_NATIVE_INPUT
         g_last_ir_trace_us = now_us;
 #endif
-        g_power_info = 0x24;
-        probe_debug_printf("[PROBE] Wii source active in slot %u; keep still for native motion calibration\n",
+        g_power_info = 0x01;
+        probe_debug_printf("[PROBE] Wii source active in slot %u; native bias learns in background\n",
                            g_wii.slot);
     }
     g_wii_active = true;
@@ -273,7 +273,7 @@ void poll_wii_source(uint32_t now_ms) {
     }
     if (g_wii.battery != 0) {
         const unsigned level = (static_cast<unsigned>(g_wii.battery) * 9u + 127u) / 255u;
-        g_power_info = static_cast<uint8_t>(level << 2);
+        g_power_info = static_cast<uint8_t>((level << 2) | 0x01u);
     }
     ProbeNativeMotionSample motion{};
     motion.accel_valid = g_wii.accel_valid;

@@ -145,6 +145,7 @@ int main() {
     memcpy(source.gyro_q10, bias_q10, sizeof(bias_q10));
     assert(poll());
     assert(controls.active && packet[15] == 30); // Wii IMU starts before background bias learning.
+    assert(packet[1] == 0x01); // USB power, no fabricated charge level or charging state.
     for (unsigned i = 1; i < 450; ++i) assert(poll());
     assert(controls.active && packet[15] == 30 && packet[19] == 0x0c);
     assert(signed32(packet+32) == (1 << 28));

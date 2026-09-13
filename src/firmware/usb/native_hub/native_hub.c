@@ -917,6 +917,32 @@ void native_hub_task(void) {
                            " lock=%"PRIu32" blocked=%08"PRIx32"/%08"PRIx32" rootnak=%"PRIu32"\n",
                            token_hits[0],token_hits[1],token_hits[2],missed_lock,
                            blocked_buffers,blocked_sie,root_naks);
+#if SWITCH2_PROBE_TRACE_NATIVE_INPUT
+        probe_router_stats observer;
+        probe_router_snapshot(&observer);
+        uint32_t interrupt_mask = save_and_disable_interrupts();
+        restore_interrupts(interrupt_mask);
+        probe_debug_printf("[HUB_HEALTH] router_ready=%"PRIu32" default=%u irq_mask=%"PRIu32
+                           " buf_status=%08"PRIx32" irq_status=%08"PRIx32
+                           " hub_ep=%08"PRIx32"/%08"PRIx32" busy=%u\n",
+                           observer.ready,default_device,interrupt_mask,
+                           usb_hw->buf_status,usb_hw->ints,
+                           usb_dpram->ep_ctrl[14].in,buffer_regs()[30],devices[0].ep[2].busy);
+        probe_debug_printf("[HUB_RAW] intr=%08"PRIx32" inte=%08"PRIx32" sof=%"PRIu32
+                           " mtime=%08"PRIx32" watchdog=%08"PRIx32" nak_poll=%08"PRIx32"\n",
+                           usb_hw->intr,usb_hw->inte,usb_hw->sof_rd,sio_hw->mtime,
+                           usb_hw->dev_sm_watchdog,usb_hw->nak_poll);
+        probe_debug_printf("[HUB_PORTS] status=%04x/%04x change=%04x/%04x\n",
+                           ports[0].status,ports[1].status,ports[0].change,ports[1].change);
+        for (uint8_t slot = 0; slot < DEVICES; ++slot) {
+            const device_t* d = &devices[slot];
+            probe_debug_printf("[HUB_EP0] slot=%u stage=%u gen=%"PRIu32"/%"PRIu32
+                               " reset=%"PRIu32" request=%02x/%02x pos=%u/%u buffers=%08"PRIx32"/%08"PRIx32"\n",
+                               slot,(unsigned)d->control.stage,d->control.generation,d->generation,
+                               d->reset_generation,d->control.request.bmRequestType,d->control.request.bRequest,
+                               d->control.position,d->control.length,d->buffers[0],d->buffers[1]);
+        }
+#endif
     }
     watchdog_update();
     // This qualification firmware must remain recoverable if the hub never

@@ -985,6 +985,28 @@ region matched the pre-update backup. Native R/L descriptors, EP0 identity,
 initialization and bulk-isolation checks passed while editor traffic was active.
 No physical Switch L+R button press was claimed by that transport check.
 
+**USB power-status correction under qualification:** a subsequent Switch trial
+accepted both halves and delivered roughly 38,000 reports per side before
+input stopped around 313 seconds. Wii Bluetooth input remained active, and the
+host cleared endpoint halts. No explicit sleep command or five-minute firmware
+timer was observed; the cause of the timeout is not yet established.
+
+That trace exposed a separate concrete metadata error: translated reports had
+the external-power flag clear. The published
+[native Power Info format](https://github.com/ndeadly/switch2_controller_research/blob/master/hid_reports.md#input-report-0x07)
+defines bit 0 as external power. Translated `GAMEPAD` and dedicated `WII` USB
+outputs now set it while preserving source battery telemetry and leaving the
+charging bit clear. An unknown battery does not become a fabricated full charge;
+the old standalone Wii nominal-charge fallback is removed.
+
+Power-field regressions fail before the correction and pass afterward. Eight
+focused regressions and both firmware builds pass; a PC capture of real
+motion-bearing input verified Power Info `0x01` on both halves. The
+`0.72-native-usb-power` trial is installed with persistent storage verified
+unchanged. A sustained Switch/idle test is still required before attributing
+the timeout to this flag or claiming recovery. Additional trace-only logs
+include raw USB interrupts, frame count and device-watchdog state.
+
 For sensorless hardware, the checker supports `--input-only`: press real buttons
 and keep changing controls on both halves during the run. Neutral fallback
 alone cannot qualify. The result explicitly records that IMU was not required;
