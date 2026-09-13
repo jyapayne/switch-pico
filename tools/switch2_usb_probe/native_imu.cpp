@@ -319,11 +319,12 @@ void ProbeNativeMotion::observe_optical_heading(uint32_t now_us, uint32_t refere
 }
 
 void ProbeNativeMotion::update(uint32_t now_us, uint32_t connection_generation,
-                               const ProbeNativeMotionSample& sample) {
-    if (!have_generation_ || connection_generation != connection_generation_) {
+                               const ProbeNativeMotionSample& sample, ProbeNativeMotionBias bias_mode) {
+    if (!have_generation_ || connection_generation != connection_generation_ || bias_mode != bias_mode_) {
         reset();
         have_generation_ = true;
         connection_generation_ = connection_generation;
+        bias_mode_ = bias_mode;
     }
     const uint32_t elapsed_us = have_update_ ? now_us - update_us_ : 0;
     update_us_ = now_us;
@@ -382,6 +383,14 @@ void ProbeNativeMotion::update(uint32_t now_us, uint32_t connection_generation,
             invalidate();
         }
         if (ready_ && new_accel && !correct_gravity(accel_elapsed_us)) invalidate();
+        return;
+    }
+
+    if (bias_mode_ == ProbeNativeMotionBias::kAlreadyCalibrated) {
+        // Trust only the caller's validated calibrated samples, not an estimated
+        // stationary bias. The first acceleration fixes a relative gravity frame.
+        for (unsigned i = 0; i < 3; ++i) mean_accel_[i] = acceleration_[i];
+        ready_ = initialize_orientation();
         return;
     }
 

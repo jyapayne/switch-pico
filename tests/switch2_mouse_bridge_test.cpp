@@ -409,6 +409,63 @@ static void test_bounded_overflow() {
     expect_empty(); // Overflow discarded all prior history, not merely its head.
 }
 
+static void test_continuous_state_coalescing_preserves_events_and_borrowed_head() {
+    now = 1500;
+    disconnect();
+    probe_controller_input_set_native_stream(0, true);
+    const auto first = native_report(0x80, 30, 0, 0);
+    auto newest = first;
+    emit(first);
+    for (unsigned i = 1; i <= 24; ++i) {
+        now += 8;
+        newest[0] = static_cast<uint8_t>(0x80 + i);
+        newest[5] = static_cast<uint8_t>(first[5] + i);
+        newest[PROBE_IMU_LENGTH_OFFSET + 1] = static_cast<uint8_t>(i);
+        emit(newest);
+    }
+    // No 192ms history of analog/IMU-only updates is replayed to a slow consumer.
+    assert(probe_controller_input_commit_native_report(0, expect_report(newest)));
+    expect_empty();
+
+    emit(first);
+    const uint32_t borrowed = expect_report(first);
+    for (unsigned i = 0; i < 6; ++i) {
+        now += 8;
+        ++newest[0];
+        ++newest[6];
+        emit(newest);
+    }
+    assert(expect_report(first) == borrowed);
+    assert(probe_controller_input_commit_native_report(0, borrowed));
+    assert(probe_controller_input_commit_native_report(0, expect_report(newest)));
+    expect_empty();
+
+    auto pressed = first;
+    pressed[2] ^= 1;
+    auto last_pressed = pressed;
+    ++last_pressed[0]; ++last_pressed[5];
+    auto released = last_pressed;
+    released[2] = first[2];
+    auto surface = released;
+    surface[13] ^= 0x10;
+    auto opaque_tail = surface;
+    opaque_tail.back() ^= 0x80;
+    auto other_format = opaque_tail;
+    other_format[PROBE_IMU_LENGTH_OFFSET] = 40;
+    emit(first); emit(pressed); emit(last_pressed); emit(released);
+    emit(surface); emit(opaque_tail); emit(other_format);
+    for (const auto& expected : {first, last_pressed, released, surface, opaque_tail, other_format})
+        assert(probe_controller_input_commit_native_report(0, expect_report(expected)));
+    expect_empty();
+
+    auto mouse = first;
+    mouse[9] = 7;
+    emit(first); emit(mouse); emit(first);
+    for (const auto& expected : {first, mouse, first})
+        assert(probe_controller_input_commit_native_report(0, expect_report(expected)));
+    expect_empty();
+}
+
 static void test_expiry_and_wrapping_clock() {
     now = 2000;
     const auto first = native_report(0x61, 30);
@@ -580,6 +637,7 @@ int main() {
     test_selected_source_isolation_and_reconnect();
     test_side_switch_and_sample_ownership();
     test_bounded_overflow();
+    test_continuous_state_coalescing_preserves_events_and_borrowed_head();
     test_expiry_and_wrapping_clock();
 #if SWITCH2_PROBE_COMPOSITE
     test_simultaneous_sources();

@@ -6,6 +6,7 @@
 #include "bt/uni_bt_service.h"
 #include "parser/uni_hid_parser_switch.h"
 #include "parser/uni_hid_parser_switch2.h"
+#include "parser/uni_hid_parser_wii.h"
 #include "platform/uni_platform.h"
 #include "uni_hid_device.h"
 
@@ -30,6 +31,14 @@ bool uni_hid_parser_switch2_is_ble_device(const uni_hid_device_t* d) {
 void uni_hid_parser_switch2_teardown(uni_hid_device_t* d) {
     (void)d;
     assert(!"Switch 2 teardown reached a Classic Switch fixture");
+}
+void uni_hid_parser_wii_setup(uni_hid_device_t* d) {
+    (void)d;
+    assert(!"Wii setup reached a Classic Switch fixture");
+}
+void uni_hid_parser_wii_teardown(uni_hid_device_t* d) {
+    (void)d;
+    assert(!"Wii teardown reached a Classic Switch fixture");
 }
 
 static unsigned timer_index(btstack_timer_source_t* timer) {

@@ -108,6 +108,36 @@ int bluepad32_input_backend_wii_sample_result(uint64_t token);
 void bluepad32_input_backend_wii_sample_cancel();
 #endif
 
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+// One physical DualSense/Edge, calibrated SDL axes before legacy conversion.
+// Receipt times and motion sequences advance only on admitted parser reports.
+struct Bluepad32DualSenseBridgeSnapshot {
+    uint8_t slot = 0xff;
+    Bluepad32SlotSnapshot controller{};
+    uint32_t state_generation = 0;
+    uint32_t received_us = 0;
+    uint8_t battery = 0;
+    bool motion_valid = false;
+    uint32_t motion_sequence = 0;
+    uint32_t motion_received_us = 0;
+    int32_t accel_q13[3]{};
+    int32_t gyro_q10[3]{};
+};
+
+// nullptr selects the uniquely eligible ready DualSense; ambiguity fails closed.
+// Reselection invalidates input and cue tokens without modifying pairings.
+void bluepad32_input_backend_select_dualsense_source(const uint8_t address[6]);
+void bluepad32_input_backend_dualsense_snapshot(Bluepad32DualSenseBridgeSnapshot* output);
+// Instance 0 is R/right motor, 1 is L/left motor. Samples 0..7 are bounded
+// compatibility-motor cues, not HD haptics. Zero stops only the requested side.
+// Result: 0 pending, 1 source-driver dispatch, -1 retired/failed/consumed.
+// Dispatch is NOT an application ACK or proof of physical actuator onset.
+bool bluepad32_input_backend_dualsense_sample_request(
+    uint8_t instance, uint8_t sample_id, uint64_t* token);
+int bluepad32_input_backend_dualsense_sample_result(uint8_t instance, uint64_t token);
+void bluepad32_input_backend_dualsense_sample_cancel(uint8_t instance);
+#endif
+
 // Side-effect-free raw input snapshot for management telemetry. Unlike the
 // report-path snapshot, reading this does not consume motion samples.
 struct Bluepad32PlaytestSnapshot {

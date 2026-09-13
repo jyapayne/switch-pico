@@ -42,6 +42,7 @@ struct Source {
     NativeReport native_reports[kNativeReportCapacity];
     uint8_t native_head;
     uint8_t native_count;
+    uint32_t native_borrowed_serial;
     bool native_stream;
     bool source_active;
     Sample sample;
@@ -62,6 +63,28 @@ Source* selected_source(uint16_t product_id, const uint8_t address[6]) {
 void clear_native_reports(Source& source) {
     source.native_head = 0;
     source.native_count = 0;
+    source.native_borrowed_serial = 0;
+}
+
+bool can_replace_native_tail(const Source& source, const NativeReport& tail,
+                             const uint8_t* report) {
+    // A handed-out packet is immutable until commit. Keep discrete transitions
+    // and every relative mouse packet; only continuous state can be superseded.
+    if (tail.serial == source.native_borrowed_serial ||
+        memcmp(tail.report + 2, report + 2, 3) != 0 ||
+        tail.report[8] != report[8] || tail.report[13] != report[13] ||
+        (source.input_product_id == UNI_SW2_JOYCON_R_PID && tail.report[14] != report[14]))
+        return false;
+    for (unsigned i = 9; i < 13; ++i)
+        if (tail.report[i] != 0 || report[i] != 0) return false;
+    const unsigned length_offset = source.input_product_id == UNI_SW2_JOYCON_L_PID ? 14u : 15u;
+    const unsigned motion_length = report[length_offset];
+    if ((motion_length != 30u && motion_length != 40u) ||
+        tail.report[length_offset] != motion_length) return false;
+    const unsigned tail_offset = length_offset + 1u + motion_length;
+    if (memcmp(tail.report + tail_offset, report + tail_offset,
+               SWITCH2_MOUSE_CAPTURE_NATIVE_INPUT_SIZE - tail_offset) != 0) return false;
+    return true;
 }
 
 bool source_fresh(const Source& source, uint32_t now_ms) {
@@ -177,13 +200,21 @@ extern "C" void switch_pico_switch2_mouse_report(
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
             source.source_active = true;
             if (source.native_stream && g_total_records != UINT32_MAX) {
-                if (source.native_count == kNativeReportCapacity) clear_native_reports(source);
-                NativeReport& packet =
-                    source.native_reports[(source.native_head + source.native_count) % kNativeReportCapacity];
-                memcpy(packet.report, report, sizeof(packet.report));
-                packet.serial = g_total_records;
-                packet.received_ms = received_ms;
-                ++source.native_count;
+                NativeReport* packet = nullptr;
+                if (source.native_count != 0) {
+                    NativeReport& tail = source.native_reports[
+                        (source.native_head + source.native_count - 1u) % kNativeReportCapacity];
+                    if (can_replace_native_tail(source, tail, report)) packet = &tail;
+                }
+                if (packet == nullptr) {
+                    if (source.native_count == kNativeReportCapacity) clear_native_reports(source);
+                    packet = &source.native_reports[
+                        (source.native_head + source.native_count) % kNativeReportCapacity];
+                    ++source.native_count;
+                }
+                memcpy(packet->report, report, sizeof(packet->report));
+                packet->serial = g_total_records;
+                packet->received_ms = received_ms;
             }
 #endif
             memcpy(source.latest_input.buttons, report + 2, sizeof(source.latest_input.buttons));
@@ -295,6 +326,7 @@ uint32_t switch2_mouse_capture_peek_native_report(
         const NativeReport& packet = source.native_reports[source.native_head];
         memcpy(report, packet.report, sizeof(packet.report));
         serial = packet.serial;
+        source.native_borrowed_serial = serial;
     }
     critical_section_exit(&g_lock);
     return serial;
@@ -309,6 +341,7 @@ bool switch2_mouse_capture_commit_native_report(uint8_t instance, uint32_t seria
     if (accepted) {
         source.native_head = static_cast<uint8_t>((source.native_head + 1) % kNativeReportCapacity);
         --source.native_count;
+        source.native_borrowed_serial = 0;
     }
     critical_section_exit(&g_lock);
     return accepted;

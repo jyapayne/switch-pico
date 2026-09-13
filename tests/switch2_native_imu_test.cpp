@@ -193,7 +193,7 @@ struct Rig {
             ++sample.gyro_sequence;
             sample.gyro_us = now;
         }
-        motion.update(now, generation, sample);
+        motion.update(now, generation, sample, ProbeNativeMotionBias::kEstimateStationary);
     }
     void settle() {
         for (unsigned i = 0; i < 65; ++i) fresh();

@@ -37,7 +37,7 @@ void switch_pico_switch2_mouse_report(uint16_t product_id, const uint8_t address
                                      const uint8_t* report, uint16_t length, uint32_t received_ms);
 #endif
 
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
 // BTstack-core mailbox hooks. Take only when READY with no command/query in
 // flight. Result 0 checks ownership before a deferred write, 1 records verified
 // command completion, and -1 fails it. False means canceled/stale/wrong source.

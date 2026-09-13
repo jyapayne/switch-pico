@@ -70,12 +70,16 @@ bool switch2_mouse_capture_latest_input(uint8_t instance, uint32_t after_serial,
                                        Switch2MouseCaptureInput* output);
 
 #if SWITCH_PICO_SWITCH2_USB_BRIDGE
-// Core 0 explicitly enables the selected source's ordered native 07/08 relay.
+// Core 0 explicitly enables the selected source's native 07/08 relay.
 // Starts disabled; false clears the FIFO, repeated true preserves it. Enable
 // never replays earlier capture-ring/latest-input data. Selection disables it;
 // teardown and capture-serial exhaustion clear it without changing selection.
 // Only exact selected Joy-Con 63-byte native payloads (07 left, 08 right) queue.
-// The 32-entry FIFO is independent of the raw capture ring; overflow discards
+// Adjacent, unborrowed updates with unchanged buttons/status/opaque fields and
+// zero relative mouse motion coalesce to the newest analog/IMU state. Different
+// IMU formats, discrete transitions and mouse packets retain their FIFO order.
+// Peek pins the head until commit; coalescing cannot change a submitted packet.
+// The 32-entry bound is independent of the raw capture ring; overflow discards
 // queued history and retains only the arriving packet.
 void switch2_mouse_capture_set_native_stream(uint8_t instance, bool enabled);
 

@@ -518,14 +518,154 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds4.c b/src/componen
          int32_t calib_data =
              mult_frac(ins->accel_calib_data[i].sens_numer, raw_data, ins->accel_calib_data[i].sens_denom);
          ctl->gamepad.accel[i] = calib_data;
+diff --git a/src/components/bluepad32/include/parser/uni_hid_parser_ds5.h b/src/components/bluepad32/include/parser/uni_hid_parser_ds5.h
+--- a/src/components/bluepad32/include/parser/uni_hid_parser_ds5.h
++++ b/src/components/bluepad32/include/parser/uni_hid_parser_ds5.h
+@@ -7,6 +7,7 @@
+ #define UNI_HID_PARSER_DS5_H
+ 
+ #include <stdint.h>
++#include <stdbool.h>
+ 
+ #include "parser/uni_hid_parser.h"
+ 
+@@ -33,6 +34,25 @@
+                                          uint8_t weak_magnitude,
+                                          uint8_t strong_magnitude);
+ void uni_hid_parser_ds5_device_dump(struct uni_hid_device_s* d);
++
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++typedef struct {
++    uint32_t report_sequence;
++    uint32_t motion_sequence;
++    bool motion_valid;
++} uni_ds5_bridge_snapshot_t;
++// Only the Bluetooth owner may call this. False means no complete CRC-checked
++// input report; motion_valid additionally requires factory calibration and a
++// forward-moving sensor timestamp. Counters never advance on accessor reads.
++bool uni_hid_parser_ds5_bridge_snapshot(struct uni_hid_device_s* d, uni_ds5_bridge_snapshot_t* out);
++// Bounded native bridge writer: false means not submitted (never queued).
++// The existing duration timer retries OFF for at most 2 seconds, then closes
++// a stuck connection without deleting its bond. No application ACK exists.
++bool uni_hid_parser_ds5_bridge_rumble(struct uni_hid_device_s* d, uint16_t duration_ms,
++                                     uint8_t right, uint8_t left);
++// Disconnect/delete retire delayed and duration timers before parser memory reuse.
++void uni_hid_parser_ds5_bridge_teardown(struct uni_hid_device_s* d);
++#endif
+ 
+ // Unique to DualSense. Not part of the "hid_parser" interface
+ // Warning: Adaptive trigger API is experimental. It might change in the future without further notice.
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds5.c b/src/components/bluepad32/parser/uni_hid_parser_ds5.c
 --- a/src/components/bluepad32/parser/uni_hid_parser_ds5.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_ds5.c
-@@ -487,17 +487,17 @@
+@@ -106,6 +106,14 @@
+     uint32_t fw_version;
+     uint16_t update_version;
+     bool use_vibration2;
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++    uni_ds5_bridge_snapshot_t bridge;
++    uint32_t sensor_timestamp;
++    bool have_sensor_timestamp;
++    bool calibration_valid;
++    bool input_valid;
++    uint32_t bridge_stop_deadline_ms;
++#endif
+ 
+     struct ds5_calibration_data gyro_calib_data[3];
+     struct ds5_calibration_data accel_calib_data[3];
+@@ -228,7 +236,29 @@
+ _Static_assert(sizeof(ds5_feature_report_calibration_t) == DS5_FEATURE_REPORT_CALIBRATION_SIZE, "Invalid size");
+ 
+ static ds5_instance_t* get_ds5_instance(uni_hid_device_t* d);
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++// Bluetooth HID CRC includes its transaction byte, omitted by the parser API.
++static bool ds5_bridge_crc_valid(const uint8_t* report, uint16_t len, uint8_t transaction) {
++    uint32_t crc = uni_crc32_le(0xffffffff, &transaction, 1);
++    crc = ~uni_crc32_le(crc, report, len - 4);
++    const uint8_t* expected = &report[len - 4];
++    return crc == ((uint32_t)expected[0] | ((uint32_t)expected[1] << 8) |
++                   ((uint32_t)expected[2] << 16) | ((uint32_t)expected[3] << 24));
++}
++
++bool uni_hid_parser_ds5_bridge_snapshot(uni_hid_device_t* d, uni_ds5_bridge_snapshot_t* out) {
++    if (d == NULL || out == NULL || d->controller_type != CONTROLLER_TYPE_PS5Controller ||
++        d->report_parser.setup != uni_hid_parser_ds5_setup)
++        return false;
++    const ds5_instance_t* ins = get_ds5_instance(d);
++    if (ins->state != DS5_STATE_READY || !ins->input_valid)
++        return false;
++    *out = ins->bridge;
++    return true;
++}
++#endif
+ static void ds5_send_output_report(uni_hid_device_t* d, ds5_output_report_t* out);
++static void ds5_prepare_output_report(uni_hid_device_t* d, ds5_output_report_t* out);
+ static void ds5_send_enable_lightbar_report(uni_hid_device_t* d);
+ static void ds5_request_pairing_info_report(uni_hid_device_t* d);
+ static void ds5_request_firmware_version_report(uni_hid_device_t* d);
+@@ -390,6 +420,9 @@
+ 
+ void uni_hid_parser_ds5_init_report(uni_hid_device_t* d) {
+     uni_controller_t* ctl = &d->controller;
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++    get_ds5_instance(d)->input_valid = false;
++#endif
+     memset(ctl, 0, sizeof(*ctl));
+ 
+     ctl->klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+@@ -423,10 +456,19 @@
+ 
+ void uni_hid_parser_ds5_parse_feature_report(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+     ds5_instance_t* ins = get_ds5_instance(d);
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++    if (report == NULL || len == 0)
++        return;
++#endif
+     uint8_t report_id = report[0];
+ 
+     switch (report_id) {
+         case DS5_FEATURE_REPORT_PAIRING_INFO:
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++            if (len != DS5_FEATURE_REPORT_PAIRING_INFO_SIZE ||
++                !ds5_bridge_crc_valid(report, len, 0xa3))
++                break;
++#endif
+             if (len != DS5_FEATURE_REPORT_PAIRING_INFO_SIZE) {
+                 loge("DS5: Unexpected pairing info size: got %d, want: %d\n", len,
+                      DS5_FEATURE_REPORT_PAIRING_INFO_SIZE);
+@@ -444,6 +486,11 @@
+             break;
+ 
+         case DS5_FEATURE_REPORT_FIRMWARE_VERSION: {
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++            if (len != DS5_FEATURE_REPORT_FIRMWARE_VERSION_SIZE ||
++                !ds5_bridge_crc_valid(report, len, 0xa3))
++                break;
++#endif
+             if (len != DS5_FEATURE_REPORT_FIRMWARE_VERSION_SIZE) {
+                 loge("DS5: Unexpected firmware version size: got %d, want: %d\n", len,
+                      DS5_FEATURE_REPORT_FIRMWARE_VERSION_SIZE);
+@@ -476,6 +523,11 @@
+             int speed_2x;
+             int range_2g;
+ 
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++            if (len != DS5_FEATURE_REPORT_CALIBRATION_SIZE ||
++                !ds5_bridge_crc_valid(report, len, 0xa3))
++                break;
++#endif
+             if (len != DS5_FEATURE_REPORT_CALIBRATION_SIZE) {
+                 loge("DS5: Unexpected calibration size: got %d, want: %d\n", len, DS5_FEATURE_REPORT_CALIBRATION_SIZE);
+                 /* fallthrough */
+@@ -487,25 +539,38 @@
              // Set gyroscope calibration and normalization parameters.
              // Data values will be normalized to 1/DS_GYRO_RES_PER_DEG_S degree/s.
              speed_2x = r->gyro_speed_plus + r->gyro_speed_minus;
 -            ins->gyro_calib_data[0].bias = 0;
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++            ins->calibration_valid = speed_2x > 0;
++            ins->bridge.motion_valid = false;
++#endif
 +            ins->gyro_calib_data[0].bias = r->gyro_pitch_bias;
              ins->gyro_calib_data[0].sens_numer = speed_2x * DS5_GYRO_RES_PER_DEG_S;
              ins->gyro_calib_data[0].sens_denom =
@@ -542,7 +682,47 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds5.c b/src/componen
              ins->gyro_calib_data[2].sens_numer = speed_2x * DS5_GYRO_RES_PER_DEG_S;
              ins->gyro_calib_data[2].sens_denom =
                  abs(r->gyro_roll_plus - r->gyro_roll_bias) + abs(r->gyro_roll_minus - r->gyro_roll_bias);
-@@ -617,12 +617,12 @@
+ 
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++            // Both extrema are measured relative to the same factory bias.
++            ins->gyro_calib_data[0].sens_denom =
++                abs(r->gyro_pitch_plus - r->gyro_pitch_bias) + abs(r->gyro_pitch_minus - r->gyro_pitch_bias);
++#endif
+             // Sanity check gyro calibration data. This is needed to prevent crashes
+             // during report handling of virtual, clone or broken devices not implementing
+             // calibration data properly.
+             for (size_t i = 0; i < ARRAY_SIZE(ins->gyro_calib_data); i++) {
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++                if (ins->gyro_calib_data[i].sens_denom <= 0)
++                    ins->calibration_valid = false;
++#endif
+                 if (ins->gyro_calib_data[i].sens_denom == 0) {
+                     loge("Invalid gyro calibration data for axis (%d), disabling calibration for axis = %d\n", i);
+                     ins->gyro_calib_data[i].bias = 0;
+@@ -535,6 +600,10 @@
+             // during report handling of virtual, clone or broken devices not implementing calibration
+             // data properly.
+             for (size_t i = 0; i < ARRAY_SIZE(ins->accel_calib_data); i++) {
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++                if (ins->accel_calib_data[i].sens_denom <= 0)
++                    ins->calibration_valid = false;
++#endif
+                 if (ins->accel_calib_data[i].sens_denom == 0) {
+                     loge("Invalid accelerometer calibration data for axis (%d), disabling calibration for axis=%d\n",
+                          i);
+@@ -557,6 +626,11 @@
+ void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t* d, const uint8_t* report, uint16_t len) {
+     ds5_instance_t* ins = get_ds5_instance(d);
+ 
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++    ins->input_valid = false;
++    if (report == NULL || len != 78 || !ds5_bridge_crc_valid(report, len, 0xa1))
++        return;
++#endif
+     // Don't process reports until state is ready. Prevents possible div-by-0 on calibration
+     // and ignores other warnings.
+     if (ins->state != DS5_STATE_READY)
+@@ -617,12 +691,12 @@
          ctl->gamepad.buttons |= BUTTON_THUMB_R;  // Thumb R
      if (r->buttons[2] & 0x01)
          ctl->gamepad.misc_buttons |= MISC_BUTTON_SYSTEM;  // PS
@@ -558,7 +738,7 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds5.c b/src/componen
          int32_t calib_data =
              mult_frac(ins->gyro_calib_data[i].sens_numer, raw_data, ins->gyro_calib_data[i].sens_denom);
          ctl->gamepad.gyro[i] = calib_data;
-@@ -630,7 +630,7 @@
+@@ -630,12 +704,29 @@
  
      // Accel
      for (size_t i = 0; i < ARRAY_SIZE(r->accel); i++) {
@@ -567,6 +747,119 @@ diff --git a/src/components/bluepad32/parser/uni_hid_parser_ds5.c b/src/componen
          int32_t calib_data =
              mult_frac(ins->accel_calib_data[i].sens_numer, raw_data, ins->accel_calib_data[i].sens_denom);
          ctl->gamepad.accel[i] = calib_data;
+     }
+ 
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++    ins->input_valid = true;
++    if (++ins->bridge.report_sequence == 0)
++        ++ins->bridge.report_sequence;
++    const uint32_t timestamp = r->sensor_timestamp;
++    const uint32_t delta = timestamp - ins->sensor_timestamp;
++    ins->bridge.motion_valid = false;
++    if (!ins->have_sensor_timestamp || (delta != 0 && delta < 0x80000000u)) {
++        ins->sensor_timestamp = timestamp;
++        ins->have_sensor_timestamp = true;
++        if (ins->calibration_valid) {
++            if (++ins->bridge.motion_sequence == 0)
++                ++ins->bridge.motion_sequence;
++            ins->bridge.motion_valid = true;
++        }
++    }
++#endif
+     // Value goes from 0 to 10. Make it from 0 to 250.
+     // The +1 is to avoid having a value of 0, which means "battery unavailable".
+     ctl->battery = (r->status & DS5_STATUS_BATTERY_CAPACITY) * 25 + 1;
+@@ -721,6 +812,69 @@
+     }
+ }
+ 
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++static void on_ds5_bridge_rumble_off(btstack_timer_source_t* timer) {
++    uni_hid_device_t* d = timer->context;
++    ds5_instance_t* ins = get_ds5_instance(d);
++    if (uni_hid_parser_ds5_bridge_rumble(d, 0, 0, 0))
++        return;
++    if ((int32_t)(btstack_run_loop_get_time_ms() - ins->bridge_stop_deadline_ms) >= 0) {
++        // A stuck output path must not leave a live vibrating connection.
++        // Disconnect preserves its bond; lifecycle teardown retires this timer.
++        uni_hid_device_disconnect(d);
++        return;
++    }
++    btstack_run_loop_set_timer(timer, 5);
++    btstack_run_loop_add_timer(timer);
++}
++
++bool uni_hid_parser_ds5_bridge_rumble(uni_hid_device_t* d, uint16_t duration_ms,
++                                     uint8_t right, uint8_t left) {
++    if (d == NULL || d->report_parser.setup != uni_hid_parser_ds5_setup || duration_ms > 1000)
++        return false;
++    ds5_instance_t* ins = get_ds5_instance(d);
++    if (ins->state != DS5_STATE_READY || d->conn.interrupt_cid == 0 ||
++        !l2cap_can_send_packet_now(d->conn.interrupt_cid))
++        return false;
++    ds5_output_report_t out = {
++        .valid_flag0 = DS5_FLAG0_HAPTICS_SELECT,
++        .motor_right = duration_ms == 0 ? 0 : right,
++        .motor_left = duration_ms == 0 ? 0 : left,
++    };
++    if (ins->use_vibration2)
++        out.valid_flag2 |= DS5_FLAG2_COMPATIBLE_VIBRATION2;
++    else
++        out.valid_flag0 |= DS5_FLAG0_COMPATIBLE_VIBRATION;
++    ds5_prepare_output_report(d, &out);
++    // Never put a timed ON packet in the generic FIFO. A later retry evaluates
++    // the current cue phase; it cannot drain a backlog of expired vibration.
++    if (l2cap_send(d->conn.interrupt_cid, (uint8_t*)&out, sizeof(out)) != ERROR_CODE_SUCCESS)
++        return false;
++    btstack_run_loop_remove_timer(&ins->rumble_timer_delayed_start);
++    btstack_run_loop_remove_timer(&ins->rumble_timer_duration);
++    ins->rumble_state = duration_ms == 0 ? DS5_STATE_RUMBLE_DISABLED : DS5_STATE_RUMBLE_IN_PROGRESS;
++    if (duration_ms != 0) {
++        ins->bridge_stop_deadline_ms = btstack_run_loop_get_time_ms() + duration_ms + 2000;
++        ins->rumble_timer_duration.context = d;
++        ins->rumble_timer_duration.process = on_ds5_bridge_rumble_off;
++        btstack_run_loop_set_timer(&ins->rumble_timer_duration, duration_ms);
++        btstack_run_loop_add_timer(&ins->rumble_timer_duration);
++    }
++    return true;  // Source transport submission, never an application ACK.
++}
++
++void uni_hid_parser_ds5_bridge_teardown(uni_hid_device_t* d) {
++    if (d == NULL || d->report_parser.setup != uni_hid_parser_ds5_setup)
++        return;
++    ds5_instance_t* ins = get_ds5_instance(d);
++    btstack_run_loop_remove_timer(&ins->rumble_timer_delayed_start);
++    btstack_run_loop_remove_timer(&ins->rumble_timer_duration);
++    ins->rumble_state = DS5_STATE_RUMBLE_DISABLED;
++    ins->input_valid = false;
++    ins->bridge.motion_valid = false;
++}
++#endif
++
+ void uni_hid_parser_ds5_device_dump(uni_hid_device_t* d) {
+     ds5_instance_t* ins = get_ds5_instance(d);
+     logi("\tDS5: FW version: %#x, HW version: %#x, update version: %#x, use vibration2: %d\n", ins->fw_version,
+@@ -734,7 +888,7 @@
+     return (ds5_instance_t*)&d->parser_data[0];
+ }
+ 
+-static void ds5_send_output_report(uni_hid_device_t* d, ds5_output_report_t* out) {
++static void ds5_prepare_output_report(uni_hid_device_t* d, ds5_output_report_t* out) {
+     ds5_instance_t* ins = get_ds5_instance(d);
+ 
+     out->transaction_type = (HID_MESSAGE_TYPE_DATA << 4) | HID_REPORT_TYPE_OUTPUT;
+@@ -748,7 +902,10 @@
+         ins->output_seq = 0;
+ 
+     out->crc32 = ~uni_crc32_le(0xffffffff, (uint8_t*)out, sizeof(*out) - 4);
+-
++}
++
++static void ds5_send_output_report(uni_hid_device_t* d, ds5_output_report_t* out) {
++    ds5_prepare_output_report(d, out);
+     uni_hid_device_send_intr_report(d, (uint8_t*)out, sizeof(*out));
+ }
+ 
 diff --git a/src/components/bluepad32/parser/uni_hid_parser_psmove.c b/src/components/bluepad32/parser/uni_hid_parser_psmove.c
 --- a/src/components/bluepad32/parser/uni_hid_parser_psmove.c
 +++ b/src/components/bluepad32/parser/uni_hid_parser_psmove.c
@@ -2939,7 +3232,7 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
  #include "parser/uni_hid_parser_wii.h"
  #include "parser/uni_hid_parser_xboxone.h"
  #include "platform/uni_platform.h"
-@@ -447,6 +448,13 @@
+@@ -447,6 +448,17 @@
          return;
      }
  
@@ -2949,11 +3242,15 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
 +        uni_hid_parser_switch2_teardown(d);
 +    if (d->report_parser.setup == uni_hid_parser_wii_setup)
 +        uni_hid_parser_wii_teardown(d);
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++    if (d->report_parser.setup == uni_hid_parser_ds5_setup)
++        uni_hid_parser_ds5_bridge_teardown(d);
++#endif
 +
      // Disconnect child first
      if (d->child)
          uni_hid_device_disconnect(d->child);
-@@ -465,9 +473,9 @@
+@@ -465,9 +477,9 @@
      // Cleanup
      if (!uni_hid_device_is_virtual_device(d)) {
          type = gap_get_connection_type(d->conn.handle);
@@ -2965,7 +3262,7 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
              uni_bt_bredr_disconnect(d);
          else
              loge("uni_hid_device_disconnect: Unknown GAP connection type: %d\n", type);
-@@ -490,6 +498,13 @@
+@@ -490,6 +502,17 @@
          loge("uni_hid_device_delete: invalid hid device: NULL\n");
          return;
      }
@@ -2975,11 +3272,15 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
 +        uni_hid_parser_switch2_teardown(d);
 +    if (d->report_parser.setup == uni_hid_parser_wii_setup)
 +        uni_hid_parser_wii_teardown(d);
++#if SWITCH2_BRIDGE_DUALSENSE_INPUT
++    if (d->report_parser.setup == uni_hid_parser_ds5_setup)
++        uni_hid_parser_ds5_bridge_teardown(d);
++#endif
 +
  
      // Delete child first
      if (d->child)
-@@ -655,6 +670,7 @@
+@@ -655,6 +678,7 @@
              d->report_parser.setup = uni_hid_parser_psmove_setup;
              d->report_parser.init_report = uni_hid_parser_psmove_init_report;
              d->report_parser.parse_input_report = uni_hid_parser_psmove_parse_input_report;
@@ -2987,7 +3288,7 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
              d->report_parser.set_lightbar_color = uni_hid_parser_psmove_set_lightbar_color;
              d->report_parser.play_dual_rumble = uni_hid_parser_psmove_play_dual_rumble;
              logi("Device detected as PS Move: 0x%02x\n", type);
-@@ -718,6 +734,15 @@
+@@ -718,6 +742,15 @@
              d->report_parser.device_dump = uni_hid_parser_switch_device_dump;
              logi("Device detected as Nintendo Switch Pro controller: 0x%02x\n", type);
              break;
@@ -3003,7 +3304,7 @@ diff --git a/src/components/bluepad32/uni_hid_device.c b/src/components/bluepad3
          case CONTROLLER_TYPE_SteamController:
              d->report_parser.setup = uni_hid_parser_steam_setup;
              d->report_parser.init_report = uni_hid_parser_steam_init_report;
-@@ -809,7 +834,11 @@
+@@ -809,7 +842,11 @@
          return;
      }
  

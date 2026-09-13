@@ -43,6 +43,14 @@ def model_references(build_dir: Path) -> dict[str, dict[str, Any]]:
         if line.startswith("SWITCH2_") and ":" in line and "=" in line:
             field, value = line.split("=", 1)
             cache[field.split(":", 1)[0]] = value
+    if (
+        cache.get("SWITCH2_BRIDGE_INPUT") == "DUALSENSE"
+        and cache.get("SWITCH2_BRIDGE_IMU_TARGET", "BOTH") != "BOTH"
+    ):
+        raise ValueError(
+            "Full dual-IMU qualification requires SWITCH2_BRIDGE_IMU_TARGET=BOTH; "
+            "use the USB-completion UART trace for LEFT/RIGHT routing comparisons"
+        )
     models = {}
     for side, constants in MODELS.items():
         prefix = "SWITCH2_PROBE" if side == "R" else "SWITCH2_PROBE_SECOND"
@@ -68,6 +76,7 @@ def model_references(build_dir: Path) -> dict[str, dict[str, Any]]:
             "version": version.hex(),
             "factory_extension": factory[64:81].hex(),
             "mac_wire": address[::-1].hex(),
+            "source_mode": cache.get("SWITCH2_BRIDGE_INPUT", "JOYCON2"),
         }
     return models
 
@@ -842,8 +851,12 @@ class Check:
                 "no interleaved control/bulk round was bracketed by valid input from both donors"
             )
         shared = self.imu_evidence["R"] & self.imu_evidence["L"]
+        shared_source = self.models["R"].get("source_mode") == "DUALSENSE"
         self.result["imu_isolation"] = {
             "sample_limit_per_side": 512,
+            "policy": "shared_physical_source"
+            if shared_source
+            else "independent_physical_sources",
             "identical_blocks_seen_on_both_sides": len(shared),
             "unique_blocks": {
                 side: len(blocks) for side, blocks in self.imu_evidence.items()
@@ -853,9 +866,16 @@ class Check:
             },
         }
         for side in SIDES:
-            if len(self.imu_evidence[side] - shared) < 2:
+            evidence = (
+                self.imu_evidence[side]
+                if shared_source
+                else self.imu_evidence[side] - shared
+            )
+            if len(evidence) < 2:
                 self.error(
-                    "donor IMU evidence is frozen or duplicated across child devices",
+                    "IMU evidence is frozen"
+                    if shared_source
+                    else "donor IMU evidence is frozen or duplicated across child devices",
                     side,
                 )
         for side in SIDES:

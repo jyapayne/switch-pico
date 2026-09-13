@@ -759,11 +759,13 @@ wiring on GPIO pins. Each child retains its own native HID/vendor interfaces,
 EP1/EP2 state, identity, protocol state and pairing bank.
 
 This mode requires `SWITCH_PICO_SWITCH2_USB_BRIDGE=ON`,
-`SWITCH2_BRIDGE_INPUT=JOYCON2`, `SWITCH2_PROBE_SIDE=RIGHT`,
-`SWITCH2_PROBE_COMPOSITE=OFF`, and `SWITCH_PICO_SYS_CLOCK_MHZ=240`.
-Configure both private donor captures and source addresses as for the paired
-native probe. Bluetooth runs cooperatively on Core 0; Core 1 is reserved for
-USB observation. Receive PID state is selected before accepting OUT traffic.
+`SWITCH2_PROBE_SIDE=RIGHT`, `SWITCH2_PROBE_COMPOSITE=OFF`, and
+`SWITCH_PICO_SYS_CLOCK_MHZ=240`. `SWITCH2_BRIDGE_INPUT=JOYCON2` forwards the
+two selected physical Joy-Cons; `DUALSENSE` translates one full DualSense into
+the same virtual pair. Both require the private R/L identity/factory captures.
+Joy-Con input additionally requires BLE/native capture and both source addresses.
+Bluetooth runs cooperatively on Core 0; Core 1 is reserved for USB observation.
+Receive PID state is selected before accepting OUT traffic.
 Transmit payloads are prepared outside the bank lock and published by Core 0;
 unavailable IN buffers NAK rather than expose another device's packet.
 
@@ -793,6 +795,89 @@ physical motor feel. The user subsequently confirmed that 0.66 works on Switch,
 with some noticeable input lag. This is console smoke-test evidence, not a
 latency measurement or exhaustive compatibility test. This mode does not add
 arbitrary full-controller splitting or continuous USB HD-rumble forwarding.
+
+**Queue latency follow-up:** `0.67-native-hub-latency` coalesces adjacent analog/
+IMU-only Joy-Con updates when buttons, status, opaque fields and IMU format are
+unchanged and neither packet contains relative mouse motion. Discrete transitions
+and mouse packets keep their order, and a peeked packet is pinned until commit.
+A reproducible 125Hz producer/62.5Hz consumer simulation of the actual capture
+code reduced maximum queue age from 252ms to 4ms (mean 129.968ms to 4ms).
+This is a same-format continuous-state workload, not measured Bluetooth-to-Switch
+latency; different formats, discrete events and sustained mouse traffic still
+use the bounded FIFO. The console lag improvement remains to be compared.
+
+**One DualSense, two native halves:** use a separate private build configured
+with `SWITCH2_BRIDGE_INPUT=DUALSENSE` and Classic Bluetooth enabled. The trial
+uses `SWITCH_PICO_BLUETOOTH_MODE=CLASSIC` with
+`SWITCH_PICO_SWITCH2_MOUSE_CAPTURE=OFF` and
+`SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE=OFF`. It does not require Joy-Con
+donors. Empty `SWITCH2_BRIDGE_SOURCE_ADDRESS` selects the uniquely eligible
+ready DualSense/Edge; an explicit address filters that source. Multiple eligible
+pads fail closed instead of mixing players. The secondary source address is unused.
+
+In the dedicated DualSense mode, transport connections awaiting classification
+count against Bluetooth capacity but do not reserve logical player/colour slots.
+Only a supported PS5-parser source can enter those slots. Logical allocation
+uses the first free slot rather than the Bluetooth device index, so an earlier
+Pro Controller reconnect cannot move the first DualSense to the second colour.
+Unsupported ready devices are disconnected without deleting their bonds;
+normal AIO admission and slot assignment are unchanged.
+
+The existing profile transform runs once for the full pad. R gets face buttons,
+right stick/shoulder/trigger, plus and home; L gets the D-pad, left stick/shoulder/
+trigger, minus and capture. Each uses its own advertised stick calibration.
+One shared motion integrator consumes only fresh, complete, CRC-checked and
+factory-calibrated DS5 sensor data. From 0.69, already-calibrated native sources
+initialize from their first usable fresh sensor pair; the extra stationary
+bias-estimation period is explicitly Wii-only. Invalid/stale sensors still
+withhold IMU while controls remain available. Each USB half has independent
+peek/commit, reset and backpressure state. No mouse movement or rail presses
+are invented.
+
+Built-in cue requests become bounded compatibility vibration on the corresponding
+DualSense actuator, not Joy-Con HD waveforms or adaptive-trigger effects.
+Completion means accepted L2CAP submission to the source driver, **not** a
+DualSense application ACK or measured motor onset. Stop attempts are bounded; a persistently
+blocked OFF path disconnects the stuck link without deleting its bond.
+
+`0.67-native-hub-dualsense` built and was flashed with current persistent storage
+verified unchanged. Its first PC run passed hub/child enumeration, native control
+reads, initialization and bulk isolation, but had no real DualSense input and
+therefore failed live-IMU qualification. Physical controls, native motion axes,
+motor feel and Switch acceptance for this source remain pending. For a new bond,
+open the Pico's two-second BOOTSEL pairing window, release it, then hold
+DualSense Create + PS. Previously bonded pads normally reconnect with PS.
+
+`0.68-native-hub-slot` fixes the observed red/second-slot case: the trace showed
+a Pro Controller connecting first and the DualSense using Bluetooth index 1.
+The regression reproduces that ordering and verifies logical slot 0 and its
+lightbar colour, stable identity across a new Bluetooth index, unrelated
+connection churn, pending-capacity accounting and rejection of late ready
+callbacks. The update was flashed after a fresh full backup, with persistent
+storage verified unchanged. USB transport checks pass; the post-update physical
+DualSense reconnect and steady lightbar colour still need observation.
+
+The subsequent Tears of the Kingdom wire trace showed IMU on both completed
+USB endpoints after the delayed startup: 38 sampled R blocks and 37 L blocks
+decoded with changing counters and quaternions. The Wii-style stationary gate
+had delayed readiness until about 30 seconds after boot in that run. Firmware
+0.69 removes that extra gate for factory-calibrated sources; the regression
+checks first-sample output even while rotating, fresh-data recovery, and the
+unchanged Wii settling behavior. Wii factory calibration is already used, but
+its residual gyro bias still needs estimation; cached per-device bias without
+revalidation can drift and is not implemented here.
+
+Translated full-controller builds expose `SWITCH2_BRIDGE_IMU_TARGET`:
+`LEFT`, `RIGHT`, or `BOTH` (default). For example, configure the existing private
+DualSense build with `-DSWITCH2_BRIDGE_IMU_TARGET=RIGHT` and rebuild/reflash.
+This routes only IMU; both halves retain their controls. It consumes no controller
+chord and changes no saved profile or pairing. The full dual-IMU PC checker
+requires `BOTH`; use the USB-completion UART trace for single-target comparisons.
+
+For the DualSense trial, pass `--build-dir build-switch2-native-dualsense` to
+the checker below. Its configured shared-source policy permits identical IMU
+blocks across the halves while retaining per-child identity, report-ID,
+fresh-counter and control/bulk isolation checks.
 
 With the existing private build configured, qualify on a PC using:
 

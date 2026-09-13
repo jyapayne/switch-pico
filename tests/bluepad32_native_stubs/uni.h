@@ -86,6 +86,7 @@ enum {
 typedef enum {
     CONTROLLER_TYPE_UnknownController = 0,
     CONTROLLER_TYPE_WiiController = 35,
+    CONTROLLER_TYPE_PS5Controller = 46,
 } uni_controller_type_t;
 
 typedef enum {
@@ -140,6 +141,7 @@ struct uni_report_parser_t {
     uni_set_player_leds_t set_player_leds;
     uni_set_lightbar_color_t set_lightbar_color;
     uni_play_dual_rumble_t play_dual_rumble;
+    void (*parse_input_report)(uni_hid_device_t*, const uint8_t*, uint16_t);
 };
 
 enum uni_bt_conn_protocol_t {

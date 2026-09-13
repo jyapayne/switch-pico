@@ -116,7 +116,7 @@ typedef struct {
     uint8_t command_data[32], rumble_data[33], cccd_data[2];
     uint8_t command_length;
     bool command_pending, command_sent, command_acked;
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
     uint64_t sample_token;
 #endif
     uint8_t step, calibration_slot;
@@ -219,7 +219,7 @@ void uni_hid_parser_switch2_teardown(uni_hid_device_t* d) {
     sw2_instance_t* ins = sw2_instance(d);
     if (!ins)
         return;
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
     if (ins->sample_token) {
         switch_pico_switch2_sample_result(d->product_id, ins->address, ins->sample_token,
                                           -1, btstack_run_loop_get_time_ms());
@@ -349,7 +349,7 @@ static bool sw2_transient_write_error(uint8_t status) {
 static void sw2_try_command(sw2_instance_t* ins) {
     if (!ins->command_pending || ins->command_sent || ins->query != SW2_QUERY_NONE)
         return;
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
     if (ins->sample_token &&
         !switch_pico_switch2_sample_result(ins->device->product_id, ins->address,
                                            ins->sample_token, 0, btstack_run_loop_get_time_ms())) {
@@ -482,7 +482,7 @@ static void sw2_continue(sw2_instance_t* ins) {
             break;
 #endif
         case SW2_FEATURES: {
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
             // Match the console's complete native feature set, including the
             // status associated with bit 5, rather than a mouse-only capture.
             const uint8_t features[4] = {sw2_mouse_capture_enabled(ins) ? 0x37 : 0x04, 0, 0, 0};
@@ -511,7 +511,7 @@ static void sw2_complete_command(sw2_instance_t* ins) {
         return;
     ins->command_pending = false;
     sw2_disarm_timeout(ins);
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
     if (ins->sample_token) {
         switch_pico_switch2_sample_result(ins->device->product_id, ins->address,
                                            ins->sample_token, 1, btstack_run_loop_get_time_ms());
@@ -590,7 +590,7 @@ static void sw2_response(sw2_instance_t* ins, const uint8_t* data, uint16_t leng
         sw2_fail(ins, "negative application ACK", data[5]);
         return;
     }
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
     // 0A/02 has an empty application ACK, not a returned sample ID or status
     // payload. Never interpret a truncated/extended response as its success.
     if (ins->sample_token && (length != 8 || data[4] != 0x10 || data[6] || data[7]))
@@ -1511,7 +1511,7 @@ static void sw2_output_tick(btstack_timer_source_t* timer) {
     if (ins->state != SW2_READY)
         return; // A blocked setup command rescheduled itself, or awaits its ACK.
     uint32_t now = btstack_run_loop_get_time_ms();
-#if SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if SWITCH_PICO_SWITCH2_USB_BRIDGE && SWITCH_PICO_SWITCH2_MOUSE_CAPTURE
     if (!ins->command_pending && ins->query == SW2_QUERY_NONE) {
         uint8_t sample_id;
         if (switch_pico_switch2_sample_take(ins->device->product_id, ins->address, now,

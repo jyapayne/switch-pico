@@ -13,6 +13,9 @@
 #include <inttypes.h>
 extern "C" int probe_debug_printf(const char* format, ...);
 #endif
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+#include "dualsense_input.h"
+#endif
 #if SWITCH2_BRIDGE_WII_INPUT
 #include <math.h>
 #include "input/wii_ir_pointer.h"
@@ -21,13 +24,19 @@ extern "C" int probe_debug_printf(const char* format, ...);
 extern "C" int probe_debug_printf(const char* format, ...);
 #endif
 
-#if !SWITCH_PICO_SWITCH2_USB_BRIDGE || !SWITCH_PICO_BLUEPAD32 || \
-    !SWITCH_PICO_ENABLE_BLE || !SWITCH_PICO_SWITCH2_MOUSE_CAPTURE || \
+#if !SWITCH_PICO_SWITCH2_USB_BRIDGE || !SWITCH_PICO_BLUEPAD32
+#error "The controller bridge requires Bluepad32"
+#elif SWITCH2_BRIDGE_DUALSENSE_INPUT
+#if !SWITCH_PICO_ENABLE_CLASSIC
+#error "The DualSense bridge requires Classic Bluetooth"
+#endif
+#elif !SWITCH_PICO_ENABLE_BLE || !SWITCH_PICO_SWITCH2_MOUSE_CAPTURE || \
     !SWITCH_PICO_SWITCH2_MOUSE_CAPTURE_NATIVE
-#error "The controller bridge requires Bluepad32 BLE and native Switch 2 capture"
+#error "The Joy-Con/Wii bridge requires Bluepad32 BLE and native Switch 2 capture"
 #endif
 
 namespace {
+#if !SWITCH2_BRIDGE_DUALSENSE_INPUT
 constexpr uint8_t kSourceAddress[] = {SWITCH2_BRIDGE_SOURCE_ADDRESS_BYTES};
 static_assert(sizeof(kSourceAddress) == 6, "Select one physical Bluetooth address");
 #if SWITCH2_PROBE_COMPOSITE || SWITCH2_PROBE_HUB
@@ -35,6 +44,7 @@ constexpr uint8_t kSecondSourceAddress[] = {SWITCH2_BRIDGE_SECOND_SOURCE_ADDRESS
 static_assert(sizeof(kSecondSourceAddress) == 6, "Select the second physical Bluetooth address");
 #endif
 constexpr uint32_t kInputDeadlineMs = 500;
+#endif
 #if !SWITCH2_PROBE_HUB
 constexpr uint32_t kFlashCoordinationTimeoutMs = 1000;
 #endif
@@ -46,7 +56,7 @@ bool g_start_attempted;
 bool g_flash_ready;
 #if SWITCH2_BRIDGE_WII_INPUT
 probe_controller_input g_input;
-#else
+#elif !SWITCH2_BRIDGE_DUALSENSE_INPUT
 probe_controller_input g_inputs[PROBE_CONTROLLER_COUNT];
 uint32_t g_received_times[PROBE_CONTROLLER_COUNT];
 #endif
@@ -280,7 +290,7 @@ void poll_wii_source(uint32_t now_ms) {
     motion.gyro_dps[0] = static_cast<float>(g_wii.gyro_q10[1]) / 1024.0f;
     motion.gyro_dps[1] = -static_cast<float>(g_wii.gyro_q10[2]) / 1024.0f;
     motion.gyro_dps[2] = -static_cast<float>(g_wii.gyro_q10[0]) / 1024.0f;
-    g_motion.update(now_us, g_wii_generation, motion);
+    g_motion.update(now_us, g_wii_generation, motion, ProbeNativeMotionBias::kEstimateStationary);
     WiiIrMouseReport optical{};
     (void)wii_ir_mouse_peek(&optical, 0);
     // Core 1 may publish during the peek. Read the clock after the snapshot.
@@ -372,7 +382,10 @@ extern "C" void probe_controller_input_clock_init(void) {
 
 extern "C" void probe_controller_input_init(void) {
     if (g_initialized) return;
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    bluepad32_input_backend_init();
+    probe_dualsense_input_init();
+#elif SWITCH2_BRIDGE_WII_INPUT
     bluepad32_input_backend_init();
     bluepad32_input_backend_select_wii_source(kSourceAddress);
     g_screen_configured = wii_ir_pointer_configure_screen(
@@ -471,9 +484,18 @@ extern "C" void probe_controller_input_set_native_features(uint8_t features) {
 }
 #endif
 
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+extern "C" void probe_controller_input_set_full_stick_calibration(
+    uint8_t instance, const uint8_t calibration[9]) {
+    probe_dualsense_input_set_stick_calibration(instance, calibration);
+}
+#endif
+
 extern "C" void probe_controller_input_set_native_stream(uint8_t instance, bool enabled) {
     if (instance >= PROBE_CONTROLLER_COUNT) return;
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    probe_dualsense_input_set_native_stream(instance, enabled && g_flash_ready);
+#elif SWITCH2_BRIDGE_WII_INPUT
     enabled = enabled && g_flash_ready;
     if (g_native_stream != enabled || !enabled) discard_wii_output();
     g_native_stream = enabled;
@@ -486,7 +508,9 @@ extern "C" void probe_controller_input_set_native_stream(uint8_t instance, bool 
 extern "C" uint32_t probe_controller_input_peek_native_report(
     uint8_t instance, uint32_t now_ms, uint8_t report[63]) {
     if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) return 0;
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    return probe_dualsense_input_peek_native_report(instance, now_ms, report);
+#elif SWITCH2_BRIDGE_WII_INPUT
     (void)now_ms;
     return prepare_wii_report(report);
 #else
@@ -496,7 +520,9 @@ extern "C" uint32_t probe_controller_input_peek_native_report(
 
 extern "C" bool probe_controller_input_commit_native_report(uint8_t instance, uint32_t serial) {
     if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) return false;
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    return probe_dualsense_input_commit_native_report(instance, serial);
+#elif SWITCH2_BRIDGE_WII_INPUT
     if (!g_native_stream || !serial || serial != g_pending_serial ||
         g_pending_generation != g_wii_generation || !g_wii_active) return false;
     wii_ir_mouse_commit(g_pending_pointer);
@@ -517,7 +543,9 @@ extern "C" bool probe_controller_input_play_sample(uint8_t instance, uint8_t sam
         if (token != nullptr) *token = 0;
         return false;
     }
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    return bluepad32_input_backend_dualsense_sample_request(instance, sample_id, token);
+#elif SWITCH2_BRIDGE_WII_INPUT
     return bluepad32_input_backend_wii_sample_request(sample_id, token);
 #else
     return switch2_mouse_capture_request_sample(
@@ -527,7 +555,10 @@ extern "C" bool probe_controller_input_play_sample(uint8_t instance, uint8_t sam
 
 extern "C" int probe_controller_input_sample_result(uint8_t instance, uint64_t token, uint32_t now_ms) {
     if (instance >= PROBE_CONTROLLER_COUNT || !g_flash_ready) return -1;
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    (void)now_ms;
+    return bluepad32_input_backend_dualsense_sample_result(instance, token);
+#elif SWITCH2_BRIDGE_WII_INPUT
     (void)now_ms;
     return bluepad32_input_backend_wii_sample_result(token);
 #else
@@ -537,7 +568,9 @@ extern "C" int probe_controller_input_sample_result(uint8_t instance, uint64_t t
 
 extern "C" void probe_controller_input_cancel_sample(uint8_t instance) {
     if (instance >= PROBE_CONTROLLER_COUNT) return;
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    bluepad32_input_backend_dualsense_sample_cancel(instance);
+#elif SWITCH2_BRIDGE_WII_INPUT
     bluepad32_input_backend_wii_sample_cancel();
 #else
     switch2_mouse_capture_cancel_sample(instance);
@@ -551,7 +584,10 @@ extern "C" void probe_controller_input_poll(uint8_t instance, uint32_t now_ms,
         *out = {};
         return;
     }
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_DUALSENSE_INPUT
+    probe_dualsense_input_poll(instance, now_ms, out);
+    return;
+#elif SWITCH2_BRIDGE_WII_INPUT
     poll_wii_source(now_ms);
 #else
     probe_controller_input& g_input = g_inputs[instance];
@@ -582,5 +618,7 @@ extern "C" void probe_controller_input_poll(uint8_t instance, uint32_t now_ms,
         g_input.mouse_surface = 0;
     }
 #endif
+#if !SWITCH2_BRIDGE_DUALSENSE_INPUT
     *out = g_input;
+#endif
 }

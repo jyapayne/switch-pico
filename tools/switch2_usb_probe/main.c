@@ -319,6 +319,8 @@ static void reset_controller_protocol(uint8_t instance) {
 #if SWITCH2_BRIDGE_WII_INPUT
     probe_controller_input_set_stick_calibration(stick_calibration);
     probe_controller_input_set_native_features(0);
+#elif SWITCH2_BRIDGE_DUALSENSE_INPUT
+    probe_controller_input_set_full_stick_calibration(instance, stick_calibration);
 #endif
     protocol->read_memory = read_memory;
 #endif
@@ -485,6 +487,9 @@ static void protocol_task(probe_usb_controller* controller, uint32_t now) {
 #if SWITCH2_BRIDGE_WII_INPUT
                 probe_debug_printf("[PROBE] Wii cue dispatched itf=%u token=%" PRIu64 "\n",
                                    instance, reply->deferred_token);
+#elif SWITCH2_BRIDGE_DUALSENSE_INPUT
+                probe_debug_printf("[PROBE] DualSense cue dispatched itf=%u token=%" PRIu64 "\n",
+                                   instance, reply->deferred_token);
 #else
                 probe_debug_printf("[PROBE] Source sample ACK itf=%u token=%" PRIu64 "\n",
                                    instance, reply->deferred_token);
@@ -523,7 +528,7 @@ static void protocol_task(probe_usb_controller* controller, uint32_t now) {
             native_serial = probe_controller_input_peek_native_report(instance, now, input);
             if (!native_serial) return;
             length = sizeof(input);
-#if SWITCH2_BRIDGE_WII_INPUT
+#if SWITCH2_BRIDGE_WII_INPUT || SWITCH2_BRIDGE_DUALSENSE_INPUT
             input[8] = (uint8_t)(0x30 | ((protocol->enabled_features & 0x20) ? 8 : 0));
 #endif
             probe_protocol_gate_native_report(protocol, input);

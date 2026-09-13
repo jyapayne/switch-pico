@@ -29,18 +29,25 @@ struct ProbeNativeMotionSample {
     float gyro_dps[3]{};
 };
 
+enum class ProbeNativeMotionBias : uint8_t {
+    kAlreadyCalibrated,
+    kEstimateStationary,
+};
+
 // Core 0 only. Call update even when sensors are unavailable, and consult ready
 // before using the orientation. Sequence identities, not polling, admit samples;
 // repeated sequences cannot refresh timestamps or contribute to calibration.
-// Startup requires the user to rest the controller: constant rotation about
-// gravity is indistinguishable from an unknown gyro bias without another sensor.
-// Fresh near-1g acceleration corrects tilt drift after startup. Heading remains
-// gyro-derived unless a reliable optical heading observation is supplied.
+// Already-calibrated sources initialize from the first usable fresh sensor pair.
+// Wii explicitly requests stationary residual-bias estimation: constant rotation
+// about gravity is indistinguishable from an unknown bias without another sensor.
+// Fresh near-1g acceleration corrects tilt drift. Heading remains gyro-derived
+// unless a reliable optical heading observation is supplied.
 class ProbeNativeMotion {
 public:
     void reset();
     void update(uint32_t now_us, uint32_t connection_generation,
-                const ProbeNativeMotionSample& sample);
+                const ProbeNativeMotionSample& sample,
+                ProbeNativeMotionBias bias_mode = ProbeNativeMotionBias::kAlreadyCalibrated);
     // Call after update, using a full observed sensor-bar pair (never inferred).
     // Positive optical yaw means aim-right, the negative reference-world turn.
     // The first sample in each optical generation anchors the current heading;
@@ -62,6 +69,7 @@ private:
     bool normalize_orientation();
 
     bool have_generation_ = false;
+    ProbeNativeMotionBias bias_mode_ = ProbeNativeMotionBias::kAlreadyCalibrated;
     bool have_update_ = false;
     bool seen_accel_sequence_ = false;
     bool seen_gyro_sequence_ = false;

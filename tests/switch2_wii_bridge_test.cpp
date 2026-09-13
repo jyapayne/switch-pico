@@ -143,7 +143,9 @@ int main() {
     source.accel_valid = source.gyro_valid = true;
     source.accel_q13[1] = 8192; // SDL up -> virtual native rail-down +X.
     memcpy(source.gyro_q10, bias_q10, sizeof(bias_q10));
-    for (unsigned i = 0; i < 450; ++i) assert(poll());
+    assert(poll());
+    assert(controls.active && packet[15] == 0); // Wii alone still estimates residual bias before IMU output.
+    for (unsigned i = 1; i < 450; ++i) assert(poll());
     assert(controls.active && packet[15] == 30 && packet[19] == 0x0c);
     assert(signed32(packet+32) == (1 << 28));
     assert(signed32(packet+36) == 0 && signed32(packet+40) == 0);
