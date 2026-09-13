@@ -1479,7 +1479,7 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
             g_native_snapshot.state_generation = target.state_generation;
             g_native_snapshot.received_us = motion.received_us;
             g_native_snapshot.battery = device->controller.battery;
-            g_native_snapshot.requires_stationary_bias =
+            g_native_snapshot.track_stationary_bias =
                 device->controller_type == CONTROLLER_TYPE_WiiController;
             g_native_snapshot.accel_valid = motion.accel_valid;
             g_native_snapshot.gyro_valid = motion.gyro_valid;

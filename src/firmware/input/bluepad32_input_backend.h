@@ -119,7 +119,7 @@ struct Bluepad32NativeGamepadSnapshot {
     uint8_t battery = 0;
     bool accel_valid = false;
     bool gyro_valid = false;
-    bool requires_stationary_bias = false;
+    bool track_stationary_bias = false;
     uint32_t accel_sequence = 0;
     uint32_t gyro_sequence = 0;
     uint32_t accel_received_us = 0;

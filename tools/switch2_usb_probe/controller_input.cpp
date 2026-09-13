@@ -290,7 +290,7 @@ void poll_wii_source(uint32_t now_ms) {
     motion.gyro_dps[0] = static_cast<float>(g_wii.gyro_q10[1]) / 1024.0f;
     motion.gyro_dps[1] = -static_cast<float>(g_wii.gyro_q10[2]) / 1024.0f;
     motion.gyro_dps[2] = -static_cast<float>(g_wii.gyro_q10[0]) / 1024.0f;
-    g_motion.update(now_us, g_wii_generation, motion, ProbeNativeMotionBias::kEstimateStationary);
+    g_motion.update(now_us, g_wii_generation, motion, ProbeNativeMotionBias::kTrackStationary);
     WiiIrMouseReport optical{};
     (void)wii_ir_mouse_peek(&optical, 0);
     // Core 1 may publish during the peek. Read the clock after the snapshot.
@@ -308,7 +308,7 @@ void poll_wii_source(uint32_t now_ms) {
                                lroundf(bias[2] * 1000));
         } else {
             probe_debug_printf("[PROBE] Wii native IMU %s\n", sensor_status ?
-                "calibrating: keep still" : "waiting for fresh calibrated accelerometer/MotionPlus");
+                "waiting for a usable acceleration sample" : "waiting for fresh calibrated accelerometer/MotionPlus");
         }
     }
     update_wii_ir_gate(now_us);

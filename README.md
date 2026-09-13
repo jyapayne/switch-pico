@@ -606,8 +606,9 @@ byte-identical to 0.35. Firmware 0.37 was flashed with persistent storage
 unchanged and both pairing records restored; its console chord test is pending.
 
 - **Motion:** factory-calibrated Wii acceleration and MotionPlus gyro have
-  independent freshness counters. Keep the Remote still at startup for at least
-  1.5 seconds and 64 fresh gyro samples to estimate residual bias. The encoder
+  independent freshness counters. Motion starts with the first usable fresh
+  sensor pair; residual bias is refined in the background during quiet periods.
+  There is no mandatory startup settling period. The encoder
   integrates real gyro into an orientation quaternion, using fresh near-1g
   acceleration to correct tilt drift, and emits the recovered 30-byte native
   IMU format. Fresh full-bar observations gently correct relative heading
@@ -827,9 +828,9 @@ The existing profile transform runs once for the full pad. R gets face buttons,
 right stick/shoulder/trigger, plus and home; L gets the D-pad, left stick/shoulder/
 trigger, minus and capture. Each uses its own advertised stick calibration.
 One shared motion integrator consumes only fresh, complete, CRC-checked and
-factory-calibrated DS5 sensor data. From 0.69, already-calibrated native sources
-initialize from their first usable fresh sensor pair; the extra stationary
-bias-estimation period is explicitly Wii-only. Invalid/stale sensors still
+factory-calibrated DS5 sensor data. DS5 initializes from its first usable fresh
+sensor pair. From 0.71, Wii also starts immediately and refines residual bias in
+the background, without blocking IMU or resetting orientation. Invalid/stale sensors still
 withhold IMU while controls remain available. Each USB half has independent
 peek/commit, reset and backpressure state. No mouse movement or rail presses
 are invented.
@@ -863,9 +864,9 @@ decoded with changing counters and quaternions. The Wii-style stationary gate
 had delayed readiness until about 30 seconds after boot in that run. Firmware
 0.69 removes that extra gate for factory-calibrated sources; the regression
 checks first-sample output even while rotating, fresh-data recovery, and the
-unchanged Wii settling behavior. Wii factory calibration is already used, but
-its residual gyro bias still needs estimation; cached per-device bias without
-revalidation can drift and is not implemented here.
+then-current Wii settling behavior. From 0.71, Wii no longer waits for that
+estimate before emitting motion; it uses the nonblocking policy described below.
+Factory calibration still applies, and bias is not cached across boots.
 
 Translated full-controller builds expose `SWITCH2_BRIDGE_IMU_TARGET`:
 `LEFT`, `RIGHT`, or `BOTH` (default). For example, configure the existing private
@@ -900,8 +901,8 @@ profile behavior is retained; original Switch Joy-Con grouping is not added.
   arrive. A paired left Joy-Con cannot refresh the right-owned sensor stream.
   Wii acceleration cannot refresh a stalled MotionPlus gyro stream.
 - `SWITCH2_BRIDGE_IMU_TARGET=LEFT|RIGHT|BOTH` also applies to `GAMEPAD`; Wii alone
-  estimates residual bias while stationary. Factory calibration already runs;
-  caching residual Wii bias across boots without revalidation is not implemented.
+  refines residual bias in the background while apparently stationary, without
+  withholding valid IMU. Factory calibration still runs; no bias is saved across boots.
 - Native cue requests use each source driver's bounded compatibility vibration.
   Mono drivers combine the two logical contributions; paired Switch2 Joy-Cons
   target their actual halves. This does not promise stereo, HD-waveform fidelity
@@ -913,10 +914,39 @@ profile behavior is retained; original Switch Joy-Con grouping is not added.
 
 The private `build-switch2-native-gamepad` image uses mixed Bluetooth and the
 unchanged stock USB socket. Software regressions cover real parser calibration,
-report integrity/freshness, source selection, split/reset/backpressure, Wii-only
-settling and cue lifetimes. DualSense, generic, existing Joy-Con/Wii, and ordinary
-AIO mixed/BLE/Classic firmware builds pass. The new generic image has not been
-flashed or physically qualified across these controller families.
+report integrity/freshness, source selection, split/reset/backpressure, Wii
+background correction and cue lifetimes. Version 0.70 was flashed with saved
+storage verified unchanged, and the user confirmed DualSense operation.
+Other controller-family motion orientation and motor response still need
+physical qualification.
+
+**Nonblocking Wii motion (0.71):** both the `GAMEPAD` and dedicated `WII` paths
+emit motion on the first usable fresh acceleration/gyro pair. Bias collection
+requires 1.5 seconds, at least 64 distinct gyro samples, low sensor variation and
+stable gravity direction, but runs alongside output rather than gating it.
+Accepted targets are applied at no more than 5 dps of correction per second;
+they never reset the quaternion or undo accumulated yaw. The absolute candidate
+gyro-vector limit is 30 dps, retaining headroom for the recorded Wii residual of
+roughly 13 dps per axis without permitting unbounded learning or ratcheting.
+Large rates, shaking and changing tilt discard the candidate; invalid/stale
+sensors retire both the learned correction and target. Fresh recovery starts
+immediately. DualSense and other factory-only sources do not run this tracker.
+
+Quiet periods still improve drift; initial drift can be substantial with a large
+offset. A sufficiently steady rotation about gravity below the candidate limit
+cannot be distinguished from bias using these sensors alone. This is not a
+guarantee of drift-free aiming while continuously moving. Built-in MotionPlus
+needs no accessory handling or manual calibration command.
+
+All 31 focused regressions pass, including immediate Wii output, bounded
+background convergence without a pose reset, motion rejection, duplicate-poll
+invariance and lifecycle recovery. A throwaway production-estimator smoke run
+kept output ready from its first sample while converging to the recorded-scale
+offset by six seconds. Generic, dedicated Wii, DualSense and mixed AIO builds pass.
+Version 0.71 was then flashed and verified, with the saved-storage region
+byte-for-byte unchanged. The hub and both native children enumerated, and UART
+confirmed the nonblocking policy. Physical Wii startup/drift qualification is
+still pending.
 
 For sensorless hardware, the checker supports `--input-only`: press real buttons
 and keep changing controls on both halves during the run. Neutral fallback

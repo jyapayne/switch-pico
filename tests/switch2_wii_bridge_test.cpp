@@ -144,7 +144,7 @@ int main() {
     source.accel_q13[1] = 8192; // SDL up -> virtual native rail-down +X.
     memcpy(source.gyro_q10, bias_q10, sizeof(bias_q10));
     assert(poll());
-    assert(controls.active && packet[15] == 0); // Wii alone still estimates residual bias before IMU output.
+    assert(controls.active && packet[15] == 30); // Wii IMU starts before background bias learning.
     for (unsigned i = 1; i < 450; ++i) assert(poll());
     assert(controls.active && packet[15] == 30 && packet[19] == 0x0c);
     assert(signed32(packet+32) == (1 << 28));
@@ -222,7 +222,8 @@ int main() {
 
     // Gyro-only motion remains available while the sensor bar is out of view.
     ir_mask = 0;
-    for (unsigned i = 0; i < 20; ++i) assert(poll());
+    // Give background correction a fresh quiet window after the simulated cooling.
+    for (unsigned i = 0; i < 750; ++i) assert(poll());
     decode_quaternion(packet, initial);
     for (unsigned i = 0; i < 250; ++i) assert(poll());
     double after_bias[4]; decode_quaternion(packet, after_bias);

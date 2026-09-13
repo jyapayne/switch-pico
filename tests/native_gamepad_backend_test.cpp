@@ -84,7 +84,7 @@ void source_isolation() {
     const auto initial = bridge_snapshot();
     require(initial.slot == 0 && initial.controller.active && initial.controller.state.button_south &&
                 initial.battery == 176 && initial.accel_valid && initial.gyro_valid &&
-                !initial.requires_stationary_bias && initial.accel_q13[1] == 8193 &&
+                !initial.track_stationary_bias && initial.accel_q13[1] == 8193 &&
                 initial.gyro_q10[2] == -123456 && initial.gyro_received_us == 100000,
             "native snapshot must preserve coherent physical controls and calibrated precision");
     now_ms = 120;
@@ -319,7 +319,7 @@ void sensorless_admission() {
     uint64_t cue = 99;
     require(initial.controller.active && initial.slot == 0 &&
                 initial.controller.state.button_south && !initial.accel_valid &&
-                !initial.gyro_valid && !initial.requires_stationary_bias &&
+                !initial.gyro_valid && !initial.track_stationary_bias &&
                 initial.accel_sequence == 0 && initial.gyro_sequence == 0 &&
                 !bluepad32_input_backend_native_sample_request(0, 1, &cue) && cue == 0,
             "sensorless controls remain live without invented IMU or rumble capability");
@@ -356,9 +356,9 @@ void independent_motion() {
     now_ms = 100;
     report_gamepad(ds4);
     const auto first = bridge_snapshot();
-    require(first.accel_valid && first.gyro_valid && !first.requires_stationary_bias &&
+    require(first.accel_valid && first.gyro_valid && !first.track_stationary_bias &&
                 first.accel_q13[1] == 8193 && first.gyro_q10[2] == -123456,
-            "calibrated DS4 motion keeps raw precision without Wii settling");
+            "calibrated DS4 motion retains precision without Wii background correction");
     now_ms = 110;
     ++ds.report_sequence;
     ++ds.accel_sequence;
@@ -408,8 +408,8 @@ void independent_motion() {
     sw.accel_valid = sw.gyro_valid = true;
     report_gamepad(pro);
     require(bridge_snapshot().accel_valid && bridge_snapshot().gyro_valid &&
-                !bridge_snapshot().requires_stationary_bias,
-            "validated Switch motion starts without Wii stationary settling");
+                !bridge_snapshot().track_stationary_bias,
+            "validated Switch motion does not enable Wii background correction");
     platform_on_device_disconnected(&pro);
 
     auto remote = wii_device(2);
@@ -420,7 +420,7 @@ void independent_motion() {
     now_ms = 200;
     report_gamepad(remote);
     require(bridge_snapshot().controller.state.button_south && bridge_snapshot().accel_valid &&
-                !bridge_snapshot().gyro_valid && bridge_snapshot().requires_stationary_bias,
+                !bridge_snapshot().gyro_valid && bridge_snapshot().track_stationary_bias,
             "Wii without MotionPlus remains acceleration-capable, not a fabricated full IMU");
     now_ms = 210;
     ++wii.gyro_sequence;
@@ -428,7 +428,7 @@ void independent_motion() {
     report_gamepad(remote);
     require(bridge_snapshot().gyro_valid && bridge_snapshot().gyro_received_us == 210000 &&
                 bridge_snapshot().accel_received_us == 200000 &&
-                bridge_snapshot().requires_stationary_bias,
+                bridge_snapshot().track_stationary_bias,
             "Wii MotionPlus ingress must retain independent acceleration age and Wii bias policy");
 }
 

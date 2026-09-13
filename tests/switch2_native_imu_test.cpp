@@ -173,9 +173,11 @@ struct Rig {
     ProbeNativeMotionSample sample{};
     uint32_t now;
     uint32_t generation = 1;
-    static constexpr float residual[3]{0.4f, -0.3f, 0.2f};
+    static constexpr float residual[3]{0.0f, 0.0f, 0.0f};
+    ProbeNativeMotionBias policy = ProbeNativeMotionBias::kAlreadyCalibrated;
 
-    explicit Rig(uint32_t start = 0) : now(start) {
+    explicit Rig(uint32_t start = 0, ProbeNativeMotionBias mode = ProbeNativeMotionBias::kAlreadyCalibrated)
+        : now(start), policy(mode) {
         sample.accel_valid = sample.gyro_valid = true;
         sample.accel_g[2] = 1.0f;
         rest();
@@ -193,7 +195,7 @@ struct Rig {
             ++sample.gyro_sequence;
             sample.gyro_us = now;
         }
-        motion.update(now, generation, sample, ProbeNativeMotionBias::kEstimateStationary);
+        motion.update(now, generation, sample, policy);
     }
     void settle() {
         for (unsigned i = 0; i < 65; ++i) fresh();
@@ -207,35 +209,45 @@ struct Rig {
     }
 };
 
-void startup_needs_count_and_stillness() {
-    Rig fast;
+void background_bias_requires_quiet_samples_not_startup_delay() {
+    Rig fast(0, ProbeNativeMotionBias::kTrackStationary);
+    fast.sample.gyro_dps[2] = 1.0f;
     fast.fresh(0);
+    expect(fast.motion.ready(), "Wii motion must be available on the first real sensor pair");
     for (unsigned i = 0; i < 63; ++i) fast.fresh(1000);
-    expect(!fast.motion.ready(), "sixty-four packets alone cannot replace 1.5 seconds of stillness");
+    expect(fast.motion.bias()[2] == 0.0f, "packet count alone cannot establish a bias target");
     for (unsigned i = 0; i < 56; ++i) fast.fresh();
-    expect(!fast.motion.ready(), "calibration must not finish before the stillness duration");
+    expect(fast.motion.bias()[2] == 0.0f, "partial quiet windows cannot change gyro correction");
+    const double before = camera_heading(fast.motion);
     fast.fresh(37000);
-    expect(fast.motion.ready(), "a stationary window may finish at exactly 1.5 seconds");
+    expect(fast.motion.ready() && fast.motion.bias()[2] == 0.0f, "learning a target must not reset or snap motion");
+    expect(std::abs(heading_change(fast.motion, before) - 0.037 * std::acos(-1.0) / 180.0) < 0.000001,
+           "calibration completion must preserve accumulated yaw");
+    fast.fresh();
+    expect(fast.motion.bias()[2] > 0.0f && fast.motion.bias()[2] <= 0.125001f,
+           "a confirmed target must be applied with a bounded slew, not a jump");
 
-    Rig slow;
+    Rig slow(0, ProbeNativeMotionBias::kTrackStationary);
+    slow.sample.gyro_dps[2] = 1.0f;
     slow.fresh(0);
     for (unsigned i = 0; i < 62; ++i) slow.fresh(30000);
-    expect(!slow.motion.ready(), "elapsed stillness cannot replace sixty-four distinct gyro samples");
+    expect(slow.motion.ready() && slow.motion.bias()[2] == 0.0f,
+           "elapsed time without enough distinct samples cannot learn bias");
     slow.fresh(30000);
-    expect(slow.motion.ready(), "the sixty-fourth stationary sample can finish calibration");
-    expect(close({slow.motion.bias()[0], slow.motion.bias()[1], slow.motion.bias()[2]},
-                 {Rig::residual[0], Rig::residual[1], Rig::residual[2]}, 0.000001),
-           "calibration must learn the selected sensor's residual bias");
+    slow.fresh(0);
+    expect(slow.motion.bias()[2] == 0.0f, "zero elapsed time cannot increase correction strength");
+    slow.fresh(25000);
+    expect(slow.motion.bias()[2] > 0.0f, "a complete quiet window must refine bias without gating output");
 }
 
 void quantized_wii_bias_calibrates_and_integrates() {
-    Rig rig;
+    Rig rig(0, ProbeNativeMotionBias::kTrackStationary);
     constexpr float device_bias[3]{-13.0625f, 12.4375f, -13.125f};
     constexpr int noise_q10[8]{-576, 192, -320, 576, -192, 320, -64, 64};
     const Vector gravity{8352.0 / 8192.0, 290.0 / 8192.0, -298.0 / 8192.0};
     // Deterministic Wii-scale Q13 steps and Q10 noise, with accel and gyro
     // arriving independently at 200 / 100 Hz. Neither noise nor bias is motion.
-    for (unsigned i = 0; i < 320 && !rig.motion.ready(); ++i) {
+    for (unsigned i = 0; i < 4000; ++i) {
         rig.sample.accel_g[0] = (8352 + (i & 1 ? 80 : -80)) / 8192.0f;
         rig.sample.accel_g[1] = (290 + (i & 2 ? 40 : -40)) / 8192.0f;
         rig.sample.accel_g[2] = (-298 + (i & 4 ? 43 : -43)) / 8192.0f;
@@ -245,11 +257,12 @@ void quantized_wii_bias_calibrates_and_integrates() {
             }
         }
         rig.fresh(5000, true, i % 2 == 0);
+        expect(rig.motion.ready(), "quantized Wii motion must remain available throughout background learning");
     }
-    expect(rig.motion.ready(), "quantized stationary Wii sensors with a large own-device bias must calibrate");
+    expect(rig.motion.ready(), "a large measured Wii residual must remain correctable in the background");
     expect(close({rig.motion.bias()[0], rig.motion.bias()[1], rig.motion.bias()[2]},
-                 {device_bias[0], device_bias[1], device_bias[2]}, 0.01),
-           "stationary variation must average into the measured bias, not a nominal or donor zero");
+                 {device_bias[0], device_bias[1], device_bias[2]}, 0.02),
+           "quiet sensor observations must converge to the measured device bias");
     const Quaternion reference = rig.packet().q;
     const double gravity_length = std::sqrt(gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]);
     expect(close(rotate(reference, gravity), {0.0, 0.0, gravity_length}, 0.0002),
@@ -345,7 +358,7 @@ void elapsed_time_not_packet_count_controls_rotation() {
 
 void moving_startup_does_not_calibrate() {
     for (unsigned movement = 0; movement < 4; ++movement) {
-        Rig rig;
+        Rig rig(0, ProbeNativeMotionBias::kTrackStationary);
         for (unsigned i = 0; i < 100; ++i) {
             rig.rest();
             rig.sample.accel_g[0] = 0.0f;
@@ -364,32 +377,41 @@ void moving_startup_does_not_calibrate() {
             if (movement == 3) rig.sample.gyro_dps[0] = i & 1 ? 1.0f : -1.0f;
             rig.fresh();
         }
-        expect(!rig.motion.ready(), "moving startup cannot be mistaken for a stationary calibration window");
+        expect(rig.motion.ready() && rig.motion.bias()[0] == 0.0f && rig.motion.bias()[1] == 0.0f &&
+               rig.motion.bias()[2] == 0.0f, "moving startup must stay live without learning movement as bias");
         rig.rest();
         rig.sample.accel_g[0] = 0.0f;
         rig.sample.accel_g[1] = 0.0f;
         rig.sample.accel_g[2] = 1.0f;
+        rig.sample.gyro_dps[2] = 1.0f;
         for (unsigned i = 0; i < 128; ++i) rig.fresh();
-        expect(rig.motion.ready(), "a new stationary window must recover after changing motion ends");
+        expect(rig.motion.ready() && rig.motion.bias()[2] > 0.0f, "background correction must recover after movement");
     }
-    Rig contaminated;
+    Rig contaminated(0, ProbeNativeMotionBias::kTrackStationary);
+    contaminated.sample.gyro_dps[2] = 1.0f;
     for (unsigned i = 0; i < 40; ++i) contaminated.fresh();
     contaminated.sample.gyro_dps[0] = 4.0f;
     contaminated.fresh();
     contaminated.rest();
+    contaminated.sample.gyro_dps[2] = 1.0f;
     for (unsigned i = 0; i < 40; ++i) contaminated.fresh();
-    expect(!contaminated.motion.ready(), "a gyro impulse must discard, not pool, the partial bias window");
+    expect(contaminated.motion.ready() && contaminated.motion.bias()[2] == 0.0f,
+           "a gyro impulse must discard, not pool, the partial bias window");
     for (unsigned i = 0; i < 24; ++i) contaminated.fresh();
-    expect(contaminated.motion.ready(), "an uncontaminated replacement window must eventually calibrate");
+    expect(contaminated.motion.bias()[2] == 0.0f, "a completed estimate must not snap the current correction");
+    contaminated.fresh();
+    expect(contaminated.motion.bias()[2] > 0.0f, "a replacement quiet window must eventually refine bias");
 
-    Rig interleaved;
+    Rig interleaved(0, ProbeNativeMotionBias::kTrackStationary);
+    interleaved.sample.gyro_dps[2] = 1.0f;
     for (unsigned i = 0; i < 55; ++i) interleaved.fresh();
     interleaved.sample.accel_g[0] = 0.1f;
     interleaved.fresh(5000, true, false);
     interleaved.sample.accel_g[0] = 0.0f;
     interleaved.fresh(5000, true, false);
     for (unsigned i = 0; i < 20; ++i) interleaved.fresh();
-    expect(!interleaved.motion.ready(), "acceleration-only movement must reset the gyro calibration window too");
+    expect(interleaved.motion.ready() && interleaved.motion.bias()[2] == 0.0f,
+           "acceleration-only movement must reset bias collection without blocking motion");
     interleaved.settle();
 }
 
@@ -413,8 +435,10 @@ void duplicate_sequences_and_interleaved_recovery() {
 
 void lifecycle_invalidates_bias_and_orientation() {
     for (unsigned fault = 0; fault < 7; ++fault) {
-        Rig rig;
-        rig.settle();
+        Rig rig(0, ProbeNativeMotionBias::kTrackStationary);
+        rig.sample.gyro_dps[2] = 1.0f;
+        for (unsigned i = 0; i < 400; ++i) rig.fresh(10000);
+        expect(rig.motion.bias()[2] == 1.0f, "quiet samples must establish a correction before a lifecycle fault");
         if (fault == 0) rig.sample.accel_valid = false;
         if (fault == 1) rig.sample.gyro_valid = false;
         if (fault == 2) rig.sample.accel_g[0] = std::numeric_limits<float>::quiet_NaN();
@@ -422,18 +446,21 @@ void lifecycle_invalidates_bias_and_orientation() {
         if (fault == 4) ++rig.generation;
         if (fault == 5) rig.motion.reset();
         rig.fresh(fault == 6 ? 50001 : 1000);
-        expect(!rig.motion.ready(), "lifecycle or invalid sensor input must fail closed immediately");
+        expect(rig.motion.ready() == (fault >= 4), "invalid sensors fail closed; fresh sensors after reset recover immediately");
+        expect(rig.motion.bias()[2] == 0.0f, "faults must retire the old correction and its target");
+        ++rig.generation;
         rig.sample.accel_valid = rig.sample.gyro_valid = true;
         rig.sample.accel_g[0] = rig.sample.accel_g[1] = 0.0f;
         rig.sample.accel_g[2] = -1.0f;
         rig.sample.gyro_dps[0] = -0.25f;
         rig.sample.gyro_dps[1] = 0.1f;
         rig.sample.gyro_dps[2] = -0.35f;
-        rig.settle();
+        rig.fresh();
+        expect(rig.motion.ready() && close(rotate(rig.packet().q, {0.0, 0.0, -1.0}), {0.0, 0.0, 1.0}),
+               "a fresh connection must initialize from its real pose without waiting");
+        for (unsigned i = 0; i < 400; ++i) rig.fresh(10000);
         expect(close({rig.motion.bias()[0], rig.motion.bias()[1], rig.motion.bias()[2]}, {-0.25, 0.1, -0.35}, 0.000001),
-               "recovery must calibrate a new bias instead of borrowing the previous connection's bias");
-        expect(close(rotate(rig.packet().q, {0.0, 0.0, -1.0}), {0.0, 0.0, 1.0}),
-               "recovery must align the new physical pose instead of replaying old orientation");
+               "background recovery must learn the new source, not resume a retired target");
     }
 }
 
@@ -462,8 +489,10 @@ void stale_boundaries_and_hidden_gaps() {
     hidden.fresh(50000, false, false);
     hidden.fresh(49999, false, false);
     hidden.fresh(2);
-    expect(!hidden.motion.ready(), "fresh replacements cannot hide an intervening stale sample interval");
+    expect(hidden.motion.ready() && close(rotate(hidden.packet().q, {1.0, 0.0, 0.0}), {1.0, 0.0, 0.0}),
+           "fresh replacements after a hidden gap must reinitialize, not integrate stale angular displacement");
     hidden.rest();
+    hidden.fresh(0);
     hidden.settle();
     expect(close(rotate(hidden.packet().q, {1.0, 0.0, 0.0}), {1.0, 0.0, 0.0}),
            "stale angular displacement must not replay after recalibration");
@@ -482,7 +511,7 @@ void clocks_sequences_and_connections_wrap() {
     rig.sample.accel_sequence = rig.sample.gyro_sequence = 0;
     rig.rest();
     rig.fresh(0);
-    expect(!rig.motion.ready(), "a new connection cannot inherit readiness even if it reuses sample identities");
+    expect(rig.motion.ready(), "a new connection must start immediately from its own fresh samples");
     rig.settle();
     expect(close(rotate(rig.packet().q, {1.0, 0.0, 0.0}), {1.0, 0.0, 0.0}),
            "a new connection must establish its own reference orientation");
@@ -793,12 +822,45 @@ void optical_vertical_forward_defers_the_anchor() {
            "heading correction must recover after the forward projection leaves vertical");
 }
 
+void background_tracking_preserves_motion_and_sensor_time() {
+    Rig turn(0, ProbeNativeMotionBias::kTrackStationary);
+    turn.sample.gyro_dps[2] = 90.0f;
+    turn.fresh(0);
+    for (unsigned i = 1; i <= 1000; ++i) {
+        turn.fresh(10000);
+        expect(turn.motion.ready(), "continuous movement must never block Wii motion");
+        if (i == 100)
+            expect(close(rotate(turn.packet().q, {1.0, 0.0, 0.0}), {0.0, 1.0, 0.0}),
+                   "startup rotation must reach native output immediately");
+    }
+    expect(turn.motion.bias()[2] == 0.0f, "large steady yaw must not be learned as a stationary offset");
+
+    Rig sparse(0, ProbeNativeMotionBias::kTrackStationary);
+    Rig frequent(0, ProbeNativeMotionBias::kTrackStationary);
+    sparse.sample.gyro_dps[2] = frequent.sample.gyro_dps[2] = 1.0f;
+    sparse.fresh(0);
+    frequent.fresh(0);
+    for (unsigned ms = 1; ms <= 4000; ++ms) {
+        frequent.fresh(1000, ms % 10 == 0, ms % 10 == 0);
+        if (ms % 10 == 0) sparse.fresh(10000);
+    }
+    expect(sparse.motion.bias()[2] == 1.0f && frequent.motion.bias()[2] == 1.0f,
+           "stationary gyro offset must converge under either polling cadence");
+    expect(std::abs(heading_change(sparse.motion, camera_heading(frequent.motion))) < 0.000001,
+           "duplicate polling must not increase background correction or change accumulated yaw");
+    const double corrected_heading = camera_heading(sparse.motion);
+    for (unsigned i = 0; i < 100; ++i) sparse.fresh(10000);
+    expect(std::abs(heading_change(sparse.motion, corrected_heading)) < 0.000001,
+           "learned correction must stop further stationary yaw drift without recentering");
+}
+
 }  // namespace
 
 int main() {
     codec_wire_edges();
     codec_rejects_invalid_inputs();
-    startup_needs_count_and_stillness();
+    background_bias_requires_quiet_samples_not_startup_delay();
+    background_tracking_preserves_motion_and_sensor_time();
     quantized_wii_bias_calibrates_and_integrates();
     measured_gravity_sets_reference();
     bias_corrected_body_rotation_reaches_wire();

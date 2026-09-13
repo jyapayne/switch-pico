@@ -181,7 +181,7 @@ void refresh(uint32_t now_ms) {
         source.accel_sequence == g_source.accel_sequence && source.gyro_sequence == g_source.gyro_sequence &&
         source.accel_received_us == g_source.accel_received_us && source.gyro_received_us == g_source.gyro_received_us &&
         source.accel_valid == g_source.accel_valid && source.gyro_valid == g_source.gyro_valid &&
-        source.requires_stationary_bias == g_source.requires_stationary_bias) return;
+        source.track_stationary_bias == g_source.track_stationary_bias) return;
     if (changed_connection) {
         lose_source(now_ms);
         g_motion.reset();
@@ -216,14 +216,13 @@ void refresh(uint32_t now_ms) {
     sample.gyro_dps[1] = -static_cast<float>(source.gyro_q10[2]) / 1024.0f;
     sample.gyro_dps[2] = static_cast<float>(source.gyro_q10[1]) / 1024.0f;
     g_motion.update(now_us, source.controller.connection_generation, sample,
-        source.requires_stationary_bias ? ProbeNativeMotionBias::kEstimateStationary :
+        source.track_stationary_bias ? ProbeNativeMotionBias::kTrackStationary :
                                           ProbeNativeMotionBias::kAlreadyCalibrated);
     const int status = !sensors_fresh(g_source, now_us) ? 0 : g_motion.ready() ? 2 : 1;
     if (status != g_sensor_status) {
         g_sensor_status = status;
         probe_debug_printf("[PROBE] Native gamepad IMU %s\n", status == 2 ? "ready" :
-            status == 1 ? (source.requires_stationary_bias ? "Wii calibrating: keep still" :
-                          "waiting for a usable acceleration sample") : "waiting for supported fresh sensors");
+            status == 1 ? "waiting for a usable acceleration sample" : "waiting for supported fresh sensors");
     }
     for (uint8_t i = 0; i < PROBE_CONTROLLER_COUNT; ++i) {
         // Latest-only: a blocked endpoint never queues obsolete controls/IMU.
@@ -329,7 +328,7 @@ bool probe_native_gamepad_input_commit_native_report(uint8_t instance, uint32_t 
         source.accel_sequence != g_source.accel_sequence || source.gyro_sequence != g_source.gyro_sequence ||
         source.accel_received_us != g_source.accel_received_us || source.gyro_received_us != g_source.gyro_received_us ||
         source.accel_valid != g_source.accel_valid || source.gyro_valid != g_source.gyro_valid ||
-        source.requires_stationary_bias != g_source.requires_stationary_bias ||
+        source.track_stationary_bias != g_source.track_stationary_bias ||
         now_us - source.received_us >= kInputDeadlineUs || now_us - child.pending_us >= kOutputDeadlineUs ||
         (child.pending_motion && !sensors_fresh(source, now_us))) return false;
     child.pending_token = 0;

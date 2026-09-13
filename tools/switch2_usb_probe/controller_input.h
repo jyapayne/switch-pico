@@ -56,7 +56,7 @@ void probe_controller_input_set_full_stick_calibration(uint8_t instance, const u
 // enable preserves it. Joy-Con mode relays its bounded FIFO; right-only Wii
 // mode synthesizes fresh calibrated sensors and the selected IR pointer.
 // Full-controller mode splits one supported gamepad into independent R/L output streams;
-// controls remain live while motion is unavailable. Only Wii estimates stationary bias.
+// controls remain live while motion is unavailable. Wii refines bias without blocking IMU.
 // No pairing changes.
 void probe_controller_input_set_native_stream(uint8_t instance, bool enabled);
 // Copy one63-byte payload without report ID. Returns a boot-unique token, or0

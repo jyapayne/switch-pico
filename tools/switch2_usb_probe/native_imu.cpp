@@ -14,6 +14,11 @@ constexpr uint32_t kVariationSamples = 16;
 // over distinct samples, with roughly twice that measured noise allowance.
 constexpr float kGyroRmsDps = 0.75f;
 constexpr float kAccelRmsG = 0.025f;
+// The recorded Wii sample has roughly 13 dps residual on each axis. Keep that
+// correctable, but never learn unrestricted gameplay rates or ratchet this
+// limit relative to a previously learned bias. Low steady yaw remains ambiguous.
+constexpr float kMaximumBiasDps = 30.0f;
+constexpr float kBiasSlewDpsPerSecond = 5.0f;
 // One degree between averaged gravity directions, independent of g scale.
 constexpr float kGravityDirectionCosSquared = 0.9996954135f;
 constexpr float kGravityTimeConstantUs = 1000000.0f;
@@ -150,6 +155,7 @@ void ProbeNativeMotion::invalidate() {
         acceleration_[i] = 0.0f;
         gyro_dps_[i] = 0.0f;
         bias_[i] = 0.0f;
+        bias_target_[i] = 0.0f;
     }
     // Keep the last observed identities until a connection change or explicit
     // reset. Restoring availability cannot turn the same packet into new data.
@@ -346,6 +352,7 @@ void ProbeNativeMotion::update(uint32_t now_us, uint32_t connection_generation,
     }
     const bool was_ready = ready_;
     const uint32_t accel_elapsed_us = was_ready && new_accel ? sample.accel_us - accel_us_ : 0;
+    const uint32_t gyro_elapsed_us = was_ready && new_gyro ? sample.gyro_us - gyro_us_ : 0;
     float previous_gyro[3];
     if (was_ready && new_gyro) {
         for (unsigned i = 0; i < 3; ++i) previous_gyro[i] = gyro_dps_[i];
@@ -383,20 +390,31 @@ void ProbeNativeMotion::update(uint32_t now_us, uint32_t connection_generation,
             invalidate();
         }
         if (ready_ && new_accel && !correct_gravity(accel_elapsed_us)) invalidate();
-        return;
-    }
-
-    if (bias_mode_ == ProbeNativeMotionBias::kAlreadyCalibrated) {
-        // Trust only the caller's validated calibrated samples, not an estimated
-        // stationary bias. The first acceleration fixes a relative gravity frame.
+    } else {
+        // Admission depends on real fresh sensors, never on a quiet interval.
         for (unsigned i = 0; i < 3; ++i) mean_accel_[i] = acceleration_[i];
         ready_ = initialize_orientation();
-        return;
+    }
+    if (ready_ && bias_mode_ == ProbeNativeMotionBias::kTrackStationary)
+        track_bias(new_accel, new_gyro, gyro_elapsed_us);
+}
+
+void ProbeNativeMotion::track_bias(bool new_accel, bool new_gyro, uint32_t gyro_elapsed_us) {
+    if (new_gyro && gyro_elapsed_us) {
+        float delta[3];
+        for (unsigned i = 0; i < 3; ++i) delta[i] = bias_target_[i] - bias_[i];
+        const float distance_squared = squared_norm(delta);
+        const float step = kBiasSlewDpsPerSecond * (static_cast<float>(gyro_elapsed_us) * 1e-6f);
+        if (distance_squared > 0.0f) {
+            const float weight = distance_squared > step * step ? step / std::sqrt(distance_squared) : 1.0f;
+            for (unsigned i = 0; i < 3; ++i) bias_[i] += delta[i] * weight;
+        }
     }
 
     const float acceleration_norm_squared = squared_norm(acceleration_);
     if (acceleration_norm_squared < 0.85f * 0.85f ||
-        acceleration_norm_squared > 1.15f * 1.15f) {
+        acceleration_norm_squared > 1.15f * 1.15f ||
+        squared_norm(gyro_dps_) > kMaximumBiasDps * kMaximumBiasDps) {
         clear_candidate();
         return;
     }
@@ -428,9 +446,9 @@ void ProbeNativeMotion::update(uint32_t now_us, uint32_t connection_generation,
         }
     }
     if (!new_gyro) return;
-    // An absolute angular-rate limit cannot distinguish motion from the bias
-    // being estimated. Changing rates, acceleration and gravity direction can;
-    // perfectly steady rotation about gravity still requires the user to rest.
+    // Variation and changing gravity reject movement. A bounded, perfectly
+    // steady rotation about gravity can still look like bias; never claim an
+    // absolute heading or suppress real input while collecting this estimate.
     if (!accumulate_stationary(gyro_dps_, ++gyro_count_, mean_gyro_,
                                gyro_variation_, kGyroRmsDps)) {
         clear_candidate();
@@ -438,12 +456,7 @@ void ProbeNativeMotion::update(uint32_t now_us, uint32_t connection_generation,
     }
     if (gyro_count_ >= kCalibrationSamples && accel_count_ >= kVariationSamples &&
         gyro_us_ - candidate_us_ >= kCalibrationUs) {
-        if (!initialize_orientation()) {
-            clear_candidate();
-            return;
-        }
-        for (unsigned i = 0; i < 3; ++i) bias_[i] = mean_gyro_[i];
-        ready_ = true;
+        for (unsigned i = 0; i < 3; ++i) bias_target_[i] = mean_gyro_[i];
         clear_candidate();
     }
 }

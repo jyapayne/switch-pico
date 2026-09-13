@@ -819,10 +819,10 @@ int main(void) {
                            instance, probe_storage_offset(instance));
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
 #if SWITCH2_BRIDGE_WII_INPUT
-    probe_debug_printf("[PROBE] Wii IR drives native mouse movement; buttons retain profile mapping; keep Wii still for MotionPlus calibration\n");
+    probe_debug_printf("[PROBE] Wii IR drives native mouse movement; buttons retain profile mapping; MotionPlus bias learns in background\n");
     probe_debug_printf("[PROBE] Hold BOOTSEL2s for pairing; Wii cue feedback uses bounded ERM patterns, not HD audio waveforms\n");
 #elif SWITCH2_BRIDGE_FULL_INPUT
-    probe_debug_printf("[PROBE] Full gamepad controls on R/L; IMU mask=%u; only Wii requires settling\n",
+    probe_debug_printf("[PROBE] Full gamepad controls on R/L; IMU mask=%u; Wii bias learns without startup settling\n",
                        (unsigned)SWITCH2_BRIDGE_IMU_TARGET_MASK);
     probe_debug_printf("[PROBE] Hold BOOTSEL 2s for Bluetooth pairing (never clears pairings); cues use source capabilities\n");
 #else

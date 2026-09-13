@@ -321,12 +321,13 @@ void selected_motion_target_keeps_both_control_halves() {
 
 void wii_bias_and_independent_sensor_freshness() {
     ++source.controller.connection_generation;
-    source.requires_stationary_bias = true;
+    source.track_stationary_bias = true;
     source.gyro_q10[1] = 2 * 1024;
     publish(); pair();
     assert(controls[0].active && controls[1].active);
     assert(reports[0][2] == 0x01 && reports[1][2] == 0x08);
-    assert(imu_length(0) == 0 && imu_length(1) == 0);
+    for (uint8_t instance = 0; instance < 2; ++instance)
+        assert(imu_length(instance) == ((SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance)) ? 30 : 0));
     for (unsigned i = 0; i < 400; ++i) { publish(); pair(); }
     for (uint8_t instance = 0; instance < 2; ++instance) {
         assert(imu_length(instance) == ((SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance)) ? 30 : 0));
@@ -344,12 +345,13 @@ void wii_bias_and_independent_sensor_freshness() {
     publish(); pair();
     assert(reports[0][2] == 0x01 && reports[1][2] == 0x08);
     assert(imu_length(0) == 0 && imu_length(1) == 0);
-    // Returning real Wii sensors must settle again, not reuse the old bias.
+    // Fresh Wii sensors recover immediately, without borrowing the old bias.
     source.gyro_valid = true;
     publish(); pair();
-    assert(imu_length(0) == 0 && imu_length(1) == 0);
+    for (uint8_t instance = 0; instance < 2; ++instance)
+        assert(imu_length(instance) == ((SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance)) ? 30 : 0));
     // A factory-calibrated source switching policy must initialize immediately.
-    source.requires_stationary_bias = false;
+    source.track_stationary_bias = false;
     publish(); pair();
     for (uint8_t instance = 0; instance < 2; ++instance) {
         assert(imu_length(instance) == ((SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance)) ? 30 : 0));

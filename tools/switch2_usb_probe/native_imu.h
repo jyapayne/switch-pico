@@ -31,15 +31,15 @@ struct ProbeNativeMotionSample {
 
 enum class ProbeNativeMotionBias : uint8_t {
     kAlreadyCalibrated,
-    kEstimateStationary,
+    kTrackStationary,
 };
 
 // Core 0 only. Call update even when sensors are unavailable, and consult ready
 // before using the orientation. Sequence identities, not polling, admit samples;
 // repeated sequences cannot refresh timestamps or contribute to calibration.
-// Already-calibrated sources initialize from the first usable fresh sensor pair.
-// Wii explicitly requests stationary residual-bias estimation: constant rotation
-// about gravity is indistinguishable from an unknown bias without another sensor.
+// All sources initialize from the first usable fresh sensor pair. Wii optionally
+// refines residual bias in the background without resetting orientation. Steady
+// rotation about gravity remains indistinguishable from bias without a reference.
 // Fresh near-1g acceleration corrects tilt drift. Heading remains gyro-derived
 // unless a reliable optical heading observation is supplied.
 class ProbeNativeMotion {
@@ -67,6 +67,7 @@ private:
     bool integrate(const float gyro_dps[3], uint32_t elapsed_us);
     bool correct_gravity(uint32_t elapsed_us);
     bool normalize_orientation();
+    void track_bias(bool new_accel, bool new_gyro, uint32_t gyro_elapsed_us);
 
     bool have_generation_ = false;
     ProbeNativeMotionBias bias_mode_ = ProbeNativeMotionBias::kAlreadyCalibrated;
@@ -100,6 +101,7 @@ private:
     float acceleration_[3]{};
     float gyro_dps_[3]{};
     float bias_[3]{};
+    float bias_target_[3]{};
     float mean_gyro_[3]{};
     float mean_accel_[3]{};
     float gravity_reference_[3]{};
