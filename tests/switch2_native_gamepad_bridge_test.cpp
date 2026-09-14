@@ -121,7 +121,7 @@ void mapped_halves_and_calibration() {
     source.controller.active = true;
     source.controller.connection_generation = 7;
     source.controller.identity = controller_identity_global();
-    source.battery = 255;
+    source.battery = 128;
     publish();
     // Neither an absent source nor an uncalibrated child masquerades as active.
     assert(!peek(0) && !controls[0].active);
@@ -132,7 +132,7 @@ void mapped_halves_and_calibration() {
     pair();
     assert(stick_x(0) == 2000 && stick_y(0) == 2100);
     assert(stick_x(1) == 1800 && stick_y(1) == 1900);
-    assert(reports[0][1] == 0x25 && reports[1][1] == 0x25); // Known full level, USB powered, not charging.
+    assert(reports[0][1] == 0x15 && reports[1][1] == 0x15); // Measured half battery, USB powered, not charging.
     // Actual profile transforms can move controls across native children.
     profile.button_map[static_cast<unsigned>(ControllerProfileLogicalButton::kSouth)] =
         static_cast<uint8_t>(ControllerProfileLogicalButton::kDpadRight);
@@ -364,7 +364,7 @@ void nunchuk_buttons_map_to_native_left_shoulders() {
     ++source.controller.connection_generation;
     source.controller.state = {};
     source.accel_valid = source.gyro_valid = false;
-    source.battery = 0; // Unknown source battery must not invent a full charge.
+    source.battery = 0;
     profile = controller_profile_default(controller_identity_global(), 0);
     // The real Wii parser maps Nunchuk C to west and Z to north. These are
     // ordinary profile inputs, not the unrelated Switch2 extra "C" control.
@@ -375,7 +375,7 @@ void nunchuk_buttons_map_to_native_left_shoulders() {
     source.controller.state.button_west = true; // C -> ZL.
     publish(false); pair();
     assert(reports[0][2] == 0 && reports[1][2] == 0x20);
-    assert(reports[0][1] == 0x01 && reports[1][1] == 0x01); // USB power remains real even without battery telemetry.
+    assert(reports[0][1] == 0x01 && reports[1][1] == 0x01);
     source.controller.state.button_west = false;
     source.controller.state.button_north = true; // Z -> L.
     publish(false); pair();

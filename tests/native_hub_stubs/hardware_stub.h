@@ -5,14 +5,28 @@
 #include <string.h>
 
 #define __not_in_flash_func(name) name
+#define __no_inline_not_in_flash_func(name) __attribute__((noinline)) name
 #define __force_inline inline __attribute__((always_inline))
 #define __dmb() ((void)0)
 
 typedef struct { unsigned unused; } spin_lock_t;
-static inline uint32_t save_and_disable_interrupts(void) { return 0; }
-static inline void restore_interrupts(uint32_t flags) { (void)flags; }
-static inline uint32_t spin_lock_blocking(spin_lock_t* lock) { (void)lock; return 0; }
-static inline void spin_unlock(spin_lock_t* lock, uint32_t flags) { (void)lock; (void)flags; }
+extern uint32_t native_test_interrupt_mask;
+void native_test_service_interrupt(void);
+static inline uint32_t save_and_disable_interrupts(void) {
+    uint32_t flags = native_test_interrupt_mask;
+    native_test_interrupt_mask = 1;
+    return flags;
+}
+static inline void restore_interrupts(uint32_t flags) {
+    native_test_interrupt_mask = flags;
+    native_test_service_interrupt();
+}
+static inline uint32_t spin_lock_blocking(spin_lock_t* lock) {
+    (void)lock; return save_and_disable_interrupts();
+}
+static inline void spin_unlock(spin_lock_t* lock, uint32_t flags) {
+    (void)lock; restore_interrupts(flags);
+}
 static inline bool spin_try_lock_unsafe(spin_lock_t* lock) { (void)lock; return true; }
 static inline void spin_unlock_unsafe(spin_lock_t* lock) { (void)lock; }
 static inline int spin_lock_claim_unused(bool required) { (void)required; return 0; }
@@ -20,13 +34,13 @@ static inline spin_lock_t* spin_lock_instance(unsigned index) {
     static spin_lock_t lock; (void)index; return &lock;
 }
 static inline void hw_clear_bits(volatile uint32_t* address, uint32_t bits) { *address &= ~bits; }
-static inline void hw_set_bits(volatile uint32_t* address, uint32_t bits) { *address |= bits; }
 
 typedef struct {
     volatile uint32_t ints, sie_status, buf_status, dev_addr_ctrl, inte;
     volatile uint32_t ep_stall_arm, muxing, phy_direct, phy_direct_override;
     volatile uint32_t pwr, main_ctrl, sie_ctrl, ep_nak_stall_status;
     volatile uint32_t ep_tx_error, ep_rx_error;
+    volatile uint32_t abort, abort_done;
 } usb_hw_t;
 typedef struct { volatile uint32_t in, out; } usb_pair_t;
 typedef struct {
@@ -45,6 +59,13 @@ extern sio_hw_t native_test_sio;
 #define sio_hw (&native_test_sio)
 #define USBCTRL_DPRAM_BASE ((uintptr_t)usb_dpram)
 #define USB_DPRAM_SIZE sizeof(*usb_dpram)
+
+extern bool native_test_abort_stuck;
+static inline void hw_set_bits(volatile uint32_t* address, uint32_t bits) {
+    *address |= bits;
+    if (address == &usb_hw->abort && !native_test_abort_stuck)
+        usb_hw->abort_done |= bits;
+}
 
 #define USB_BUF_CTRL_LEN_MASK 0x3ffu
 #define USB_BUF_CTRL_AVAIL (1u << 10)

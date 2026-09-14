@@ -80,7 +80,7 @@ int g_sensor_status = -1;
 uint16_t g_stick_center[2]{2048, 2048};
 uint16_t g_stick_positive[2]{2047, 2047};
 uint16_t g_stick_negative[2]{2048, 2048};
-uint8_t g_power_info = 0x01; // USB powered; no invented source charge or charging state.
+uint8_t g_power_info = 0x01;
 uint8_t g_report_counter;
 uint32_t g_report_serial;
 uint32_t g_pending_serial;

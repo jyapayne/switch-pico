@@ -1002,10 +1002,53 @@ the old standalone Wii nominal-charge fallback is removed.
 Power-field regressions fail before the correction and pass afterward. Eight
 focused regressions and both firmware builds pass; a PC capture of real
 motion-bearing input verified Power Info `0x01` on both halves. The
-`0.72-native-usb-power` trial is installed with persistent storage verified
-unchanged. A sustained Switch/idle test is still required before attributing
-the timeout to this flag or claiming recovery. Additional trace-only logs
-include raw USB interrupts, frame count and device-watchdog state.
+`0.72-native-usb-power` trial was installed with persistent storage verified
+unchanged. Later `0.76` passed a ten-minute PC mixed input/control/bulk soak but
+still lost input on Switch. Captured failures end after a completed root hub
+endpoint-halt clear, with addressed-token and root NAK counters stopped while
+SOF continues. This also occurs without USB receive-error flags; the disconnect
+cause is not established. Trace-only logs include raw USB interrupts, frame
+count and device-watchdog state.
+
+**Wii battery telemetry (0.77):** the Wii parser previously ignored the battery
+byte in status report `0x20` and cleared the battery field on every input report.
+It now retains the latest measurement between reports, rejects truncated status
+updates and clears the old measurement on parser setup. The voltage-derived
+capacity uses the same 5/20/70/100-percent bands as
+[SDL's Wii driver](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_wii.c).
+The USB bridge forwards that measured level with external power set and charging
+clear, rather than forcing full battery. Updates occur when a status report
+arrives; this change adds no periodic status requests. Parser regressions cover
+retention, low-battery updates and reconnection.
+The installed `0.77` PC smoke test read source battery `179/255` (the 70-percent
+band) and Power Info `0x19` from both native children, with live IMU and mixed
+control/bulk checks passing. Saved flash data was verified unchanged. The
+connected-controller JSON percentage also uses the full `1..255` battery range,
+so full charge is 100 percent rather than 102. The subsequent Switch trial still
+disconnected around 240 seconds while delivering Power Info `0x19`; correcting
+false-empty battery reporting alone did not resolve the failure.
+
+**Private transmit-bank publication (0.78):** the earlier
+PC checker submitted R/L reads sequentially. USBmon confirmed zero overlapping
+child reads. With one reader per child and 500-ms application timeouts, `0.77`
+stopped delivering fresh input within about three seconds. Short 10-ms timeouts
+had repeatedly cancelled those pending reads and obscured this starvation.
+
+Bank selection had disabled every IN buffer until Core 0 restored the bank,
+including HID and bulk payloads already stored in private DPRAM. `0.78` publishes
+those prepared private buffers during selection; only the shared EP0 IN image
+still waits for Core 0 copying. A regression polls alternating child HID/bulk
+endpoints without a foreground task and checks payload isolation, completion,
+and newly queued data while EP0 restoration is pending. It fails before the fix
+and passes afterward; 14 focused tests and both native firmware builds pass.
+The image is installed with persistent storage verified unchanged. With the Wii
+reconnected, the same concurrent 500-ms-read test passed 600 seconds: 145,746 R
+packets and 149,567 L packets, including 113,316 and 114,276 fresh IMU packets.
+USBmon measured overlapping child reads during 94.4% of the steady-state window
+with no failed read completions there and no capture drops. A subsequent
+15-second mixed control/bulk/input check passed 57 rounds with no errors.
+This confirms the PC starvation reproduction is corrected. The user's subsequent
+Switch gameplay trial also stopped reproducing the L+R disconnect.
 
 For sensorless hardware, the checker supports `--input-only`: press real buttons
 and keep changing controls on both halves during the run. Neutral fallback

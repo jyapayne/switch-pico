@@ -1108,7 +1108,7 @@ class ProfilePlaytest:
                 "right": self.triggers[1],
             },
             "battery": (
-                round((self.battery - 1) / 250 * 100) if self.battery != 0 else None
+                round((self.battery - 1) / 254 * 100) if self.battery != 0 else None
             ),
             "capabilities": [
                 name

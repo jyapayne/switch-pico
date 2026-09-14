@@ -17,6 +17,9 @@ bool native_test_setup(uint8_t, const tusb_control_request_t*, bool);
 bool native_test_out(uint8_t, const uint8_t*, uint16_t, bool);
 bool native_test_in(uint8_t, uint8_t*, uint16_t*, bool);
 void native_test_bus_reset(bool);
+void native_test_hold_abort(bool);
+bool native_test_select(uint8_t);
+bool native_test_private_in(uint8_t, uint8_t, uint8_t*, uint16_t*);
 }
 
 namespace {
@@ -26,6 +29,7 @@ uint32_t programs = 0;
 uint32_t erases = 0;
 uint32_t bootsel_calls = 0;
 std::array<uint8_t, 64> child_identity[2];
+bool interleave_identity_ack = false;
 
 void require(bool condition, const char* message) {
     if (!condition) { std::cerr << message << '\n'; std::exit(1); }
@@ -155,9 +159,9 @@ void test_profile_transport() {
     const auto original = encoded_profile(0);
     const auto edited = encoded_profile(4);
     auto info = read_operation(Operation::kInfo);
-    require(info[kResponseHeaderSize] == 0 && info[kResponseHeaderSize + 1] == 72 &&
-            info[kResponseHeaderSize + 2] == 0 && info[kResponseHeaderSize + 4] == 5 &&
-            info[kResponseHeaderSize + 5] == 7, "native INFO does not describe the fixed image");
+    require(info.size() == kResponseHeaderSize + 8 &&
+            info[kResponseHeaderSize + 4] == 5 && info[kResponseHeaderSize + 5] == 7,
+            "native INFO does not describe the fixed output and its capabilities");
     auto list = read_operation(Operation::kProfileList);
     require(list[kResponseHeaderSize] == 1 && list.size() > 64, "root catalog omitted the global profile owner");
     auto playtest = read_operation(Operation::kProfilePlaytest);
@@ -261,6 +265,74 @@ void test_interrupted_transactions() {
     require(!native_test_in(0, packet, &length, true), "completed request retained a second status ACK");
 }
 
+void test_pending_control_buffer_ownership() {
+    const auto info = request(Operation::kInfo, true, kMaximumResponseSize);
+    require(native_test_setup(0, &info, true), "pending INFO setup failed");
+    const unsigned programs_before = programs, erases_before = erases;
+    native_test_hold_abort(true);
+    const auto replacement = request(Operation::kProfileSelect, false, kRequestHeaderSize + 15);
+    require(!native_test_setup(0, &replacement, false),
+            "new SETUP replaced an EP0 buffer before the controller released ownership");
+    uint8_t packet[64]; uint16_t length;
+    require(!native_test_in(0, packet, &length, false),
+            "an unquiesced control endpoint acknowledged replacement work");
+    profile_service_task_on_storage_core(4000);
+    require(programs == programs_before && erases == erases_before,
+            "unquiesced replacement changed saved profiles");
+    native_test_initialize();
+}
+
+void test_read_ack_allows_usb_progress() {
+    interleave_identity_ack = true;
+    read_child(1);
+    const auto next = receive(2);
+    require(next == std::vector<uint8_t>(child_identity[1].begin(), child_identity[1].end()),
+            "SETUP received during read ACK did not retain the next child's response");
+}
+
+void test_private_transmit_survives_round_robin_tokens() {
+    native_test_initialize();
+    tusb_control_request_t configuration{};
+    configuration.bRequest = TUSB_REQ_SET_CONFIGURATION;
+    configuration.wValue = 1;
+    for (uint8_t slot : {1, 2}) {
+        require(native_test_setup(slot, &configuration, true), "child configuration failed");
+        acknowledge(slot);
+    }
+    const uint8_t payloads[2][3] = {{0x11, 0x22, 0x33}, {0x44, 0x55, 0x66}};
+    for (uint8_t instance : {0, 1}) {
+        require(native_hub_hid_report(instance, instance ? 7 : 8, payloads[instance], 3),
+                "could not queue HID packet");
+        require(native_hub_vendor_write(instance, payloads[instance], 3) == 3 &&
+                native_hub_vendor_write_flush(instance) == 3, "could not queue bulk packet");
+    }
+    uint8_t packet[64];
+    uint16_t length = 0;
+    for (uint8_t endpoint : {0x81, 0x82}) {
+        for (uint8_t slot : {1, 2}) {
+            require(native_test_private_in(slot, endpoint, packet, &length),
+                    "queued private IN packet required foreground work after bank selection");
+            const unsigned prefix = endpoint == 0x81 ? 1 : 0;
+            require(length == 3 + prefix &&
+                    (!prefix || packet[0] == (slot == 1 ? 8 : 7)) &&
+                    std::memcmp(packet + prefix, payloads[slot - 1], 3) == 0,
+                    "round-robin IN token received another endpoint's payload");
+        }
+    }
+    native_test_drain();
+    require(native_hub_hid_ready(0) && native_hub_hid_ready(1),
+            "acknowledged HID packets did not release their queues");
+    require(!native_test_private_in(1, 0x81, packet, &length),
+            "acknowledged HID packet was retransmitted");
+    // The idle poll selected R without restoring its shared EP0 image.
+    require(native_hub_hid_report(0, 8, payloads[0], 3), "could not queue the next HID packet");
+    require(native_test_private_in(1, 0x81, packet, &length) && length == 4 &&
+            std::memcmp(packet + 1, payloads[0], 3) == 0,
+            "pending shared EP0 restoration blocked a newly queued private IN packet");
+    native_test_drain();
+    native_test_initialize();
+}
+
 void test_private_bootsel() {
     const auto bytes = envelope(Operation::kBootselReboot, {});
     const auto setup = request(Operation::kBootselReboot, false, bytes.size());
@@ -336,6 +408,14 @@ extern "C" bool tud_vendor_control_xfer_cb(uint8_t slot, uint8_t stage, const tu
     if (probe_management_vendor_control(slot, stage, setup)) return true;
     if (slot < 1 || slot > 2 || setup->bmRequestType != 0xc0 ||
         setup->bRequest != 3 || setup->wValue || setup->wIndex) return false;
+    if (stage == CONTROL_STAGE_ACK && slot == 1 && interleave_identity_ack) {
+        interleave_identity_ack = false;
+        const auto next = *setup;
+        require(native_test_setup(2, &next, false), "next child's SETUP was rejected during read ACK");
+        // SETUP must be serviced before another token can change the bank.
+        // This observes IRQ progress, rather than inspecting the CPU mask.
+        require(native_test_select(0), "read ACK callback blocked servicing the next USB SETUP");
+    }
     return stage != CONTROL_STAGE_SETUP || native_hub_control_xfer(slot, setup,
             child_identity[slot - 1].data(), child_identity[slot - 1].size());
 }
@@ -347,6 +427,9 @@ int main() {
     native_test_initialize();
     test_profile_transport();
     test_interrupted_transactions();
+    test_pending_control_buffer_ownership();
+    test_read_ack_allows_usb_progress();
+    test_private_transmit_survives_round_robin_tokens();
     test_private_bootsel();
     std::cout << "native root management packet and persistence regressions passed\n";
 }

@@ -163,7 +163,7 @@ static __force_inline void buffer_settle(void) {
 static __force_inline void set_buffer(uint8_t device, uint8_t channel, uint32_t value) {
     devices[device].buffers[channel] = value;
     __dmb();
-    if ((active_device == device && (!bank_restore_pending || (channel & 1u))) ||
+    if ((active_device == device && (!bank_restore_pending || channel != 0)) ||
         (device == 0 && channel == 2)) {
         unsigned physical = physical_channel(device,channel);
         buffer_regs()[physical] = value & ~USB_BUF_CTRL_AVAIL;
@@ -191,8 +191,8 @@ bool __not_in_flash_func(native_hub_select_device)(uint8_t address, uint8_t owne
         const device_t* restrict incoming = &devices[owner];
         volatile uint32_t* buffers = (volatile uint32_t*)&usb_dpram->ep_buf_ctrl[0];
         volatile uint32_t* controls = (volatile uint32_t*)&usb_dpram->ep_ctrl[0];
-        // Receive PID/availability must be selected before accepting an OUT token.
-        // Transmit buffers can safely NAK until Core0 publishes their contents.
+        // Select metadata before accepting a token. Only EP0 IN needs a later
+        // shared-buffer copy; other endpoints already have private DPRAM data.
         for (unsigned i = 0; i < CHANNELS; ++i) {
             uint32_t value = owner == 0 && i >= 2 ? 0 : incoming->buffers[i];
             buffers[i] = value & ~USB_BUF_CTRL_AVAIL;
@@ -200,7 +200,7 @@ bool __not_in_flash_func(native_hub_select_device)(uint8_t address, uint8_t owne
         usb_dpram->ep_ctrl[14].in = owner == 0 ? hub_endpoint_control : 0;
         for (unsigned i = 0; i < 4; ++i) controls[i] = incoming->endpoint_controls[i];
         buffer_settle();
-        for (unsigned i = 1; i < CHANNELS; i += 2)
+        for (unsigned i = 1; i < CHANNELS; ++i)
             buffers[i] = owner == 0 && i >= 2 ? 0 : incoming->buffers[i];
         __dmb();
         usb_hw->dev_addr_ctrl = address;
@@ -220,7 +220,9 @@ bool __not_in_flash_func(native_hub_select_device)(uint8_t address, uint8_t owne
     spin_unlock_unsafe(bank_lock);
     return true;
 }
-static void __not_in_flash_func(restore_selected_bank)(void) {
+// Section placement alone permits inlining into the flash-backed task. Keep
+// bank-lock ownership independent of XIP instruction-cache refill latency.
+static void __no_inline_not_in_flash_func(restore_selected_bank)(void) {
     if (!bank_restore_pending) return;
     uint32_t flags = spin_lock_blocking(bank_lock);
     if (!bank_restore_pending || (usb_hw->sie_status & USB_SIE_STATUS_SETUP_REC_BITS) ||
@@ -238,15 +240,11 @@ static void __not_in_flash_func(restore_selected_bank)(void) {
         unsigned words = ((incoming->buffers[0] & USB_BUF_CTRL_LEN_MASK) + 3u) / 4u;
         for (unsigned i = 0; i < words; ++i) to[i] = from[i];
     }
-    for (unsigned i = 0; i < CHANNELS; i += 2) {
-        uint32_t value = owner == 0 && i >= 2 ? 0 : incoming->buffers[i];
-        buffers[i] = value & ~USB_BUF_CTRL_AVAIL;
-    }
+    buffers[0] = incoming->buffers[0] & ~USB_BUF_CTRL_AVAIL;
     usb_hw->ep_stall_arm = ((incoming->buffers[0] & USB_BUF_CTRL_STALL) ? 1u : 0u) |
         ((incoming->buffers[1] & USB_BUF_CTRL_STALL) ? 2u : 0u);
     buffer_settle();
-    for (unsigned i = 0; i < CHANNELS; i += 2)
-        buffers[i] = owner == 0 && i >= 2 ? 0 : incoming->buffers[i];
+    buffers[0] = incoming->buffers[0];
     bank_restore_pending = false;
     spin_unlock(bank_lock,flags);
 }
@@ -334,10 +332,24 @@ static void __not_in_flash_func(usb_interrupt)(void) {
         uint8_t actual_owner = hardware_owner();
         uint8_t setup[8];
         copy_from_usb(setup, usb_dpram->setup_packet, sizeof(setup));
+        // A new SETUP revokes the preceding control transfer. Reclaim both
+        // physical EP0 buffers through the controller's ownership handshake,
+        // as the SDK DCD does, before changing their metadata or PID.
+        hw_set_bits(&usb_hw->abort, 3u);
+        unsigned abort_wait = 4096u;
+        while ((usb_hw->abort_done & 3u) != 3u && --abort_wait) {}
+        if ((usb_hw->abort_done & 3u) != 3u) {
+            // Never acknowledge new work over a buffer the SIE still owns.
+            failed = true;
+            usb_hw->inte = 0;
+            spin_unlock(bank_lock, flags);
+            return;
+        }
         if (actual_owner < DEVICES && actual_owner == owner) {
             ++devices[owner].generation;
-            devices[owner].buffers[0] = devices[owner].buffers[1] = 0;
-            buffer_regs()[0] = buffer_regs()[1] = 0;
+            devices[owner].buffers[0] = devices[owner].buffers[1] =
+                USB_BUF_CTRL_DATA1_PID | USB_BUF_CTRL_SEL;
+            buffer_regs()[0] = buffer_regs()[1] = USB_BUF_CTRL_DATA1_PID | USB_BUF_CTRL_SEL;
             devices[owner].ep[0].next_pid = devices[owner].ep[1].next_pid = 1;
             push_event(owner,0,1,sizeof(setup),setup);
         } else {
@@ -345,6 +357,8 @@ static void __not_in_flash_func(usb_interrupt)(void) {
             hw_set_bits(&usb_hw->ep_stall_arm,3u);
             buffer_regs()[0] = buffer_regs()[1] = USB_BUF_CTRL_STALL;
         }
+        hw_clear_bits(&usb_hw->abort_done, 3u);
+        hw_clear_bits(&usb_hw->abort, 3u);
         hw_clear_bits(&usb_hw->sie_status,USB_SIE_STATUS_SETUP_REC_BITS);
     }
     if (status & USB_INTS_DEV_SUSPEND_BITS) {
@@ -368,7 +382,7 @@ static void stall(uint8_t slot) {
     set_buffer(slot,0,USB_BUF_CTRL_STALL); set_buffer(slot,1,USB_BUF_CTRL_STALL);
     spin_unlock(bank_lock, flags);
 }
-static void __not_in_flash_func(arm_packet)(uint8_t slot, uint8_t channel, const uint8_t* data, uint16_t length) {
+static void __no_inline_not_in_flash_func(arm_packet)(uint8_t slot, uint8_t channel, const uint8_t* data, uint16_t length) {
     endpoint_t* ep = &devices[slot].ep[channel];
     uint32_t generation = channel < 2 ? devices[slot].control.generation :
         devices[slot].endpoint_generation[channel];
@@ -726,7 +740,7 @@ static void transmit_next(uint8_t slot, uint8_t channel) {
     uint8_t packet[64]; if (size) memcpy(packet,ep->data+ep->sent,size);
     arm_packet(slot,channel,packet,size);
 }
-static void transfer_complete(const event_t* event) {
+static void __no_inline_not_in_flash_func(transfer_complete)(const event_t* event) {
     uint8_t slot = event->device, channel = event->channel;
     device_t* d = &devices[slot];
     if (event->reset_generation != d->reset_generation) return;
@@ -742,6 +756,16 @@ static void transfer_complete(const event_t* event) {
         if (event->generation != c->generation) return;
         if ((c->stage == STATUS_IN && channel == 0) || (c->stage == STATUS_OUT && channel == 1)) {
             if (event->length) stall(slot);
+            else if (c->stage == STATUS_OUT && (c->request.bmRequestType & 0x80u)) {
+                // Claim the completed read before a reset can revoke it, but
+                // let USB IRQs run while its read-only ACK callback executes.
+                uint32_t flags = save_and_disable_interrupts();
+                bool acknowledged = event->reset_generation == d->reset_generation;
+                if (acknowledged) c->stage = IDLE;
+                restore_interrupts(flags);
+                if (acknowledged && c->vendor)
+                    tud_vendor_control_xfer_cb(slot,CONTROL_STAGE_ACK,&c->request);
+            }
             else {
                 // Do not let a reset IRQ revoke ownership between checking it
                 // and publishing the acknowledged service transaction.

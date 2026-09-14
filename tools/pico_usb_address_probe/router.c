@@ -43,7 +43,7 @@ _Static_assert(PROBE_ROUTER_SLOTS == 3u, "Packed setup owner has three slots");
 typedef struct {
     uint8_t owner[128];
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
-    uint8_t early_address[2][16];
+    uint8_t early_address[2][256];
 #endif
 } routing_table;
 
@@ -149,6 +149,9 @@ static void build_table(routing_table* table,
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
     // A unique observed prefix can preselect the SIE sooner. It still compares
     // the complete hardware address and CRC before accepting the transaction.
+    // Index the four captured line pairs directly. Packing their D+ bits in
+    // the sampling window delays bit 20 even when the prefix is ambiguous.
+    memset(table->early_address, PROBE_ROUTER_UNASSIGNED, sizeof(table->early_address));
     for (unsigned kind = 0; kind < 2; ++kind) {
         for (unsigned prefix = 0; prefix < 16; ++prefix) {
             uint8_t candidate = PROBE_ROUTER_UNASSIGNED;
@@ -161,7 +164,10 @@ static void build_table(routing_table* table,
                 }
                 candidate = address;
             }
-            table->early_address[kind][prefix] = candidate;
+            unsigned raw_prefix = 0u;
+            for (unsigned bit = 0; bit < 4; ++bit)
+                raw_prefix |= ((prefix >> bit) & 1u ? LINE_J : LINE_K) << (2u * bit);
+            table->early_address[kind][raw_prefix] = candidate;
         }
     }
 #endif
@@ -331,14 +337,12 @@ static bool observe_idle_j(void);
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
 static raw_packet __no_inline_not_in_flash_func(capture_packet)(
     uint32_t phase, const routing_table* table, bool draining) {
-prepare_capture:;
 #else
 static raw_packet __no_inline_not_in_flash_func(capture_packet)(
     uint32_t phase, const routing_table* table) {
 #endif
     raw_packet result = {0};
     uint32_t word0 = LINE_K, word1 = 0u, word2 = 0u;
-    uint32_t address_wire = 0u;
     const uint8_t* decoder = NULL;
     uint32_t expected_word = 0u;
     const uint32_t initial_address = usb_hw->dev_addr_ctrl;
@@ -351,6 +355,7 @@ static raw_packet __no_inline_not_in_flash_func(capture_packet)(
     // forcing them into live registers adds spills and unnecessary ORs.
     __asm volatile ("" : "+r"(word0), "+m"(result) : : "memory");
     #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
+drain_prepared_capture:;
     if (draining) {
         const uint32_t stop = cycles_now() + FS_CLOCK_HZ / 10000u;
         bool saw_se0 = false;
@@ -422,10 +427,16 @@ edge:
     // The first stored K is the observed SOP above, not an invented SYNC bit.
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
 #define SET_EARLY_DECODER(kind) (early_decoder = table->early_address[kind])
-#define DISCARD_NON_TOKEN() do { draining = true; goto prepare_capture; } while (0)
+// PID rejection happens before any address/body samples. Reuse the prepared
+// frame: rebuilding its stack image here can miss the end of a short ACK/NAK
+// and the following token. All other result/address accumulators are still zero.
+#define DISCARD_NON_TOKEN() do { \
+        result.sop = false; word0 = LINE_K; draining = true; \
+        goto drain_prepared_capture; \
+    } while (0)
 #define ROUTE_EARLY(bit, base) do { \
         if ((base) + (bit) == 19u && decoder != NULL) { \
-            uint8_t candidate = early_decoder[address_wire]; \
+            uint8_t candidate = early_decoder[word1 & 0xffu]; \
             if (candidate < 128u) \
                 route_header(table, candidate, word0 == 0x9a56a666u, initial_address, \
                              deadline + 11u * FS_BIT_CYCLES, &result); \
@@ -447,10 +458,13 @@ edge:
             decoder = NULL; \
             DISCARD_NON_TOKEN(); \
         } \
-        if ((base) + (bit) >= 16u && (base) + (bit) <= 23u) \
-            address_wire |= (line & 1u) << (bit); \
         ROUTE_EARLY(bit, base); \
         if ((base) + (bit) == 23u && decoder != NULL) { \
+            /* Compact observed D+ bits only after all eight symbols exist. */ \
+            uint32_t address_wire = word1 & 0x5555u; \
+            address_wire = (address_wire | (address_wire >> 1u)) & 0x3333u; \
+            address_wire = (address_wire | (address_wire >> 2u)) & 0x0f0fu; \
+            address_wire = (address_wire | (address_wire >> 4u)) & 0xffu; \
             route_header(table, decoder[address_wire], word0 == 0x9a56a666u, \
                          initial_address, deadline + 7u * FS_BIT_CYCLES, &result); \
             if (result.late) { result.count = (base) + (bit) + 1u; goto done; } \

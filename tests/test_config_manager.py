@@ -2801,6 +2801,8 @@ def test_profile_playtest_decodes_raw_controller_state() -> None:
         "dpad_up",
         "dpad_right",
     ]
+    assert replace(playtest, battery=255).to_json_object()["battery"] == 100
+    assert replace(playtest, battery=1).to_json_object()["battery"] == 0
 
     device.playtest_connected = False
     disconnected = config_manager.read_profile_playtest(device)
@@ -2818,6 +2820,7 @@ def test_profile_playtest_decodes_raw_controller_state() -> None:
         capabilities=0,
         motion=None,
     )
+    assert disconnected.to_json_object()["battery"] is None
     device.playtest_connected = True
     payload, flags = device._profile_playtest_payload()
     malformed = bytearray(payload)

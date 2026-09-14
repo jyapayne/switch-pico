@@ -290,9 +290,7 @@ uint32_t probe_native_gamepad_input_peek_native_report(uint8_t instance, uint32_
         if (g_report_token == UINT32_MAX) return 0; // Boot-unique, including across children/resets.
         memset(child.pending_report, 0, sizeof(child.pending_report));
         child.pending_report[0] = child.counter;
-        // Battery telemetry belongs to the source; external power belongs to
-        // these USB-powered virtual controllers. Unknown is not a full charge,
-        // and the Pico does not charge the wireless source.
+        // Source battery level and the virtual controller's USB power are separate.
         const unsigned battery_level = (static_cast<unsigned>(g_source.battery) * 9u + 127u) / 255u;
         child.pending_report[1] = static_cast<uint8_t>((battery_level << 2) | 0x01u);
         memcpy(child.pending_report + 2, child.input.buttons, sizeof(child.input.buttons));

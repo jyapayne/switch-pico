@@ -1232,6 +1232,33 @@ static void nunchuk_accel_detach_and_replacement_require_fresh_calibration(void)
     }
 }
 
+static void battery_status_survives_input_reports(void) {
+    reset_fixture(0x0306, false, EXT_NONE);
+    assert(f.device.controller.battery == UNI_CONTROLLER_BATTERY_NOT_AVAILABLE);
+    uni_hid_parser_wii_setup(&f.device);
+    finish_setup();
+    assert(f.device.controller.battery == UNI_CONTROLLER_BATTERY_FULL);
+    send_core_and_accel();
+    assert(f.device.controller.battery == UNI_CONTROLLER_BATTERY_FULL);
+
+    uint8_t status[] = {0x20, 0, 0, 0, 0, 0, 52};
+    feed(status, sizeof(status));
+    finish_setup();
+    assert(f.device.controller.battery == 179); // Measured 70% band, not a full-charge placeholder.
+    send_core_and_accel();
+    assert(f.device.controller.battery == 179);
+    status[6] = 0;
+    feed(status, sizeof(status) - 1);
+    assert(f.device.controller.battery == 179); // Truncation cannot erase the last measurement.
+    feed(status, sizeof(status));
+    finish_setup();
+    assert(f.device.controller.battery == 13); // Measured low band remains distinct from unknown.
+    send_core_and_accel();
+    assert(f.device.controller.battery == 13);
+    uni_hid_parser_wii_setup(&f.device);
+    assert(f.device.controller.battery == UNI_CONTROLLER_BATTERY_NOT_AVAILABLE);
+}
+
 static void run_case(const char* name, void (*test)(void)) {
     printf("Wii parser: %s\n", name);
     fflush(stdout);
@@ -1239,6 +1266,7 @@ static void run_case(const char* name, void (*test)(void)) {
 }
 
 int main(void) {
+    run_case("real battery retained between status and input reports", battery_status_survives_input_reports);
     run_case("fresh calibrated accelerometer snapshots without MotionPlus", accelerometer_snapshot_requires_fresh_calibrated_reports);
     run_case("independent fresh calibrated MotionPlus gyro snapshots", gyro_snapshot_advances_only_on_calibrated_motionplus_packets);
     run_case("gyro validity through hotplug, replacement and teardown", gyro_snapshot_invalidates_on_topology_and_teardown);
