@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "tusb.h"
+#include "native_hub_trace.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,6 +16,9 @@ extern "C" {
 void native_hub_startup_guard(void);
 bool native_hub_init(void);
 void native_hub_task(void);
+// Core0, with IRQs disabled and bank_lock not held: service hardware status
+// while flash is unavailable. SRAM-only; queues events, never runs callbacks.
+void native_hub_service_pending_usb(void);
 bool native_hub_mounted(uint8_t instance);
 bool native_hub_suspended(uint8_t instance);
 bool native_hub_hid_ready(uint8_t instance);
@@ -30,6 +34,7 @@ bool native_hub_control_xfer(uint8_t device_slot,
                              void* buffer, uint16_t length);
 bool native_hub_control_status(uint8_t device_slot,
                                const tusb_control_request_t* request);
+
 
 // Supplied by the existing native Joy-Con protocol engine. Each returned
 // descriptor is the standalone model, with interfaces 0/1 and EPs 1/2.

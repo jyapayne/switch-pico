@@ -9,6 +9,9 @@
 
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
 extern bool native_hub_select_device(uint8_t address, uint8_t owner, uint32_t cutoff);
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+#include "usb/native_hub/native_hub_trace.h"
+#endif
 #endif
 
 #if !PICO_RP2350 || defined(__riscv)
@@ -30,6 +33,10 @@ extern bool native_hub_select_device(uint8_t address, uint8_t owner, uint32_t cu
 #define PID_OUT 0xe1u
 #define PID_IN 0x69u
 #define PID_SETUP 0x2du
+// NRZI SYNC+PID words, with K=2 and J=1 packed into two-bit samples.
+#define TOKEN_OUT_SIGNATURE 0xaa66a666u
+#define TOKEN_IN_SIGNATURE 0x95a6a666u
+#define TOKEN_SETUP_SIGNATURE 0x9a56a666u
 #define NO_READER 2u
 #define SETUP_SEQUENCE_MASK 0x3fffffffu
 #define SETUP_SLOT_SHIFT 30u
@@ -175,9 +182,9 @@ static void build_table(routing_table* table,
 
 void probe_router_init(uint32_t system_clock_hz) {
     // Explicit SRAM data: Core1 must never fetch flash during durable saves.
-    token_words[6] = 0xaa66a666u;
-    token_words[10] = 0x95a6a666u;
-    token_words[5] = 0x9a56a666u;
+    token_words[6] = TOKEN_OUT_SIGNATURE;
+    token_words[10] = TOKEN_IN_SIGNATURE;
+    token_words[5] = TOKEN_SETUP_SIGNATURE;
     const uint8_t addresses[PROBE_ROUTER_SLOTS] = {0u, PROBE_ROUTER_UNASSIGNED,
                                                 PROBE_ROUTER_UNASSIGNED};
     memset(&counters, 0, sizeof(counters));
@@ -295,7 +302,7 @@ static __force_inline bool sample_line(uint32_t* deadline, uint32_t* line) {
 }
 
 static __force_inline void route_header(const routing_table* table, uint32_t address,
-                                        bool setup, uint32_t initial_address,
+                                        uint32_t signature, uint32_t initial_address,
                                         uint32_t cutoff, raw_packet* packet) {
     // TinyUSB clears SETUP_REC only AFTER copying the hardware-validated SETUP
     // into its event callback. Until then, preserve both address and owner.
@@ -306,8 +313,21 @@ static __force_inline void route_header(const routing_table* table, uint32_t add
         return;
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
     if (atomic_read(&enabled) != 0u) {
-        if (!native_hub_select_device((uint8_t)address, table->owner[address], cutoff))
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        const uint8_t pid = signature == TOKEN_OUT_SIGNATURE ? PID_OUT :
+            signature == TOKEN_IN_SIGNATURE ? PID_IN : PID_SETUP;
+        const bool selected = (pid == PID_OUT || (pid == PID_IN && table->owner[address] == 0))
+            ? native_hub_select_device_traced((uint8_t)address, table->owner[address], cutoff, pid)
+            : native_hub_select_device((uint8_t)address, table->owner[address], cutoff);
+#else
+        const bool selected = native_hub_select_device((uint8_t)address, table->owner[address], cutoff);
+#endif
+        if (!selected) {
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+            native_hub_note_failed_select((uint8_t)address, table->owner[address], cutoff, pid);
+#endif
             return;
+        }
         if (initial_address != address) ++packet->retargets;
     }
 #else
@@ -324,7 +344,7 @@ static __force_inline void route_header(const routing_table* table, uint32_t add
     // Candidate observations qualify calibration only. Runtime ownership
     // comes from the hardware address frozen by SETUP_REC. A missed software
     // candidate must not reject a correctly addressed, hardware-accepted SETUP.
-    if (setup)
+    if (signature == TOKEN_SETUP_SIGNATURE)
         publish_setup(table->owner[address]);
 }
 
@@ -438,7 +458,7 @@ edge:
         if ((base) + (bit) == 19u && decoder != NULL) { \
             uint8_t candidate = early_decoder[word1 & 0xffu]; \
             if (candidate < 128u) \
-                route_header(table, candidate, word0 == 0x9a56a666u, initial_address, \
+                route_header(table, candidate, word0, initial_address, \
                              deadline + 11u * FS_BIT_CYCLES, &result); \
         } \
     } while (0)
@@ -465,7 +485,7 @@ edge:
             address_wire = (address_wire | (address_wire >> 1u)) & 0x3333u; \
             address_wire = (address_wire | (address_wire >> 2u)) & 0x0f0fu; \
             address_wire = (address_wire | (address_wire >> 4u)) & 0xffu; \
-            route_header(table, decoder[address_wire], word0 == 0x9a56a666u, \
+            route_header(table, decoder[address_wire], word0, \
                          initial_address, deadline + 7u * FS_BIT_CYCLES, &result); \
             if (result.late) { result.count = (base) + (bit) + 1u; goto done; } \
         } \

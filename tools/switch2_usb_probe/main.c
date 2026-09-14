@@ -124,6 +124,10 @@ int probe_debug_printf(const char* format, ...) {
     if (result <= 0) return result;
     const size_t size = (size_t)result < sizeof(message) ? (size_t)result : sizeof(message) - 1;
     const uint32_t interrupts = save_and_disable_interrupts();
+#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    const uint32_t mask_started = time_us_32();
+    const uint32_t trace_parent = native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_LOG_COPY);
+#endif
     if (LOG_CAPACITY - (log_written - log_read) >= size) {
         for (size_t i = 0; i < size; ++i)
             log_bytes[(log_written + i) % LOG_CAPACITY] = message[i];
@@ -132,7 +136,14 @@ int probe_debug_printf(const char* format, ...) {
     } else {
         log_dropped += (uint32_t)result;
     }
+#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    native_hub_trace_phase(trace_parent);
+    const uint32_t mask_elapsed = time_us_32() - mask_started;
+#endif
     restore_interrupts(interrupts);
+#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    native_hub_note_log_mask(mask_elapsed, (uint32_t)size, interrupts != 0);
+#endif
     return result;
 }
 
@@ -847,12 +858,24 @@ int main(void) {
     uint32_t last_heartbeat = 0;
     while (true) {
 #if SWITCH2_PROBE_HUB
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_RADIO_POLL);
+#endif
         probe_controller_input_task();
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_USB_TASK);
+#endif
         native_hub_task();
 #else
         tud_task();
 #endif
+#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_LOG_DRAIN);
+#endif
         drain_log();
+#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_PROTOCOL);
+#endif
         const uint32_t now = to_ms_since_boot(get_absolute_time());
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
         probe_bootsel_task(now);
@@ -917,6 +940,9 @@ int main(void) {
             }
 #endif
         }
+#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_SLEEP);
+#endif
         sleep_us(100);
     }
 }

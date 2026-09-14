@@ -25,6 +25,9 @@
 #include <btstack_run_loop.h>
 #if SWITCH2_PROBE_HUB
 #include <pico/async_context.h>
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+#include "usb/native_hub/native_hub_trace.h"
+#endif
 #endif
 #include <pico/critical_section.h>
 #include <pico/cyw43_arch.h>
@@ -379,7 +382,40 @@ struct BackendSlot {
     ProfileFeedbackSequence profile_feedback;
 };
 
+#if SWITCH2_PROBE_HUB
+spin_lock_t* g_state_lock;
+static __force_inline void backend_state_lock_enter() {
+    // Hub Bluetooth is polled on Core0, and USB IRQs only enqueue transport
+    // events. Neither IRQs nor Core1 may enter backend state. Keep USB IRQs
+    // serviceable while holding this lock; preserve any caller-owned masking.
+    if (get_core_num() != 0 || __get_current_exception() != 0) {
+        panic("Native hub backend state requires Core0 foreground");
+    }
+    spin_lock_unsafe_blocking(g_state_lock);
+}
+#define backend_state_lock_exit() spin_unlock_unsafe(g_state_lock)
+#else
 critical_section_t g_state_lock;
+#define backend_state_lock_enter() critical_section_enter_blocking(&g_state_lock)
+#define backend_state_lock_exit() critical_section_exit(&g_state_lock)
+#endif
+#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+static uint32_t g_state_lock_trace_parent;
+static __force_inline void trace_state_lock_enter(uint32_t line) {
+    backend_state_lock_enter();
+    g_state_lock_trace_parent = native_hub_trace_phase(
+        NATIVE_HUB_TRACE_PHASE_BACKEND_LOCK | line);
+}
+static __force_inline void trace_state_lock_exit() {
+    native_hub_trace_phase(g_state_lock_trace_parent);
+    backend_state_lock_exit();
+}
+#define state_lock_enter() trace_state_lock_enter(__LINE__)
+#define state_lock_exit() trace_state_lock_exit()
+#else
+#define state_lock_enter() backend_state_lock_enter()
+#define state_lock_exit() backend_state_lock_exit()
+#endif
 uni_hid_device_t* g_retired_devices[kSlotCount]{};
 BackendSlot g_slots[kSlotCount];
 ControllerMacroCapture g_macro_capture;
@@ -639,7 +675,7 @@ bool valid_slot(uint8_t slot) {
 }
 
 bool has_free_slot() {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     unsigned physical_count = 0;
     for (const BackendSlot& slot : g_slots) {
         physical_count += slot.device != nullptr;
@@ -648,17 +684,17 @@ bool has_free_slot() {
     #if SWITCH2_BRIDGE_FULL_INPUT
     for (const auto* pending : g_native_pending_devices) physical_count += pending != nullptr;
     #endif
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return physical_count < kSlotCount;
 }
 
 bool has_active_controller() {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     bool active_controller = false;
     for (const BackendSlot& slot : g_slots) {
         active_controller = active_controller || slot.active;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return active_controller;
 }
 
@@ -875,7 +911,7 @@ void mask_joycon_gesture(uni_gamepad_t& gamepad,
 }
 
 bool waiting_for_joycon_mate(int side = 0) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     unsigned physical_count = 0;
     bool pending = false;
     unsigned left_count = 0;
@@ -894,7 +930,7 @@ bool waiting_for_joycon_mate(int side = 0) {
             right_count += candidate_side > 0;
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     // Individual players still reconnect their remembered opposite half, but
     // a balanced set is complete even though no logical pair was created.
     const bool missing_left = g_joycon_mode == JoyConMode::kIndividual
@@ -1050,10 +1086,10 @@ uni_switch2_haptics_frame_t switch2_physical_frame(
 }
 
 void drain_switch2_ingress(uint8_t slot_index, uint32_t now_ms) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& slot = g_slots[slot_index];
     if (!slot.active || !uni_hid_parser_switch2_is_ble_device(slot.device)) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return;
     }
     Switch2Ingress& ingress = slot.switch2_ingress;
@@ -1110,7 +1146,7 @@ void drain_switch2_ingress(uint8_t slot_index, uint32_t now_ms) {
         ingress.head = (ingress.head + 1u) % kSwitch2IngressCapacity;
         --ingress.count;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 bool addresses_equal(const bd_addr_t first, const bd_addr_t second) {
@@ -1214,7 +1250,7 @@ void publish_ble_identity(const BleIdentityMapping& mapping) {
     ControllerIdentity observed_identity{};
     bool observe_identity = false;
     bool joycon_identity_changed = false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     for (BackendSlot& slot : g_slots) {
         if (slot.device != nullptr && slot.companion == nullptr &&
             gap_get_connection_type(slot.device->conn.handle) ==
@@ -1232,7 +1268,7 @@ void publish_ble_identity(const BleIdentityMapping& mapping) {
             }
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     if (observe_identity) {
         profile_service_observe_identity_on_storage_core(
             observed_identity);
@@ -1270,7 +1306,7 @@ void clear_ble_identity_for_handle(hci_con_handle_t connection_handle) {
         }
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     for (BackendSlot& slot : g_slots) {
         if (slot.device != nullptr && slot.companion == nullptr &&
             gap_get_connection_type(slot.device->conn.handle) ==
@@ -1279,7 +1315,7 @@ void clear_ble_identity_for_handle(hci_con_handle_t connection_handle) {
             slot.identity = controller_identity_global();
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 void clear_ble_identity_for_device(const uni_hid_device_t* device) {
@@ -1354,7 +1390,7 @@ void apply_profile_lighting(
 bool lighting_target_is_current(
     uint8_t slot_index, uint32_t connection_generation,
     const uni_hid_device_t* device) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const bool current =
         device != nullptr && slot_index < kSlotCount &&
         g_slots[slot_index].active &&
@@ -1362,7 +1398,7 @@ bool lighting_target_is_current(
          g_slots[slot_index].companion == device) &&
         g_slots[slot_index].connection_generation ==
             connection_generation;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return current;
 }
 
@@ -1393,7 +1429,7 @@ Bluepad32ControllerLayout controller_layout(const BackendSlot& slot) {
 
 
 ConnectionStatus compute_connection_status() {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     bool all_ready = true;
     bool any_connecting = false;
     unsigned physical_count = 0;
@@ -1413,7 +1449,7 @@ ConnectionStatus compute_connection_status() {
         }
     }
     #endif
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 
     if (all_ready && physical_count == kSlotCount) {
         return ConnectionStatus::Ready;
@@ -1427,7 +1463,7 @@ ConnectionStatus compute_connection_status() {
 void publish_device_state(uint8_t slot, uni_hid_device_t* device,
                           uint16_t pre_hotkey_button_mask,
                           const ControllerState& state) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& target = g_slots[slot];
     if (target.active && target.device == device) {
         target.state = state;
@@ -1494,11 +1530,11 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
         g_macro_capture.observe(slot, target.connection_generation,
                                 time_us_32(), target.state);
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 void publish_all_neutral() {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
 #ifdef SWITCH_PICO_WII_IR
     wii_ir_pointer_reset();
 #endif
@@ -1548,7 +1584,7 @@ void publish_all_neutral() {
         g_joycon_overrides[index] = {};
         g_joycon_pair_hints[index] = {};
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     for (BleIdentityMapping& mapping : g_ble_identity_mappings) {
         mapping = {};
     }
@@ -1652,13 +1688,13 @@ bool wake_chord_rising_edge(uint8_t slot, uni_hid_device_t* device,
         logical_button_bit(ControllerProfileLogicalButton::kLeftShoulder) |
         logical_button_bit(ControllerProfileLogicalButton::kRightShoulder) |
         logical_button_bit(ControllerProfileLogicalButton::kSystem);
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const BackendSlot& previous = g_slots[slot];
     const bool rising =
         previous.active && previous.device == device &&
         (button_mask & chord) == chord &&
         (previous.pre_hotkey_button_mask & chord) != chord;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return rising;
 }
 
@@ -2114,12 +2150,12 @@ bool is_solo_wii_remote(const BackendSlot& slot) {
 HotkeyDecision update_controller_hotkeys(
     uint8_t slot_index, uni_hid_device_t* device) {
     HotkeyDecision decision{kDefaultMotionEnabled};
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device == device) {
         decision.motion_enabled = slot.motion_enabled;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return decision;
 }
 
@@ -2248,10 +2284,10 @@ void handle_btstack_event(uint8_t packet_type, uint16_t channel,
 }
 
 bool update_pairing_window(uint32_t now_ms) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const bool requested = g_pairing_window_requested;
     g_pairing_window_requested = false;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     if (g_connection_policy_state == ConnectionPolicyState::FailedClosed) {
         return false;
     }
@@ -2337,7 +2373,7 @@ void refresh_pairing_snapshot() {
         }
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     if (g_pairing_snapshot.status == Bluepad32PairingSnapshotStatus::kFailed) {
         snapshot.status = Bluepad32PairingSnapshotStatus::kFailed;
     }
@@ -2346,13 +2382,13 @@ void refresh_pairing_snapshot() {
         g_pairing_snapshot.completed_clear_pairings_token;
     g_pairing_snapshot = snapshot;
     g_pairing_snapshot_requested = false;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 void process_pairing_snapshot_request() {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const bool requested = g_pairing_snapshot_requested;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     if (requested) {
         refresh_pairing_snapshot();
     }
@@ -2364,7 +2400,7 @@ void recompute_connection_status();
 void process_clear_pairings(uint32_t now_ms) {
     uni_hid_device_t* devices[kSlotCount]{};
     uint8_t device_count = 0;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const uint32_t request_token =
         g_clear_pairings_requested_token;
     if (request_token != 0) {
@@ -2391,7 +2427,7 @@ void process_clear_pairings(uint32_t now_ms) {
             g_joycon_pair_hints[slot_index] = {};
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     if (request_token == 0) {
         return;
     }
@@ -2423,12 +2459,12 @@ void process_clear_pairings(uint32_t now_ms) {
         uni_bt_stop_scanning_unsafe();
         uni_bt_allow_incoming_connections(false);
         g_connection_policy_state = ConnectionPolicyState::FailedClosed;
-        critical_section_enter_blocking(&g_state_lock);
+        state_lock_enter();
         g_pairing_snapshot.status = Bluepad32PairingSnapshotStatus::kFailed;
         g_clear_pairings_in_progress_token = 0;
         g_clear_pairings_requested_token = 0;
         g_pairing_window_requested = false;
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return;
     }
 
@@ -2440,11 +2476,11 @@ void process_clear_pairings(uint32_t now_ms) {
         g_connection_policy_state = ConnectionPolicyState::Uninitialized;
     }
     apply_connection_policy();
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     g_pairing_snapshot.completed_clear_pairings_token =
         request_token;
     g_clear_pairings_in_progress_token = 0;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 
@@ -2535,7 +2571,7 @@ void update_status_led() {
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
     bool profile_led_override = false;
     bool profile_led_on = false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     for (const BackendSlot& slot : g_slots) {
         if (slot.profile_feedback.active &&
             slot.profile_feedback.led_enabled) {
@@ -2544,7 +2580,7 @@ void update_status_led() {
                 profile_led_on || slot.profile_feedback.on;
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 
     bool led_on = false;
     if (profile_led_override) {
@@ -2595,13 +2631,13 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
             if ((previously_owned & (1u << i)) || !switch_native_output_owns(g_slots[i].device))
                 continue;
             RumbleEnvelope retained{};
-            critical_section_enter_blocking(&g_state_lock);
+            state_lock_enter();
             const BackendSlot& current = g_slots[i];
             retained = current.pending_rumble;
             const bool valid = current.active && retained.slot == i &&
                 retained.connection_generation == current.connection_generation &&
                 retained.duration_ms == host_rumble_duration_ms();
-            critical_section_exit(&g_state_lock);
+            state_lock_exit();
             if (valid) switch_native_output_submit(i, retained.connection_generation,
                 retained.received_us, retained.rumble,
                 retained.duration_ms == kXInputHostRumbleDurationMs);
@@ -2713,13 +2749,13 @@ bool prepare_wii_cue(uint8_t slot_index, uint32_t now_ms,
 
 void dispatch_wii_cue(const WiiCueDispatch& command) {
     if (command.device == nullptr) return;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const bool current = g_wii_cue.token == command.token &&
         g_wii_cue.in_flight && wii_cue_target_current() &&
         g_slots[command.slot].device == command.device &&
         (command.cancellation_stop ? g_wii_cue.stop_pending
                                   : g_wii_cue.result != -1);
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     // Lifecycle/parser callbacks are serialized on Core 1. The readiness check
     // excludes the Wii void hook's early-return path during topology setup.
     const bool dispatched = current &&
@@ -2730,7 +2766,7 @@ void dispatch_wii_cue(const WiiCueDispatch& command) {
         command.device->report_parser.play_dual_rumble(
             command.device, 0, command.duration_ms, UINT8_MAX, UINT8_MAX);
     }
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     WiiCue& cue = g_wii_cue;
     if (cue.token == command.token && cue.connection_generation == command.connection_generation) {
         cue.in_flight = false;
@@ -2757,7 +2793,7 @@ void dispatch_wii_cue(const WiiCueDispatch& command) {
             }
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 #endif
 
@@ -2871,7 +2907,7 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
     bool submitted[2]{};
     uint32_t dispatch_ms = btstack_run_loop_get_time_ms();
     for (uint8_t target = 0; target < (paired ? 2 : 1); ++target) {
-        critical_section_enter_blocking(&g_state_lock);
+        state_lock_enter();
         bool current = slot.active && slot.device == command.device &&
             slot.companion == command.companion &&
             slot.connection_generation == command.connection_generation;
@@ -2882,7 +2918,7 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
                 current &= cue.token == command.token[side] && cue.in_flight &&
                     cue.result != -1 && native_cue_current(cue);
         }
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         // No backend lock crosses a driver call. Recheck every real target:
         // cancel/reselection or a stall during R dispatch must not send stale L.
         dispatch_ms = btstack_run_loop_get_time_ms();
@@ -2902,7 +2938,7 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
         if (paired) submitted[target] = true;
         else submitted[0] = submitted[1] = true;
 
-        critical_section_enter_blocking(&g_state_lock);
+        state_lock_enter();
         if (slot.active && slot.device == command.device &&
             slot.companion == command.companion) {
             // Retain each actual submission even if USB canceled/reselected
@@ -2917,9 +2953,9 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
             output.deadline_ms = output.owned
                 ? command.prepared_ms + command.duration_ms : 0;
         }
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
     }
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     for (uint8_t side = 0; side < 2; ++side) {
         NativeGamepadCue& cue = g_native_cues[side];
         if (command.token[side] == 0 || cue.token != command.token[side]) continue;
@@ -2933,17 +2969,17 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
             cue.active = cue.sample_id != 0;
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 #endif
 
 // Core 1 only. The mailbox carries values, never a parser pointer supplied by
 // Core 0. Revalidate after lifecycle/topology work and before touching the parser.
 void process_wii_orientation(uint8_t slot_index) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& slot = g_slots[slot_index];
     if (!slot.wii_orientation_pending) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return;
     }
     const WiiOrientationRequest request = slot.pending_wii_orientation;
@@ -2952,7 +2988,7 @@ void process_wii_orientation(uint8_t slot_index) {
     if (!is_solo_wii_remote(slot) ||
         slot.connection_generation != request.connection_generation ||
         !controller_identity_equal(slot.identity, request.identity)) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return;
     }
     uni_hid_device_t* device = slot.device;
@@ -2966,7 +3002,7 @@ void process_wii_orientation(uint8_t slot_index) {
 #if SWITCH2_BRIDGE_FULL_INPUT
     refresh_native_source_locked();
 #endif
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 
     // The setter can synchronously re-enter the platform ready callback, so
     // release the lock first. Lifecycle and parser callbacks share this core.
@@ -3023,7 +3059,7 @@ void seed_native_host_rumble() {
     }
     g_seeded_native_run_id = native.run_id;
     RumbleEnvelope retained{};
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& slot = g_slots[native.slot];
     const bool valid = slot.active && slot.device != nullptr &&
                        slot.retained_host_rumble_valid &&
@@ -3040,7 +3076,7 @@ void seed_native_host_rumble() {
         slot.pending_rumble = retained;
         slot.rumble_pending = true;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     if (valid) {
         // Replay once on arm, not on a watchdog cadence. The original timestamp
         // keeps a raced newer USB command authoritative in the host timeline.
@@ -3100,7 +3136,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         NativeGamepadCueDispatch native_dispatch{};
 #endif
 
-        critical_section_enter_blocking(&g_state_lock);
+        state_lock_enter();
         BackendSlot& slot = g_slots[slot_index];
         if (slot.retained_host_rumble_valid &&
             (!xinput_host_mode ||
@@ -3119,7 +3155,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             // Fixture/startup/restoration exclusively own output. Preserve
             // stateful XInput requests until compatibility restoration ends.
             if (!xinput_host_mode) slot.rumble_pending = false;
-            critical_section_exit(&g_state_lock);
+            state_lock_exit();
             continue;
         }
 #endif
@@ -3265,7 +3301,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         }
         companion = slot.companion;
         dispatch_generation = slot.connection_generation;
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
         if (host_dispatch && switch_native_output_owns(device))
             host_dispatch = false;  // The timestamped native queue already owns this command.
@@ -3451,7 +3487,7 @@ void stop_joycon_output(uni_hid_device_t* device) {
 bool merge_joycon_slots(int owner_index, int joining_index,
                        uni_hid_device_t* joining_device,
                        bool gesture = false) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& owner = g_slots[owner_index];
     BackendSlot& joining = g_slots[joining_index];
     uni_hid_device_t* const owner_device = owner.device;
@@ -3471,7 +3507,7 @@ bool merge_joycon_slots(int owner_index, int joining_index,
         reserve_device_slot(joining_device) == joining_index;
     const ControllerIdentity owner_identity = identity_for_device(owner_device);
     const ControllerIdentity joining_identity = identity_for_device(joining_device);
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     ControllerIdentity pair_identity{};
     if (!eligible ||
         !controller_identity_make_joycon_pair(
@@ -3481,7 +3517,7 @@ bool merge_joycon_slots(int owner_index, int joining_index,
         return false;
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const bool still_admitted = gesture
         ? joycon_gesture_mature(
               owner_device, joining_device, true, btstack_run_loop_get_time_ms())
@@ -3494,7 +3530,7 @@ bool merge_joycon_slots(int owner_index, int joining_index,
         joining.active != joining_active || joining.companion != nullptr ||
         joining.connection_generation != joining_generation ||
         reserve_device_slot(joining_device) != joining_index) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return false;
     }
     invalidate_slot(owner);
@@ -3538,14 +3574,14 @@ bool merge_joycon_slots(int owner_index, int joining_index,
 #if SWITCH2_BRIDGE_FULL_INPUT
     refresh_native_source_locked();
 #endif
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     apply_slot_lighting(static_cast<uint8_t>(owner_index), owner.device);
     apply_slot_lighting(static_cast<uint8_t>(owner_index), owner.companion);
     return true;
 }
 
 bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& owner = g_slots[owner_index];
     const int physical_index = physical_index_for_device(owner.device);
     if (!owner.active || owner.companion == nullptr || physical_index < 0 ||
@@ -3554,7 +3590,7 @@ bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
         (gesture && !joycon_gesture_mature(
             owner.device, owner.companion, false,
             btstack_run_loop_get_time_ms()))) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return false;
     }
     // Keep the pair's left member at its existing player index. Prefer the
@@ -3570,7 +3606,7 @@ bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
         }
     }
     if (right_index < 0) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return false;
     }
     BackendSlot& right = g_slots[right_index];
@@ -3580,7 +3616,7 @@ bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
     // event has temporarily cleared a member's transport mapping.
     if (!controller_identity_joycon_pair_members(
             owner.identity, &left_identity, &right_identity)) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return false;
     }
     invalidate_slot(owner);
@@ -3611,7 +3647,7 @@ bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
 #if SWITCH2_BRIDGE_FULL_INPUT
     refresh_native_source_locked();
 #endif
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     apply_slot_lighting(owner_index, owner.device);
     apply_slot_lighting(static_cast<uint8_t>(right_index), right.device);
     return true;
@@ -3620,11 +3656,11 @@ bool split_joycon_slot(uint8_t owner_index, bool gesture = false) {
 void process_joycon_gestures(uint32_t now_ms) {
     for (uint8_t index = 0; index < kSlotCount; ++index) {
         now_ms = btstack_run_loop_get_time_ms();
-        critical_section_enter_blocking(&g_state_lock);
+        state_lock_enter();
         refresh_joycon_gestures(now_ms);
         const JoyConGesture& gesture = g_joycon_gestures[index];
         if (gesture.blocked || joycon_side(gesture.device) >= 0) {
-            critical_section_exit(&g_state_lock);
+            state_lock_exit();
             continue;
         }
         uni_hid_device_t* right = nullptr;
@@ -3639,7 +3675,7 @@ void process_joycon_gestures(uint32_t now_ms) {
         const bool mature = joycon_gesture_mature(
             gesture.device, right, joining, now_ms);
         if (mature) block_joycon_gesture(gesture.participants);
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         if (!mature) continue;
         // Latch success AND failure before any enrollment I/O. A failed seed
         // must not retry at the timer cadence or undo either participant.
@@ -3660,14 +3696,14 @@ void apply_joycon_configuration(const ConfigurationServiceSnapshot& configuratio
     if (configuration.state != ConfigurationServiceState::kReady) return;
     const JoyConMode requested = configuration.configuration.joycon_mode;
     if (requested != g_joycon_mode) {
-        critical_section_enter_blocking(&g_state_lock);
+        state_lock_enter();
         for (uint8_t index = 0; index < kSlotCount; ++index) {
             g_joycon_overrides[index] = {};
             block_joycon_gesture(g_joycon_gestures[index].participants);
         }
         g_joycon_mode = requested;
         g_joycon_reconcile_requested = true;
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
     }
     if (!g_joycon_reconcile_requested) return;
     g_joycon_reconcile_requested = false;
@@ -3678,13 +3714,13 @@ void apply_joycon_configuration(const ConfigurationServiceSnapshot& configuratio
     } else {
         uint8_t attempted = 0;
         for (uint8_t index = 0; index < kSlotCount; ++index) {
-            critical_section_enter_blocking(&g_state_lock);
+            state_lock_enter();
             const BackendSlot& slot = g_slots[index];
             int partner = slot.active && slot.companion == nullptr &&
                                   !(attempted & (1u << index))
                               ? joycon_partner_slot(slot.device, index) : -1;
             if (partner < 0 || (attempted & (1u << partner))) {
-                critical_section_exit(&g_state_lock);
+                state_lock_exit();
                 continue;
             }
             int owner = index;
@@ -3697,7 +3733,7 @@ void apply_joycon_configuration(const ConfigurationServiceSnapshot& configuratio
             }
             uni_hid_device_t* joining_device = g_slots[joining].device;
             attempted |= (1u << index) | (1u << partner);
-            critical_section_exit(&g_state_lock);
+            state_lock_exit();
             // Failed seeds/invalid identities leave both live solos intact.
             // Retry only on a mode change or fresh identity/ready event, never
             // at the 50 ms poll cadence or for unrelated configuration edits.
@@ -3827,7 +3863,7 @@ void platform_on_device_connected(uni_hid_device_t* device) {
         uni_hid_device_disconnect(device);
         return;
     }
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     g_retired_devices[pending_index] = nullptr;
     g_switch2_interval_requests[pending_index] = {};
     if (slot_for_device(device) < 0) {
@@ -3835,11 +3871,11 @@ void platform_on_device_connected(uni_hid_device_t* device) {
         reset_joycon_connection(device);
     }
     if (slot_for_device(device) < 0) g_native_pending_devices[pending_index] = device;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     recompute_connection_status();
 #else
     const ControllerIdentity connection_identity = identity_for_device(device);
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const int physical_index = physical_index_for_device(device);
     if (physical_index >= 0) {
         g_retired_devices[physical_index] = nullptr;
@@ -3856,7 +3892,7 @@ void platform_on_device_connected(uni_hid_device_t* device) {
             reset_slot_hotkeys(slot);
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     if (slot_index >= 0) {
         recompute_connection_status();
     } else {
@@ -3869,11 +3905,11 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
 #if SWITCH2_BRIDGE_FULL_INPUT
     const int pending_index = physical_index_for_device(device);
     if (pending_index >= 0) {
-        critical_section_enter_blocking(&g_state_lock);
+        state_lock_enter();
         if (g_native_pending_devices[pending_index] == device)
             g_native_pending_devices[pending_index] = nullptr;
         g_retired_devices[pending_index] = device;
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
     }
 #endif
     const int slot_index = slot_for_device(device);
@@ -3898,7 +3934,7 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
 #endif
     uni_hid_device_t* survivor = nullptr;
     ControllerIdentity survivor_identity{};
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& slot = g_slots[slot_index];
     g_retired_devices[physical_index_for_device(device)] = device;
     reset_joycon_connection(device);
@@ -3922,7 +3958,7 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
 #if SWITCH2_BRIDGE_FULL_INPUT
     refresh_native_source_locked();
 #endif
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     clear_ble_identity_for_device(device);
     if (survivor != nullptr) {
         if (survivor->report_parser.play_dual_rumble != nullptr) {
@@ -3955,16 +3991,16 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     uni_hid_device_t* owner = device;
     uni_hid_device_t* companion = nullptr;
     ControllerIdentity connection_identity = identity_for_device(device);
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     #if SWITCH2_BRIDGE_FULL_INPUT
     if (!native_device_allowed(device)) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return UNI_ERROR_INVALID_CONTROLLER;
     }
     #endif
     int slot_index = reserve_device_slot(device);
     if (slot_index < 0) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return UNI_ERROR_NO_SLOTS;
     }
     #if SWITCH2_BRIDGE_FULL_INPUT
@@ -3976,11 +4012,11 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     if (!pending.active) {
         const int partner_index = joycon_partner_slot(device, slot_index);
         if (partner_index >= 0) {
-            critical_section_exit(&g_state_lock);
+            state_lock_exit();
             if (!merge_joycon_slots(partner_index, slot_index, device)) {
                 return UNI_ERROR_INIT_FAILED;
             }
-            critical_section_enter_blocking(&g_state_lock);
+            state_lock_enter();
             slot_index = partner_index;
             paired = true;
         } else {
@@ -4002,7 +4038,7 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     companion = current.companion;
     lighting_generation = current.connection_generation;
     connection_identity = current.identity;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     if (became_active) {
         apply_radio_connection_policy();
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
@@ -4055,25 +4091,46 @@ void platform_on_controller_data(uni_hid_device_t* device,
     }
     __atomic_add_fetch(&g_controller_reports, 1, __ATOMIC_RELAXED);
 
-    critical_section_enter_blocking(&g_state_lock);
+    // Parser state belongs to this serialized Bluepad32 callback, not to
+    // g_state_lock. Read it before masking IRQs so USB completions can run
+    // while snapshot helpers execute (including cold XIP fetches).
+#if SWITCH2_BRIDGE_FULL_INPUT
+    const int physical_index = physical_index_for_device(device);
+    if (physical_index < 0) return;
+    uni_native_motion_snapshot_t sensor{};
+    uni_hid_parser_native_motion_snapshot(device, &sensor);
+#endif
+    const uint8_t extras = uni_hid_parser_switch2_extra_buttons(device);
+    const bool is_wii = device->controller_type == CONTROLLER_TYPE_WiiController;
+    int32_t acceleration[3];
+    uint32_t sequence = 0;
+    const bool have_acceleration = is_wii &&
+        uni_hid_parser_wii_accel_snapshot(device, acceleration, &sequence);
+    int32_t nunchuk_acceleration[3];
+    uint32_t nunchuk_sequence = 0;
+    const bool have_nunchuk_acceleration = is_wii &&
+        uni_hid_parser_wii_nunchuk_accel_snapshot(
+            device, nunchuk_acceleration, &nunchuk_sequence);
+#ifdef SWITCH2_BRIDGE_WII_INPUT
+    int32_t gyro[3];
+    uint32_t gyro_sequence = 0;
+    const bool have_gyro = is_wii &&
+        uni_hid_parser_wii_gyro_snapshot(device, gyro, &gyro_sequence);
+#endif
+
+    const uint32_t report_ms = btstack_run_loop_get_time_ms();
+    state_lock_enter();
     BackendSlot& slot = g_slots[slot_index];
     if (!slot.active) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return;
     }
 #if SWITCH2_BRIDGE_FULL_INPUT
-    const int physical_index = physical_index_for_device(device);
-    if (physical_index < 0) {
-        critical_section_exit(&g_state_lock);
-        return;
-    }
-    uni_native_motion_snapshot_t sensor{};
-    uni_hid_parser_native_motion_snapshot(device, &sensor);
     NativeGamepadReportIngress& ingress = g_native_reports[physical_index];
     if (ingress.device != device) ingress = {device, 0, 0, 0};
     if (sensor.report_tracked &&
         (!sensor.report_valid || sensor.report_sequence == ingress.report_sequence)) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return;
     }
     ingress.report_sequence = sensor.report_sequence;
@@ -4114,7 +4171,6 @@ void platform_on_controller_data(uni_hid_device_t* device,
         have_infrared ? &infrared : nullptr, time_us_32());
 #endif
 #endif
-    const uint8_t extras = uni_hid_parser_switch2_extra_buttons(device);
     if (slot.companion == device) {
         slot.companion_gamepad = controller->gamepad;
         slot.companion_extra_buttons = extras;
@@ -4123,15 +4179,13 @@ void platform_on_controller_data(uni_hid_device_t* device,
         slot.extra_buttons = extras;
     }
     observe_joycon_gesture(
-        device, controller->gamepad, btstack_run_loop_get_time_ms());
-    if (device->controller_type == CONTROLLER_TYPE_WiiController) {
-        int32_t acceleration[3];
-        uint32_t sequence;
+        device, controller->gamepad, report_ms);
+    if (is_wii) {
 #ifdef SWITCH2_BRIDGE_WII_INPUT
         WiiMotionIngress& motion = slot.wii_motion;
         motion.received_us = time_us_32();
 #endif
-        if (!uni_hid_parser_wii_accel_snapshot(device, acceleration, &sequence)) {
+        if (!have_acceleration) {
             slot.accelerometer = {};
 #ifdef SWITCH2_BRIDGE_WII_INPUT
             motion.accel_valid = false;
@@ -4147,7 +4201,7 @@ void platform_on_controller_data(uni_hid_device_t* device,
                 convert_accel(-static_cast<int64_t>(acceleration[2])),
                 convert_accel(-static_cast<int64_t>(acceleration[0])),
                 convert_accel(acceleration[1]), sequence,
-                btstack_run_loop_get_time_ms(), true};
+                report_ms, true};
         }
 #ifdef SWITCH2_BRIDGE_WII_INPUT
         if (slot.accelerometer.valid && sequence != motion.accel_sequence) {
@@ -4156,33 +4210,32 @@ void platform_on_controller_data(uni_hid_device_t* device,
             motion.accel_valid = true;
             memcpy(motion.accel_q13, acceleration, sizeof(motion.accel_q13));
         }
-        int32_t gyro[3];
-        if (!uni_hid_parser_wii_gyro_snapshot(device, gyro, &sequence)) {
+        if (!have_gyro) {
             motion.gyro_valid = false;
-        } else if (sequence != motion.gyro_sequence) {
-            motion.gyro_sequence = sequence;
+        } else if (gyro_sequence != motion.gyro_sequence) {
+            motion.gyro_sequence = gyro_sequence;
             motion.gyro_received_us = motion.received_us;
             motion.gyro_valid = true;
             memcpy(motion.gyro_q10, gyro, sizeof(motion.gyro_q10));
         }
 #endif
-        if (!uni_hid_parser_wii_nunchuk_accel_snapshot(device, acceleration, &sequence)) {
+        if (!have_nunchuk_acceleration) {
             slot.nunchuk_accelerometer = {};
         } else if (
 #ifdef SWITCH2_BRIDGE_WII_INPUT
-            sequence != motion.nunchuk_sequence
+            nunchuk_sequence != motion.nunchuk_sequence
 #else
             !slot.nunchuk_accelerometer.valid ||
-            sequence != slot.nunchuk_accelerometer.sequence
+            nunchuk_sequence != slot.nunchuk_accelerometer.sequence
 #endif
         ) {
             slot.nunchuk_accelerometer = {
-                convert_accel(-static_cast<int64_t>(acceleration[2])),
-                convert_accel(-static_cast<int64_t>(acceleration[0])),
-                convert_accel(acceleration[1]), sequence,
-                btstack_run_loop_get_time_ms(), true};
+                convert_accel(-static_cast<int64_t>(nunchuk_acceleration[2])),
+                convert_accel(-static_cast<int64_t>(nunchuk_acceleration[0])),
+                convert_accel(nunchuk_acceleration[1]), nunchuk_sequence,
+                report_ms, true};
 #ifdef SWITCH2_BRIDGE_WII_INPUT
-            motion.nunchuk_sequence = sequence;
+            motion.nunchuk_sequence = nunchuk_sequence;
 #endif
         }
     }
@@ -4218,7 +4271,7 @@ void platform_on_controller_data(uni_hid_device_t* device,
         slot.companion == nullptr || slot.companion == device;
     const uint8_t merged_extras =
         slot.extra_buttons | slot.companion_extra_buttons;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     const uint16_t pre_hotkey_button_mask = logical_button_mask(gamepad);
     if (wake_chord_rising_edge(
             static_cast<uint8_t>(slot_index), owner, pre_hotkey_button_mask)) {
@@ -4352,33 +4405,33 @@ extern "C" bool uni_platform_on_l2cap_can_send_now(
 bool bluepad32_input_backend_capture_start(
     uint8_t slot, uint32_t connection_generation, const CaptureOptions& options) {
     if (!g_initialized || slot >= kSlotCount) return false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const BackendSlot& current = g_slots[slot];
     const bool accepted = current.active &&
         current.connection_generation == connection_generation &&
         g_macro_capture.start(slot, connection_generation, options,
                               time_us_32(), current.state);
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return accepted;
 }
 
 bool bluepad32_input_backend_capture_stop(uint32_t run_id) {
     if (!g_initialized || run_id == 0) return false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const bool matches = run_id == g_macro_capture.run_id();
     if (matches) g_macro_capture.stop(time_us_32());
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return matches;
 }
 
 bool bluepad32_input_backend_capture_page(
     uint32_t run_id, uint16_t first_index, Bluepad32CaptureSnapshot* output) {
     if (!g_initialized || output == nullptr) return false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     g_macro_capture.tick(time_us_32());
     if ((run_id != 0 && run_id != g_macro_capture.run_id()) ||
         first_index > g_macro_capture.event_count()) {
-        critical_section_exit(&g_state_lock);
+        state_lock_exit();
         return false;
     }
     *output = {};
@@ -4396,7 +4449,7 @@ bool bluepad32_input_backend_capture_page(
     for (uint8_t index = 0; index < output->event_count; ++index) {
         g_macro_capture.event(first_index + index, &output->events[index]);
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return true;
 }
 
@@ -4405,7 +4458,11 @@ void bluepad32_input_backend_init() {
         return;
     }
 
+#if SWITCH2_PROBE_HUB
+    g_state_lock = spin_lock_init(spin_lock_claim_unused(true));
+#else
     critical_section_init(&g_state_lock);
+#endif
 #ifdef SWITCH_PICO_WII_IR
     wii_ir_pointer_init();
 #endif
@@ -4515,16 +4572,16 @@ void bluepad32_input_backend_open_pairing_window() {
         bluepad32_input_backend_init();
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     g_pairing_window_requested = true;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 uint32_t bluepad32_input_backend_clear_pairings() {
     if (!g_initialized) {
         bluepad32_input_backend_init();
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     uint32_t request_token = g_clear_pairings_requested_token;
     if (request_token == 0) {
         request_token = g_clear_pairings_in_progress_token;
@@ -4537,7 +4594,7 @@ uint32_t bluepad32_input_backend_clear_pairings() {
         g_pairing_snapshot.status =
             Bluepad32PairingSnapshotStatus::kPending;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return request_token;
 }
 
@@ -4546,12 +4603,12 @@ void bluepad32_input_backend_request_pairing_snapshot() {
         bluepad32_input_backend_init();
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     g_pairing_snapshot_requested = true;
     if (g_pairing_snapshot.status != Bluepad32PairingSnapshotStatus::kFailed) {
         g_pairing_snapshot.status = Bluepad32PairingSnapshotStatus::kPending;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 void bluepad32_input_backend_pairing_snapshot(
@@ -4563,9 +4620,9 @@ void bluepad32_input_backend_pairing_snapshot(
         bluepad32_input_backend_init();
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     *out = g_pairing_snapshot;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 
@@ -4593,7 +4650,7 @@ void bluepad32_input_backend_diagnostics(
         __atomic_load_n(&g_switch2_ingress_drops, __ATOMIC_RELAXED);
     out->switch2_output_drops = uni_hid_parser_switch2_haptics_dropped();
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     for (const BackendSlot& slot : g_slots) {
         if (slot.active) {
             ++out->active_slots;
@@ -4610,7 +4667,7 @@ void bluepad32_input_backend_diagnostics(
             ++out->rumble_pending_slots;
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 void bluepad32_input_backend_snapshot(uint8_t slot_index,
@@ -4623,7 +4680,7 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
         return;
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const BackendSlot& slot = g_slots[slot_index];
     out->active = slot.active;
     out->connection_generation = slot.connection_generation;
@@ -4634,7 +4691,7 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
     out->accelerometer = slot.accelerometer;
     out->nunchuk_accelerometer = slot.nunchuk_accelerometer;
     const uint32_t state_generation = slot.state_generation;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 
     if (state_generation == g_consumed_generation[slot_index]) {
         out->state.motion_sample_count = 0;
@@ -4645,21 +4702,21 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
 #if SWITCH2_BRIDGE_FULL_INPUT
 void bluepad32_input_backend_select_native_source(const uint8_t address[6]) {
     if (!g_initialized) return;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     g_native_explicit_address = address != nullptr;
     if (address != nullptr) memcpy(g_native_address, address, 6);
     else memset(g_native_address, 0, sizeof(g_native_address));
     refresh_native_source_locked(true);
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 void bluepad32_input_backend_native_snapshot(Bluepad32NativeGamepadSnapshot* output) {
     if (output == nullptr) return;
     *output = {};
     if (!g_initialized) return;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     *output = g_native_snapshot;
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 bool bluepad32_input_backend_native_sample_request(
@@ -4667,7 +4724,7 @@ bool bluepad32_input_backend_native_sample_request(
     if (token == nullptr) return false;
     *token = 0;
     if (!g_initialized || instance >= 2 || sample_id >= 8) return false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     NativeGamepadCue& cue = g_native_cues[instance];
     const uint8_t index = g_native_slot;
     const bool accepted = index < kSlotCount && g_next_native_token != 0 &&
@@ -4683,13 +4740,13 @@ bool bluepad32_input_backend_native_sample_request(
         cue.result = 0;
         *token = cue.token;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return accepted;
 }
 
 int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t token) {
     if (!g_initialized || instance >= 2 || token == 0) return -1;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     NativeGamepadCue& cue = g_native_cues[instance];
     int result = -1;
     if (cue.token == token && !cue.consumed) {
@@ -4700,15 +4757,15 @@ int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t toke
         result = cue.result;
         if (result != 0) cue.consumed = true;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return result;
 }
 
 void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
     if (!g_initialized || instance >= 2) return;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     cancel_native_cue_locked(g_native_cues[instance]);
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 #endif
 
@@ -4716,7 +4773,7 @@ void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
 void bluepad32_input_backend_select_wii_source(const uint8_t address[6]) {
     // Selection is configuration, not a live Core 0 parser mutation.
     if (!g_initialized || g_started) return;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     g_wii_source_selected = address != nullptr;
     if (address != nullptr) memcpy(g_wii_source_address, address, 6);
     else memset(g_wii_source_address, 0, sizeof(g_wii_source_address));
@@ -4727,28 +4784,28 @@ void bluepad32_input_backend_select_wii_source(const uint8_t address[6]) {
     // Lock order: backend exclusive, then pointer striped.
     wii_ir_pointer_reset();
 #endif
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 void bluepad32_input_backend_wii_snapshot(Bluepad32WiiBridgeSnapshot* output) {
     if (output == nullptr) return;
     *output = {};
     if (!g_initialized) return;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const uint8_t slot = g_wii_snapshot.slot;
     if (slot < kSlotCount && is_selected_wii(g_slots[slot]) &&
         g_slots[slot].connection_generation ==
             g_wii_snapshot.controller.connection_generation) {
         *output = g_wii_snapshot;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 bool bluepad32_input_backend_wii_sample_request(uint8_t sample_id, uint64_t* token) {
     if (token == nullptr) return false;
     *token = 0;
     if (!g_initialized || sample_id >= 8) return false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     bool accepted = false;
     // Do not overwrite a command already being dispatched. Sample zero can
     // replace a queued/running pattern; ordinary cues serialize until it ends.
@@ -4771,13 +4828,13 @@ bool bluepad32_input_backend_wii_sample_request(uint8_t sample_id, uint64_t* tok
             break;
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return accepted;
 }
 
 int bluepad32_input_backend_wii_sample_result(uint64_t token) {
     if (!g_initialized || token == 0) return -1;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     int result = -1;
     if (g_wii_cue.token == token && !g_wii_cue.consumed) {
         if (!wii_cue_target_current() ||
@@ -4789,15 +4846,15 @@ int bluepad32_input_backend_wii_sample_result(uint64_t token) {
         result = g_wii_cue.result;
         if (result != 0) g_wii_cue.consumed = true;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return result;
 }
 
 void bluepad32_input_backend_wii_sample_cancel() {
     if (!g_initialized) return;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     cancel_wii_cue_locked();
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 #endif
 
@@ -4811,7 +4868,7 @@ void bluepad32_input_backend_playtest_snapshot(
         return;
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     const BackendSlot& slot = g_slots[slot_index];
     out->active = slot.active;
     out->connection_generation = slot.connection_generation;
@@ -4828,7 +4885,7 @@ void bluepad32_input_backend_playtest_snapshot(
             (slot.state.motion_sample_count != 0 ? 8u : 0u);
         out->controller_layout = controller_layout(slot);
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }
 
 bool bluepad32_input_backend_toggle_motion(
@@ -4837,7 +4894,7 @@ bool bluepad32_input_backend_toggle_motion(
         return false;
     }
     bool toggled = false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active &&
         slot.connection_generation == connection_generation) {
@@ -4868,7 +4925,7 @@ bool bluepad32_input_backend_toggle_motion(
         }
         toggled = true;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return toggled;
 }
 
@@ -4892,7 +4949,7 @@ void bluepad32_input_backend_queue_rumble(
 #endif
     const uint16_t duration_ms = host_rumble_duration_ms();
     const uint32_t received_ms = btstack_run_loop_get_time_ms();
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device != nullptr) {
         if (uni_hid_parser_switch2_is_ble_device(slot.device)) {
@@ -4922,7 +4979,7 @@ void bluepad32_input_backend_queue_rumble(
             command.generation = ingress.generation;
             ++ingress.count;
             __atomic_add_fetch(&g_host_rumble_requests, 1, __ATOMIC_RELAXED);
-            critical_section_exit(&g_state_lock);
+            state_lock_exit();
             return;
         }
 #if defined(SWITCH_PICO_HAPTICS_EXPERIMENT) || defined(SWITCH_PICO_NATIVE_SWITCH_RUMBLE)
@@ -4948,7 +5005,7 @@ void bluepad32_input_backend_queue_rumble(
             slot.retained_host_rumble_valid = false;
         }
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
     if (native_candidate)
         switch_native_output_submit(slot_index, native_generation, received_us, rumble,
@@ -4976,7 +5033,7 @@ bool bluepad32_input_backend_set_wii_orientation(
         return false;
     }
     bool queued = false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     for (BackendSlot& slot : g_slots) {
         if (!is_solo_wii_remote(slot) ||
             slot.connection_generation != connection_generation ||
@@ -4988,7 +5045,7 @@ bool bluepad32_input_backend_set_wii_orientation(
         queued = true;
         break;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return queued;
 }
 
@@ -4999,7 +5056,7 @@ bool bluepad32_input_backend_identify(
         return false;
     }
     bool queued = false;
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     for (BackendSlot& slot : g_slots) {
         if (!slot.active ||
             !controller_identity_equal(slot.identity, identity)) {
@@ -5012,7 +5069,7 @@ bool bluepad32_input_backend_identify(
         queued = true;
         break;
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
     return queued;
 }
 
@@ -5028,7 +5085,7 @@ void bluepad32_input_backend_queue_profile_feedback(
         return;
     }
 
-    critical_section_enter_blocking(&g_state_lock);
+    state_lock_enter();
     BackendSlot& slot = g_slots[slot_index];
     if (slot.active && slot.device != nullptr &&
         slot.connection_generation == connection_generation) {
@@ -5036,5 +5093,5 @@ void bluepad32_input_backend_queue_profile_feedback(
             connection_generation, active_profile_number, policy};
         queue_profile_feedback(slot, feedback);
     }
-    critical_section_exit(&g_state_lock);
+    state_lock_exit();
 }

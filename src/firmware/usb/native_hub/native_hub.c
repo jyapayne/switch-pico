@@ -101,6 +101,69 @@ static uint32_t token_hits[DEVICES], missed_lock, blocked_buffers, blocked_sie, 
 static uint16_t root_string[64];
 static char root_serial[48];
 
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+#define OUT_TRACE_SLOTS 65u
+#define OUT_TRACE_RETAIN 64u
+#define OUT_TRACE_STALL_US 200000u
+#define OUT_TRACE_LINE_US 50000u
+
+enum {
+    OUT_TRACE_LOCK = 1u,
+    OUT_TRACE_BUFFERS = 2u,
+    OUT_TRACE_SETUP = 4u,
+    OUT_TRACE_GUARD = 8u,
+    OUT_TRACE_INVALID = 16u,
+};
+typedef struct {
+    uint32_t cursor, cutoff, clock_before, clock_after, sof;
+    uint32_t address_before, address_after, in0, out0, buffers, sie, sm, ints;
+    uint32_t blocked_buffers, blocked_sie, missed_lock, irq_enter, irq_exit, core0_phase;
+    uint32_t ep0_word;
+    uint8_t address, owner, owner_before, owner_after, selected, reason, pid, before_valid;
+} out_trace_record_t;
+typedef struct {
+    uint32_t time_us, quiet_us, cursor, count, input[2], cycle, sof;
+    uint32_t address, owner, out0, buffers, sie, sm, ints, intr, inte;
+    uint32_t tx_error, rx_error, irq_enter, irq_exit, core0_phase;
+    uint32_t log_max_us, log_max_us_bytes, log_max_bytes, log_nested;
+    uint32_t control_slot, control_generation, control_stage, control_position, control_length;
+    uint32_t control_word, in0, ep0_word;
+    tusb_control_request_t control_request;
+} out_trace_header_t;
+
+// All producer state is ordinary SRAM/BSS. Only Core1 writes the records.
+// Cursor low 7 bits name the NEXT slot (0..64); upper bits count ring laps.
+// Skipping unused low-bit values keeps each publication monotonic without a
+// division on Core1, and slot adjacency survives uint32_t generation rollover.
+// Freeze and cursor accesses below are SC (publication includes release,
+// snapshot includes acquire). In their common total order, a producer's final
+// freeze=false load precedes Core0's freeze=true store. Every earlier record
+// has already been published, and at most that one iteration can still write.
+// Core0 therefore reads only the 64 slots BEFORE its acquired cursor, never
+// the possible in-flight 65th slot. Ordinary record reads/writes cannot race.
+// No rearm occurs until the dump reader has finished; cursors are never reset.
+static out_trace_record_t out_trace_records[OUT_TRACE_SLOTS];
+static uint32_t out_trace_cursor, out_trace_frozen;
+static uint32_t out_trace_irq_enter, out_trace_irq_exit;
+static uint32_t out_trace_last_missed_lock; // Core1, updated after every rejected selection.
+static uint32_t out_trace_core0_phase;
+
+// Core0 alone owns logger metrics and dump/IN-progress state. IRQ code never
+// logs, and Core1 does not read these fields, so they need no cross-core atomics.
+static uint32_t out_trace_log_max_us, out_trace_log_max_us_bytes;
+static uint32_t out_trace_log_max_bytes, out_trace_log_nested;
+static out_trace_header_t out_trace_header;
+static uint32_t out_trace_input[2], out_trace_last_input_us, out_trace_last_line_us;
+static uint32_t out_trace_dump_line, out_trace_dump_slot;
+static bool out_trace_seen_input, out_trace_dumping;
+typedef struct {
+    uint32_t generation, since_us;
+    stage_t stage;
+    uint16_t position;
+} control_trace_watch_t;
+static control_trace_watch_t out_trace_controls[DEVICES];
+#endif
+
 static const uint8_t hub_device[] = {
     18,1,0x10,1,9,0,0,64,0x7e,5,0x68,0x20,0,1,1,2,3,1
 };
@@ -220,6 +283,116 @@ bool __not_in_flash_func(native_hub_select_device)(uint8_t address, uint8_t owne
     spin_unlock_unsafe(bank_lock);
     return true;
 }
+
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+static __force_inline out_trace_record_t* out_trace_begin_record(void) {
+    if (__atomic_load_n(&out_trace_frozen,__ATOMIC_SEQ_CST)) return NULL;
+    const uint32_t cursor = __atomic_load_n(&out_trace_cursor,__ATOMIC_SEQ_CST);
+    out_trace_record_t* record = &out_trace_records[cursor & 127u];
+    record->cursor = cursor;
+    return record;
+}
+
+static __force_inline void out_trace_finish_record(out_trace_record_t* record) {
+    // Post-decision observations are sequential, NOT an atomic hardware image.
+    // Never inspect unlocked software control stages or shadow banks.
+    record->address_after = usb_hw->dev_addr_ctrl;
+    record->owner_after = active_device;
+    record->sof = usb_hw->sof_rd;
+    record->in0 = usb_dpram->ep_buf_ctrl[0].in;
+    record->out0 = usb_dpram->ep_buf_ctrl[0].out;
+    record->buffers = usb_hw->buf_status;
+    record->sie = usb_hw->sie_status;
+    record->sm = usb_hw->sm_state;
+    record->ints = usb_hw->ints;
+    record->missed_lock = missed_lock;
+    record->core0_phase = __atomic_load_n(&out_trace_core0_phase,__ATOMIC_ACQUIRE);
+    record->irq_enter = __atomic_load_n(&out_trace_irq_enter,__ATOMIC_ACQUIRE);
+    record->irq_exit = __atomic_load_n(&out_trace_irq_exit,__ATOMIC_ACQUIRE);
+    record->ep0_word = *(const volatile uint32_t*)usb_dpram->ep0_buf_a;
+    const uint32_t cursor = record->cursor;
+    const uint32_t next = (cursor & 127u) == OUT_TRACE_SLOTS-1u ? cursor+64u : cursor+1u;
+    __atomic_store_n(&out_trace_cursor,next,__ATOMIC_SEQ_CST);
+}
+
+bool __no_inline_not_in_flash_func(native_hub_select_device_traced)(
+        uint8_t address, uint8_t owner, uint32_t cutoff, uint8_t pid) {
+    if (__atomic_load_n(&out_trace_frozen,__ATOMIC_SEQ_CST))
+        return native_hub_select_device(address,owner,cutoff);
+    const uint32_t clock_before = sio_hw->mtime;
+    const uint32_t address_before = usb_hw->dev_addr_ctrl;
+    const uint8_t owner_before = active_device;
+    const bool selected = native_hub_select_device(address,owner,cutoff);
+    const uint32_t clock_after = sio_hw->mtime;
+    // The router records all failures through the post-rejection hook below.
+    if (!selected) return false;
+    out_trace_record_t* record = out_trace_begin_record();
+    if (!record) return true;
+    record->cutoff = cutoff;
+    record->clock_before = clock_before;
+    record->clock_after = clock_after;
+    record->address = address;
+    record->owner = owner;
+    record->address_before = address_before;
+    record->owner_before = owner_before;
+    record->selected = true;
+    record->reason = 0;
+    record->pid = pid;
+    record->before_valid = true;
+    record->blocked_buffers = record->blocked_sie = 0;
+    out_trace_finish_record(record);
+    return true;
+}
+
+void __no_inline_not_in_flash_func(native_hub_note_failed_select)(
+        uint8_t address, uint8_t owner, uint32_t cutoff, uint8_t pid) {
+    // Every rejection reaches this hook, even while frozen. A changed lock
+    // counter therefore identifies THIS attempt, not an older rejected token.
+    const bool lock_failed = missed_lock != out_trace_last_missed_lock;
+    out_trace_last_missed_lock = missed_lock;
+    const uint32_t clock_after = sio_hw->mtime;
+    out_trace_record_t* record = out_trace_begin_record();
+    if (!record) return;
+    record->cutoff = cutoff;
+    record->clock_before = 0;
+    record->clock_after = clock_after;
+    record->address = address;
+    record->owner = owner;
+    record->address_before = 0;
+    record->owner_before = NONE;
+    record->selected = false;
+    record->pid = pid;
+    record->before_valid = false; // No added work before normal IN/SETUP selection.
+    record->blocked_buffers = record->blocked_sie = 0;
+    if (lock_failed) record->reason = OUT_TRACE_LOCK;
+    else if (owner >= DEVICES || bank_lock == NULL) record->reason = OUT_TRACE_INVALID;
+    else {
+        record->reason = OUT_TRACE_GUARD;
+        record->blocked_buffers = blocked_buffers;
+        record->blocked_sie = blocked_sie;
+        if (blocked_buffers) record->reason |= OUT_TRACE_BUFFERS;
+        if (blocked_sie & USB_SIE_STATUS_SETUP_REC_BITS) record->reason |= OUT_TRACE_SETUP;
+    }
+    out_trace_finish_record(record);
+}
+
+uint32_t __no_inline_not_in_flash_func(native_hub_trace_phase)(uint32_t phase) {
+    // All setters run on Core0; IRQ instrumentation does not modify this tag.
+    const uint32_t previous = __atomic_load_n(&out_trace_core0_phase,__ATOMIC_RELAXED);
+    __atomic_store_n(&out_trace_core0_phase,phase,__ATOMIC_RELEASE);
+    return previous;
+}
+
+void __no_inline_not_in_flash_func(native_hub_note_log_mask)(
+        uint32_t elapsed_us, uint32_t bytes, bool already_masked) {
+    if (elapsed_us > out_trace_log_max_us) {
+        out_trace_log_max_us = elapsed_us;
+        out_trace_log_max_us_bytes = bytes;
+    }
+    if (bytes > out_trace_log_max_bytes) out_trace_log_max_bytes = bytes;
+    if (already_masked) ++out_trace_log_nested;
+}
+#endif
 // Section placement alone permits inlining into the flash-backed task. Keep
 // bank-lock ownership independent of XIP instruction-cache refill latency.
 static void __no_inline_not_in_flash_func(restore_selected_bank)(void) {
@@ -268,7 +441,12 @@ static __force_inline bool push_event(uint8_t device, uint8_t channel, uint8_t k
         devices[device].endpoint_generation[channel]) : 0;
     event->reset_generation = device < DEVICES ? devices[device].reset_generation : 0;
     if (kind == 2 && (channel & 1u) && channel != 1) copy_from_usb(event->data,data,length);
-    else if (length) memcpy(event->data,data,length);
+    else {
+        // SRAM sources may be unaligned. Volatile byte reads keep this copy
+        // inline instead of calling flash-backed memcpy during BOOTSEL sampling.
+        const volatile uint8_t* source = data;
+        for (uint16_t i = 0; i < length; ++i) event->data[i] = source[i];
+    }
     __dmb(); event_head = next;
     return true;
 }
@@ -368,6 +546,26 @@ static void __not_in_flash_func(usb_interrupt)(void) {
         bus_suspended = false; hw_clear_bits(&usb_hw->sie_status,USB_SIE_STATUS_RESUME_BITS);
     }
     spin_unlock(bank_lock, flags);
+}
+
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+static void __no_inline_not_in_flash_func(usb_interrupt_traced)(void) {
+    __atomic_store_n(&out_trace_irq_enter,sio_hw->mtime,__ATOMIC_RELEASE);
+    usb_interrupt();
+    __atomic_store_n(&out_trace_irq_exit,sio_hw->mtime,__ATOMIC_RELEASE);
+}
+#endif
+
+void __no_inline_not_in_flash_func(native_hub_service_pending_usb)(void) {
+    // BOOTSEL sampling keeps IRQs disabled while QSPI CSn is floated. Drain
+    // real hardware completions so Core1 can route the next device's token.
+    // Do not touch NVIC pending state: a later IRQ safely observes cleared flags.
+    if (!started || !usb_hw->ints) return;
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    usb_interrupt_traced();
+#else
+    usb_interrupt();
+#endif
 }
 
 static void stall(uint8_t slot) {
@@ -882,7 +1080,11 @@ bool native_hub_init(void) {
     while ((int32_t)(time_us_32()-deadline) < 0);
     if (!observer.ready) return false;
     publish_addresses(); probe_router_enable(true);
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    irq_set_exclusive_handler(USBCTRL_IRQ,usb_interrupt_traced);
+#else
     irq_set_exclusive_handler(USBCTRL_IRQ,usb_interrupt);
+#endif
     irq_set_priority(USBCTRL_IRQ,0);
     irq_set_enabled(USBCTRL_IRQ,true);
     hw_set_bits(&usb_hw->sie_ctrl,USB_SIE_CTRL_PULLUP_EN_BITS);
@@ -890,6 +1092,166 @@ bool native_hub_init(void) {
     probe_debug_printf("[NATIVE_HUB] stock USB, SIO phase=%u, 240MHz; hub2068 R2066 L2067; isolated EP0/1/2 banks\n",NATIVE_HUB_SAMPLE_PHASE);
     return true;
 }
+
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+static void out_trace_freeze(uint32_t now, uint8_t control_slot) {
+    __atomic_store_n(&out_trace_frozen,1u,__ATOMIC_SEQ_CST);
+    out_trace_header_t* h = &out_trace_header;
+    h->cursor = __atomic_load_n(&out_trace_cursor,__ATOMIC_SEQ_CST);
+    h->count = h->cursor < OUT_TRACE_RETAIN ? h->cursor : OUT_TRACE_RETAIN;
+    h->time_us = now;
+    h->quiet_us = now - (control_slot < DEVICES
+        ? out_trace_controls[control_slot].since_us : out_trace_last_input_us);
+    h->input[0] = input_count[1];
+    h->input[1] = input_count[2];
+    h->cycle = sio_hw->mtime;
+    h->sof = usb_hw->sof_rd;
+    h->address = usb_hw->dev_addr_ctrl;
+    h->owner = active_device;
+    h->out0 = usb_dpram->ep_buf_ctrl[0].out;
+    h->buffers = usb_hw->buf_status;
+    h->sie = usb_hw->sie_status;
+    h->sm = usb_hw->sm_state;
+    h->ints = usb_hw->ints;
+    h->intr = usb_hw->intr;
+    h->inte = usb_hw->inte;
+    h->tx_error = usb_hw->ep_tx_error;
+    h->rx_error = usb_hw->ep_rx_error;
+    h->irq_enter = __atomic_load_n(&out_trace_irq_enter,__ATOMIC_ACQUIRE);
+    h->irq_exit = __atomic_load_n(&out_trace_irq_exit,__ATOMIC_ACQUIRE);
+    h->core0_phase = __atomic_load_n(&out_trace_core0_phase,__ATOMIC_ACQUIRE);
+    h->log_max_us = out_trace_log_max_us;
+    h->log_max_us_bytes = out_trace_log_max_us_bytes;
+    h->log_max_bytes = out_trace_log_max_bytes;
+    h->log_nested = out_trace_log_nested;
+    h->in0 = usb_dpram->ep_buf_ctrl[0].in;
+    h->ep0_word = *(const volatile uint32_t*)usb_dpram->ep0_buf_a;
+    h->control_slot = control_slot;
+    h->control_generation = h->control_stage = h->control_position = h->control_length = 0;
+    h->control_word = 0;
+    memset(&h->control_request,0,sizeof(h->control_request));
+    if (control_slot < DEVICES) {
+        const control_t* c = &devices[control_slot].control;
+        h->control_generation = c->generation;
+        h->control_stage = c->stage;
+        h->control_position = c->position;
+        h->control_length = c->length;
+        h->control_request = c->request;
+        if (c->position < c->length) {
+            unsigned length = c->length-c->position;
+            if (length > sizeof(h->control_word)) length = sizeof(h->control_word);
+            memcpy(&h->control_word,c->data+c->position,length);
+        }
+    }
+    // Snapshot EVERYTHING printed in the header before enqueueing its first
+    // byte. Later lines must not accidentally describe the act of dumping.
+    out_trace_dump_slot = (h->cursor & 127u)+OUT_TRACE_SLOTS-h->count;
+    if (out_trace_dump_slot >= OUT_TRACE_SLOTS) out_trace_dump_slot -= OUT_TRACE_SLOTS;
+    out_trace_dump_line = 0;
+    out_trace_last_line_us = now-OUT_TRACE_LINE_US;
+    out_trace_dumping = true;
+}
+
+static bool out_trace_task(uint32_t now) {
+    const bool progress = input_count[1] != out_trace_input[0] ||
+                          input_count[2] != out_trace_input[1];
+    if (progress) {
+        out_trace_input[0] = input_count[1];
+        out_trace_input[1] = input_count[2];
+        out_trace_last_input_us = now;
+        out_trace_seen_input = true;
+    }
+    bool control_progress = false;
+    uint8_t stalled_control = NONE;
+    for (uint8_t slot = 0; slot < DEVICES; ++slot) {
+        const control_t* c = &devices[slot].control;
+        control_trace_watch_t* watch = &out_trace_controls[slot];
+        const bool pending = c->stage == DATA_IN || c->stage == DATA_OUT ||
+            c->stage == STATUS_IN || c->stage == STATUS_OUT;
+        const bool changed = c->generation != watch->generation ||
+            c->stage != watch->stage || c->position != watch->position;
+        if (changed || !pending) {
+            watch->since_us = now;
+            watch->generation = c->generation;
+            watch->stage = c->stage;
+            watch->position = c->position;
+        }
+        control_progress |= changed;
+        if (pending && (uint32_t)(now-watch->since_us) >= OUT_TRACE_STALL_US &&
+            stalled_control == NONE) stalled_control = slot;
+    }
+    if (__atomic_load_n(&out_trace_frozen,__ATOMIC_SEQ_CST)) {
+        if (!out_trace_dumping) {
+            // A fresh completion after the dump permits diagnostic rearm.
+            // Never reset the producer cursor or touch controller/protocol state.
+            if (progress || control_progress) __atomic_store_n(&out_trace_frozen,0u,__ATOMIC_SEQ_CST);
+            return false;
+        }
+    } else if (stalled_control != NONE || (out_trace_seen_input &&
+               (uint32_t)(now-out_trace_last_input_us) >= OUT_TRACE_STALL_US)) {
+        out_trace_freeze(now,stalled_control);
+    } else return false;
+
+    // At most one <512-byte logger line per 50ms, below UART line capacity;
+    // no ring copying, waiting for Core1, masking, or formatting on Core1/IRQ.
+    if ((uint32_t)(now-out_trace_last_line_us) < OUT_TRACE_LINE_US) return true;
+    out_trace_last_line_us = now;
+    const out_trace_header_t* h = &out_trace_header;
+    if (out_trace_dump_line == 0) {
+        probe_debug_printf("[HUB_FLIGHT_FREEZE] us=%"PRIu32" quiet=%"PRIu32
+                           " next=%08"PRIx32" n=%"PRIu32" in=%"PRIu32"/%"PRIu32
+                           " cycle=%08"PRIx32" sof=%08"PRIx32" addr=%08"PRIx32" owner=%"PRIu32
+                           " out0=%08"PRIx32" bs=%08"PRIx32" sie=%08"PRIx32" sm=%08"PRIx32
+                           " ints=%08"PRIx32" intr=%08"PRIx32" inte=%08"PRIx32"\n",
+                           h->time_us,h->quiet_us,h->cursor,h->count,h->input[0],h->input[1],
+                           h->cycle,h->sof,h->address,h->owner,h->out0,h->buffers,h->sie,h->sm,
+                           h->ints,h->intr,h->inte);
+    } else if (out_trace_dump_line == 1) {
+        probe_debug_printf("[HUB_FLIGHT_CONTEXT] next=%08"PRIx32" irq=%08"PRIx32"/%08"PRIx32
+                           " phase=%08"PRIx32" txerr=%08"PRIx32" rxerr=%08"PRIx32" log_us=%"PRIu32
+                           " bytes_at_max=%"PRIu32" max_bytes=%"PRIu32" nested=%"PRIu32"\n",
+                           h->cursor,h->irq_enter,h->irq_exit,h->core0_phase,h->tx_error,h->rx_error,
+                           h->log_max_us,h->log_max_us_bytes,h->log_max_bytes,h->log_nested);
+    } else if (out_trace_dump_line == 2) {
+        probe_debug_printf("[HUB_FLIGHT_CONTROL] slot=%"PRIu32" gen=%"PRIu32
+                           " stage=%"PRIu32" pos=%"PRIu32"/%"PRIu32
+                           " setup=%02x/%02x v=%04x i=%04x n=%u"
+                           " expected=%08"PRIx32" ep0=%08"PRIx32" in0=%08"PRIx32"\n",
+                           h->control_slot,h->control_generation,h->control_stage,
+                           h->control_position,h->control_length,
+                           h->control_request.bmRequestType,h->control_request.bRequest,
+                           h->control_request.wValue,h->control_request.wIndex,h->control_request.wLength,
+                           h->control_word,h->ep0_word,h->in0);
+    } else if (out_trace_dump_line < h->count+3u) {
+        const out_trace_record_t* r = &out_trace_records[out_trace_dump_slot];
+        // Hex except owner/ok/lock; req=address/owner, addr/owner=before/after.
+        // pre=0 means before-clock/address/owner are unavailable; all HW/IRQ fields are POST.
+        // reason bits: 01 lock, 02 saved BUF_STATUS, 04 saved SETUP_REC,
+        // 08 original guard, 10 invalid selector arguments; 00 means selected.
+        // Guard snapshots can race hardware; absence of 02/04 alone does not
+        // prove cutoff was the cause. Keep raw cutoff and clocks for analysis.
+        probe_debug_printf("[HUB_FLIGHT] n=%08"PRIx32" pid=%02x pre=%u cutoff=%08"PRIx32
+                           " clock=%08"PRIx32"/%08"PRIx32" sof=%08"PRIx32
+                           " req=%02x/%u addr=%08"PRIx32"/%08"PRIx32" owner=%u/%u ok=%u why=%02x"
+                           " in0=%08"PRIx32" out0=%08"PRIx32" bs=%08"PRIx32" sie=%08"PRIx32" sm=%08"PRIx32
+                           " ints=%08"PRIx32" block=%08"PRIx32"/%08"PRIx32
+                           " lock=%"PRIu32" irq=%08"PRIx32"/%08"PRIx32" phase=%08"PRIx32
+                           " ep0=%08"PRIx32"\n",
+                           r->cursor,r->pid,r->before_valid,r->cutoff,r->clock_before,r->clock_after,r->sof,
+                           r->address,r->owner,r->address_before,r->address_after,
+                           r->owner_before,r->owner_after,r->selected,r->reason,
+                           r->in0,r->out0,r->buffers,r->sie,r->sm,r->ints,r->blocked_buffers,
+                           r->blocked_sie,r->missed_lock,r->irq_enter,r->irq_exit,r->core0_phase,r->ep0_word);
+        if (++out_trace_dump_slot == OUT_TRACE_SLOTS) out_trace_dump_slot = 0;
+    } else {
+        probe_debug_printf("[HUB_FLIGHT_END] next=%08"PRIx32" n=%"PRIu32"\n",h->cursor,h->count);
+        out_trace_dumping = false;
+    }
+    ++out_trace_dump_line;
+    return true;
+}
+#endif
+
 void native_hub_task(void) {
     if (!started) return;
     if (failed) {
@@ -926,6 +1288,9 @@ void native_hub_task(void) {
         }
     }
     static uint32_t last_log;
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    if (out_trace_task(now)) last_log = now;
+#endif
     if ((uint32_t)(now-last_log) >= 1000000u) {
         last_log = now;
         probe_debug_printf("[NATIVE_HUB] addr=%u/%u/%u cfg=%u/%u/%u setup=%"PRIu32"/%"PRIu32"/%"PRIu32

@@ -41,6 +41,7 @@ typedef struct {
     volatile uint32_t pwr, main_ctrl, sie_ctrl, ep_nak_stall_status;
     volatile uint32_t ep_tx_error, ep_rx_error;
     volatile uint32_t abort, abort_done;
+    volatile uint32_t sm_state, sof_rd, intr, dev_sm_watchdog, nak_poll;
 } usb_hw_t;
 typedef struct { volatile uint32_t in, out; } usb_pair_t;
 typedef struct {

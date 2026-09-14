@@ -966,7 +966,7 @@ Select the Wii profile owner and its active profile. With the Nunchuk connected,
 Auto uses its live layout; while offline, choose **Preview · Wii Remote + Nunchuk**.
 The physical Nunchuk **C** is logical `west` and **Z** is logical `north`, not the
 unrelated Switch2 extra control named `c`. Both can target buttons or triggers.
-For example, **Z → L**, **C → ZL**, with **Remote 2 → R**, makes **Z + 2** the
+For example, **C → L**, **Z → ZL**, with **Remote 2 → R**, makes **C + 2** the
 physical L+R combination. Save changes to that Wii profile, not the global
 default or another controller's profile.
 
@@ -977,11 +977,12 @@ cannot borrow child EP0 buffers; aborted/short/corrupt transfers and reset-stale
 status completions cannot dispatch profile writes. Valid status ACKs preceding
 a subsequent SETUP remain valid.
 
-Qualification: 390 focused tests pass. The actual browser editor saved the
-Wii C/Z example and read it back after a Pico reboot. All 80 stored profiles
-were compared: only the two intended mappings changed; the other 79 profiles,
-metadata and active selections were unchanged. The configuration/pairing flash
-region matched the pre-update backup. Native R/L descriptors, EP0 identity,
+Qualification: 390 focused tests pass. The earlier browser save/readback check
+used the reverse C/Z example (**C → ZL, Z → L**); that test configuration must
+not be mistaken for the requested **C → L, Z → ZL** mapping above. All 80 stored
+profiles were compared: only those two mapping fields changed; the other 79
+profiles, metadata and active selections were unchanged. The configuration/pairing
+flash region matched the pre-update backup. Native R/L descriptors, EP0 identity,
 initialization and bulk-isolation checks passed while editor traffic was active.
 No physical Switch L+R button press was claimed by that transport check.
 
@@ -1047,8 +1048,131 @@ packets and 149,567 L packets, including 113,316 and 114,276 fresh IMU packets.
 USBmon measured overlapping child reads during 94.4% of the steady-state window
 with no failed read completions there and no capture drops. A subsequent
 15-second mixed control/bulk/input check passed 57 rounds with no errors.
-This confirms the PC starvation reproduction is corrected. The user's subsequent
-Switch gameplay trial also stopped reproducing the L+R disconnect.
+This confirms the PC starvation reproduction is corrected. An initial Switch
+trial appeared successful, but a longer run subsequently disconnected after
+roughly 236,000 R / 234,000 L input reports. Bluetooth reports and USB SOF
+continued while input and addressed-token counters stopped, without USB error
+flags. An additional right-side firmware-version request and endpoint-halt clear
+were observed. Extended Switch stability remains unresolved. Concurrent HID
+polling with interleaved version reads reproduced `EPROTO` on `0.78` after about
+140 seconds (`c1/02`, interface 1, requested length 64).
+
+A synchronous shared-EP0-copy trial (`0.79`) also failed a version read after
+about 17 seconds and recorded late bank switches. The trial was rejected and
+the exact `0.78` image restored, with saved data, pairing inventory and profile
+selections verified unchanged. A subsequent xHCI trace reproduced the failure
+after 111 seconds and located USB transaction error completion code 4 on the
+right controller's final OUT status-stage descriptor, not its data-stage
+descriptor (`c0/02`, requested length 16). This narrows the missing handshake but
+does not distinguish a missed status token, bank/IRQ handoff delay, or malformed
+response. No further timing change is qualified by these results; failure-time
+device-state or direct USB-wire capture is still needed.
+
+**Flight recorder (since diagnostic 0.83):** trace-enabled hub builds retain 64 completed
+records in a 65-slot SRAM ring. They record OUT selections and rejected IN/SETUP
+selections; 0.87 additionally records successful root-hub IN selections. The
+failure hook runs only after the original selector rejects the token. Records
+include PID, address/owner, physical EP0 buffer controls, selection reason, raw
+SIE state, IRQ timestamps and the Core 0 execution phase.
+`pre=0` marks unavailable pre-selection observations rather than inferred values.
+Phase values identify main-loop work; `0x10000 | line` identifies a held backend
+state-lock region by source line in `bluepad32_input_backend.cpp`.
+These are execution breadcrumbs, not a sampled program counter. The phase tags
+do not change lock scope, but their instrumentation adds overhead.
+
+After 200 ms without child IN completions following first input, the recorder
+freezes and emits `HUB_FLIGHT_FREEZE`, `HUB_FLIGHT_CONTEXT`, `HUB_FLIGHT` and
+`HUB_FLIGHT_END` over UART, at most one line per 50 ms. Since 0.87, a pending
+control transfer with no generation/stage/position progress for 200 ms also
+triggers a dump, even before input starts. `HUB_FLIGHT_CONTROL` adds the stalled
+request, expected first data word and physical EP0 word/buffer state; records
+also include the physical EP0 first word. Rearming requires the dump to finish
+and fresh input or control progress. It never resets USB or changes selection
+decisions. Logger-mask
+measurements include instrumentation overhead, and hardware snapshots are not
+atomic. Ordinary non-trace builds retain the 0.78 transport.
+
+The initial 0.80 recorder selected IN rather than OUT; those logs are not OUT
+evidence. Independently encoded PID checks corrected this in 0.81. Its two mixed
+test failures were located in the IN data stage, so 0.82 adds rejected-IN/SETUP
+coverage. Ring retention, freeze/rearm and dispatch smoke checks, both native
+builds and 14 transport regressions pass; the 0.82 recorder also passed an
+on-device initialization/poll/quiet-dump smoke. This is diagnostic instrumentation,
+not a qualified fix for the remaining control-transfer failure.
+
+The 0.83 concurrent-input/version-read capture failed after 15.8 seconds in the
+left controller's OUT status stage (xHCI completion code 4). Four rejected tokens
+spanned 30.7 microseconds with EP1 IN completion pending and unchanged USB IRQ
+timestamps. All four carried `phase=00010fee`: the state-lock section beginning
+at line 4078 of that build's `platform_on_controller_data()`. The phase identifies
+the held critical section, not an individual instruction within it.
+
+The 0.84 trial moves native/Wii parser snapshot reads, extra-button reads and
+report-time calculation outside that interrupt-masked section. Shared-state
+updates remain locked; USB bank-selection and recovery behavior are unchanged.
+The concurrent USB test nevertheless failed after 34.0 seconds in the right
+controller's IN data stage (xHCI completion code 4, all 16 bytes outstanding).
+The final rejected tokens still showed pending EP1 completion and the
+controller-data lock, now at line 4106. This trial did not qualify.
+
+The 0.85 trial keeps a spin lock for native-hub backend state without changing
+the caller's interrupt mask. Its entry point enforces Core 0 foreground access:
+the hub uses the SDK's polled Bluetooth context, and USB IRQ/Core1 routing never
+access backend state or dispatch protocol callbacks. Ordinary AIO retains its
+interrupt-masking critical section. USB bank locking and intentionally masked
+control-status commits are unchanged. A held backend phase tag therefore no
+longer implies masked interrupts. Both native builds, AIO and eight focused
+backend/transport test cases pass; on-device backend snapshots return real
+Wii/Nunchuk motion. The concurrent test still failed after 43.3 seconds, now in
+the protocol phase rather than under the backend lock: left IN data failed with
+16 bytes outstanding and three rejected tokens spanning 18.35 microseconds.
+
+The 0.86 trial addresses another masked interval in that phase: the 100 ms
+BOOTSEL poll's flash-safe QSPI-CS settling loop. Interrupts remain disabled and
+the 1000-iteration loop is retained, but each iteration services pending native
+USB hardware status through an SRAM-only helper. It queues events without
+dispatching protocol callbacks or changing NVIC pending state. The IRQ's
+variable-length SRAM copy no longer calls flash-backed `memcpy`; linked trace
+and non-trace call graphs contain no flash-backed calls in the sampler/IRQ path.
+Nine focused tests pass, including real transport-fixture bank handoff while
+interrupts remain masked and deferred completion dispatch. Native trace,
+native non-trace and AIO builds pass.
+
+**0.86 PC qualification:** the original concurrent R/L HID plus device-recipient
+version-read reproduction passed 600 seconds: 2,400 control reads and
+149,139 R / 149,204 L active-phase HID reads, with no reported errors.
+The complete usbmon capture contains 601,718 records with zero capture drops.
+Its steady-state window shows 93.98% simultaneous pending R/L reads, no HID
+completion errors, and a maximum per-side completion gap below 8.07 ms.
+The xHCI trace is a rolling buffer and lost older events; it is not complete-run
+evidence. A subsequent 60-second matrix passed all 240 queries across both sides,
+requested lengths 1/7/16/32/64 and device/interface-0/interface-1 recipients
+(30 variants, eight queries each), while HID reads remained concurrent.
+Captures are `usb-sram-0.86-A.*` and `usb-matrix-0.86-B.*` in the ignored native
+gamepad build directory.
+
+**0.86 Switch qualification failed at startup:** the root hub and right child
+configured at addresses 5 and 6, but neither native protocol initialized and the
+left child never acquired an address. Bluetooth reports continued. The last
+root transaction was `a3/00`, port 2, length 4, following the port-reset ACK:
+generation 39 armed `11010000` with DATA1, but no data completion followed.
+The root remained in DATA_IN at position 0/4. This is an enumeration failure,
+not a passed gameplay test; the PC result does not qualify console operation.
+Startup trace and state are preserved as `switch-0.86-enumeration-*` in the
+ignored native gamepad build directory. The existing recorder requires prior
+child input, so it did not produce a flight dump for this startup failure.
+
+The 0.87 enumeration recorder addresses that diagnostic blind spot, not the
+underlying startup failure. Its pre-input timeout, root-IN recording, expected
+versus physical data distinction, progress tracking and rearm smoke checks pass,
+as do 11 transport/protocol regressions and both native plus AIO builds. Linked
+critical paths remain in SRAM. Non-trace firmware remains at 0.86.
+
+A subsequent 0.87 Switch startup configured and initialized both native
+controllers, and the user confirmed working input. The startup trace is retained
+as `switch-0.87-startup-uart.txt` in the ignored build directory. Instrumentation
+changes timing; this successful run does not establish the startup failure's
+root cause or qualify extended Switch gameplay.
 
 For sensorless hardware, the checker supports `--input-only`: press real buttons
 and keep changing controls on both halves during the run. Neutral fallback

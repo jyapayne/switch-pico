@@ -20,6 +20,7 @@ void native_test_bus_reset(bool);
 void native_test_hold_abort(bool);
 bool native_test_select(uint8_t);
 bool native_test_private_in(uint8_t, uint8_t, uint8_t*, uint16_t*);
+extern uint32_t native_test_interrupt_mask;
 }
 
 namespace {
@@ -332,6 +333,44 @@ void test_private_transmit_survives_round_robin_tokens() {
     native_test_drain();
     native_test_initialize();
 }
+void test_masked_irq_completion_handoff() {
+    native_test_initialize();
+    tusb_control_request_t configuration{};
+    configuration.bRequest = TUSB_REQ_SET_CONFIGURATION;
+    configuration.wValue = 1;
+    for (uint8_t slot : {1, 2}) {
+        require(native_test_setup(slot, &configuration, true), "child configuration failed");
+        acknowledge(slot);
+    }
+    const uint8_t payloads[2][3] = {{0x12, 0x34, 0x56}, {0x78, 0x9a, 0xbc}};
+    for (uint8_t instance : {0, 1})
+        require(native_hub_hid_report(instance, 8, payloads[instance], 3),
+                "could not queue masked-window HID packet");
+    uint8_t packet[64];
+    uint16_t length = 0;
+    native_test_interrupt_mask = 1;
+    require(native_test_private_in(1, 0x81, packet, &length),
+            "first controller did not complete during masked window");
+    require(!native_test_select(2),
+            "pending completion must prevent overwriting the active bank");
+    native_hub_service_pending_usb();
+    require(native_test_interrupt_mask == 1,
+            "SRAM service must preserve the caller's interrupt mask");
+    require(native_test_private_in(2, 0x81, packet, &length) && length == 4 &&
+                packet[0] == 8 && std::memcmp(packet + 1, payloads[1], 3) == 0,
+            "SRAM service did not permit the other controller's real packet");
+    native_hub_service_pending_usb();
+    require(!native_hub_hid_ready(0) && !native_hub_hid_ready(1),
+            "SRAM service must defer protocol callbacks to foreground dispatch");
+    native_test_interrupt_mask = 0;
+    native_test_drain();
+    require(native_hub_hid_ready(0) && native_hub_hid_ready(1),
+            "deferred completions did not release both controller queues");
+    require(!native_test_private_in(1, 0x81, packet, &length),
+            "later IRQ dispatch duplicated a serviced completion");
+    native_test_initialize();
+}
+
 
 void test_private_bootsel() {
     const auto bytes = envelope(Operation::kBootselReboot, {});
@@ -430,6 +469,7 @@ int main() {
     test_pending_control_buffer_ownership();
     test_read_ack_allows_usb_progress();
     test_private_transmit_survives_round_robin_tokens();
+    test_masked_irq_completion_handoff();
     test_private_bootsel();
     std::cout << "native root management packet and persistence regressions passed\n";
 }

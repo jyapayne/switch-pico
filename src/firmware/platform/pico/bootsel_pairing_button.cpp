@@ -8,6 +8,9 @@
 #if PICO_RP2350
 #include "hardware/regs/sio.h"
 #endif
+#if SWITCH2_PROBE_HUB
+#include "usb/native_hub/native_hub.h"
+#endif
 
 namespace {
 
@@ -34,6 +37,12 @@ void __no_inline_not_in_flash_func(read_bootsel_callback)(void* parameter) {
         IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
 
     for (volatile uint32_t delay = 0; delay < 1000; ++delay) {
+#if SWITCH2_PROBE_HUB
+        // Keep flash safety and the original settling delay, but do not leave
+        // USB completions pending throughout it. This helper is SRAM-only and
+        // dispatches no protocol/Bluetooth callbacks.
+        native_hub_service_pending_usb();
+#endif
     }
 
 #if PICO_RP2350
