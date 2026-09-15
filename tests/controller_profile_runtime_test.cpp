@@ -1164,27 +1164,31 @@ void test_shortcut_selector_rollover_without_modifier_release() {
 void test_extra_hotkeys_consume_mappings_and_rearm() {
     prepare_profiles();
     auto& profile = rows[0].profiles[0];
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
     profile.switching_chord = (1u << 18) | (1u << 24);
     profile.motion_toggle_chord = (1u << 19) | (1u << 16);
     profile.shortcuts.modifier = 20;
     profile.shortcuts.selectors[7] = 0;
-    profile.extra_button_map[0] = 3;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
     profile.extra_button_map[1] = 1;
     profile.extra_button_map[2] = 2;
-    profile.extra_button_map[6] = 17;
+    profile.extra_button_map[6] = CONTROLLER_PROFILE_LEFT_SR_OUTPUT;
+    profile.triggers[0].output = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
     Bluepad32SlotSnapshot snapshot = make_snapshot(0, 9);
     (void)runtime_transform(0, snapshot, 0);
     snapshot.state.extra_buttons = 1;
     auto output = runtime_transform(0, snapshot, 1);
-    require(activation_attempt_count == 0 && output.state.button_north,
-            "partial extra switching chord was swallowed or activated");
+    require(activation_attempt_count == 0 && output.state.extra_buttons == 0x08 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo,
+            "partial extra switching chord lost its rail route or active layout");
     snapshot.state.extra_buttons = 0x41;
     output = runtime_transform(0, snapshot, 2);
     require(activation_attempt_count == 1 &&
                 activation_attempts[0].profile_index == 1 &&
                 controller_profile_extract_button_mask(output.state) == 0 &&
-                output.state.right_trigger == 0 && output.state.extra_buttons == 0,
-            "extra switching chord did not select the next profile and consume mappings");
+                output.state.right_trigger == 0 && output.state.extra_buttons == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo,
+            "extra switching chord leaked rails or lost the active layout while suppressed");
     (void)runtime_transform(0, snapshot, 3);
     require(activation_attempt_count == 1, "held extra switching chord retriggered");
     snapshot.state = controller_neutral_state();
@@ -1194,8 +1198,10 @@ void test_extra_hotkeys_consume_mappings_and_rearm() {
     output = runtime_transform(0, snapshot, 5);
     require(motion_toggle_count == 1 && last_motion_toggle_slot == 0 &&
                 last_motion_toggle_connection_generation == 9 &&
-                !output.state.button_east && output.state.left_trigger == 0,
-            "extra/trigger motion chord lost its logical slot or leaked mapped inputs");
+                !output.state.button_east && output.state.left_trigger == 0 &&
+                output.state.extra_buttons == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo,
+            "extra/trigger motion chord leaked a mapped rail or lost slot/layout routing");
     (void)runtime_transform(0, snapshot, 6);
     require(motion_toggle_count == 1, "held extra motion chord retriggered");
     snapshot.state = controller_neutral_state();
@@ -1214,6 +1220,237 @@ void test_extra_hotkeys_consume_mappings_and_rearm() {
     require(activation_attempt_count == 3 &&
                 activation_attempts[2].profile_index == 1,
             "released extra switching chord did not rearm");
+}
+
+void test_shift_rails_reset_with_live_profile_layout_changes() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    profile.button_map[0] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_SR_OUTPUT;
+    profile.shift.mode = ControllerProfileShiftMode::kToggle;
+    profile.shift.modifier = 9;
+    profile.shift.button_map[0] = CONTROLLER_PROFILE_RIGHT_SL_OUTPUT;
+    profile.shift.extra_button_map[0] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.shift.button_map[9] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    auto snapshot = make_snapshot(0);
+    auto output = runtime_transform(0, snapshot, 0);
+    require(output.state.extra_buttons == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kRightSolo,
+            "neutral active input lost its solo layout or created a rail press");
+
+    apply_button_mask(1u | (1u << 9), &snapshot);
+    snapshot.state.extra_buttons = 1;
+    output = runtime_transform(0, snapshot, 1);
+    require(output.state.extra_buttons == 0x60 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "Shift failed to route both ordinary and extra sources or leaked its modifier");
+    apply_button_mask(1u, &snapshot);
+    snapshot.state.extra_buttons = 1;
+    output = runtime_transform(0, snapshot, 2);
+    require(output.state.extra_buttons == 0x60,
+            "toggle Shift dropped its rail routes when the modifier was released");
+    ++configuration_reset_generation;
+    output = runtime_transform(0, snapshot, 3);
+    require(output.state.extra_buttons == 0x18 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kRightSolo,
+            "configuration reset left stale Shift rails or reset profile-owned layout");
+    apply_button_mask(1u | (1u << 9), &snapshot);
+    snapshot.state.extra_buttons = 1;
+    output = runtime_transform(0, snapshot, 4);
+    require(output.state.extra_buttons == 0x60,
+            "Shift rail routes did not rearm after reset");
+
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+    profile.button_map[0] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_NO_BUTTON;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 5);
+    require(output.state.extra_buttons == 0x40 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo,
+            "same-profile live edit retained old Shift rails or stale native layout");
+    rows[0].active_profile = 1;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 6);
+    require(output.state.extra_buttons == 0 && output.state.button_south &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kPaired,
+            "activating a normal profile retained the previous profile's rails or layout");
+
+    snapshot.active = false;
+    output = runtime_transform(0, snapshot, 7);
+    require(output.state.extra_buttons == 0 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kPaired,
+            "disconnect retained mapped rails or active-only routing metadata");
+}
+
+void test_stick_swap_precedes_final_macro_overrides_in_all_output_modes() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.swap_sticks = true;
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.macros[0] = {1u, CONTROLLER_PROFILE_NO_BUTTON, 0, 1};
+    profile.macro_step_count = 1;
+    auto& step = profile.macro_steps[0];
+    step.override_flags =
+        kControllerProfileOverrideButtons | kControllerProfileOverrideLeftStick;
+    step.output_button_mask =
+        logical_button_bit(ControllerProfileLogicalButton::kLeftStick);
+    step.left_stick_x = 1234;
+    step.left_stick_y = -5678;
+    step.duration_ms = 10;
+    auto snapshot = make_snapshot(0);
+    snapshot.state.left_stick_x = 111;
+    snapshot.state.left_stick_y = -222;
+    snapshot.state.right_stick_x = 333;
+    snapshot.state.right_stick_y = -444;
+    snapshot.state.button_left_stick = true;
+    snapshot.state.extra_buttons = 1;
+    auto output = runtime_transform(0, snapshot, 0, AdapterUsbMode::kXInput);
+    require(output.state.left_stick_x == 333 && output.state.left_stick_y == -444 &&
+                output.state.right_stick_x == 111 && output.state.right_stick_y == -222 &&
+                !output.state.button_left_stick && output.state.button_right_stick,
+            "stick axes and clicks were not swapped for a non-native output mode");
+    snapshot.state.button_south = true;
+    output = runtime_transform(0, snapshot, 1, AdapterUsbMode::kXInput);
+    require(output.state.left_stick_x == 1234 && output.state.left_stick_y == -5678 &&
+                output.state.right_stick_x == 111 && output.state.right_stick_y == -222 &&
+                controller_profile_extract_button_mask(output.state) ==
+                    logical_button_bit(ControllerProfileLogicalButton::kLeftStick) &&
+                output.state.extra_buttons == 0x40,
+            "stick swap moved final macro outputs or broadened its standard-button override");
+    output = runtime_transform(0, snapshot, 11, AdapterUsbMode::kXInput);
+    require(output.state.left_stick_x == 333 && output.state.left_stick_y == -444 &&
+                output.state.right_stick_x == 111 && output.state.right_stick_y == -222 &&
+                !output.state.button_left_stick && output.state.button_right_stick,
+            "macro completion failed to restore the live swapped sticks and clicks");
+
+    profile.swap_sticks = false;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 12, AdapterUsbMode::kXInput);
+    require(output.state.left_stick_x == 111 && output.state.left_stick_y == -222 &&
+                output.state.right_stick_x == 333 && output.state.right_stick_y == -444 &&
+                output.state.button_left_stick && !output.state.button_right_stick,
+            "live swap edit retained old output pairs or restarted a held macro");
+}
+
+void test_shift_directions_select_maps_and_consume_modifiers() {
+    for (const auto mode : {ControllerProfileShiftMode::kHold,
+                            ControllerProfileShiftMode::kToggle}) {
+        prepare_profiles();
+        auto& profile = rows[0].profiles[0];
+        profile.button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+        profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_DOWN_OUTPUT;
+        profile.shift.mode = mode;
+        profile.shift.modifier = 9;
+        profile.button_map[9] = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+        profile.shift.button_map[9] = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+        profile.shift.button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+        profile.shift.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+        auto snapshot = make_snapshot(0);
+        (void)runtime_transform(0, snapshot, 0);
+        apply_button_mask(1u, &snapshot);
+        auto output = runtime_transform(0, snapshot, 1);
+        require(output.state.left_stick_x == 0 && output.state.left_stick_y == -32767,
+                "inactive Shift did not use the base direction map");
+        apply_button_mask(1u | (1u << 9), &snapshot);
+        snapshot.state.extra_buttons = 1;
+        output = runtime_transform(0, snapshot, 2);
+        require(output.state.left_stick_x == 32767 && output.state.left_stick_y == 0 &&
+                    output.state.extra_buttons == 0 &&
+                    controller_profile_extract_button_mask(output.state) == 0,
+                "Shift did not OR ordinary and extra directions or leaked its consumed modifier");
+        apply_button_mask(1u << 9, &snapshot);
+        snapshot.state.extra_buttons = 1;
+        output = runtime_transform(0, snapshot, 3);
+        require(output.state.left_stick_x == 32767 && output.state.left_stick_y == 0,
+                "releasing the ordinary source cleared a held Shift extra direction");
+        apply_button_mask(0, &snapshot);
+        snapshot.state.extra_buttons = 1;
+        output = runtime_transform(0, snapshot, 4);
+        const bool toggled = mode == ControllerProfileShiftMode::kToggle;
+        require(output.state.left_stick_x == (toggled ? 32767 : 0) &&
+                    output.state.left_stick_y == (toggled ? 0 : 32767),
+                "modifier release failed to retain toggle Shift or restore hold Shift's base map");
+        snapshot.state.extra_buttons = 0;
+        output = runtime_transform(0, snapshot, 5);
+        require(output.state.left_stick_x == 0 && output.state.left_stick_y == 0,
+                "Shift retained a direction after its last source released");
+    }
+}
+
+void test_consumed_direction_sources_and_live_layout_changes() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    profile.motion_toggle_chord = (1u << 18) | (1u << 16);
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    profile.triggers[0].output = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.triggers[0].digital_threshold = 12345;
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+    auto snapshot = make_snapshot(0);
+    (void)runtime_transform(0, snapshot, 0);
+    snapshot.state.extra_buttons = 1;
+    auto output = runtime_transform(0, snapshot, 1);
+    require(output.state.left_stick_x == 32767 && output.state.left_stick_y == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kRightSolo,
+            "partial extra hotkey lost its direction or native-layout metadata");
+    apply_button_mask(1u << 12, &snapshot);
+    snapshot.state.extra_buttons = 1;
+    snapshot.state.left_trigger = 12345;
+    output = runtime_transform(0, snapshot, 2);
+    require(motion_toggle_count == 1 &&
+                output.state.left_stick_x == -32767 && output.state.left_stick_y == 0 &&
+                output.state.left_trigger == 0 && output.state.extra_buttons == 0 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kRightSolo,
+            "consumed extra/trigger hotkey leaked directions or suppressed unrelated movement/layout");
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_DOWN_OUTPUT;
+    ++database_generation;
+    output = runtime_transform(0, snapshot, 3);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == 32767 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo,
+            "live profile edit retained an old direction or native layout");
+    snapshot.active = false;
+    output = runtime_transform(0, snapshot, 4);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kPaired,
+            "disconnect retained digital movement or active-only native-layout metadata");
+}
+
+void test_direction_fallback_precedes_final_macro_override() {
+    prepare_profiles();
+    auto& profile = rows[0].profiles[0];
+    profile.swap_sticks = true;
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.macros[0] = {1u, CONTROLLER_PROFILE_NO_BUTTON, 0, 1};
+    profile.macro_step_count = 1;
+    auto& step = profile.macro_steps[0];
+    step.override_flags = kControllerProfileOverrideLeftStick;
+    step.left_stick_x = 1234;
+    step.left_stick_y = -5678;
+    step.duration_ms = 10;
+    auto snapshot = make_snapshot(0);
+    snapshot.state.left_stick_x = 111;
+    snapshot.state.dpad_up = true;
+    auto output = runtime_transform(0, snapshot, 0);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == -32767 &&
+                output.state.right_stick_x == 111 && output.state.right_stick_y == 0,
+            "runtime applied direction fallback before the physical stick swap");
+    snapshot.state.button_south = true;
+    output = runtime_transform(0, snapshot, 1);
+    require(output.state.left_stick_x == 1234 && output.state.left_stick_y == -5678 &&
+                output.state.right_stick_x == 111 && output.state.right_stick_y == 0 &&
+                output.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo,
+            "digital directions replaced final macro output or lost native-layout metadata");
+    output = runtime_transform(0, snapshot, 11);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == -32767 &&
+                output.state.right_stick_x == 111 && output.state.right_stick_y == 0,
+            "macro completion failed to restore a still-held mapped direction");
 }
 
 void test_accelerometer_swing_requires_evidence_and_settle() {
@@ -1656,6 +1893,11 @@ int main() {
     test_held_synthetic_sources_and_disconnect_rearming();
     test_shortcut_selector_rollover_without_modifier_release();
     test_extra_hotkeys_consume_mappings_and_rearm();
+    test_shift_rails_reset_with_live_profile_layout_changes();
+    test_stick_swap_precedes_final_macro_overrides_in_all_output_modes();
+    test_shift_directions_select_maps_and_consume_modifiers();
+    test_consumed_direction_sources_and_live_layout_changes();
+    test_direction_fallback_precedes_final_macro_override();
     test_accelerometer_swing_requires_evidence_and_settle();
     test_swing_output_isolated_from_motion_remaps_and_profiles();
     test_swing_modifier_release_cancels_and_requires_fresh_settle();

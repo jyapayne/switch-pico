@@ -9,6 +9,7 @@
 #include "native_imu.h"
 #include "pico/time.h"
 #include "profile/controller_profile_runtime.h"
+#include "profile/profile_service.h"
 
 #if !SWITCH2_PROBE_HUB || SWITCH2_BRIDGE_WII_INPUT
 #error "A full gamepad source requires the native R/L USB hub"
@@ -56,6 +57,7 @@ ProbeNativeMotion g_motion;
 bool g_active;
 bool g_evaluated;
 uint32_t g_evaluated_ms;
+uint32_t g_profile_generation;
 uint32_t g_report_token;
 int g_sensor_status = -1;
 bool g_clock_started;
@@ -77,6 +79,7 @@ void advance_clock(uint32_t now_us) {
 
 void discard_output(Child& child) {
     child.pending_token = 0;
+    child.pending_motion = false;
     child.have_committed_motion = false;
 }
 
@@ -104,20 +107,51 @@ uint16_t calibrated_axis(const Child& child, int16_t value, unsigned axis, bool 
         (output_positive ? displacement : -displacement));
 }
 
+int16_t negate_axis(int16_t value) {
+    return value == INT16_MIN ? INT16_MAX : static_cast<int16_t>(-value);
+}
+
+void native_motion_axes(const int32_t source[3], float scale, float output[3]) {
+    // Undo rotate_solo_joycon's horizontal SDL normalization, then apply the
+    // existing upright native mount [X,-Z,Y]. Rotate accel and gyro together.
+    output[1] = -static_cast<float>(source[2]) * scale;
+    switch (g_mapped.native_joycon_layout) {
+        case ControllerProfileNativeJoyconLayout::kLeftSolo:
+            output[0] = static_cast<float>(source[1]) * scale;
+            output[2] = -static_cast<float>(source[0]) * scale;
+            break;
+        case ControllerProfileNativeJoyconLayout::kRightSolo:
+            output[0] = -static_cast<float>(source[1]) * scale;
+            output[2] = static_cast<float>(source[0]) * scale;
+            break;
+        case ControllerProfileNativeJoyconLayout::kPaired:
+            output[0] = static_cast<float>(source[0]) * scale;
+            output[2] = static_cast<float>(source[1]) * scale;
+            break;
+    }
+}
+
 void pack_controls(uint8_t instance) {
     Child& child = g_children[instance];
     child.input = {};
     child.input.serial = g_source.state_generation;
     if (!g_active || !child.calibrated) return;
+    const bool left = probe_model_is_left(instance);
+    const auto layout = g_mapped.native_joycon_layout;
+    const bool solo = layout != ControllerProfileNativeJoyconLayout::kPaired;
+    // Leave both USB identities in place. The existing inactive-input protocol
+    // path emits neutral reports for the unselected child.
+    if (solo && left != (layout == ControllerProfileNativeJoyconLayout::kLeftSolo)) return;
     child.input.active = true;
     child.input.native_status = 0x30; // Host feature status is gated per model in main.
     child.input.mouse_surface = 0xff; // No optical sensor, clicks, or invented movement.
     const ControllerState& state = g_mapped.state;
-    const bool left = probe_model_is_left(instance);
     if (left) {
         child.input.buttons[0] = static_cast<uint8_t>(
-            (state.dpad_down ? 0x01 : 0) | (state.dpad_right ? 0x02 : 0) |
-            (state.dpad_left ? 0x04 : 0) | (state.dpad_up ? 0x08 : 0) |
+            ((solo ? state.button_east : state.dpad_down) ? 0x01 : 0) |
+            ((solo ? state.button_north : state.dpad_right) ? 0x02 : 0) |
+            ((solo ? state.button_south : state.dpad_left) ? 0x04 : 0) |
+            ((solo ? state.button_west : state.dpad_up) ? 0x08 : 0) |
             (state.button_left_shoulder ? 0x10 : 0) |
             (state.left_trigger != 0 && state.left_trigger >= g_mapped.left_trigger_digital_threshold ? 0x20 : 0) |
             (state.button_select ? 0x40 : 0) | (state.button_left_stick ? 0x80 : 0));
@@ -127,18 +161,29 @@ void pack_controls(uint8_t instance) {
             ((state.extra_buttons & (1u << 4)) ? 0x40 : 0));
     } else {
         child.input.buttons[0] = static_cast<uint8_t>(
-            (state.button_south ? 0x01 : 0) | (state.button_east ? 0x02 : 0) |
-            (state.button_west ? 0x04 : 0) | (state.button_north ? 0x08 : 0) |
+            ((solo ? state.button_west : state.button_south) ? 0x01 : 0) |
+            ((solo ? state.button_south : state.button_east) ? 0x02 : 0) |
+            ((solo ? state.button_north : state.button_west) ? 0x04 : 0) |
+            ((solo ? state.button_east : state.button_north) ? 0x08 : 0) |
             (state.button_right_shoulder ? 0x10 : 0) |
             (state.right_trigger != 0 && state.right_trigger >= g_mapped.right_trigger_digital_threshold ? 0x20 : 0) |
-            (state.button_start ? 0x40 : 0) | (state.button_right_stick ? 0x80 : 0));
+            (state.button_start ? 0x40 : 0) |
+            ((solo ? state.button_left_stick : state.button_right_stick) ? 0x80 : 0));
         child.input.buttons[1] = static_cast<uint8_t>(
             (state.button_system ? 0x01 : 0) | ((state.extra_buttons & 1) ? 0x10 : 0) |
             ((state.extra_buttons & (1u << 5)) ? 0x80 : 0) |
             ((state.extra_buttons & (1u << 6)) ? 0x40 : 0));
     }
-    const uint16_t x = calibrated_axis(child, left ? state.left_stick_x : state.right_stick_x, 0, false);
-    const uint16_t y = calibrated_axis(child, left ? state.left_stick_y : state.right_stick_y, 1, true);
+    int16_t stick_x = left ? state.left_stick_x : state.right_stick_x;
+    int16_t stick_y = left ? state.left_stick_y : state.right_stick_y;
+    if (solo) {
+        // Solo consumes the mapped LEFT stick and click, including any profile
+        // stick swap already performed upstream.
+        stick_x = left ? negate_axis(state.left_stick_y) : state.left_stick_y;
+        stick_y = left ? state.left_stick_x : negate_axis(state.left_stick_x);
+    }
+    const uint16_t x = calibrated_axis(child, stick_x, 0, false);
+    const uint16_t y = calibrated_axis(child, stick_y, 1, true);
     child.input.stick[0] = static_cast<uint8_t>(x);
     child.input.stick[1] = static_cast<uint8_t>((x >> 8) | (y << 4));
     child.input.stick[2] = static_cast<uint8_t>(y >> 4);
@@ -174,9 +219,11 @@ void refresh(uint32_t now_ms) {
     }
     const bool changed_connection = !g_active || source.slot != g_source.slot ||
         source.controller.connection_generation != g_source.controller.connection_generation;
+    const uint32_t profile_generation = profile_service_database_generation();
     // Both polls and both peeks in a paired output round share one profile and
     // motion evaluation. A real publication in the same millisecond still wins.
     if (!changed_connection && g_evaluated && g_evaluated_ms == now_ms &&
+        profile_generation == g_profile_generation &&
         source.state_generation == g_source.state_generation && source.received_us == g_source.received_us &&
         source.accel_sequence == g_source.accel_sequence && source.gyro_sequence == g_source.gyro_sequence &&
         source.accel_received_us == g_source.accel_received_us && source.gyro_received_us == g_source.gyro_received_us &&
@@ -192,7 +239,16 @@ void refresh(uint32_t now_ms) {
     g_active = true;
     g_evaluated = true;
     g_evaluated_ms = now_ms;
+    // Store the generation observed before transforming: a concurrent storage
+    // publication must invalidate this result rather than bless an older profile.
+    g_profile_generation = profile_generation;
+    const auto previous_layout = g_mapped.native_joycon_layout;
     g_mapped = controller_profile_runtime_transform(source.slot, source.controller, now_ms, AdapterUsbMode::kSwitch);
+    if (g_mapped.native_joycon_layout != previous_layout) {
+        g_motion.reset();
+        for (Child& child : g_children) discard_output(child);
+        g_sensor_status = -1;
+    }
     ControllerProfileRuntimeProfileChangeEvent feedback{};
     if (controller_profile_runtime_take_initial_profile_indication(source.slot, &feedback) ||
         controller_profile_runtime_take_profile_change(source.slot, &feedback)) {
@@ -206,15 +262,8 @@ void refresh(uint32_t now_ms) {
     sample.gyro_sequence = source.gyro_sequence;
     sample.accel_us = source.accel_received_us;
     sample.gyro_us = source.gyro_received_us;
-    // SDL -> upright native body [X,-Z,Y], the same physical transform used by
-    // the Wii adapter before its mouse-mount rotation. Both halves represent
-    // one rigid, full controller: no solo-Joy-Con or mouse mounting rotation.
-    sample.accel_g[0] = static_cast<float>(source.accel_q13[0]) / 8192.0f;
-    sample.accel_g[1] = -static_cast<float>(source.accel_q13[2]) / 8192.0f;
-    sample.accel_g[2] = static_cast<float>(source.accel_q13[1]) / 8192.0f;
-    sample.gyro_dps[0] = static_cast<float>(source.gyro_q10[0]) / 1024.0f;
-    sample.gyro_dps[1] = -static_cast<float>(source.gyro_q10[2]) / 1024.0f;
-    sample.gyro_dps[2] = static_cast<float>(source.gyro_q10[1]) / 1024.0f;
+    native_motion_axes(source.accel_q13, 1.0f / 8192.0f, sample.accel_g);
+    native_motion_axes(source.gyro_q10, 1.0f / 1024.0f, sample.gyro_dps);
     g_motion.update(now_us, source.controller.connection_generation, sample,
         source.track_stationary_bias ? ProbeNativeMotionBias::kTrackStationary :
                                           ProbeNativeMotionBias::kAlreadyCalibrated);
@@ -317,12 +366,14 @@ uint32_t probe_native_gamepad_input_peek_native_report(uint8_t instance, uint32_
 bool probe_native_gamepad_input_commit_native_report(uint8_t instance, uint32_t token) {
     if (instance >= PROBE_CONTROLLER_COUNT || !token) return false;
     Child& child = g_children[instance];
+    // Profile edits/activation need no physical publication to retire a token.
+    if (!child.enabled || !child.input.active || !g_active || child.pending_token != token ||
+        profile_service_database_generation() != g_profile_generation) return false;
     // Check the live source even when the caller did not poll after a disconnect.
     Bluepad32NativeGamepadSnapshot source;
     bluepad32_input_backend_native_snapshot(&source);
     const uint32_t now_us = time_us_32();
-    if (!child.enabled || !g_active || child.pending_token != token ||
-        !source.controller.active || source.slot != g_source.slot ||
+    if (!source.controller.active || source.slot != g_source.slot ||
         source.controller.connection_generation != g_source.controller.connection_generation ||
         source.state_generation != g_source.state_generation ||
         source.accel_sequence != g_source.accel_sequence || source.gyro_sequence != g_source.gyro_sequence ||

@@ -131,6 +131,20 @@
                 </select>
                 <p class="field-help" id="controllerLayoutHelp">Preview changes only this editor's source labels and diagram, never firmware topology or saved mappings.</p>
               </div>
+              <div class="native-joycon-control" id="nativeJoyconControl">
+                <label class="field-label" for="nativeJoyconLayoutSelect">Native Joy-Con layout</label>
+                <div class="native-joycon-actions">
+                  <select class="select" id="nativeJoyconLayoutSelect" aria-describedby="nativeJoyconHelp">
+                    <option value="paired">Paired · standard dual Joy-Con orientation</option>
+                    <option value="left_solo">Left sideways · solo Joy-Con (L)</option>
+                    <option value="right_solo">Right sideways · solo Joy-Con (R)</option>
+                  </select>
+                  <button class="button button-secondary" id="mapShouldersButton" type="button" hidden>Map shoulders to SL/SR</button>
+                  <button class="button button-secondary" id="mapDpadButton" type="button">Map D-pad to left stick</button>
+                </div>
+                <p class="field-help" id="nativeJoyconHelp">Native-hub output only; this does not change Pro emulation's controller identity. Unlike physical Joy-Con grouping in Adapter settings or Wii orientation, this is a per-profile draft setting: choose Save to Pico to store it. Both USB devices remain enumerated; solo keeps the other side neutral. Assign solo on Switch Change Grip/Order by pressing the sources mapped to the selected side's SL+SR.</p>
+                <p class="field-help">Changing layout never remaps buttons. “Map shoulders to SL/SR” changes only the two base shoulder destinations in this draft. “Map D-pad to left stick” changes only the four base D-pad destinations (Up, Down, Left, Right) to left-stick movement in this draft. You can also map any source, including D-pad directions, to the horizontal face positions. Solo uses the mapped left stick; enable stick swap below to use the physical right stick. Digital directions apply only when the mapped left analog stick is neutral within its deadzone (any nonzero analog stick input takes priority). In native sideways solo mode, wire rotation happens after mapped left directions. SL/SR mappings work in native and Pro emulation; C/GL/GR are physical input sources, not output destinations.</p>
+              </div>
               <div class="wii-orientation-control" id="wiiOrientationControl" hidden>
                 <label class="field-label" for="wiiOrientationSelect">Wii orientation</label>
                 <div class="wii-orientation-actions">
@@ -276,10 +290,21 @@
             <div class="mapping-playtest">
               <p><strong>Raw extra inputs:</strong> <span id="playtestExtraInputs">None</span></p>
               <p><strong>Draft button output:</strong> <span id="playtestMappedButtons">None</span></p>
-              <p class="field-help" id="playtestMappingHelp">Base and Shift mapping preview only; shortcuts, macros and Turbo are not simulated.</p>
+              <p class="field-help" id="playtestMappingHelp">Base and Shift mapping preview only; shortcuts, macros and Turbo are not simulated. Digital stick directions apply only when the mapped left analog vector is neutral within inner deadzones.</p>
             </div>
           </div>
           <div class="analog-grid" id="analogFields"></div>
+          <div class="subpanel stick-swap-panel" id="stickSwapPanel">
+            <div class="subpanel-heading">
+              <h4>Stick swap</h4>
+              <span>Output routing</span>
+            </div>
+            <label class="checkbox-pill">
+              <input type="checkbox" id="swapSticksCheckbox" data-kind="swap-sticks" aria-describedby="swapSticksHelp">
+              <span>Swap left &amp; right sticks (including clicks)</span>
+            </label>
+            <p class="field-help" id="swapSticksHelp">Swaps output axes and mapped stick clicks in both native and Pro emulation. Save to Pico to store this draft setting. Calibrations, deadzones, response curves and invert settings remain tied to their original physical sticks.</p>
+          </div>
         </section>
 
         <section class="panel" id="feedback">

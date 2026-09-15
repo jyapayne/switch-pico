@@ -3,6 +3,7 @@
 #include "platform/pico/controller_color_config.h"
 #include "tusb.h"
 #include "pico/time.h"
+#include "profile/controller_profile_transform.h"
 
 #include <array>
 #include <cstddef>
@@ -810,6 +811,112 @@ void test_motion_cadence_survives_usb_poll_quantization() {
     expect(!switch_pro_task(0), "motion replayed a stale catch-up burst");
 }
 
+void test_profile_rails_and_stick_swap_reach_pro_reports() {
+    initialize_contexts();
+    ControllerProfile profile = controller_profile_default(controller_identity_global(), 0);
+    profile.button_map[0] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    profile.button_map[1] = CONTROLLER_PROFILE_LEFT_SR_OUTPUT;
+    profile.button_map[2] = CONTROLLER_PROFILE_RIGHT_SL_OUTPUT;
+    profile.button_map[3] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    const uint8_t expected_right[] = {0, 0, 0x20, 0x10};
+    const uint8_t expected_left[] = {0x20, 0x10, 0, 0};
+    for (unsigned i = 0; i < 4; ++i) {
+        ControllerState input{};
+        controller_profile_apply_button_mask(static_cast<uint16_t>(1u << i), &input);
+        const auto mapped = controller_profile_transform(input, profile);
+        usb_output_driver_set_input(0, mapped.state,
+                                    mapped.left_trigger_digital_threshold,
+                                    mapped.right_trigger_digital_threshold);
+        now_ms += 15;
+        expect(switch_pro_task(0), "mapped rail did not produce a Pro report");
+        const SentReport* packet = latest_regular_report(0);
+        // Compare raw bytes: sharing the packed struct here would hide reversed
+        // Left SL/SR declarations. Both button bytes use SR bit4 / SL bit5.
+        expect(packet && packet->data[3] == expected_right[i] &&
+                   packet->data[5] == expected_left[i],
+               "profile rail mapping reached the wrong Pro report bit or leaked its face button");
+        const SwitchProReport current = get_current_report(0, "rail GET_REPORT failed");
+        const auto* bytes = reinterpret_cast<const uint8_t*>(&current);
+        expect(bytes[3] == expected_right[i] && bytes[5] == expected_left[i],
+               "Pro GET_REPORT disagreed with streamed rail state");
+    }
+    ControllerState input{};
+    auto mapped = controller_profile_transform(input, profile);
+    usb_output_driver_set_input(0, mapped.state, mapped.left_trigger_digital_threshold,
+                                mapped.right_trigger_digital_threshold);
+    now_ms += 15;
+    expect(switch_pro_task(0), "rail release did not produce a Pro report");
+    const SentReport* released = latest_regular_report(0);
+    expect(released && released->data[3] == 0 && released->data[5] == 0,
+           "released rail mapping stayed pressed");
+
+    profile.swap_sticks = true;
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    input.left_stick_x = 1600;
+    input.left_stick_y = 3200;
+    input.right_stick_x = -1600;
+    input.right_stick_y = -3200;
+    input.button_left_stick = true;
+    mapped = controller_profile_transform(input, profile);
+    usb_output_driver_set_input(0, mapped.state, mapped.left_trigger_digital_threshold,
+                                mapped.right_trigger_digital_threshold);
+    now_ms += 15;
+    expect(switch_pro_task(0), "swapped sticks did not produce a Pro report");
+    SwitchProReport swapped = copy_switch_report(latest_regular_report(0));
+    expect(swapped.inputs.leftStick.getX() == (controller_axis_to_unsigned(input.right_stick_x) >> 4) &&
+               swapped.inputs.leftStick.getY() ==
+                   ((-(controller_axis_to_unsigned(input.right_stick_y) >> 4)) & 0xfff) &&
+               swapped.inputs.rightStick.getX() == (controller_axis_to_unsigned(input.left_stick_x) >> 4) &&
+               swapped.inputs.rightStick.getY() ==
+                   ((-(controller_axis_to_unsigned(input.left_stick_y) >> 4)) & 0xfff) &&
+               swapped.inputs.buttonThumbR && !swapped.inputs.buttonThumbL,
+           "Pro output lost swapped axes/clicks or applied native-only solo routing");
+    SwitchProReport untouched = get_current_report(1, "other Pro instance GET_REPORT failed");
+    const auto* untouched_bytes = reinterpret_cast<const uint8_t*>(&untouched);
+    expect((untouched_bytes[3] & 0x30) == 0 && (untouched_bytes[5] & 0x30) == 0 &&
+               !untouched.inputs.buttonThumbL && !untouched.inputs.buttonThumbR,
+           "mapped rails or stick clicks crossed Pro instances");
+}
+
+void test_digital_dpad_reaches_pro_stick_without_dpad_leakage() {
+    initialize_contexts();
+    ControllerProfile profile = controller_profile_default(controller_identity_global(), 0);
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.button_map[15] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    const auto send = [&](const ControllerState& input) {
+        const auto mapped = controller_profile_transform(input, profile);
+        usb_output_driver_set_input(0, mapped.state, mapped.left_trigger_digital_threshold,
+                                    mapped.right_trigger_digital_threshold);
+        now_ms += 15;
+        expect(switch_pro_task(0), "digital-stick Pro input did not send");
+        return copy_switch_report(latest_regular_report(0));
+    };
+    ControllerState input{};
+    input.dpad_up = input.dpad_right = true;
+    SwitchProReport digital = send(input);
+    input = {};
+    input.left_stick_x = 23169;
+    input.left_stick_y = -23169;
+    SwitchProReport analog = send(input);
+    expect(digital.inputs.leftStick.getX() == analog.inputs.leftStick.getX() &&
+               digital.inputs.leftStick.getY() == analog.inputs.leftStick.getY() &&
+               !digital.inputs.dpadUp && !digital.inputs.dpadRight &&
+               !digital.inputs.buttonThumbL,
+           "digital diagonal did not reach the Pro left stick or leaked Dpad/L3 buttons");
+    input.dpad_up = true;
+    input.left_stick_x = -1600;
+    input.left_stick_y = 3200;
+    SwitchProReport priority = send(input);
+    input.dpad_up = false;
+    SwitchProReport reference = send(input);
+    expect(priority.inputs.leftStick.getX() == reference.inputs.leftStick.getX() &&
+               priority.inputs.leftStick.getY() == reference.inputs.leftStick.getY(),
+           "digital direction overrode active Pro analog movement");
+    input = {};
+    SwitchProReport released = send(input);
+    expect_neutral_sticks(released, "released digital directions left the Pro stick held");
+}
+
 }  // namespace
 
 extern "C" absolute_time_t get_absolute_time(void) {
@@ -854,6 +961,8 @@ int main() {
     test_startup_identify_preserves_first_reply_counter();
     test_failed_startup_identify_retries_preserve_counter();
     test_input_reports_and_timers_are_isolated();
+    test_profile_rails_and_stick_swap_reach_pro_reports();
+    test_digital_dpad_reaches_pro_stick_without_dpad_leakage();
     test_callback_send_and_imu_modes_are_isolated();
     test_rumble_callbacks_and_decoders_are_isolated();
     test_grip_colors_are_isolated();

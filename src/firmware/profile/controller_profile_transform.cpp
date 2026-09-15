@@ -177,24 +177,56 @@ uint16_t transform_trigger(
         kQ16One);
 }
 
+void route_digital_output(
+    uint8_t output, uint16_t* output_button_mask,
+    uint8_t* output_extra_button_mask, uint8_t* left_stick_directions) {
+    if (output < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT) {
+        *output_button_mask |= static_cast<uint16_t>(1u << output);
+    } else if (output >= CONTROLLER_PROFILE_LEFT_SL_OUTPUT &&
+               output <= CONTROLLER_PROFILE_RIGHT_SR_OUTPUT) {
+        *output_extra_button_mask |= static_cast<uint8_t>(
+            1u << (output - CONTROLLER_PROFILE_LEFT_SL_OUTPUT + 3u));
+    } else if (output >= CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT &&
+               output <= CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT) {
+        *left_stick_directions |= static_cast<uint8_t>(
+            1u << (output - CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT));
+    }
+}
+
 void route_trigger_output(
     uint8_t output, uint16_t value, uint16_t digital_threshold,
-    uint16_t* output_button_mask, uint16_t output_triggers[2],
-    uint16_t output_thresholds[2]) {
-    if (output < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT) {
-        if (value >= digital_threshold) {
-            *output_button_mask |= static_cast<uint16_t>(1u << output);
-        }
-        return;
-    }
-    if (output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) {
+    uint16_t* output_button_mask, uint8_t* output_extra_button_mask,
+    uint16_t output_triggers[2], uint16_t output_thresholds[2],
+    uint8_t* left_stick_directions) {
+    if (output >= CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+        output < CONTROLLER_PROFILE_LEFT_SL_OUTPUT) {
         const uint8_t trigger_index = static_cast<uint8_t>(
             output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL);
         if (value > output_triggers[trigger_index]) {
             output_triggers[trigger_index] = value;
         }
         output_thresholds[trigger_index] = digital_threshold;
+    } else if (value >= digital_threshold &&
+               (value != 0 || output < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT)) {
+        route_digital_output(output, output_button_mask,
+                             output_extra_button_mask, left_stick_directions);
     }
+}
+
+void apply_left_stick_directions(uint8_t directions, ControllerState* state) {
+    // Directions target mapped left after calibration and swapping. Any analog
+    // movement owns the whole vector, rather than blending one neutral axis.
+    if (directions == 0 || state->left_stick_x != 0 || state->left_stick_y != 0) {
+        return;
+    }
+    const int16_t x = ((directions & (1u << 3)) != 0) -
+                      ((directions & (1u << 2)) != 0);
+    const int16_t y = ((directions & (1u << 1)) != 0) -
+                      ((directions & (1u << 0)) != 0);
+    // floor(32767 / sqrt(2)): diagonals stay inside the unit radius.
+    const int16_t magnitude = x != 0 && y != 0 ? 23169 : 32767;
+    state->left_stick_x = static_cast<int16_t>(x * magnitude);
+    state->left_stick_y = static_cast<int16_t>(y * magnitude);
 }
 
 }  // namespace
@@ -368,11 +400,11 @@ ControllerProfileTransformResult controller_profile_transform(
     ControllerProfileTransformResult result{};
     result.state = input;
     result.state.extra_buttons = 0;
+    result.native_joycon_layout = profile.native_joycon_layout;
     const uint16_t input_button_mask =
         controller_profile_extract_button_mask(input);
-    uint16_t output_button_mask =
-        controller_profile_map_button_mask(
-            input_button_mask, profile, selected_map);
+    uint16_t output_button_mask = 0;
+    uint8_t left_stick_directions = 0;
     uint16_t output_triggers[2]{};
     uint16_t output_thresholds[2] = {
         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD,
@@ -388,10 +420,14 @@ ControllerProfileTransformResult controller_profile_transform(
         }
         const uint8_t output = selected_map[input_button];
         if (output >= CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
-            output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) {
+            output < CONTROLLER_PROFILE_LEFT_SL_OUTPUT) {
             output_triggers[
                 output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL] =
                 UINT16_MAX;
+        } else {
+            route_digital_output(output, &output_button_mask,
+                                 &result.state.extra_buttons,
+                                 &left_stick_directions);
         }
     }
     for (uint8_t extra = 0;
@@ -400,11 +436,14 @@ ControllerProfileTransformResult controller_profile_transform(
             continue;
         }
         const uint8_t output = selected_extra_map[extra];
-        if (output < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT) {
-            output_button_mask |= static_cast<uint16_t>(1u << output);
-        } else if (output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) {
+        if (output >= CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL &&
+            output < CONTROLLER_PROFILE_LEFT_SL_OUTPUT) {
             output_triggers[
                 output - CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL] = UINT16_MAX;
+        } else {
+            route_digital_output(output, &output_button_mask,
+                                 &result.state.extra_buttons,
+                                 &left_stick_directions);
         }
     }
 
@@ -417,7 +456,8 @@ ControllerProfileTransformResult controller_profile_transform(
             profile.triggers[input_trigger].output,
             transformed_triggers[input_trigger],
             profile.triggers[input_trigger].digital_threshold,
-            &output_button_mask, output_triggers, output_thresholds);
+            &output_button_mask, &result.state.extra_buttons,
+            output_triggers, output_thresholds, &left_stick_directions);
     }
     controller_profile_apply_button_mask(output_button_mask, &result.state);
 
@@ -427,6 +467,18 @@ ControllerProfileTransformResult controller_profile_transform(
     transform_stick(profile.sticks[1], input.right_stick_x,
                     input.right_stick_y, &result.state.right_stick_x,
                     &result.state.right_stick_y);
+    if (profile.swap_sticks) {
+        const int16_t left_x = result.state.left_stick_x;
+        const int16_t left_y = result.state.left_stick_y;
+        result.state.left_stick_x = result.state.right_stick_x;
+        result.state.left_stick_y = result.state.right_stick_y;
+        result.state.right_stick_x = left_x;
+        result.state.right_stick_y = left_y;
+        const bool left_click = result.state.button_left_stick;
+        result.state.button_left_stick = result.state.button_right_stick;
+        result.state.button_right_stick = left_click;
+    }
+    apply_left_stick_directions(left_stick_directions, &result.state);
     result.state.left_trigger = output_triggers[0];
     result.state.right_trigger = output_triggers[1];
     result.left_trigger_digital_threshold = output_thresholds[0];

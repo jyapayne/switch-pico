@@ -110,9 +110,9 @@ void test_button_masks_and_direct_mapping() {
             "disabled button mapping still produced output");
 
     ControllerProfile invalid = default_profile();
-    invalid.button_map[0] = CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
+    invalid.button_map[0] = CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT;
     require(!controller_profile_validate(invalid),
-            "logical output 18 was accepted");
+            "out-of-range logical output was accepted");
     invalid.button_map[0] = 0xfe;
     require(!controller_profile_validate(invalid),
             "logical output 0xfe was accepted");
@@ -433,7 +433,7 @@ void test_rumble_scaling_and_confirmation_policy() {
             "confirmation policy was not exposed unchanged");
 }
 
-void test_extra_sources_route_without_creating_output_channels() {
+void test_extra_sources_preserve_standard_routes_and_suppress_unmapped_inputs() {
     ControllerProfile profile = default_profile();
     ControllerState input{};
     input.extra_buttons = 0x7f;
@@ -475,6 +475,310 @@ void test_extra_sources_route_without_creating_output_channels() {
             "reserved extra bit became a control or output");
 }
 
+void test_native_extra_destinations_combine_mapped_sources() {
+    ControllerProfile profile = default_profile();
+    profile.button_map[0] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    profile.button_map[1] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    profile.extra_button_map[6] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.triggers[0].output = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    profile.triggers[0].digital_threshold = 30000;
+    ControllerState input{};
+    input.button_south = true;
+    input.button_east = true;
+    input.extra_buttons = 0x41;
+    input.left_trigger = 30000;
+    auto output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0x48 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.state.left_trigger == 0,
+            "native destinations lost contributors or leaked their original outputs");
+
+    input.button_south = false;
+    input.button_east = false;
+    input.extra_buttons = 0;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0x08,
+            "releasing mapped buttons cleared an independently held trigger rail");
+    input.left_trigger = 29999;
+    input.extra_buttons = 1;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0x08,
+            "a below-threshold trigger cleared an independently held extra-source rail");
+    input.extra_buttons = 0;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0,
+            "released extra destinations retained stale mapped presses");
+}
+
+void test_trigger_rails_use_transformed_source_thresholds() {
+    ControllerProfile profile = default_profile();
+    profile.triggers[0].output = CONTROLLER_PROFILE_LEFT_SR_OUTPUT;
+    profile.triggers[0].lower_deadzone = 1000;
+    profile.triggers[0].upper_saturation = 11000;
+    profile.triggers[0].digital_threshold = 32768;
+    profile.triggers[1].output = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.triggers[1].lower_deadzone = 2000;
+    profile.triggers[1].upper_saturation = 22000;
+    profile.triggers[1].digital_threshold = UINT16_MAX;
+    ControllerState input{};
+    input.left_trigger = 5999;
+    input.right_trigger = 21999;
+    auto output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0 &&
+                output.state.left_trigger == 0 && output.state.right_trigger == 0,
+            "trigger rails activated below their transformed thresholds");
+    input.left_trigger = 6000;
+    input.right_trigger = 22000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0x50,
+            "trigger rails missed their calibrated threshold or saturation boundary");
+    profile.triggers[0].curve_q8_8 = 512;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0x40,
+            "trigger-to-rail routing ignored the source response curve");
+    input.left_trigger = 11000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0x50,
+            "curved trigger rail did not preserve the saturated endpoint");
+
+    profile.triggers[0].digital_threshold = 0;
+    profile.triggers[1].digital_threshold = 0;
+    input.left_trigger = 1000;
+    input.right_trigger = 2000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0,
+            "zero-threshold rails activated inside calibrated trigger deadzones");
+    input = {};
+    require(controller_profile_transform(input, profile).state.extra_buttons == 0,
+            "neutral triggers created zero-threshold rail presses");
+    input.left_trigger = 1001;
+    output = controller_profile_transform(input, profile);
+    require(output.state.extra_buttons == 0x10,
+            "first nonzero transformed trigger failed its zero-threshold rail route");
+}
+
+void test_stick_swap_keeps_physical_calibration_and_mapped_clicks() {
+    ControllerProfile profile = default_profile();
+    profile.swap_sticks = true;
+    profile.sticks[0].center_x = 1200;
+    profile.sticks[0].center_y = -900;
+    profile.sticks[0].inner_deadzone = 500;
+    profile.sticks[0].outer_saturation = 20000;
+    profile.sticks[0].invert_x = true;
+    profile.sticks[1].center_x = -3000;
+    profile.sticks[1].center_y = 2000;
+    profile.sticks[1].inner_deadzone = 2000;
+    profile.sticks[1].outer_saturation = 10000;
+    profile.sticks[1].invert_y = true;
+    ControllerState input{};
+    input.left_stick_x = 1700;
+    input.left_stick_y = -900;
+    input.right_stick_x = -3000;
+    input.right_stick_y = 4000;
+    auto output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == 0 &&
+                output.state.right_stick_x == 0 && output.state.right_stick_y == 0,
+            "stick swap moved calibration or inner deadzones off their physical sticks");
+
+    input.left_stick_x = 21200;
+    input.right_stick_y = 12000;
+    input.button_left_stick = true;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 0 &&
+                output.state.left_stick_y == INT16_MIN &&
+                output.state.right_stick_x == INT16_MIN &&
+                output.state.right_stick_y == 0 &&
+                !output.state.button_left_stick && output.state.button_right_stick,
+            "stick swap separated clicks from calibrated saturated axis pairs");
+
+    profile.button_map[10] = 0;
+    profile.button_map[0] = 11;
+    input.button_south = true;
+    output = controller_profile_transform(input, profile);
+    require(output.state.button_south && output.state.button_left_stick &&
+                !output.state.button_right_stick,
+            "stick clicks were swapped before normal output mapping");
+    profile.swap_sticks = false;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == INT16_MIN &&
+                output.state.left_stick_y == 0 &&
+                output.state.right_stick_x == 0 &&
+                output.state.right_stick_y == INT16_MIN &&
+                !output.state.button_left_stick && output.state.button_right_stick,
+            "disabling stick swap did not restore the calibrated normal mappings");
+}
+
+void test_left_stick_directions_cancel_and_normalize_without_button_leaks() {
+    ControllerProfile profile = default_profile();
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.button_map[13] = CONTROLLER_PROFILE_LEFT_STICK_DOWN_OUTPUT;
+    profile.button_map[14] = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+    profile.button_map[15] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    const struct {
+        uint16_t directions;
+        int16_t x;
+        int16_t y;
+    } cases[] = {
+        {0, 0, 0},
+        {1, 0, -32767}, {2, 0, 32767}, {4, -32767, 0}, {8, 32767, 0},
+        {5, -23169, -23169}, {9, 23169, -23169},
+        {6, -23169, 23169}, {10, 23169, 23169},
+        {3, 0, 0}, {12, 0, 0}, {15, 0, 0},
+        {7, -32767, 0}, {11, 32767, 0},
+        {13, 0, -32767}, {14, 0, 32767},
+    };
+    for (const auto& entry : cases) {
+        ControllerState input{};
+        controller_profile_apply_button_mask(entry.directions << 12, &input);
+        input.right_stick_x = 123;
+        input.right_stick_y = -456;
+        const auto output = controller_profile_transform(input, profile);
+        require(output.state.left_stick_x == entry.x &&
+                    output.state.left_stick_y == entry.y,
+                "direction combination lost a cardinal, diagonal, or independent cancellation");
+        const int32_t x = output.state.left_stick_x;
+        const int32_t y = output.state.left_stick_y;
+        require(x * x + y * y <= 32767 * 32767,
+                "digital left-stick vector exceeded the unit radius");
+        require(controller_profile_extract_button_mask(output.state) == 0 &&
+                    output.state.extra_buttons == 0 &&
+                    output.state.left_trigger == 0 && output.state.right_trigger == 0 &&
+                    output.state.right_stick_x == 123 &&
+                    output.state.right_stick_y == -456,
+                "direction mapping leaked Dpad, clicks, rails, triggers, or right-stick movement");
+    }
+}
+
+void test_left_stick_direction_sources_combine_and_release_independently() {
+    ControllerProfile profile = default_profile();
+    profile.button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    profile.extra_button_map[6] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.triggers[0].output = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    profile.triggers[0].digital_threshold = 30000;
+    ControllerState input{};
+    input.button_south = true;
+    input.extra_buttons = 0x41;
+    input.left_trigger = 30000;
+    auto output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 32767 && output.state.left_stick_y == 0 &&
+                output.state.extra_buttons == 0x40 &&
+                controller_profile_extract_button_mask(output.state) == 0 &&
+                output.state.left_trigger == 0,
+            "direction contributors accumulated magnitude or corrupted an independent rail");
+    input.button_south = false;
+    input.left_trigger = 29999;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 32767 && output.state.extra_buttons == 0x40,
+            "releasing button and trigger contributors cleared a held extra direction");
+    input.extra_buttons = 0;
+    input.left_trigger = 30000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 32767 && output.state.extra_buttons == 0,
+            "trigger direction depended on a button contributor or retained a released rail");
+    input.left_trigger = 0;
+    require(states_equal(controller_profile_transform(input, profile).state,
+                         controller_neutral_state()),
+            "releasing every direction contributor left stale output");
+}
+
+void test_trigger_directions_use_transformed_threshold_and_nonzero_guard() {
+    ControllerProfile profile = default_profile();
+    profile.triggers[0].output = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+    profile.triggers[0].lower_deadzone = 1000;
+    profile.triggers[0].upper_saturation = 11000;
+    profile.triggers[0].digital_threshold = 32768;
+    profile.triggers[1].output = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.triggers[1].lower_deadzone = 2000;
+    profile.triggers[1].upper_saturation = 22000;
+    profile.triggers[1].digital_threshold = UINT16_MAX;
+    ControllerState input{};
+    input.left_trigger = 5999;
+    input.right_trigger = 21999;
+    auto output = controller_profile_transform(input, profile);
+    require(states_equal(output.state, controller_neutral_state()),
+            "trigger directions activated below transformed thresholds");
+    input.left_trigger = 6000;
+    input.right_trigger = 22000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == -23169 && output.state.left_stick_y == -23169 &&
+                output.state.left_trigger == 0 && output.state.right_trigger == 0 &&
+                output.state.extra_buttons == 0 &&
+                controller_profile_extract_button_mask(output.state) == 0,
+            "trigger directions missed threshold equality, normalization, or leaked source output");
+    profile.triggers[0].curve_q8_8 = 512;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == -32767,
+            "trigger direction threshold ignored the response curve");
+    input.left_trigger = 11000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == -23169 && output.state.left_stick_y == -23169,
+            "curved trigger direction lost its saturated endpoint");
+    profile.triggers[0].digital_threshold = 0;
+    profile.triggers[1].digital_threshold = 0;
+    input.left_trigger = 1000;
+    input.right_trigger = 2000;
+    require(states_equal(controller_profile_transform(input, profile).state,
+                         controller_neutral_state()),
+            "zero-threshold directions activated inside trigger deadzones");
+    input = {};
+    require(states_equal(controller_profile_transform(input, profile).state,
+                         controller_neutral_state()),
+            "neutral zero-threshold triggers synthesized directions");
+    input.left_trigger = 1001;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == -32767 && output.state.left_stick_y == 0,
+            "first nonzero curved trigger value missed a zero-threshold direction");
+}
+
+void test_left_stick_directions_yield_to_whole_calibrated_swapped_vector() {
+    ControllerProfile profile = default_profile();
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    ControllerState input{};
+    input.dpad_up = true;
+    input.left_stick_x = 1;
+    auto output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 1 && output.state.left_stick_y == 0,
+            "digital direction blended into the neutral axis of a live analog vector");
+    input.left_stick_x = 0;
+    input.left_stick_y = 1;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == 1,
+            "digital direction replaced a nonzero analog Y axis");
+
+    profile.sticks[0].center_x = 1000;
+    profile.sticks[0].center_y = -2000;
+    profile.sticks[0].inner_deadzone = 500;
+    input.left_stick_x = 1500;
+    input.left_stick_y = -2000;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == -32767,
+            "calibration or deadzone was applied after digital fallback");
+    input.left_stick_x = 1501;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x > 0 && output.state.left_stick_y == 0,
+            "first analog value outside the deadzone did not own the whole vector");
+
+    profile.swap_sticks = true;
+    profile.sticks[1].center_x = -3000;
+    profile.sticks[1].center_y = 2000;
+    profile.sticks[1].inner_deadzone = 1000;
+    input.right_stick_x = -2000;
+    input.right_stick_y = 2000;
+    input.button_left_stick = true;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x == 0 && output.state.left_stick_y == -32767 &&
+                output.state.right_stick_x > 0 && output.state.right_stick_y == 0 &&
+                !output.state.button_left_stick && output.state.button_right_stick,
+            "directions followed physical left or changed swapped analog movement and clicks");
+    input.right_stick_x = -1999;
+    output = controller_profile_transform(input, profile);
+    require(output.state.left_stick_x > 0 && output.state.left_stick_y == 0 &&
+                output.state.right_stick_x > 0 && output.state.right_stick_y == 0,
+            "mapped-left analog priority ignored physical-right calibration after swapping");
+}
+
 }  // namespace
 
 int main() {
@@ -483,7 +787,14 @@ int main() {
     test_stick_curves_and_monotonicity();
     test_trigger_boundaries_curves_and_thresholds();
     test_trigger_and_button_cross_mapping();
-    test_extra_sources_route_without_creating_output_channels();
+    test_extra_sources_preserve_standard_routes_and_suppress_unmapped_inputs();
+    test_native_extra_destinations_combine_mapped_sources();
+    test_trigger_rails_use_transformed_source_thresholds();
+    test_stick_swap_keeps_physical_calibration_and_mapped_clicks();
+    test_left_stick_directions_cancel_and_normalize_without_button_leaks();
+    test_left_stick_direction_sources_combine_and_release_independently();
+    test_trigger_directions_use_transformed_threshold_and_nonzero_guard();
+    test_left_stick_directions_yield_to_whole_calibrated_swapped_vector();
     test_default_whole_state_equivalence();
     test_rumble_scaling_and_confirmation_policy();
     return 0;

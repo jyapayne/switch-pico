@@ -1964,6 +1964,8 @@ def test_identity_and_profile_binary_json_round_trip() -> None:
         "nunchuk_swing",
         "combined_swing",
         "combination_window_ms",
+        "native_joycon_layout",
+        "swap_sticks",
     ):
         del legacy_json_object[field]
     del legacy_json_object["motion_toggle_chord"]
@@ -2036,6 +2038,8 @@ def test_schema5_full_macro_stream_migrates_bytes_and_json(monkeypatch) -> None:
         "nunchuk_swing",
         "combined_swing",
         "combination_window_ms",
+        "native_joycon_layout",
+        "swap_sticks",
     ):
         del obj[field]
     for macro in obj["macros"]:
@@ -2087,7 +2091,10 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     legacy_json["schema_version"] = 6
     del legacy_json["extra_button_map"]
     del legacy_json["shift"]["extra_button_map"]
-    for field in ("swing", "nunchuk_swing", "combined_swing", "combination_window_ms"):
+    for field in (
+        "swing", "nunchuk_swing", "combined_swing", "combination_window_ms",
+        "native_joycon_layout", "swap_sticks",
+    ):
         del legacy_json[field]
     assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
     assert config_manager.ControllerProfile.from_json_object(legacy_json) == profile
@@ -2108,7 +2115,7 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     )
 
 
-@pytest.mark.parametrize("version", [7, 8, 9])
+@pytest.mark.parametrize("version", [7, 8, 9, 10, 11])
 def test_schema7_extra_controls_keep_output_channels_and_wire_layout(
     version: int,
 ) -> None:
@@ -2145,6 +2152,9 @@ def test_schema7_extra_controls_keep_output_channels_and_wire_layout(
         obj["macros"][index]["trigger"] = names
         obj["macros"][index]["cancel"] = config_manager.EXTRA_BUTTONS[index + 3]
     obj["schema_version"] = version
+    if version < 10:
+        del obj["native_joycon_layout"]
+        del obj["swap_sticks"]
     if version == 7:
         del obj["swing"]
     elif version == 8:
@@ -2196,17 +2206,303 @@ def test_schema7_extra_controls_keep_output_channels_and_wire_layout(
         ("button_map", "south"),
         ("extra_button_map", "c"),
         ("triggers", "left", "output"),
+        ("shift", "button_map", "south"),
         ("shift", "extra_button_map", "c"),
     ],
 )
-def test_extra_controls_cannot_be_output_destinations(path: tuple[str, ...]) -> None:
+def test_schema9_rejects_extra_output_destinations(path: tuple[str, ...]) -> None:
     obj = config_manager.ControllerProfile.default().to_json_object()
+    obj["schema_version"] = 9
+    del obj["native_joycon_layout"]
+    del obj["swap_sticks"]
     target = obj
     for key in path[:-1]:
         target = target[key]
     target[path[-1]] = "right_sr"
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerProfile.from_json_object(obj)
+
+
+@pytest.mark.parametrize(
+    ("layout", "layout_byte", "swap"),
+    [("paired", 0, False), ("left_solo", 1, True), ("right_solo", 2, False)],
+)
+def test_native_profile_fields_and_rail_outputs_round_trip(
+    layout: str, layout_byte: int, swap: bool
+) -> None:
+    obj = custom_profile().to_json_object()
+    obj["native_joycon_layout"] = layout
+    obj["swap_sticks"] = swap
+    obj["switching_chord"] = ["right_sr"]
+    obj["macros"][0]["trigger"] = ["right_sr"]
+    obj["macros"][0]["cancel"] = "right_sr"
+    obj["shift"]["modifier"] = "left_sl"
+    obj["button_map"]["south"] = "left_sl"
+    obj["extra_button_map"]["c"] = "left_sr"
+    obj["shift"]["button_map"]["east"] = "right_sl"
+    obj["shift"]["button_map"]["north"] = "left_trigger"
+    obj["shift"]["extra_button_map"]["right_sr"] = "right_sr"
+    obj["triggers"]["left"]["output"] = "right_sr"
+    obj["triggers"]["right"]["output"] = "right_sr"
+    profile = config_manager.ControllerProfile.from_json_object(obj)
+    payload = profile.to_bytes()
+    assert payload[376:384] == bytes((layout_byte, int(swap), 0, 0, 0, 0, 0, 0))
+    assert payload[4] == 18
+    assert payload[344] == 19
+    assert payload[268] == 20
+    assert payload[270] == 16
+    assert payload[357] == payload[60] == payload[70] == 21
+    assert payload[358] == payload[362] == 1 << 6
+    assert payload[266] == 21
+    assert profile.macros[0].cancel_control == 24
+    assert config_manager.ControllerProfile.from_bytes(payload) == profile
+    assert profile.to_json_object() == obj
+    obj["triggers"]["left"]["output"] = "left_trigger"
+    obj["triggers"]["right"]["output"] = "left_trigger"
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+
+
+@pytest.mark.parametrize(
+    ("path", "source"),
+    [
+        (("button_map", "south"), "c"),
+        (("extra_button_map", "c"), "gl"),
+        (("triggers", "left", "output"), "gr"),
+        (("shift", "button_map", "south"), "c"),
+        (("shift", "extra_button_map", "c"), "gl"),
+    ],
+)
+def test_source_only_controls_are_not_output_destinations(
+    path: tuple[str, ...], source: str
+) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    target = obj
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = source
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+
+
+def test_left_stick_direction_destinations_round_trip_without_new_sources() -> None:
+    obj = custom_profile().to_json_object()
+    obj["button_map"].update(
+        dpad_up="left_stick_up", dpad_down="left_stick_down",
+        dpad_left="left_stick_left", dpad_right="left_stick_right",
+    )
+    obj["extra_button_map"]["c"] = "left_stick_left"
+    obj["shift"]["button_map"]["south"] = "left_stick_down"
+    obj["shift"]["extra_button_map"]["right_sr"] = "left_stick_right"
+    obj["triggers"]["left"]["output"] = "left_stick_up"
+    obj["triggers"]["right"]["output"] = "left_stick_up"
+    obj["shift"]["modifier"] = "right_sr"
+    obj["shortcuts"]["modifier"] = "right_sr"
+    obj["macros"][0]["trigger"] = ["right_sr"]
+    obj["macros"][0]["cancel"] = "right_sr"
+    profile = config_manager.ControllerProfile.from_json_object(obj)
+    encoded = profile.to_bytes()
+    assert encoded[:4] == struct.pack("<HH", 11, 384)
+    assert encoded[16:20] == bytes((22, 23, 24, 25))
+    assert encoded[344] == 24
+    assert encoded[267] == 23
+    assert encoded[357] == 25
+    assert encoded[60] == encoded[70] == 22
+    assert encoded[378:384] == bytes(6)
+    assert profile.shift.modifier == profile.shortcuts.modifier == 24
+    assert profile.macros[0].trigger_mask == 1 << 24
+    assert profile.macros[0].cancel_control == 24
+    assert profile.button_map[10] == 10
+    assert config_manager.ControllerProfile.from_bytes(encoded) == profile
+    assert config_manager.ControllerProfile.from_json(profile.to_json()) == profile
+    assert profile.to_json_object() == obj
+
+
+@pytest.mark.parametrize(
+    ("path", "offset"),
+    [
+        (("button_map", "south"), 4),
+        (("extra_button_map", "c"), 344),
+        (("triggers", "left", "output"), 60),
+        (("triggers", "right", "output"), 70),
+        (("shift", "button_map", "south"), 267),
+        (("shift", "extra_button_map", "c"), 351),
+    ],
+)
+def test_schema10_rejects_direction_destinations(
+    path: tuple[str, ...], offset: int
+) -> None:
+    obj = config_manager.ControllerProfile.default().to_json_object()
+    obj["schema_version"] = 10
+    target = obj
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = "left_stick_up"
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+    payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    payload[0] = 10
+    payload[offset] = 22
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("switching_chord",), ["left_stick_up"]),
+        (("motion_toggle_chord",), ["left_stick_up"]),
+        (("shift", "modifier"), "left_stick_up"),
+        (("shortcuts", "modifier"), "left_stick_up"),
+        (("macros", 0, "trigger"), ["left_stick_up"]),
+        (("macros", 0, "cancel"), "left_stick_up"),
+        (("swing", "modifier"), "left_stick_up"),
+        (("swing", "button"), "left_stick_up"),
+        (("macros", 0, "steps", 0, "output_buttons"), ["left_stick_up"]),
+    ],
+)
+def test_direction_outputs_do_not_expand_sources_or_macro_swing_buttons(
+    path: tuple[str | int, ...], value: object
+) -> None:
+    obj = custom_profile().to_json_object()
+    target = obj
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+
+
+def test_schema10_native_settings_migrate_without_persistent_writes() -> None:
+    base = custom_profile()
+    expected = replace(
+        base,
+        native_joycon_layout=2,
+        swap_sticks=True,
+        button_map=(18, *base.button_map[1:]),
+        extra_button_map=(19, *base.extra_button_map[1:]),
+        shift=replace(
+            base.shift,
+            button_map=(20, *base.shift.button_map[1:]),
+            extra_button_map=(21, *base.shift.extra_button_map[1:]),
+        ),
+        left_trigger=replace(base.left_trigger, output=21),
+        right_trigger=replace(base.right_trigger, output=21),
+    )
+    legacy_wire = bytearray(expected.to_bytes())
+    legacy_wire[0] = 10
+    legacy_json = expected.to_json_object()
+    legacy_json["schema_version"] = 10
+    assert config_manager.ControllerProfile.from_bytes(legacy_wire) == expected
+    assert config_manager.ControllerProfile.from_json_object(legacy_json) == expected
+    device = FakeDevice()
+    device.profiles[(device.stable_identity.to_bytes(), 1)] = bytes(legacy_wire)
+    profiles_before = device.profiles.copy()
+    active_before = device.active_profiles.copy()
+    generation_before = device.profile_generation
+    assert config_manager.read_profile(device, device.stable_identity, 1) == expected
+    assert device.profiles == profiles_before
+    assert device.active_profiles == active_before
+    assert device.profile_generation == generation_before
+    assert expected.to_bytes()[2:] == legacy_wire[2:]
+    listing = config_manager.parse_profile_list(
+        config_manager.parse_response(
+            make_response(
+                config_manager.OP_PROFILE_LIST,
+                device._profile_list_payload(),
+                schema=10,
+            ),
+            config_manager.OP_PROFILE_LIST,
+        )
+    )
+    assert listing[1].identity == device.stable_identity
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_legacy_button_maps_reject_analog_destinations(version: int) -> None:
+    payload = legacy_profile_wire(version)
+    assert config_manager.ControllerProfile.from_bytes(payload).button_map == tuple(range(16))
+    payload[4] = 16
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+def test_schema9_gestures_migrate_without_persistent_writes() -> None:
+    expected = replace(
+        custom_profile(),
+        swing=config_manager.ProfileSwing(255, 2, 24, 0),
+        nunchuk_swing=config_manager.ProfileSwing(15, 0, 18),
+        combined_swing=config_manager.ProfileCombinedSwing(255, 1, 16),
+        combination_window_ms=200,
+    )
+    legacy_wire = bytearray(expected.to_bytes())
+    legacy_wire[0] = 9
+    legacy_json = expected.to_json_object()
+    legacy_json["schema_version"] = 9
+    del legacy_json["native_joycon_layout"]
+    del legacy_json["swap_sticks"]
+    assert config_manager.ControllerProfile.from_bytes(legacy_wire) == expected
+    assert config_manager.ControllerProfile.from_json_object(legacy_json) == expected
+    device = FakeDevice()
+    device.profiles[(device.stable_identity.to_bytes(), 1)] = bytes(legacy_wire)
+    profiles_before = device.profiles.copy()
+    active_before = device.active_profiles.copy()
+    generation_before = device.profile_generation
+    assert config_manager.read_profile(device, device.stable_identity, 1) == expected
+    assert device.profiles == profiles_before
+    assert device.active_profiles == active_before
+    assert device.profile_generation == generation_before
+    migrated = config_manager.read_selected_profile(device)
+    assert migrated.native_joycon_layout == 0
+    assert migrated.swap_sticks is False
+    assert migrated.to_bytes()[2:] == legacy_wire[2:]
+
+
+@pytest.mark.parametrize(
+    ("offset", "value"),
+    [(4, 18), (60, 18), (70, 24), (344, 18), (267, 16), (351, 16),
+     (376, 1), (377, 1), (383, 1)],
+)
+def test_schema9_keeps_legacy_output_and_reserved_byte_bounds(
+    offset: int, value: int
+) -> None:
+    payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    payload[0] = 9
+    payload[offset] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize(
+    ("offset", "value"),
+    [(376, 3), (376, 255), (377, 2), (377, 128), (377, 255), (383, 1)],
+)
+def test_native_fields_reject_invalid_wire_values(offset: int, value: int) -> None:
+    payload = bytearray(config_manager.ControllerProfile.default().to_bytes())
+    payload[offset] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_bytes(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("native_joycon_layout", "solo"), ("native_joycon_layout", 1),
+     ("native_joycon_layout", None), ("swap_sticks", 1),
+     ("swap_sticks", "false"), ("swap_sticks", None)],
+)
+def test_native_fields_reject_invalid_json_types(field: str, value: object) -> None:
+    obj = custom_profile().to_json_object()
+    obj[field] = value
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.ControllerProfile.from_json_object(obj)
+
+
+def test_missing_native_fields_preserve_legacy_behavior() -> None:
+    expected = custom_profile()
+    obj = expected.to_json_object()
+    del obj["native_joycon_layout"]
+    del obj["swap_sticks"]
+    assert config_manager.ControllerProfile.from_json_object(obj) == expected
 
 
 @pytest.mark.parametrize(
@@ -2289,6 +2585,8 @@ def test_legacy_control_profiles_preserve_custom_actions(version: int) -> None:
         "nunchuk_swing",
         "combined_swing",
         "combination_window_ms",
+        "native_joycon_layout",
+        "swap_sticks",
     ):
         del obj[key]
     assert config_manager.ControllerProfile.from_json_object(obj) == profile
@@ -2389,7 +2687,7 @@ def test_swing_rejects_invalid_in_memory_settings(field: str, value: object) -> 
         (374, 25),
         (375, 29),
         (375, 201),
-        (376, 1),
+        (378, 1),
     ],
 )
 def test_swing_rejects_corrupt_wire_settings(offset: int, value: int) -> None:
@@ -2422,6 +2720,8 @@ def test_swing_json_fields_are_strict(mutation: str) -> None:
     else:
         for field in ("nunchuk_swing", "combined_swing", "combination_window_ms"):
             del obj[field]
+        del obj["native_joycon_layout"]
+        del obj["swap_sticks"]
         obj["schema_version"] = 7
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerProfile.from_json_object(obj)
@@ -2435,7 +2735,10 @@ def test_schema8_swing_migration_preserves_remote_binding() -> None:
     legacy_json = profile.to_json_object()
     legacy_json["schema_version"] = 8
     del legacy_json["swing"]["macro"]
-    for field in ("nunchuk_swing", "combined_swing", "combination_window_ms"):
+    for field in (
+        "nunchuk_swing", "combined_swing", "combination_window_ms",
+        "native_joycon_layout", "swap_sticks",
+    ):
         del legacy_json[field]
     assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
     assert config_manager.ControllerProfile.from_json_object(legacy_json) == profile
@@ -2566,7 +2869,7 @@ def test_combination_window_rejects_out_of_range_or_noninteger_values(
         (("shortcuts", "profiles", 1), "south"),
         (("shortcuts", "profiles", 0), "left_shoulder"),
         (("shift", "modifier"), None),
-        (("shift", "button_map", "south"), "left_trigger"),
+        (("shift", "button_map", "south"), "unknown"),
         (("turbo_settings", "defaults", "rate_hz"), 0),
         (("turbo_settings", "defaults", "rate_hz"), 31),
         (("turbo_settings", "defaults", "duty_percent"), 0),
@@ -2598,7 +2901,7 @@ def test_set_b_rejects_invalid_json_settings(path: tuple, value: object) -> None
         (288, 1),
         (383, 1),
         (265, 3),
-        (267, 16),
+        (267, 26),
         (283, 31),
         (284, 100),
         (285, 0),

@@ -13,12 +13,23 @@ constexpr uint16_t CONTROLLER_PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5;
 constexpr uint16_t CONTROLLER_PROFILE_EXPANDED_SCHEMA_VERSION = 6;
 constexpr uint16_t CONTROLLER_PROFILE_EXTRA_CONTROL_SCHEMA_VERSION = 7;
 constexpr uint16_t CONTROLLER_PROFILE_SWING_SCHEMA_VERSION = 8;
-constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 9;
+constexpr uint16_t CONTROLLER_PROFILE_COMBINED_SWING_SCHEMA_VERSION = 9;
+constexpr uint16_t CONTROLLER_PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION = 10;
+constexpr uint16_t CONTROLLER_PROFILE_SCHEMA_VERSION = 11;
 constexpr size_t CONTROLLER_PROFILE_LEGACY_ENCODED_SIZE = 256;
 constexpr size_t CONTROLLER_PROFILE_ENCODED_SIZE = 384;
 constexpr uint8_t CONTROLLER_PROFILE_COUNT = 8;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT = 16;
 constexpr uint8_t CONTROLLER_PROFILE_LOGICAL_CONTROL_COUNT = 25;
+constexpr uint8_t CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT = 26;
+constexpr uint8_t CONTROLLER_PROFILE_LEFT_SL_OUTPUT = 18;
+constexpr uint8_t CONTROLLER_PROFILE_LEFT_SR_OUTPUT = 19;
+constexpr uint8_t CONTROLLER_PROFILE_RIGHT_SL_OUTPUT = 20;
+constexpr uint8_t CONTROLLER_PROFILE_RIGHT_SR_OUTPUT = 21;
+constexpr uint8_t CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT = 22;
+constexpr uint8_t CONTROLLER_PROFILE_LEFT_STICK_DOWN_OUTPUT = 23;
+constexpr uint8_t CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT = 24;
+constexpr uint8_t CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT = 25;
 constexpr uint8_t CONTROLLER_PROFILE_EXTRA_BUTTON_COUNT = 7;
 constexpr uint8_t CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL = 18;
 constexpr uint8_t CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL = 16;
@@ -89,6 +100,12 @@ static_assert(
     static_cast<uint8_t>(ControllerProfileLogicalButton::kDpadRight) + 1 ==
     CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT);
 
+
+enum class ControllerProfileNativeJoyconLayout : uint8_t {
+    kPaired = 0,
+    kLeftSolo = 1,
+    kRightSolo = 2,
+};
 
 enum class ControllerProfileConfirmationPolicy : uint8_t {
     kNone = 0,
@@ -233,6 +250,9 @@ struct ControllerProfile {
     ControllerProfileSwingConfiguration nunchuk_swing{};
     ControllerProfileCombinedSwingConfiguration combined_swing{};
     uint8_t combination_window_ms = 100;
+    ControllerProfileNativeJoyconLayout native_joycon_layout =
+        ControllerProfileNativeJoyconLayout::kPaired;
+    bool swap_sticks = false;
 };
 
 struct ControllerProfileDatabaseEntry {

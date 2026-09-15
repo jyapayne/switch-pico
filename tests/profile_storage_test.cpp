@@ -1,6 +1,7 @@
 #include "core/controller_identity.h"
 #include "profile/controller_profile.h"
 #include "profile/profile_storage.h"
+#include "controller_profile_legacy_fixtures.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -938,6 +939,85 @@ void test_schema8_swing_migration_is_lazy_and_preserves_existing_data() {
           "editing migrated gestures lost Remote, macros, extras, or metadata");
 }
 
+void test_schema9_native_layout_migration_preserves_profiles() {
+  erase_all();
+  install_populated_catalog(3);
+  const auto id = controller_identity_global();
+  uint8_t legacy[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  static_assert(sizeof(kLegacySchema9Profile) == sizeof(legacy));
+  memcpy(legacy, kLegacySchema9Profile, sizeof(legacy));
+  install_catalog_record(3, PROFILE_STORAGE_RECORDS_OFFSET, 1, id, 0, 1001,
+                         legacy, sizeof(legacy));
+  ProfileStorage storage;
+  ControllerProfile migrated{};
+  uint8_t migrated_bytes[sizeof(legacy)]{};
+  require(storage.initialize(fake_io()) &&
+              storage.get(id, 0, &migrated) == ProfileStorageResult::kOk &&
+              migrated.native_joycon_layout == ControllerProfileNativeJoyconLayout::kPaired &&
+              !migrated.swap_sticks &&
+              controller_profile_encode(migrated, migrated_bytes, sizeof(migrated_bytes)) &&
+              memcmp(legacy + 2, migrated_bytes + 2, sizeof(legacy) - 2) == 0 &&
+              storage.set(id, 0, migrated) == ProfileStorageResult::kUnchanged &&
+              flash.programs == 0 && flash.erases == 0,
+          "reading schema9 changed bindings/gestures or rewrote persistent storage");
+  migrated.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+  migrated.swap_sticks = true;
+  migrated.button_map[5] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+  require(storage.set(id, 0, migrated) == ProfileStorageResult::kOk,
+          "migrated profile could not save solo layout and rail output");
+  ProfileStorage reloaded;
+  ControllerProfile recovered{};
+  uint8_t expected[sizeof(legacy)]{}, actual[sizeof(legacy)]{};
+  char metadata[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+  require(reloaded.initialize(fake_io()) &&
+              reloaded.get(id, 0, &recovered) == ProfileStorageResult::kOk &&
+              controller_profile_encode(migrated, expected, sizeof(expected)) &&
+              controller_profile_encode(recovered, actual, sizeof(actual)) &&
+              memcmp(expected, actual, sizeof(expected)) == 0 &&
+              reloaded.find(id)->active_profile == 0 &&
+              reloaded.get_alias(id, metadata, sizeof(metadata)) == ProfileStorageResult::kOk &&
+              strcmp(metadata, "A") == 0 &&
+              reloaded.get_profile_name(id, 0, metadata, sizeof(metadata)) == ProfileStorageResult::kOk &&
+              strcmp(metadata, "A0") == 0,
+          "solo-layout save/reload lost existing profile settings or metadata");
+}
+
+void test_schema10_direction_migration_preserves_layout_and_swap() {
+  erase_all();
+  install_populated_catalog(3);
+  const auto id = controller_identity_global();
+  install_catalog_record(3, PROFILE_STORAGE_RECORDS_OFFSET, 1, id, 0, 1001,
+                         kLegacySchema10Profile, sizeof(kLegacySchema10Profile));
+  ProfileStorage storage;
+  ControllerProfile migrated{};
+  uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+  require(storage.initialize(fake_io()) &&
+              storage.get(id, 0, &migrated) == ProfileStorageResult::kOk &&
+              migrated.native_joycon_layout != ControllerProfileNativeJoyconLayout::kPaired &&
+              migrated.swap_sticks &&
+              controller_profile_encode(migrated, encoded, sizeof(encoded)) &&
+              memcmp(encoded + 2, kLegacySchema10Profile + 2, sizeof(encoded) - 2) == 0 &&
+              storage.set(id, 0, migrated) == ProfileStorageResult::kUnchanged &&
+              flash.programs == 0 && flash.erases == 0,
+          "schema10 read changed solo layout/swap/rails or rewrote storage");
+  migrated.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+  require(storage.set(id, 0, migrated) == ProfileStorageResult::kOk,
+          "schema10 profile could not add a digital stick direction");
+  ProfileStorage reloaded;
+  ControllerProfile recovered{};
+  uint8_t expected[sizeof(encoded)]{};
+  char metadata[PROFILE_STORAGE_METADATA_PAYLOAD_SIZE]{};
+  require(reloaded.initialize(fake_io()) &&
+              reloaded.get(id, 0, &recovered) == ProfileStorageResult::kOk &&
+              controller_profile_encode(migrated, expected, sizeof(expected)) &&
+              controller_profile_encode(recovered, encoded, sizeof(encoded)) &&
+              memcmp(encoded, expected, sizeof(encoded)) == 0 &&
+              reloaded.find(id)->active_profile == 0 &&
+              reloaded.get_profile_name(id, 0, metadata, sizeof(metadata)) == ProfileStorageResult::kOk &&
+              strcmp(metadata, "A0") == 0,
+          "digital direction save lost other settings, active selection or metadata");
+}
+
 void require_pair_bank(const ProfileStorage &storage,
                        const ControllerIdentity &owner, uint8_t base,
                        uint8_t active, char name_prefix) {
@@ -1168,6 +1248,8 @@ int main() {
   test_unreadable_legacy_data_is_not_erased();
   test_schema6_read_migration_is_lazy_and_edit_preserves_metadata();
   test_schema8_swing_migration_is_lazy_and_preserves_existing_data();
+  test_schema9_native_layout_migration_preserves_profiles();
+  test_schema10_direction_migration_preserves_layout_and_swap();
   test_pair_seed_independence_reconnect_and_compaction();
   test_pair_capacity_and_unseeded_mutations();
   test_pair_seed_interruption_and_ambiguous_readback();

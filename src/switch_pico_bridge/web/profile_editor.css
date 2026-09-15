@@ -320,6 +320,16 @@ h4 { font-size: 1rem; }
 .controller-live[data-state="live"] { color: var(--mint); }
 .layout-picker { margin-block: 16px 8px; }
 .layout-picker .select { width: 100%; margin-top: 6px; }
+.native-joycon-control { margin-block: 14px 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(14, 23, 42, 0.6); }
+.native-joycon-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; align-items: center; }
+.native-joycon-actions .select { flex: 1 1 220px; }
+.native-joycon-actions .button { flex: 0 0 auto; }
+.stick-swap-panel { margin-top: 14px; }
+.stick-swap-panel .checkbox-pill { display: inline-block; margin-top: 4px; }
+.stick-swap-panel .field-help { margin-top: 10px; }
+.native-joycon-actions .select { min-width: 0; max-width: 100%; }
+.native-joycon-actions .button { min-height: 44px; max-width: 100%; white-space: normal; }
+.stick-swap-panel .checkbox-pill span { min-height: 44px; }
 .wii-orientation-control { margin-block: 14px 10px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(14, 23, 42, 0.6); }
 .wii-orientation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; align-items: center; }
 .wii-orientation-actions .select { flex: 1 1 220px; }

@@ -753,8 +753,8 @@ static void update_switch_report_from_state(SwitchProContext& context) {
     inputs.buttonX = state.button_north;
     inputs.buttonB = state.button_south;
     inputs.buttonA = state.button_east;
-    inputs.buttonRightSR = 0;
-    inputs.buttonRightSL = 0;
+    inputs.buttonRightSR = (state.extra_buttons & (1u << 6)) != 0;
+    inputs.buttonRightSL = (state.extra_buttons & (1u << 5)) != 0;
     inputs.buttonR = state.button_right_shoulder;
     inputs.buttonZR =
         state.right_trigger >= context.right_trigger_threshold;
@@ -764,8 +764,8 @@ static void update_switch_report_from_state(SwitchProContext& context) {
     inputs.buttonThumbL = state.button_left_stick;
     inputs.buttonHome = state.button_system;
     inputs.buttonCapture = state.button_capture;
-    inputs.buttonLeftSR = 0;
-    inputs.buttonLeftSL = 0;
+    inputs.buttonLeftSR = (state.extra_buttons & (1u << 4)) != 0;
+    inputs.buttonLeftSL = (state.extra_buttons & (1u << 3)) != 0;
     inputs.buttonL = state.button_left_shoulder;
     inputs.buttonZL =
         state.left_trigger >= context.left_trigger_threshold;

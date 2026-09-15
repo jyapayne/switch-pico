@@ -9,12 +9,14 @@
 #include "pico/stdlib.h"
 #include "platform/pico/bootsel_pairing_button.h"
 #include "profile/controller_profile_runtime.h"
+#include "profile/profile_service.h"
 
 namespace {
 uint64_t now_us = 1000000;
 uint32_t stage;
 Bluepad32NativeGamepadSnapshot source;
 ControllerProfile profile;
+uint32_t profile_generation = 1;
 bool alternating_shortcut;
 bool shortcut_phase;
 probe_controller_input controls[2];
@@ -39,6 +41,7 @@ int bluepad32_input_backend_native_sample_result(uint8_t, uint64_t) { return -1;
 void bluepad32_input_backend_native_sample_cancel(uint8_t) {}
 void bluepad32_input_backend_queue_profile_feedback(uint8_t, uint32_t, uint8_t, ControllerProfileConfirmationPolicy) {}
 void controller_profile_runtime_reset() { profile = controller_profile_default(controller_identity_global(), 0); }
+uint32_t profile_service_database_generation() { return profile_generation; }
 bool controller_profile_runtime_take_initial_profile_indication(uint8_t, ControllerProfileRuntimeProfileChangeEvent*) { return false; }
 bool controller_profile_runtime_take_profile_change(uint8_t, ControllerProfileRuntimeProfileChangeEvent*) { return false; }
 ControllerProfileTransformResult controller_profile_runtime_transform(
@@ -392,6 +395,284 @@ void nunchuk_buttons_map_to_native_left_shoulders() {
     no_mouse_or_rails();
 }
 
+void inactive_child(uint8_t instance) {
+    memset(reports[instance], 0x5a, sizeof(reports[instance]));
+    assert(!peek(instance) && !controls[instance].active);
+    assert(controls[instance].buttons[0] == 0 && controls[instance].buttons[1] == 0);
+    for (uint8_t byte : controls[instance].stick) assert(byte == 0);
+    for (uint8_t byte : reports[instance]) assert(byte == 0x5a);
+}
+
+void solo_controls_and_explicit_rails() {
+    source.accel_valid = source.gyro_valid = false;
+    calibrate(0, 2000, 2100, 1500, 1400, 1600, 1700);
+    calibrate(1, 1800, 1900, 1700, 1800, 1400, 1500);
+    bool ControllerState::* const faces[] = {
+        &ControllerState::button_south, &ControllerState::button_east,
+        &ControllerState::button_west, &ControllerState::button_north};
+    const uint8_t face_bits[2][4] = {{0x02, 0x08, 0x01, 0x04}, {0x04, 0x01, 0x08, 0x02}};
+    ControllerState& state = source.controller.state;
+    for (uint8_t instance = 0; instance < 2; ++instance) {
+        const bool left = instance == 1;
+        profile = controller_profile_default(controller_identity_global(), 0);
+        profile.native_joycon_layout = left ? ControllerProfileNativeJoyconLayout::kLeftSolo :
+                                             ControllerProfileNativeJoyconLayout::kRightSolo;
+        ++profile_generation;
+        for (unsigned face = 0; face < 4; ++face) {
+            state = {};
+            state.*faces[face] = true;
+            publish(false); consume(instance);
+            assert(reports[instance][2] == face_bits[instance][face]);
+            inactive_child(instance ^ 1);
+        }
+        // Dpad is not silently merged into the four solo face actions.
+        state = {};
+        state.dpad_up = state.dpad_down = state.dpad_left = state.dpad_right = true;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0);
+        profile.button_map[static_cast<unsigned>(ControllerProfileLogicalButton::kDpadRight)] =
+            static_cast<uint8_t>(ControllerProfileLogicalButton::kSouth);
+        ++profile_generation;
+        consume(instance);
+        assert(reports[instance][2] == face_bits[instance][0]);
+
+        state = {};
+        state.button_select = state.button_start = state.button_system = state.button_capture = true;
+        state.button_left_stick = true;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0xc0 && reports[instance][3] == 1);
+        state = {};
+        state.button_right_stick = true;
+        state.right_stick_x = INT16_MIN;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0);
+        assert(stick_x(instance) == (left ? 1800 : 2000));
+        assert(stick_y(instance) == (left ? 1900 : 2100));
+        // A live swap selects the physical right stick AND click, without a
+        // physical publication or a second swap in the native routing layer.
+        profile.swap_sticks = true;
+        ++profile_generation;
+        consume(instance);
+        assert(reports[instance][2] == 0x80);
+        assert(stick_x(instance) == (left ? 1800 : 2000));
+        assert(stick_y(instance) == (left ? 3700 : 400));
+        state.button_right_stick = false;
+        state.button_left_stick = true;
+        state.right_stick_x = 0;
+        state.right_stick_y = INT16_MIN;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0);
+        assert(stick_x(instance) == (left ? 3500 : 400));
+        assert(stick_y(instance) == (left ? 1900 : 2100));
+
+        state = {};
+        state.button_left_shoulder = true;
+        state.left_trigger = UINT16_MAX;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == (left ? 0x30 : 0));
+        assert(reports[instance][3] == 0);
+        state = {};
+        state.button_right_shoulder = true;
+        state.right_trigger = UINT16_MAX;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == (left ? 0 : 0x30));
+        assert(reports[instance][3] == 0);
+        const uint8_t sl = left ? CONTROLLER_PROFILE_LEFT_SL_OUTPUT : CONTROLLER_PROFILE_RIGHT_SL_OUTPUT;
+        const unsigned shoulder_l = static_cast<unsigned>(ControllerProfileLogicalButton::kLeftShoulder);
+        const unsigned shoulder_r = static_cast<unsigned>(ControllerProfileLogicalButton::kRightShoulder);
+        profile.button_map[shoulder_l] = sl;
+        profile.button_map[shoulder_r] = sl + 1;
+        ++profile_generation;
+        state = {};
+        state.button_left_shoulder = true;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0 && reports[instance][3] == 0x80);
+        state.button_right_shoulder = true;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0 && reports[instance][3] == 0xc0);
+        state.button_left_shoulder = false;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0 && reports[instance][3] == 0x40);
+        // Mapping to the other child's rails never creates a selected-side chord.
+        profile.button_map[shoulder_l] = left ? CONTROLLER_PROFILE_RIGHT_SL_OUTPUT : CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+        profile.button_map[shoulder_r] = left ? CONTROLLER_PROFILE_RIGHT_SR_OUTPUT : CONTROLLER_PROFILE_LEFT_SR_OUTPUT;
+        ++profile_generation;
+        state.button_left_shoulder = true;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0 && reports[instance][3] == 0);
+        inactive_child(instance ^ 1);
+        // A mapped analog source reaches the same rail wire bit only at its
+        // transformed digital threshold; unmapped physical extras cannot leak.
+        profile.triggers[0].output = sl;
+        profile.triggers[0].digital_threshold = 20000;
+        ++profile_generation;
+        state = {};
+        state.extra_buttons = 0x7f;
+        state.left_trigger = 19999;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0 && reports[instance][3] == 0);
+        state.left_trigger = 20000;
+        publish(false); consume(instance);
+        assert(reports[instance][2] == 0 && reports[instance][3] == 0x80);
+    }
+}
+
+void profile_changes_retire_tokens_without_source_publication() {
+    profile = controller_profile_default(controller_identity_global(), 0);
+    ++profile_generation;
+    source.controller.state = {};
+    source.controller.state.button_south = source.controller.state.dpad_left = true;
+    source.accel_valid = source.gyro_valid = false;
+    publish(false);
+    const uint32_t paired_right = peek(0), paired_left = peek(1);
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    ++profile_generation;
+    assert(!probe_controller_input_commit_native_report(0, paired_right));
+    assert(!probe_controller_input_commit_native_report(1, paired_left));
+    consume(0);
+    assert(reports[0][2] == 0x02);
+    inactive_child(1);
+    const uint32_t solo_right = peek(0);
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+    ++profile_generation;
+    assert(!probe_controller_input_commit_native_report(0, solo_right));
+    consume(1);
+    assert(reports[1][2] == 0x04);
+    inactive_child(0);
+    const uint32_t solo_left = peek(1);
+    // Even an ordinary mapping edit in the same layout retires old reports.
+    profile.button_map[static_cast<unsigned>(ControllerProfileLogicalButton::kSouth)] =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kNorth);
+    ++profile_generation;
+    assert(!probe_controller_input_commit_native_report(1, solo_left));
+    consume(1);
+    assert(reports[1][2] == 0x02);
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kPaired;
+    ++profile_generation;
+    pair();
+    assert(reports[0][2] == 0x08 && reports[1][2] == 0x04);
+}
+
+void digital_dpad_reaches_the_mapped_left_stick() {
+    source.accel_valid = source.gyro_valid = false;
+    source.controller.active = true;
+    calibrate(0, 2048, 2048, 1000, 1000, 1000, 1000);
+    calibrate(1, 2048, 2048, 1000, 1000, 1000, 1000);
+    profile = controller_profile_default(controller_identity_global(), 0);
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.button_map[13] = CONTROLLER_PROFILE_LEFT_STICK_DOWN_OUTPUT;
+    profile.button_map[14] = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+    profile.button_map[15] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    ++profile_generation;
+    ControllerState& state = source.controller.state;
+    state = {};
+    state.dpad_up = true;
+    publish(false); pair();
+    assert(stick_x(1) == 2048 && stick_y(1) == 3048);
+    assert(stick_x(0) == 2048 && stick_y(0) == 2048);
+    assert(reports[0][2] == 0 && reports[1][2] == 0);
+
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    ++profile_generation;
+    consume(0);
+    assert(stick_x(0) == 1048 && stick_y(0) == 2048);
+    inactive_child(1);
+    state.dpad_right = true;
+    publish(false); consume(0);
+    assert(stick_x(0) == 1341 && stick_y(0) == 2755);
+    profile.native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+    ++profile_generation;
+    consume(1);
+    assert(stick_x(1) == 2755 && stick_y(1) == 1341);
+    inactive_child(0);
+
+    // Digital directions still target mapped LEFT after swapping. Physical
+    // left movement now belongs to mapped right and must not block them.
+    profile.swap_sticks = true;
+    ++profile_generation;
+    state.dpad_up = false;
+    state.left_stick_x = INT16_MAX;
+    publish(false); consume(1);
+    assert(stick_x(1) == 2048 && stick_y(1) == 1048);
+    state.right_stick_y = INT16_MAX;
+    publish(false); consume(1);
+    assert(stick_x(1) == 1048 && stick_y(1) == 2048);
+    // Releasing all inputs cannot leave a generated stick or click held.
+    state = {};
+    publish(false); consume(1);
+    assert(stick_x(1) == 2048 && stick_y(1) == 2048 && reports[1][2] == 0);
+}
+
+void solo_motion_rotates_coherently_and_resets_frame() {
+    profile = controller_profile_default(controller_identity_global(), 0);
+    source.controller.state = {};
+    ++source.controller.connection_generation;
+    source.track_stationary_bias = false;
+    source.accel_valid = source.gyro_valid = true;
+    source.accel_q13[0] = 2048;
+    source.accel_q13[1] = 4096;
+    source.accel_q13[2] = -4096;
+    // Parallel acceleration/rate vectors turn about reference gravity. A
+    // one-sided or sign-inconsistent rotation cannot preserve this motion.
+    source.gyro_q10[0] = 30 * 1024;
+    source.gyro_q10[1] = 60 * 1024;
+    source.gyro_q10[2] = -60 * 1024;
+    const ControllerProfileNativeJoyconLayout layouts[] = {
+        ControllerProfileNativeJoyconLayout::kPaired,
+        ControllerProfileNativeJoyconLayout::kLeftSolo,
+        ControllerProfileNativeJoyconLayout::kRightSolo,
+        ControllerProfileNativeJoyconLayout::kPaired};
+    const int32_t body_accel[4][3] = {
+        {2048, 4096, 4096}, {4096, 4096, -2048},
+        {-4096, 4096, 2048}, {2048, 4096, 4096}};
+    uint32_t previous_token = 0;
+    uint8_t previous_instance = 0;
+    publish();
+    for (unsigned layout = 0; layout < 4; ++layout) {
+        profile.native_joycon_layout = layouts[layout];
+        ++profile_generation;
+        if (previous_token)
+            assert(!probe_controller_input_commit_native_report(previous_instance, previous_token));
+        const uint8_t instance = layout == 1 ? 1 : layout == 2 ? 0 :
+            (SWITCH2_BRIDGE_IMU_TARGET_MASK & 1) ? 0 : 1;
+        consume(instance);
+        if (layout == 1 || layout == 2) inactive_child(instance ^ 1);
+        if (!(SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << instance))) {
+            assert(imu_length(instance) == 0);
+            continue;
+        }
+        assert(imu_length(instance) == 30);
+        const uint8_t* imu = reports[instance] + probe_model_imu_data_offset(instance);
+        assert(bits(imu, 12, 12) == 1); // No committed timestamp from the old frame.
+        for (unsigned axis = 0; axis < 3; ++axis)
+            assert(bits(imu, 128 + axis * 32, 32) == static_cast<uint32_t>(body_accel[layout][axis] * 32768));
+        double initial[4]; quaternion(instance, initial);
+        const double w = sqrt((1.0 + body_accel[layout][2] / 6144.0) / 2.0);
+        const double expected[4] = {
+            w, body_accel[layout][1] / (12288.0 * w),
+            -body_accel[layout][0] / (12288.0 * w), 0};
+        double dot = 0;
+        for (unsigned i = 0; i < 4; ++i) dot += initial[i] * expected[i];
+        assert(fabs(fabs(dot) - 1.0) < 1e-6);
+        for (unsigned sample = 0; sample < 250; ++sample) { publish(); consume(instance); }
+        double turned[4]; quaternion(instance, turned);
+        const double half = sqrt(.5);
+        const double expected_turn[4] = {
+            half * initial[0], half * (initial[1] - initial[2]),
+            half * (initial[1] + initial[2]), half * initial[0]};
+        dot = 0;
+        for (unsigned i = 0; i < 4; ++i) dot += turned[i] * expected_turn[i];
+        assert(fabs(fabs(dot) - 1.0) < 1e-5);
+        consume(instance);
+        assert(imu_length(instance) == 0); // No repeated sensor provenance.
+        publish();
+        previous_token = peek(instance);
+        previous_instance = instance;
+        assert(previous_token && imu_length(instance) == 30);
+        // Next layout uses this exact fresh source sample, not a new publication.
+    }
+}
+
 } // namespace
 
 int main() {
@@ -407,5 +688,9 @@ int main() {
     selected_motion_target_keeps_both_control_halves();
     wii_bias_and_independent_sensor_freshness();
     nunchuk_buttons_map_to_native_left_shoulders();
+    solo_controls_and_explicit_rails();
+    profile_changes_retire_tokens_without_source_publication();
+    digital_dpad_reaches_the_mapped_left_stick();
+    solo_motion_rotates_coherently_and_resets_frame();
     return 0;
 }

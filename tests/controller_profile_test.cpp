@@ -136,9 +136,9 @@ void test_profile_wire_schema() {
     uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
     require(controller_profile_encode(profile, encoded, sizeof(encoded)),
             "default profile did not encode");
-    require(encoded[0] == 9 && encoded[1] == 0 &&
+    require(encoded[0] == 11 && encoded[1] == 0 &&
                 encoded[2] == 0x80 && encoded[3] == 1,
-            "profile header is not little-endian v9/384");
+            "profile header is not little-endian v11/384");
     for (uint8_t index = 0;
          index < CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT; ++index) {
         require(encoded[4 + index] == index,
@@ -226,7 +226,7 @@ void test_profile_wire_schema() {
             "nonzero reserved profile byte was accepted");
 
     ControllerProfile invalid = profile;
-    invalid.button_map[0] = CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
+    invalid.button_map[0] = CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT;
     require(!controller_profile_validate(invalid),
             "invalid direct output was accepted");
     invalid = profile;
@@ -582,8 +582,8 @@ void test_set_b_sparse_extension_and_migration() {
     profile.shortcuts.selectors[7] = 0;
     require(!controller_profile_validate(profile), "duplicate shortcut was accepted");
     profile.shortcuts.selectors[7] = 15;
-    profile.shift.button_map[0] = 16;
-    require(!controller_profile_validate(profile), "analog Shift output was accepted");
+    profile.shift.button_map[0] = CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT;
+    require(!controller_profile_validate(profile), "out-of-range Shift output was accepted");
     profile.shift.button_map[0] = 0;
     profile.turbo_overrides[2].rate_hz = 31;
     require(!controller_profile_validate(profile), "out-of-range Turbo rate was accepted");
@@ -730,17 +730,17 @@ void test_extra_control_schema_round_trip_and_output_limits() {
                 "out-of-range extra-control mask was accepted");
         encoded[offset] &= 0x7f;
     }
-    profile.extra_button_map[0] = 18;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT;
     require(!controller_profile_validate(profile),
-            "extra input was accepted as a console output destination");
+            "out-of-range extra output was accepted");
     profile.extra_button_map[0] = 0;
-    profile.triggers[0].output = 18;
+    profile.triggers[0].output = CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT;
     require(!controller_profile_validate(profile),
-            "analog trigger was allowed to route into a source-only control");
+            "analog trigger was allowed to route into an invalid control");
     profile.triggers[0].output = 0;
-    profile.shift.extra_button_map[0] = 16;
+    profile.shift.extra_button_map[0] = CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT;
     require(!controller_profile_validate(profile),
-            "Shift extra mapping admitted an analog destination");
+            "Shift extra mapping admitted an invalid destination");
 }
 
 void test_schema7_migration_preserves_extra_controls_and_macros() {
@@ -810,6 +810,195 @@ void test_schema8_migration_preserves_remote_swing() {
         require(!controller_profile_decode(legacy, sizeof(legacy), &migrated),
                 "schema8 interpreted reserved padding as new swing actions");
         legacy[offset] = 0;
+    }
+}
+
+void test_schema9_migration_preserves_all_settings() {
+    ControllerProfile migrated{};
+    migrated.native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    migrated.swap_sticks = true;
+    uint8_t upgraded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_decode(kLegacySchema9Profile,
+                                      sizeof(kLegacySchema9Profile), &migrated) &&
+                controller_profile_encode(migrated, upgraded, sizeof(upgraded)) &&
+                memcmp(kLegacySchema9Profile + 2, upgraded + 2,
+                       sizeof(upgraded) - 2) == 0 &&
+                migrated.native_joycon_layout ==
+                    ControllerProfileNativeJoyconLayout::kPaired &&
+                !migrated.swap_sticks &&
+                migrated.swing.macro == 0 &&
+                migrated.nunchuk_swing.button == 15 &&
+                migrated.combined_swing.macro == 3 &&
+                migrated.combination_window_ms == 200,
+            "schema9 migration lost settings or enabled native layout/stick swapping");
+    const uint16_t output_offsets[] = {4, 60, 70, 344, 267, 351};
+    for (uint16_t offset : output_offsets) {
+        uint8_t malformed[sizeof(kLegacySchema9Profile)]{};
+        memcpy(malformed, kLegacySchema9Profile, sizeof(malformed));
+        malformed[offset] = offset == 267 || offset == 351 ? 16 : 18;
+        require(!controller_profile_decode(malformed, sizeof(malformed), &migrated),
+                "schema9 accepted a formerly invalid output destination");
+    }
+    for (size_t offset = 376; offset < sizeof(kLegacySchema9Profile); ++offset) {
+        uint8_t malformed[sizeof(kLegacySchema9Profile)]{};
+        memcpy(malformed, kLegacySchema9Profile, sizeof(malformed));
+        malformed[offset] = 1;
+        require(!controller_profile_decode(malformed, sizeof(malformed), &migrated),
+                "schema9 reinterpreted reserved bytes as layout/stick swapping");
+    }
+}
+
+void test_schema10_migration_preserves_native_settings() {
+    ControllerProfile migrated{};
+    uint8_t upgraded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    require(controller_profile_decode(kLegacySchema10Profile,
+                                      sizeof(kLegacySchema10Profile), &migrated) &&
+                controller_profile_encode(migrated, upgraded, sizeof(upgraded)) &&
+                upgraded[0] == 11 &&
+                memcmp(kLegacySchema10Profile + 2, upgraded + 2,
+                       sizeof(upgraded) - 2) == 0 &&
+                migrated.native_joycon_layout ==
+                    ControllerProfileNativeJoyconLayout::kRightSolo &&
+                migrated.swap_sticks &&
+                migrated.button_map[0] == CONTROLLER_PROFILE_LEFT_SL_OUTPUT &&
+                migrated.extra_button_map[0] == CONTROLLER_PROFILE_LEFT_SR_OUTPUT &&
+                migrated.shift.button_map[0] == CONTROLLER_PROFILE_RIGHT_SL_OUTPUT &&
+                migrated.shift.extra_button_map[0] == CONTROLLER_PROFILE_RIGHT_SR_OUTPUT &&
+                migrated.triggers[0].output == CONTROLLER_PROFILE_RIGHT_SR_OUTPUT &&
+                migrated.triggers[1].output == CONTROLLER_PROFILE_RIGHT_SR_OUTPUT,
+            "schema10 migration changed rail destinations, layout, or swapping");
+    const uint16_t output_offsets[] = {4, 60, 70, 344, 267, 351};
+    for (uint16_t offset : output_offsets) {
+        uint8_t malformed[sizeof(kLegacySchema10Profile)]{};
+        memcpy(malformed, kLegacySchema10Profile, sizeof(malformed));
+        malformed[offset] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+        require(!controller_profile_decode(malformed, sizeof(malformed), &migrated),
+                "schema10 accepted a schema11 direction destination");
+    }
+    for (size_t offset = 378; offset < sizeof(kLegacySchema10Profile); ++offset) {
+        uint8_t malformed[sizeof(kLegacySchema10Profile)]{};
+        memcpy(malformed, kLegacySchema10Profile, sizeof(malformed));
+        malformed[offset] = 1;
+        require(!controller_profile_decode(malformed, sizeof(malformed), &migrated),
+                "schema10 accepted nonzero reserved padding");
+    }
+}
+
+void test_direction_outputs_preserve_input_namespace() {
+    ControllerProfile profile{};
+    require(controller_profile_decode(kLegacySchema10Profile,
+                                      sizeof(kLegacySchema10Profile), &profile),
+            "direction fixture did not decode");
+    profile.button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.button_map[13] = CONTROLLER_PROFILE_LEFT_STICK_DOWN_OUTPUT;
+    profile.button_map[14] = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+    profile.button_map[15] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_LEFT_OUTPUT;
+    profile.shift.button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_DOWN_OUTPUT;
+    profile.shift.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_STICK_RIGHT_OUTPUT;
+    profile.triggers[0].output = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.triggers[1].output = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.shortcuts.modifier = 24;
+    profile.shift.modifier = 24;
+    profile.macros[0].trigger_mask = 1u << 24;
+    profile.macros[0].cancel_control = 24;
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    ControllerProfile decoded{};
+    require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
+                encoded[0] == 11 && encoded[16] == 22 && encoded[17] == 23 &&
+                encoded[18] == 24 && encoded[19] == 25 &&
+                decoded.button_map[10] == 10 &&
+                decoded.extra_button_map[0] == 24 &&
+                decoded.shift.button_map[0] == 23 &&
+                decoded.shift.extra_button_map[0] == 25 &&
+                decoded.triggers[0].output == 22 && decoded.triggers[1].output == 22 &&
+                decoded.shortcuts.modifier == 24 && decoded.shift.modifier == 24 &&
+                decoded.macros[0].trigger_mask == 1u << 24 &&
+                decoded.macros[0].cancel_control == 24,
+            "direction destinations changed encoding, clicks, or source indices");
+    uint8_t round_trip[sizeof(encoded)]{};
+    require(controller_profile_encode(decoded, round_trip, sizeof(round_trip)) &&
+                memcmp(encoded, round_trip, sizeof(encoded)) == 0,
+            "direction destinations did not survive re-encoding");
+    for (size_t offset = 378; offset < sizeof(encoded); ++offset) {
+        encoded[offset] = 1;
+        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "schema11 consumed reserved padding");
+        encoded[offset] = 0;
+    }
+    profile.shift.modifier = 25;
+    require(!controller_profile_validate(profile),
+            "new output destination expanded source-control indices");
+    profile.shift.modifier = 24;
+    profile.swing.button = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profile.swing.macro = CONTROLLER_PROFILE_NO_BUTTON;
+    require(!controller_profile_validate(profile),
+            "direction destination expanded swing output buttons");
+}
+
+void test_legacy_button_only_destinations() {
+    for (uint8_t schema = 1; schema <= 2; ++schema) {
+        uint8_t encoded[sizeof(kLegacyDefaultProfile)]{};
+        memcpy(encoded, kLegacyDefaultProfile, sizeof(encoded));
+        encoded[0] = schema;
+        ControllerProfile decoded{};
+        require(controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "legacy button-only fixture did not decode");
+        encoded[4] = CONTROLLER_PROFILE_LEFT_TRIGGER_CONTROL;
+        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "schema1/2 accepted a schema3 output destination");
+    }
+}
+
+void test_native_layout_and_mapping_boundaries() {
+    ControllerProfile profile{};
+    require(controller_profile_decode(kLegacySchema9Profile,
+                                      sizeof(kLegacySchema9Profile), &profile),
+            "native layout fixture did not decode");
+    profile.button_map[0] = CONTROLLER_PROFILE_LEFT_SL_OUTPUT;
+    profile.extra_button_map[0] = CONTROLLER_PROFILE_LEFT_SR_OUTPUT;
+    profile.shift.button_map[0] = CONTROLLER_PROFILE_RIGHT_SL_OUTPUT;
+    profile.shift.extra_button_map[0] = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.triggers[0].output = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    profile.triggers[1].output = CONTROLLER_PROFILE_RIGHT_SR_OUTPUT;
+    uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+    ControllerProfile decoded{};
+    for (uint8_t layout = 0; layout <= 2; ++layout) {
+        profile.native_joycon_layout =
+            static_cast<ControllerProfileNativeJoyconLayout>(layout);
+        for (uint8_t swap = 0; swap <= 1; ++swap) {
+            profile.swap_sticks = swap != 0;
+            require(controller_profile_encode(profile, encoded, sizeof(encoded)) &&
+                        encoded[376] == layout && encoded[377] == swap &&
+                        controller_profile_decode(encoded, sizeof(encoded), &decoded) &&
+                        decoded.native_joycon_layout == profile.native_joycon_layout &&
+                        decoded.swap_sticks == profile.swap_sticks &&
+                        decoded.button_map[0] == 18 &&
+                        decoded.extra_button_map[0] == 19 &&
+                        decoded.shift.button_map[0] == 20 &&
+                        decoded.shift.extra_button_map[0] == 21 &&
+                        decoded.triggers[0].output == 21 &&
+                        decoded.triggers[1].output == 21,
+                    "native fields or shared rail destinations did not round-trip");
+        }
+    }
+    const uint8_t invalid_layouts[] = {3, 255};
+    for (uint8_t layout : invalid_layouts) {
+        profile.native_joycon_layout =
+            static_cast<ControllerProfileNativeJoyconLayout>(layout);
+        require(!controller_profile_validate(profile),
+                "out-of-range native layout was accepted");
+        encoded[376] = layout;
+        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "out-of-range wire native layout was accepted");
+    }
+    encoded[376] = 2;
+    const uint8_t invalid_flags[] = {2, 128, 255};
+    for (uint8_t flags : invalid_flags) {
+        encoded[377] = flags;
+        require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
+                "reserved stick-swap flags were accepted");
     }
 }
 
@@ -895,8 +1084,8 @@ void test_swing_wire_settings_and_rejection() {
         require(!controller_profile_decode(malformed, sizeof(malformed), &decoded),
                 "out-of-range combination window was accepted from wire");
     }
-    for (size_t offset = 376; offset < sizeof(encoded); ++offset) {
-        require(encoded[offset] == 0, "schema9 reserved tail was not zero");
+    for (size_t offset = 378; offset < sizeof(encoded); ++offset) {
+        require(encoded[offset] == 0, "profile reserved tail was not zero");
         encoded[offset] = 1;
         require(!controller_profile_decode(encoded, sizeof(encoded), &decoded),
                 "nonzero swing extension reservation was accepted");
@@ -986,7 +1175,28 @@ void test_swing_macro_targets_require_playable_steps() {
 }
 
 }  // namespace
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--legacy9") == 0) {
+        std::cout.write(reinterpret_cast<const char*>(kLegacySchema9Profile),
+                        sizeof(kLegacySchema9Profile));
+        return std::cout ? 0 : 1;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--legacy10") == 0) {
+        std::cout.write(reinterpret_cast<const char*>(kLegacySchema10Profile),
+                        sizeof(kLegacySchema10Profile));
+        return std::cout ? 0 : 1;
+    }
+    if (argc == 2 && std::strcmp(argv[1], "--codec") == 0) {
+        uint8_t encoded[CONTROLLER_PROFILE_ENCODED_SIZE]{};
+        std::cin.read(reinterpret_cast<char*>(encoded), sizeof(encoded));
+        const size_t size = static_cast<size_t>(std::cin.gcount());
+        ControllerProfile profile{};
+        require(controller_profile_decode(encoded, size, &profile) &&
+                    controller_profile_encode(profile, encoded, sizeof(encoded)),
+                "cross-language profile failed to decode/encode");
+        std::cout.write(reinterpret_cast<const char*>(encoded), sizeof(encoded));
+        return std::cout ? 0 : 1;
+    }
     test_pair_identity_wire_and_member_validation();
     test_profile_wire_schema();
     test_legacy_profile_migration();
@@ -997,6 +1207,11 @@ int main() {
     test_extra_control_schema_round_trip_and_output_limits();
     test_schema7_migration_preserves_extra_controls_and_macros();
     test_schema8_migration_preserves_remote_swing();
+    test_schema9_migration_preserves_all_settings();
+    test_schema10_migration_preserves_native_settings();
+    test_direction_outputs_preserve_input_namespace();
+    test_legacy_button_only_destinations();
+    test_native_layout_and_mapping_boundaries();
     test_swing_wire_settings_and_rejection();
     test_swing_macro_targets_require_playable_steps();
     return 0;

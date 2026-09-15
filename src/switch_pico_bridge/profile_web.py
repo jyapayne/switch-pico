@@ -70,8 +70,12 @@ _CONTROL_LABELS = {
         "start": "Menu",
         "capture": "Share",
         "system": "Xbox",
-        "left_stick": "Left Stick",
-        "right_stick": "Right Stick",
+        "left_stick": "Left Stick Click",
+        "right_stick": "Right Stick Click",
+        "left_stick_up": "Left Stick Up",
+        "left_stick_down": "Left Stick Down",
+        "left_stick_left": "Left Stick Left",
+        "left_stick_right": "Left Stick Right",
     },
     "xbox": {
         "north": "Y",
@@ -86,8 +90,8 @@ _CONTROL_LABELS = {
         "start": "Menu",
         "capture": "Share",
         "system": "Xbox",
-        "left_stick": "Left Stick",
-        "right_stick": "Right Stick",
+        "left_stick": "Left Stick Click",
+        "right_stick": "Right Stick Click",
     },
     "switch": {
         "north": "X",
@@ -102,8 +106,12 @@ _CONTROL_LABELS = {
         "start": "Plus",
         "capture": "Capture",
         "system": "Home",
-        "left_stick": "Left Stick",
-        "right_stick": "Right Stick",
+        "left_stick": "Left Stick Click",
+        "right_stick": "Right Stick Click",
+        "left_stick_up": "Left Stick Up",
+        "left_stick_down": "Left Stick Down",
+        "left_stick_left": "Left Stick Left",
+        "left_stick_right": "Left Stick Right",
         "c": "C",
         "gl": "GL",
         "gr": "GR",
@@ -125,8 +133,8 @@ _CONTROL_LABELS = {
         "start": "Options",
         "capture": "Touchpad",
         "system": "PS",
-        "left_stick": "L3",
-        "right_stick": "R3",
+        "left_stick": "L3 Click",
+        "right_stick": "R3 Click",
     },
     "wii": {
         "north": "B",
@@ -196,9 +204,9 @@ def _controller_presentation(
 def _source_controls(controller: dict[str, str]) -> list[str]:
     layout = controller["layout"]
     if layout == "switch2-pro":
-        controls = config_manager.OUTPUT_CONTROLS + ("c", "gl", "gr")
+        controls = config_manager.STANDARD_CONTROLS + ("c", "gl", "gr")
     elif layout == "joycon2-pair":
-        controls = config_manager.OUTPUT_CONTROLS + (
+        controls = config_manager.STANDARD_CONTROLS + (
             "c", "left_sl", "left_sr", "right_sl", "right_sr",
         )
     elif layout in {"joycon2-left", "joycon2-right"}:
@@ -218,7 +226,7 @@ def _source_controls(controller: dict[str, str]) -> list[str]:
             ("left_shoulder", "right_shoulder") if layout == "wii-nunchuk" else ()
         )
     elif layout in {"switch-pro", "dualsense", "xbox"} or controller["style"] == "playstation":
-        controls = config_manager.OUTPUT_CONTROLS
+        controls = config_manager.STANDARD_CONTROLS
     else:
         controls = config_manager.LOGICAL_CONTROLS
     return list(controls)
@@ -315,6 +323,7 @@ class ProfileEditorHandler(BaseHTTPRequestHandler):
                     "turbo_modes": list(config_manager.TURBO_MODES),
                     "shift_modes": list(config_manager.SHIFT_MODES),
                     "swing_sensitivities": list(config_manager.SWING_SENSITIVITIES),
+                    "native_joycon_layouts": list(config_manager.NATIVE_JOYCON_LAYOUTS),
                     "combination_window_bounds": {
                         "min": config_manager.PROFILE_COMBINATION_WINDOW_MIN,
                         "max": config_manager.PROFILE_COMBINATION_WINDOW_MAX,

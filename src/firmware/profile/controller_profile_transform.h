@@ -12,6 +12,8 @@ struct ControllerProfileTransformResult {
         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD;
     uint16_t right_trigger_digital_threshold =
         CONTROLLER_PROFILE_DEFAULT_DIGITAL_THRESHOLD;
+    ControllerProfileNativeJoyconLayout native_joycon_layout =
+        ControllerProfileNativeJoyconLayout::kPaired;
 };
 
 uint16_t controller_profile_extract_button_mask(const ControllerState& state);

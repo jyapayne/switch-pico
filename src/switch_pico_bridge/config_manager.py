@@ -154,7 +154,9 @@ PROFILE_SPARSE_MACRO_SCHEMA_VERSION = 5
 PROFILE_EXPANDED_SCHEMA_VERSION = 6
 PROFILE_EXTRA_CONTROL_SCHEMA_VERSION = 7
 PROFILE_SWING_SCHEMA_VERSION = 8
-PROFILE_SCHEMA_VERSION = 9
+PROFILE_COMBINED_SWING_SCHEMA_VERSION = 9
+PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION = 10
+PROFILE_SCHEMA_VERSION = 11
 PROFILE_LEGACY_SIZE = 256
 PROFILE_SIZE = 384
 PROFILE_CAPACITY = 8
@@ -292,11 +294,18 @@ LOGICAL_BUTTONS = (
     "dpad_left",
     "dpad_right",
 )
-OUTPUT_CONTROLS = LOGICAL_BUTTONS + ("left_trigger", "right_trigger")
+ANALOG_TRIGGER_CONTROLS = ("left_trigger", "right_trigger")
+STANDARD_CONTROLS = LOGICAL_BUTTONS + ANALOG_TRIGGER_CONTROLS
 EXTRA_BUTTONS = ("c", "gl", "gr", "left_sl", "left_sr", "right_sl", "right_sr")
-LOGICAL_CONTROLS = OUTPUT_CONTROLS + EXTRA_BUTTONS
+LOGICAL_CONTROLS = STANDARD_CONTROLS + EXTRA_BUTTONS
+RAIL_OUTPUTS = ("left_sl", "left_sr", "right_sl", "right_sr")
+LEFT_STICK_DIRECTION_OUTPUTS = (
+    "left_stick_up", "left_stick_down", "left_stick_left", "left_stick_right"
+)
+OUTPUT_CONTROLS = STANDARD_CONTROLS + RAIL_OUTPUTS + LEFT_STICK_DIRECTION_OUTPUTS
 PROFILE_LOGICAL_CONTROL_MASK = (1 << len(LOGICAL_CONTROLS)) - 1
 RUMBLE_POLICIES = ("none", "rumble", "led", "rumble_and_led")
+NATIVE_JOYCON_LAYOUTS = ("paired", "left_solo", "right_solo")
 TURBO_MODES = ("off", "turbo", "auto_burst", "burst")
 SHIFT_MODES = ("off", "hold", "toggle")
 MACRO_PLAYBACK_MODES = ("once", "while_held", "toggle", "repeat")
@@ -738,7 +747,7 @@ def _control_index(
     controls = (
         LOGICAL_CONTROLS
         if schema_version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION
-        else OUTPUT_CONTROLS
+        else STANDARD_CONTROLS
     )
     if type(value) is not str or value not in controls:
         choices = ", ".join(controls)
@@ -746,10 +755,39 @@ def _control_index(
     return controls.index(value)
 
 
+def _output_index(
+    value: Any,
+    name: str,
+    *,
+    schema_version: int = PROFILE_SCHEMA_VERSION,
+    shift: bool = False,
+) -> int:
+    if schema_version < PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION:
+        if shift or schema_version < PROFILE_CONTROL_MAPPING_SCHEMA_VERSION:
+            return _button_index(value, name)
+        return _control_index(
+            value, name, schema_version=PROFILE_EXPANDED_SCHEMA_VERSION
+        )
+    if value is None:
+        return PROFILE_NONE_BUTTON
+    outputs = (
+        OUTPUT_CONTROLS
+        if schema_version >= PROFILE_SCHEMA_VERSION
+        else STANDARD_CONTROLS + RAIL_OUTPUTS
+    )
+    return _require_enum(value, outputs, name)
+
+
 def _control_name(value: int) -> str | None:
     if value == PROFILE_NONE_BUTTON:
         return None
     return LOGICAL_CONTROLS[value]
+
+
+def _output_name(value: int) -> str | None:
+    if value == PROFILE_NONE_BUTTON:
+        return None
+    return OUTPUT_CONTROLS[value]
 
 
 def _button_mask_from_json(value: Any, name: str) -> int:
@@ -1267,6 +1305,15 @@ class TriggerConfig:
             if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
             else len(LOGICAL_BUTTONS) + source_index
         )
+        output_count = (
+            len(OUTPUT_CONTROLS)
+            if schema_version >= PROFILE_SCHEMA_VERSION
+            else len(STANDARD_CONTROLS) + len(RAIL_OUTPUTS)
+            if schema_version >= PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION
+            else len(STANDARD_CONTROLS)
+        )
+        if output != PROFILE_NONE_BUTTON and output >= output_count:
+            raise ConfigManagerError("invalid legacy trigger output mapping")
         lower, upper, curve_q8_8, threshold = struct.unpack("<HHHH", payload[:8])
         return cls(lower, upper, curve_q8_8, threshold, output)
 
@@ -1287,7 +1334,7 @@ class TriggerConfig:
             "upper_saturation": self.upper_saturation,
             "curve_q8_8": self.curve_q8_8,
             "digital_threshold": self.digital_threshold,
-            "output": _control_name(self.output),
+            "output": _output_name(self.output),
         }
 
     @classmethod
@@ -1309,7 +1356,9 @@ class TriggerConfig:
             fields += ("output",)
         obj = _require_object(value, fields, name)
         output = (
-            _control_index(obj["output"], f"{name}.output")
+            _output_index(
+                obj["output"], f"{name}.output", schema_version=schema_version
+            )
             if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
             else len(LOGICAL_BUTTONS) + source_index
         )
@@ -1667,20 +1716,20 @@ class ProfileShift:
             )
         for output in (*self.button_map, *self.extra_button_map):
             if type(output) is not int or (
-                output != PROFILE_NONE_BUTTON and not 0 <= output < len(LOGICAL_BUTTONS)
+                output != PROFILE_NONE_BUTTON and not 0 <= output < len(OUTPUT_CONTROLS)
             ):
-                raise ConfigManagerError("Shift outputs must be buttons or null")
+                raise ConfigManagerError("invalid Shift output mapping")
 
     def to_json_object(self) -> dict[str, Any]:
         return {
             "mode": SHIFT_MODES[self.mode],
             "modifier": _control_name(self.modifier),
             "button_map": {
-                name: _button_name(self.button_map[index])
+                name: _output_name(self.button_map[index])
                 for index, name in enumerate(LOGICAL_BUTTONS)
             },
             "extra_button_map": {
-                name: _button_name(self.extra_button_map[index])
+                name: _output_name(self.extra_button_map[index])
                 for index, name in enumerate(EXTRA_BUTTONS)
             },
         }
@@ -1709,11 +1758,17 @@ class ProfileShift:
                 obj["modifier"], "profile.shift.modifier", schema_version=schema_version
             ),
             tuple(
-                _button_index(mappings[name], f"profile.shift.button_map.{name}")
+                _output_index(
+                    mappings[name], f"profile.shift.button_map.{name}",
+                    schema_version=schema_version, shift=True,
+                )
                 for name in LOGICAL_BUTTONS
             ),
             tuple(
-                _button_index(extras[name], f"profile.shift.extra_button_map.{name}")
+                _output_index(
+                    extras[name], f"profile.shift.extra_button_map.{name}",
+                    schema_version=schema_version, shift=True,
+                )
                 for name in EXTRA_BUTTONS
             ),
         )
@@ -1900,7 +1955,7 @@ class ProfileSwing:
         schema_version: int = PROFILE_SCHEMA_VERSION,
     ) -> ProfileSwing:
         fields = ["button", "sensitivity", "modifier"]
-        if schema_version >= PROFILE_SCHEMA_VERSION:
+        if schema_version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION:
             fields.append("macro")
         obj = _require_object(value, fields, name)
         return cls(
@@ -1912,7 +1967,7 @@ class ProfileSwing:
                 obj["modifier"], f"{name}.modifier", schema_version=schema_version
             ),
             _swing_macro_index(obj["macro"], f"{name}.macro")
-            if schema_version >= PROFILE_SCHEMA_VERSION
+            if schema_version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION
             else PROFILE_NONE_BUTTON,
         )
 
@@ -1967,6 +2022,8 @@ class ControllerProfile:
     nunchuk_swing: ProfileSwing = ProfileSwing()
     combined_swing: ProfileCombinedSwing = ProfileCombinedSwing()
     combination_window_ms: int = PROFILE_COMBINATION_WINDOW_DEFAULT
+    native_joycon_layout: int = 0
+    swap_sticks: bool = False
 
     def __post_init__(self) -> None:
         if type(self.button_map) is not tuple or len(self.button_map) != len(
@@ -1994,7 +2051,7 @@ class ControllerProfile:
         routed_triggers = [
             trigger.output
             for trigger in (self.left_trigger, self.right_trigger)
-            if len(LOGICAL_BUTTONS) <= trigger.output < len(OUTPUT_CONTROLS)
+            if len(LOGICAL_BUTTONS) <= trigger.output < len(STANDARD_CONTROLS)
         ]
         if len(routed_triggers) != len(set(routed_triggers)):
             raise ConfigManagerError(
@@ -2076,6 +2133,13 @@ class ControllerProfile:
             PROFILE_COMBINATION_WINDOW_MIN,
             PROFILE_COMBINATION_WINDOW_MAX,
         )
+        _require_int(
+            self.native_joycon_layout,
+            "profile.native_joycon_layout",
+            0,
+            len(NATIVE_JOYCON_LAYOUTS) - 1,
+        )
+        _require_bool(self.swap_sticks, "profile.swap_sticks")
         if not isinstance(self.turbo_defaults, TurboSettings):
             raise ConfigManagerError("Turbo defaults must be TurboSettings")
         if (
@@ -2145,9 +2209,10 @@ class ControllerProfile:
         sparse_macros = version >= PROFILE_SPARSE_MACRO_SCHEMA_VERSION
         has_extra_buttons = version >= PROFILE_EXTRA_CONTROL_SCHEMA_VERSION
         has_swing = version >= PROFILE_SWING_SCHEMA_VERSION
-        has_combined_swing = version >= PROFILE_SCHEMA_VERSION
+        has_combined_swing = version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION
+        has_native_layout = version >= PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION
         control_count = (
-            len(LOGICAL_CONTROLS) if has_extra_buttons else len(OUTPUT_CONTROLS)
+            len(LOGICAL_CONTROLS) if has_extra_buttons else len(STANDARD_CONTROLS)
         )
         if sparse_macros:
             if payload[75] & 0xCC:
@@ -2163,6 +2228,36 @@ class ControllerProfile:
             payload[81] != 0 or payload[98:100] != b"\x00\x00"
         ):
             raise ConfigManagerError("legacy profile reserved fields must be zero")
+        if version < PROFILE_SCHEMA_VERSION:
+            output_count = (
+                len(STANDARD_CONTROLS) + len(RAIL_OUTPUTS)
+                if has_native_layout
+                else len(STANDARD_CONTROLS)
+                if has_control_mapping
+                else len(LOGICAL_BUTTONS)
+            )
+            mappings = payload[4:20]
+            if has_extra_buttons:
+                mappings += payload[344:351]
+            if any(
+                output != PROFILE_NONE_BUTTON and output >= output_count
+                for output in mappings
+            ):
+                raise ConfigManagerError("invalid legacy output mapping")
+            if version >= PROFILE_EXPANDED_SCHEMA_VERSION:
+                shift_output_count = (
+                    output_count if has_native_layout else len(LOGICAL_BUTTONS)
+                )
+                shift_mappings = payload[267:283]
+                if has_extra_buttons:
+                    shift_mappings += payload[351:358]
+                if any(
+                    output != PROFILE_NONE_BUTTON and output >= shift_output_count
+                    for output in shift_mappings
+                ):
+                    raise ConfigManagerError("invalid legacy Shift output mapping")
+        if has_native_layout and payload[377] & ~1:
+            raise ConfigManagerError("invalid profile stick-swap flags")
 
         left_trigger = TriggerConfig.from_bytes(
             payload[52:62], schema_version=version, source_index=0
@@ -2327,7 +2422,9 @@ class ControllerProfile:
             if payload[settings_offset:336] != bytes(336 - settings_offset):
                 raise ConfigManagerError("nonzero Turbo override padding")
             reserved_offset = (
-                376
+                378
+                if has_native_layout
+                else 376
                 if has_combined_swing
                 else 367
                 if has_swing
@@ -2376,6 +2473,8 @@ class ControllerProfile:
             combination_window_ms=payload[375]
             if has_combined_swing
             else PROFILE_COMBINATION_WINDOW_DEFAULT,
+            native_joycon_layout=payload[376] if has_native_layout else 0,
+            swap_sticks=bool(payload[377] & 1) if has_native_layout else False,
         )
 
     def to_bytes(self) -> bytes:
@@ -2479,6 +2578,8 @@ class ControllerProfile:
                 self.combination_window_ms,
             )
         )
+        payload[376] = self.native_joycon_layout
+        payload[377] = int(self.swap_sticks)
         return bytes(payload)
 
     def to_json_object(self) -> dict[str, Any]:
@@ -2486,11 +2587,11 @@ class ControllerProfile:
             "schema_version": PROFILE_SCHEMA_VERSION,
             "size": PROFILE_SIZE,
             "button_map": {
-                name: _control_name(self.button_map[index])
+                name: _output_name(self.button_map[index])
                 for index, name in enumerate(LOGICAL_BUTTONS)
             },
             "extra_button_map": {
-                name: _control_name(self.extra_button_map[index])
+                name: _output_name(self.extra_button_map[index])
                 for index, name in enumerate(EXTRA_BUTTONS)
             },
             "sticks": {
@@ -2519,6 +2620,8 @@ class ControllerProfile:
             "nunchuk_swing": self.nunchuk_swing.to_json_object(),
             "combined_swing": self.combined_swing.to_json_object(),
             "combination_window_ms": self.combination_window_ms,
+            "native_joycon_layout": NATIVE_JOYCON_LAYOUTS[self.native_joycon_layout],
+            "swap_sticks": self.swap_sticks,
             "turbo_settings": {
                 "defaults": self.turbo_defaults.to_json_object(),
                 "overrides": {
@@ -2570,8 +2673,12 @@ class ControllerProfile:
             fields.append("extra_button_map")
         if schema_version >= PROFILE_SWING_SCHEMA_VERSION:
             fields.append("swing")
-        if schema_version >= PROFILE_SCHEMA_VERSION:
+        if schema_version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION:
             fields.extend(("nunchuk_swing", "combined_swing", "combination_window_ms"))
+        if schema_version >= PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION:
+            fields.extend(
+                name for name in ("native_joycon_layout", "swap_sticks") if name in value
+            )
         obj = _require_object(value, fields, "profile")
         expected_size = (
             PROFILE_SIZE
@@ -2723,11 +2830,10 @@ class ControllerProfile:
 
         return cls(
             button_map=tuple(
-                (
-                    _control_index
-                    if schema_version >= PROFILE_CONTROL_MAPPING_SCHEMA_VERSION
-                    else _button_index
-                )(button_map[name], f"profile.button_map.{name}")
+                _output_index(
+                    button_map[name], f"profile.button_map.{name}",
+                    schema_version=schema_version,
+                )
                 for name in LOGICAL_BUTTONS
             ),
             left_stick=StickConfig.from_json_object(
@@ -2767,7 +2873,10 @@ class ControllerProfile:
             turbo_defaults=turbo_defaults,
             turbo_overrides=tuple(turbo_overrides),
             extra_button_map=tuple(
-                _control_index(extras[name], f"profile.extra_button_map.{name}")
+                _output_index(
+                    extras[name], f"profile.extra_button_map.{name}",
+                    schema_version=schema_version,
+                )
                 for name in EXTRA_BUTTONS
             ),
             swing=(
@@ -2779,20 +2888,29 @@ class ControllerProfile:
             ),
             nunchuk_swing=(
                 ProfileSwing.from_json_object(
-                    obj["nunchuk_swing"], "profile.nunchuk_swing"
+                    obj["nunchuk_swing"], "profile.nunchuk_swing",
+                    schema_version=schema_version,
                 )
-                if schema_version >= PROFILE_SCHEMA_VERSION
+                if schema_version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION
                 else ProfileSwing()
             ),
             combined_swing=(
                 ProfileCombinedSwing.from_json_object(obj["combined_swing"])
-                if schema_version >= PROFILE_SCHEMA_VERSION
+                if schema_version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION
                 else ProfileCombinedSwing()
             ),
             combination_window_ms=(
                 obj["combination_window_ms"]
-                if schema_version >= PROFILE_SCHEMA_VERSION
+                if schema_version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION
                 else PROFILE_COMBINATION_WINDOW_DEFAULT
+            ),
+            native_joycon_layout=_require_enum(
+                obj.get("native_joycon_layout", "paired"),
+                NATIVE_JOYCON_LAYOUTS,
+                "profile.native_joycon_layout",
+            ),
+            swap_sticks=_require_bool(
+                obj.get("swap_sticks", False), "profile.swap_sticks"
             ),
         )
 
@@ -3925,6 +4043,8 @@ def parse_profile_list(envelope: Envelope) -> tuple[ProfileListEntry, ...]:
         PROFILE_EXPANDED_SCHEMA_VERSION,
         PROFILE_EXTRA_CONTROL_SCHEMA_VERSION,
         PROFILE_SWING_SCHEMA_VERSION,
+        PROFILE_COMBINED_SWING_SCHEMA_VERSION,
+        PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile-list schema")
@@ -4005,6 +4125,8 @@ def read_selected_profile(device: UsbDevice) -> ControllerProfile:
         PROFILE_EXPANDED_SCHEMA_VERSION,
         PROFILE_EXTRA_CONTROL_SCHEMA_VERSION,
         PROFILE_SWING_SCHEMA_VERSION,
+        PROFILE_COMBINED_SWING_SCHEMA_VERSION,
+        PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION,
         PROFILE_SCHEMA_VERSION,
     ):
         raise ConfigManagerError("unsupported profile schema")

@@ -52,8 +52,10 @@ bool valid_button(uint8_t button) {
            button == CONTROLLER_PROFILE_NO_BUTTON;
 }
 
-bool valid_control_output(uint8_t output) {
-    return output < CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL ||
+bool valid_control_output(
+    uint8_t output,
+    uint8_t control_count = CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT) {
+    return output < control_count ||
            output == CONTROLLER_PROFILE_NO_BUTTON;
 }
 
@@ -302,7 +304,9 @@ bool controller_profile_validate(const ControllerProfile& profile) {
             return false;
         }
     }
-    if (!valid_source_control(profile.shortcuts.modifier) ||
+    if (static_cast<uint8_t>(profile.native_joycon_layout) >
+            static_cast<uint8_t>(ControllerProfileNativeJoyconLayout::kRightSolo) ||
+        !valid_source_control(profile.shortcuts.modifier) ||
         !valid_swing_action(profile.swing.button, profile.swing.macro,
                             profile.swing.modifier) ||
         !valid_swing_action(profile.nunchuk_swing.button,
@@ -337,12 +341,12 @@ bool controller_profile_validate(const ControllerProfile& profile) {
         selectors |= static_cast<uint16_t>(1u << selector);
     }
     for (uint8_t output : profile.shift.button_map) {
-        if (!valid_button(output)) {
+        if (!valid_control_output(output)) {
             return false;
         }
     }
     for (uint8_t output : profile.shift.extra_button_map) {
-        if (!valid_button(output)) {
+        if (!valid_control_output(output)) {
             return false;
         }
     }
@@ -588,6 +592,8 @@ bool controller_profile_encode(const ControllerProfile& profile,
     output[373] = profile.combined_swing.macro;
     output[374] = profile.combined_swing.modifier;
     output[375] = profile.combination_window_ms;
+    output[376] = static_cast<uint8_t>(profile.native_joycon_layout);
+    output[377] = profile.swap_sticks ? 1u : 0u;
     return stream_offset <= CONTROLLER_PROFILE_MACRO_STREAM_SIZE;
 }
 
@@ -624,7 +630,9 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
     const bool has_swing =
         schema_version >= CONTROLLER_PROFILE_SWING_SCHEMA_VERSION;
     const bool has_combined_swing =
-        schema_version >= CONTROLLER_PROFILE_SCHEMA_VERSION;
+        schema_version >= CONTROLLER_PROFILE_COMBINED_SWING_SCHEMA_VERSION;
+    const bool has_native_layout =
+        schema_version >= CONTROLLER_PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION;
     if ((has_control_mapping
              ? input[61] != 0 || input[71] != 0
              : !profile_bytes_are_zero(&input[60], 2) ||
@@ -860,8 +868,10 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
         }
         if (!has_extra_controls &&
             (!profile_bytes_are_zero(&input[344], 40) ||
-             !valid_control_output(profile.shortcuts.modifier) ||
-             !valid_control_output(profile.shift.modifier))) {
+             !valid_control_output(profile.shortcuts.modifier,
+                                   CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL) ||
+             !valid_control_output(profile.shift.modifier,
+                                   CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL))) {
             return false;
         }
     } else {
@@ -883,7 +893,8 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
             }
         }
         const size_t reserved_offset =
-            has_combined_swing ? 376 : (has_swing ? 367 : 364);
+            has_native_layout ? 378 :
+            (has_combined_swing ? 376 : (has_swing ? 367 : 364));
         if (!profile_bytes_are_zero(
                 &input[reserved_offset], expected_size - reserved_offset)) {
             return false;
@@ -899,7 +910,8 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
                                        << CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
     } else {
         for (const ControllerProfileMacro& macro : profile.macros) {
-            if (!valid_control_output(macro.cancel_control)) {
+            if (!valid_control_output(macro.cancel_control,
+                                      CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL)) {
                 return false;
             }
         }
@@ -913,6 +925,51 @@ bool controller_profile_decode(const uint8_t* input, size_t input_size,
             input[368], input[369], input[370], input[371]};
         profile.combined_swing = {input[372], input[373], input[374]};
         profile.combination_window_ms = input[375];
+    }
+    if (has_native_layout) {
+        if ((input[377] & ~1u) != 0) {
+            return false;
+        }
+        profile.native_joycon_layout =
+            static_cast<ControllerProfileNativeJoyconLayout>(input[376]);
+        profile.swap_sticks = (input[377] & 1u) != 0;
+    }
+    if (schema_version < CONTROLLER_PROFILE_SCHEMA_VERSION) {
+        const uint8_t output_count =
+            has_native_layout ? CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT
+                              : CONTROLLER_PROFILE_FIRST_EXTRA_CONTROL;
+        const uint8_t button_output_count =
+            has_control_mapping ? output_count
+                                : CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT;
+        const uint8_t shift_output_count =
+            has_native_layout ? output_count
+                              : CONTROLLER_PROFILE_LOGICAL_BUTTON_COUNT;
+        for (uint8_t mapping : profile.button_map) {
+            if (!valid_control_output(mapping, button_output_count)) {
+                return false;
+            }
+        }
+        for (uint8_t mapping : profile.extra_button_map) {
+            if (!valid_control_output(mapping, output_count)) {
+                return false;
+            }
+        }
+        for (const ControllerProfileTriggerConfiguration& trigger :
+             profile.triggers) {
+            if (!valid_control_output(trigger.output, output_count)) {
+                return false;
+            }
+        }
+        for (uint8_t mapping : profile.shift.button_map) {
+            if (!valid_control_output(mapping, shift_output_count)) {
+                return false;
+            }
+        }
+        for (uint8_t mapping : profile.shift.extra_button_map) {
+            if (!valid_control_output(mapping, shift_output_count)) {
+                return false;
+            }
+        }
     }
     if (!controller_profile_validate(profile)) {
         return false;

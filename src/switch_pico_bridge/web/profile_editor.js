@@ -114,6 +114,10 @@ const elements = {
   controllerLayoutPreview: document.querySelector("#controllerLayoutPreview"),
   controllerLayoutHelp: document.querySelector("#controllerLayoutHelp"),
   controllerLayoutNote: document.querySelector("#controllerLayoutNote"),
+  nativeJoyconLayout: document.querySelector("#nativeJoyconLayoutSelect"),
+  mapShoulders: document.querySelector("#mapShouldersButton"),
+  mapDpad: document.querySelector("#mapDpadButton"),
+  swapSticks: document.querySelector("#swapSticksCheckbox"),
   wiiOrientationControl: document.querySelector("#wiiOrientationControl"),
   wiiOrientation: document.querySelector("#wiiOrientationSelect"),
   applyWiiOrientation: document.querySelector("#applyWiiOrientationButton"),
@@ -220,6 +224,12 @@ const directionalLabels = {
   dpad_right: "D-pad Right",
   dpad_down: "D-pad Down",
   dpad_left: "D-pad Left",
+  left_stick: "Left Stick Click",
+  right_stick: "Right Stick Click",
+  left_stick_up: "Left Stick Up",
+  left_stick_down: "Left Stick Down",
+  left_stick_left: "Left Stick Left",
+  left_stick_right: "Left Stick Right",
   c: "C",
   gl: "GL",
   gr: "GR",
@@ -291,6 +301,53 @@ function controlLabel(control, style = currentControllerStyle()) {
     label(control);
 }
 
+const nativeLayoutLabels = {
+  paired: "Paired",
+  left_solo: "Left sideways",
+  right_solo: "Right sideways",
+};
+const soloFaceLabels = {
+  left_solo: {
+    south: "Bottom / Left Joy-Con Left arrow",
+    east: "Right / Left Joy-Con Down arrow",
+    west: "Left / Left Joy-Con Up arrow",
+    north: "Top / Left Joy-Con Right arrow",
+  },
+  right_solo: {
+    south: "Bottom / Right Joy-Con A",
+    east: "Right / Right Joy-Con X",
+    west: "Left / Right Joy-Con B",
+    north: "Top / Right Joy-Con Y",
+  },
+};
+
+function outputLabel(control, style = currentControllerStyle()) {
+  const layout = state.profile?.native_joycon_layout || "paired";
+  if (soloFaceLabels[layout]) {
+    if (soloFaceLabels[layout][control]) return soloFaceLabels[layout][control];
+    if (control.startsWith("dpad_")) return `${controlLabel(control, "switch")} · no separate solo D-pad`;
+    if (control === "left_stick") return "Solo stick click · mapped left output";
+    if (control === "right_stick") return "Right stick click · unused in solo";
+    if (control.startsWith("left_stick_")) return `${controlLabel(control, "switch")} · mapped left movement`;
+    return controlLabel(control, "switch");
+  }
+  return controlLabel(control, style);
+}
+
+function renderNativeLayout() {
+  const layout = state.profile?.native_joycon_layout || "paired";
+  const choices = state.schema?.native_joycon_layouts || [];
+  elements.nativeJoyconLayout.innerHTML = choices.map(value =>
+    `<option value="${value}"${layout === value ? " selected" : ""}>${nativeLayoutLabels[value]}</option>`
+  ).join("");
+  elements.nativeJoyconLayout.disabled = state.busy || captureBlocking() || !state.profile;
+  elements.mapShoulders.hidden = layout === "paired";
+  elements.mapShoulders.disabled = elements.nativeJoyconLayout.disabled;
+  if (elements.mapDpad) elements.mapDpad.disabled = elements.nativeJoyconLayout.disabled;
+  elements.swapSticks.checked = Boolean(state.profile?.swap_sticks);
+  elements.swapSticks.disabled = elements.nativeJoyconLayout.disabled;
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -300,7 +357,6 @@ function canonical(value) {
 }
 
 const {
-  transformStick,
   transformTrigger,
   stickCoordinates,
   triggerPercent,
@@ -436,8 +492,7 @@ function renderPlaytest(sample) {
   const mapped = ProfilePlaytestMath.transformMappings(sample, state.profile, state.playtestShift.active);
   const rawLeft = sample.left_stick;
   const rawRight = sample.right_stick;
-  const outputLeft = transformStick(rawLeft, state.profile.sticks.left);
-  const outputRight = transformStick(rawRight, state.profile.sticks.right);
+  const { left: outputLeft, right: outputRight } = ProfilePlaytestMath.transformSticks(sample, state.profile, mapped);
   const outputLeftTrigger = mapped.triggers.left;
   const outputRightTrigger = mapped.triggers.right;
   updateStickPlaytest(
@@ -481,9 +536,9 @@ function renderPlaytest(sample) {
   elements.playtestExtraInputs.textContent =
     (sample.extra_buttons || []).map(button => sourceLabel(button)).join(", ") || "None";
   elements.playtestMappedButtons.textContent =
-    mapped.buttons.map((button) => controlLabel(button, style)).join(", ") || "None";
+    mapped.buttons.map((button) => outputLabel(button, style)).join(", ") || "None";
   elements.playtestMappingHelp.textContent =
-    `${state.playtestShift.active ? "Shift" : "Base"} layer preview; shortcuts, macros and Turbo are not simulated.${state.presentation.liveDiagram ? "" : " Diagram is a reference/preview; physical highlighting is off."}`;
+    `${state.playtestShift.active ? "Shift" : "Base"} layer preview; shortcuts, macros and Turbo are not simulated.${state.profile.swap_sticks ? " Stick axes and mapped clicks are swapped; amber dots and calibration rings remain physical inputs, blue dots are output channels." : ""}${state.profile.native_joycon_layout !== "paired" ? " Native solo uses mapped left axes/click and the selected side's rails; no separate D-pad. Axes show logical output before native wire rotation." : ""}${state.presentation.liveDiagram ? "" : " Diagram is a reference/preview; physical highlighting is off."} Digital stick directions apply only when the mapped left analog stick is neutral within its deadzone (any nonzero analog vector takes priority).`;
   elements.playtestPanel.dataset.state = "live";
   elements.playtestStatus.textContent = "Live";
   const owner = currentOwner();
@@ -822,6 +877,7 @@ function setBusy(busy) {
   });
   renderCapture();
   renderWiiOrientation();
+  renderNativeLayout();
 }
 
 function updateDirtyState() {
@@ -975,7 +1031,7 @@ function buttonOptions(
     ? `<option value=""${selected === null ? " selected" : ""}>${escapeHtml(noneLabel)}</option>`
     : "";
   return none + choices.map((button) => (
-    `<option value="${button}"${selected === button ? " selected" : ""}>${escapeHtml(controlLabel(button, style))}</option>`
+    `<option value="${button}"${selected === button ? " selected" : ""}>${escapeHtml(outputLabel(button, style))}</option>`
   )).join("");
 }
 
@@ -1001,7 +1057,7 @@ function gestureActionOptions(
   const buttonGroup = choices.length ? `
     <optgroup label="Output buttons">
       ${choices.map((button) => (
-        `<option value="${button}"${selectedButton === button ? " selected" : ""}>${escapeHtml(controlLabel(button, style))}</option>`
+        `<option value="${button}"${selectedButton === button ? " selected" : ""}>${escapeHtml(outputLabel(button, style))}</option>`
       )).join("")}
     </optgroup>` : "";
 
@@ -1118,7 +1174,7 @@ function renderShift() {
     return `
     <div class="control-card" data-source-card="${button}"${sourceAvailable(button) ? "" : " hidden"}>
       <label for="shift-map-${button}"><span data-source-label="${button}">${escapeHtml(sourceLabel(button))}</span> → alternate output</label>
-      <select class="select" id="shift-map-${button}" data-kind="shift-map" data-name="${button}"${shift.mode === "off" || shift.modifier === null ? " disabled" : ""}>${buttonOptions(map[button], true, state.schema.buttons)}</select>
+      <select class="select" id="shift-map-${button}" data-kind="shift-map" data-name="${button}"${shift.mode === "off" || shift.modifier === null ? " disabled" : ""}>${buttonOptions(map[button])}</select>
     </div>`;
   }).join("");
   updateShiftValidity();
@@ -1165,6 +1221,10 @@ const fixedControlGlyphs = {
   dpad_left: "◀",
   left_stick: "L3",
   right_stick: "R3",
+  left_stick_up: "L▲",
+  left_stick_down: "L▼",
+  left_stick_left: "L◀",
+  left_stick_right: "L▶",
   select: "−",
   start: "+",
   capture: "▣",
@@ -1286,7 +1346,7 @@ function renderButtonMap() {
     hotspot.classList.toggle("disabled-map", output == null);
     if (!liveDiagram) hotspot.classList.remove("pressed");
     hotspot.setAttribute("aria-pressed", String(button === selected));
-    hotspot.title = `${sourceLabel(button)} [${button}] → ${output == null ? "Disabled" : controlLabel(output)}`;
+    hotspot.title = `${sourceLabel(button)} [${button}] → ${output == null ? "Disabled" : outputLabel(output)}`;
     hotspot.setAttribute("aria-label", hotspot.title);
   });
   elements.selectedSource.innerHTML = sourceOptions(selected);
@@ -1294,7 +1354,7 @@ function renderButtonMap() {
   elements.selectedControlGlyph.textContent = sourceGlyph(selected);
   elements.selectedControlName.textContent = sourceLabel(selected);
   elements.selectedControlDescription.textContent =
-    `${sourceAvailable(selected) ? "Source" : "Stored / unavailable source"} ${sourceLabel(selected)} [${selected}] produces ${mappedOutput == null ? "no output" : controlLabel(mappedOutput)}.${sourceAvailable(selected) ? "" : " Its mapping is retained; change the preview to locate it."}`;
+    `${sourceAvailable(selected) ? "Source" : "Stored / unavailable source"} ${sourceLabel(selected)} [${selected}] produces ${mappedOutput == null ? "no output" : outputLabel(mappedOutput)}.${sourceAvailable(selected) ? "" : " Its mapping is retained; change the preview to locate it."}`;
   elements.selectedMapping.innerHTML = buttonOptions(mappedOutput, true, state.schema.output_controls, style);
   renderWiiOrientation();
 }
@@ -1323,6 +1383,44 @@ elements.controllerLayoutPreview.addEventListener("change", () => {
   renderButtonMap();
   refreshSourceControls();
 });
+
+elements.nativeJoyconLayout.addEventListener("change", () => {
+  if (state.busy || captureBlocking() || !state.profile) return;
+  state.profile.native_joycon_layout = elements.nativeJoyconLayout.value;
+  stopMacroPreview("Preview stopped: draft edited.");
+  renderNativeLayout();
+  renderButtonMap();
+  refreshSourceControls();
+  updateDirtyState();
+  if (state.liveSample) renderPlaytest(state.liveSample);
+});
+elements.mapShoulders.addEventListener("click", () => {
+  if (state.busy || captureBlocking() || !state.profile) return;
+  const layout = state.profile.native_joycon_layout;
+  if (layout !== "left_solo" && layout !== "right_solo") return;
+  const side = layout === "left_solo" ? "left" : "right";
+  state.profile.button_map.left_shoulder = `${side}_sl`;
+  state.profile.button_map.right_shoulder = `${side}_sr`;
+  stopMacroPreview("Preview stopped: draft edited.");
+  renderButtonMap();
+  updateDirtyState();
+  if (state.liveSample) renderPlaytest(state.liveSample);
+  toast(`Base shoulders mapped to ${label(side)} SL/SR in the unsaved draft. Other mappings are unchanged.`);
+});
+if (elements.mapDpad) {
+  elements.mapDpad.addEventListener("click", () => {
+    if (state.busy || captureBlocking() || !state.profile) return;
+    state.profile.button_map.dpad_up = "left_stick_up";
+    state.profile.button_map.dpad_down = "left_stick_down";
+    state.profile.button_map.dpad_left = "left_stick_left";
+    state.profile.button_map.dpad_right = "left_stick_right";
+    stopMacroPreview("Preview stopped: draft edited.");
+    renderButtonMap();
+    updateDirtyState();
+    if (state.liveSample) renderPlaytest(state.liveSample);
+    toast("Base D-pad mapped to left stick movement (Up, Down, Left, Right) in the unsaved draft. Other mappings are unchanged.");
+  });
+}
 
 // Patch source controls in place on topology changes. Never rerender the editor,
 // stop macro playback, replace focused inputs, or mutate hidden draft values.
@@ -1366,10 +1464,10 @@ function refreshSourceControls() {
   elements.shiftMap.querySelectorAll("select").forEach(select => {
     const map = state.schema.extra_buttons.includes(select.dataset.name)
       ? state.profile.shift.extra_button_map : state.profile.shift.button_map;
-    select.innerHTML = buttonOptions(map[select.dataset.name], true, state.schema.buttons);
+    select.innerHTML = buttonOptions(map[select.dataset.name]);
   });
   document.querySelectorAll("[data-output-label]").forEach(node => {
-    node.textContent = controlLabel(node.dataset.outputLabel);
+    node.textContent = outputLabel(node.dataset.outputLabel);
   });
   updateGestureActionSelects();
 }
@@ -1431,6 +1529,7 @@ function curvePath(curve) {
 }
 
 function renderAnalog() {
+  elements.swapSticks.checked = Boolean(state.profile.swap_sticks);
   elements.analog.innerHTML = analogDefinitions.map(([group, side, title, fields]) => {
     const config = state.profile[group][side];
     const toggles = group === "sticks" ? `
@@ -2374,7 +2473,7 @@ function renderMacro() {
   elements.macroPreviewTitle.textContent = `Macro ${state.selectedMacro + 1} draft preview`;
   elements.macroPreviewButtons.innerHTML = state.schema.buttons.map((button) => `
     <span class="preview-button" data-preview-button="${button}">
-      <b data-output-label="${button}">${escapeHtml(controlLabel(button, controllerStyle))}</b><small>Passthrough</small>
+      <b data-output-label="${button}">${escapeHtml(outputLabel(button, controllerStyle))}</b><small>Passthrough</small>
     </span>`).join("");
   renderMacroSteps();
   updateMacroPlayback();
@@ -2431,7 +2530,7 @@ function renderMacroSteps() {
               ${state.schema.buttons.map((button) => `
                 <label class="checkbox-pill">
                   <input type="checkbox" data-kind="macro-output" data-index="${index}" data-name="${button}"${outputButtons.has(button) ? " checked" : ""}${overrides.has("buttons") ? "" : " disabled"}>
-                  <span data-output-label="${button}">${escapeHtml(controlLabel(button, controllerStyle))}</span>
+                  <span data-output-label="${button}">${escapeHtml(outputLabel(button, controllerStyle))}</span>
                 </label>`).join("")}
             </div>
           </div>
@@ -2461,6 +2560,7 @@ function renderEditor() {
     : "Used when no dedicated controller profile exists.";
   renderIdentities();
   renderProfileList();
+  renderNativeLayout();
   renderButtonMap();
   renderShortcuts();
   renderShift();
@@ -2553,6 +2653,8 @@ function handleFormChange(event) {
     state.profile[target.dataset.group][target.dataset.side][target.dataset.field] = Number(target.value);
   } else if (kind === "analog-bool") {
     state.profile[target.dataset.group][target.dataset.side][target.dataset.field] = target.checked;
+  } else if (kind === "swap-sticks") {
+    state.profile.swap_sticks = target.checked;
   } else if (kind === "curve-preset") {
     if (target.value !== "custom") {
       state.profile[target.dataset.group][target.dataset.side].curve_q8_8 =
@@ -3148,11 +3250,13 @@ document.querySelectorAll("[data-reset-section]").forEach((button) => {
     const defaults = state.schema.default_profile;
     const section = button.dataset.resetSection;
     if (section === "mapping") {
+      state.profile.native_joycon_layout = defaults.native_joycon_layout;
       state.profile.button_map = clone(defaults.button_map);
       state.profile.extra_button_map = clone(defaults.extra_button_map);
       state.profile.triggers.left.output = defaults.triggers.left.output;
       state.profile.triggers.right.output = defaults.triggers.right.output;
     } else if (section === "analog") {
+      state.profile.swap_sticks = defaults.swap_sticks;
       state.profile.sticks = clone(defaults.sticks);
       const leftOutput = state.profile.triggers.left.output;
       const rightOutput = state.profile.triggers.right.output;

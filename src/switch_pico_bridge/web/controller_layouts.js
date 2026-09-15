@@ -47,7 +47,7 @@ const ControllerLayouts = (() => {
   const translate = (controls, x, y = 0) => Object.fromEntries(
     Object.entries(controls).map(([id, value]) => [id, { ...value, x: value.x + x, y: value.y + y }])
   );
-  const railNote = "Rail SL/SR are source-only extras and also emit the left/right shoulder source in solo mode. The physical L or R button shares that shoulder source. Each source ID is editable once; changing an extra does not disable its shoulder alias.";
+  const railNote = "Rail SL/SR are extra inputs and also emit the left/right shoulder source in physical solo mode. The physical L or R button shares that shoulder source. Each source ID is editable once; changing an extra does not disable its shoulder alias. Rail output destinations are available for native Joy-Con and Pro emulation.";
   const wiiCommon = {
     select: point(60, 294, "Minus", "−"), system: point(100, 294, "Home", "Home"),
     start: point(140, 294, "Plus", "+"),
@@ -116,7 +116,7 @@ const ControllerLayouts = (() => {
         left_sl: back("Left SL · rail", "L SL"), left_sr: back("Left SR · rail", "L SR"),
         right_sl: back("Right SL · rail", "R SL"), right_sr: back("Right SR · rail", "R SR"),
       },
-      note: "Select the L+R profile owner for paired settings; its eight profiles are independent of both solo banks. If no L+R owner is listed, update firmware and connect both members. The grip is illustrative, not detected. Rear triggers and rails are not visible in this front view. C and rail inputs are source-only; GL/GR belong to Switch 2 Pro, not Joy-Con 2.",
+      note: "Select the L+R profile owner for paired settings; its eight profiles are independent of both solo banks. If no L+R owner is listed, update firmware and connect both members. The grip is illustrative, not detected. Rear triggers and rails are not visible in this front view. C is a source-only extra; rails can also be mapped outputs. GL/GR belong to Switch 2 Pro, not Joy-Con 2.",
     },
     "joycon2-left": {
       name: "Joy-Con 2 left · sideways solo", style: "switch", asset: "switch-2-joycon-left.svg",
@@ -145,7 +145,7 @@ const ControllerLayouts = (() => {
         right_trigger: back("ZR · rear", "ZR"),
         right_sl: back("SL · rail extra", "SL extra"), right_sr: back("SR · rail extra", "SR extra"),
       },
-      note: "Solo firmware rotates ABXY sources; the right stick becomes LEFT axes and left-stick click. Output labels do not rotate. Select the separate L+R profile owner for paired settings, not this solo bank. " + railNote,
+      note: "Physical solo input rotates ABXY sources; the right stick becomes LEFT axes and left-stick click. The emulated output layout is configured separately in the profile. Select the separate L+R profile owner for paired settings, not this solo bank. " + railNote,
     },
     "wii-remote": {
       name: "Wii Remote · orientation unknown", style: "switch", asset: "wii-remote-simple.svg",

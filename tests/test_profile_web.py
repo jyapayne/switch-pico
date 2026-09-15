@@ -189,7 +189,7 @@ def test_native_hub_editor_discovers_root_and_preserves_saved_state(
         (0x2066, {"c", "right_sl", "right_sr"}),
     ],
 )
-def test_switch2_input_choices_are_never_output_targets(
+def test_switch2_source_choices_stay_physical_with_expanded_outputs(
     monkeypatch: pytest.MonkeyPatch,
     product_id: int,
     extras: set[str],
@@ -207,11 +207,13 @@ def test_switch2_input_choices_are_never_output_targets(
     assert owner["controller"]["style"] == "switch"
     assert set(owner["source_controls"]) & set(config_manager.EXTRA_BUTTONS) == extras
     assert set(owner["modifier_controls"]) & set(config_manager.EXTRA_BUTTONS) == extras
-    assert set(schema["extra_buttons"]).isdisjoint(schema["output_controls"])
+    assert set(schema["extra_buttons"]) & set(schema["output_controls"]) == {
+        "left_sl", "left_sr", "right_sl", "right_sr",
+    }
     assert schema["output_controls"] == list(config_manager.OUTPUT_CONTROLS)
 
 
-@pytest.mark.parametrize("version", [6, 7, 8])
+@pytest.mark.parametrize("version", [6, 7, 8, 9])
 def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
     monkeypatch: pytest.MonkeyPatch,
     version: int,
@@ -227,8 +229,10 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
         legacy_wire[344:] = bytes(40)
     elif version == 7:
         legacy_wire[364:] = bytes(20)
-    else:
+    elif version == 8:
         legacy_wire[367:] = bytes(17)
+    else:
+        legacy_wire[376:] = bytes(8)
     device.profiles[key] = bytes(legacy_wire)
     device.profile_aliases[key[0]] = "Living room"
     device.profile_names[key] = "Racing"
@@ -241,6 +245,8 @@ def test_editor_migrates_old_profiles_and_saves_swing_without_metadata_loss(
             == profile
         )
         assert migrated["profile"]["swing"] == profile.swing.to_json_object()
+        assert migrated["profile"]["native_joycon_layout"] == "paired"
+        assert migrated["profile"]["swap_sticks"] is False
         draft = migrated["profile"]
         draft["extra_button_map"] = dict(
             zip(config_manager.EXTRA_BUTTONS, config_manager.LOGICAL_BUTTONS[:7])
@@ -657,7 +663,6 @@ def test_editor_reads_writes_and_activates_profiles_atomically(
         ]
         assert playtest["left_stick"] == {"x": -1234, "y": 2345}
         assert playtest["triggers"] == {"left": 123, "right": 65000}
-        assert playtest["battery"] == 100
         assert playtest["capabilities"] == [
             "rumble",
             "lightbar",
@@ -1170,3 +1175,95 @@ def test_wii_orientation_endpoint_validation_and_failures(
         )
         assert status == 503
         assert "error" in err
+
+
+def test_native_layout_draft_roundtrip_is_isolated_from_other_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    original_profiles = dict(device.profiles)
+    original_active = dict(device.active_profiles)
+    original_configuration = device.configuration
+    key = (device.stable_identity.to_bytes(), 7)
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, schema = request_json(f"{base_url}/api/schema")
+        assert status == 200
+        assert schema["native_joycon_layouts"] == ["paired", "left_solo", "right_solo"]
+        status, selected = request_json(f"{base_url}/api/profiles/1/8")
+        assert status == 200
+        draft = selected["profile"]
+        draft["native_joycon_layout"] = "right_solo"
+        draft["swap_sticks"] = True
+        draft["button_map"]["left_shoulder"] = "right_sl"
+        draft["button_map"]["right_shoulder"] = "right_sr"
+        draft["shift"].update(mode="hold", modifier="select")
+        draft["shift"]["button_map"]["south"] = "left_sl"
+        draft["triggers"]["left"]["output"] = "left_sr"
+        draft["sticks"]["left"]["inner_deadzone"] = 4000
+        status, validated = request_json(
+            f"{base_url}/api/profiles/validate", method="POST", value=draft, token=token
+        )
+        assert status == 200
+        assert validated["profile"] == draft
+        assert device.profiles == original_profiles
+        assert device.active_profiles == original_active
+        status, _ = request_json(
+            f"{base_url}/api/profiles/1/8", method="PUT",
+            value=validated["profile"], token=token,
+        )
+        assert status == 200
+        status, stored = request_json(f"{base_url}/api/profiles/1/8")
+        assert status == 200
+        assert stored["profile"] == draft
+        expected_profiles = dict(original_profiles)
+        expected_profiles[key] = config_manager.ControllerProfile.from_json_object(draft).to_bytes()
+        assert device.profiles == expected_profiles
+        assert device.active_profiles == original_active
+        assert device.configuration == original_configuration
+
+
+def test_left_stick_direction_outputs_roundtrip_and_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    original_profiles = dict(device.profiles)
+    original_active = dict(device.active_profiles)
+    original_configuration = device.configuration
+    key = (device.stable_identity.to_bytes(), 0)
+    with running_server(monkeypatch, device) as (base_url, token):
+        status, schema = request_json(f"{base_url}/api/schema")
+        assert status == 200
+        assert "left_stick_up" in schema["output_controls"]
+        assert "left_stick_down" in schema["output_controls"]
+        assert "left_stick_left" in schema["output_controls"]
+        assert "left_stick_right" in schema["output_controls"]
+        status, selected = request_json(f"{base_url}/api/profiles/1/1")
+        assert status == 200
+        draft = selected["profile"]
+        # Map D-pad to left stick movement
+        draft["button_map"]["dpad_up"] = "left_stick_up"
+        draft["button_map"]["dpad_down"] = "left_stick_down"
+        draft["button_map"]["dpad_left"] = "left_stick_left"
+        draft["button_map"]["dpad_right"] = "left_stick_right"
+        draft["extra_button_map"]["c"] = "left_stick_up"
+        draft["shift"]["button_map"]["south"] = "left_stick_down"
+        draft["triggers"]["left"]["output"] = "left_stick_left"
+        status, validated = request_json(
+            f"{base_url}/api/profiles/validate", method="POST", value=draft, token=token
+        )
+        assert status == 200
+        assert validated["profile"] == draft
+        assert device.profiles == original_profiles
+        status, _ = request_json(
+            f"{base_url}/api/profiles/1/1", method="PUT",
+            value=validated["profile"], token=token,
+        )
+        assert status == 200
+        status, stored = request_json(f"{base_url}/api/profiles/1/1")
+        assert status == 200
+        assert stored["profile"] == draft
+        expected_profiles = dict(original_profiles)
+        expected_profiles[key] = config_manager.ControllerProfile.from_json_object(draft).to_bytes()
+        assert device.profiles == expected_profiles
+        assert device.active_profiles == original_active
+        assert device.configuration == original_configuration

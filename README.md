@@ -350,15 +350,58 @@ Output mode is selected before TinyUSB starts and never changes while mounted. A
 
 Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `CAFE:4021` (Mac). DInput and Mac expose four input-only generic HID interfaces and no rumble. Mac uses X/Y/Z/Rx sticks plus Simulation Brake/Accelerator triggers. Switch reports input, rumble, and motion capability; XInput reports input and rumble.
 
-`profiles edit` starts a local-only browser editor at `http://127.0.0.1:8765/`. It exposes every profile field: all 16 buttons plus the L2/R2 analog triggers can be remapped to any button or trigger output; both sticks and triggers retain independent deadzone/saturation/curve settings; and rumble, confirmation, Turbo/Auto Burst, built-in action chords, and four custom macro sequences are editable. Its live playtest compares current raw stick and trigger input with the unsaved draft, shows deadzone/saturation boundaries and digital thresholds, and highlights pressed physical controls. Select a controller identity and one of its eight profile slots, use **Start from defaults** for a new draft, then **Save to Pico**. The backend validates the complete profile before using the existing chunked atomic transaction; invalid drafts never reach flash. Use `profiles edit --no-browser` for a printed URL or `profiles edit --port PORT` to choose another local port.
+`profiles edit` starts a local-only browser editor at `http://127.0.0.1:8765/`. It exposes every profile field: all 16 buttons plus the L2/R2 analog triggers can be remapped to ordinary buttons, triggers, or Switch SL/SR rail outputs; both sticks and triggers retain independent deadzone/saturation/curve settings; and rumble, confirmation, Turbo/Auto Burst, built-in action chords, and four custom macro sequences are editable. Its live playtest compares current raw stick and trigger input with the unsaved draft, shows deadzone/saturation boundaries and digital thresholds, and highlights pressed physical controls. Select a controller identity and one of its eight profile slots, use **Start from defaults** for a new draft, then **Save to Pico**. The backend validates the complete profile before using the existing chunked atomic transaction; invalid drafts never reach flash. Use `profiles edit --no-browser` for a printed URL or `profiles edit --port PORT` to choose another local port.
 
-Switch 2's **C, GL, GR, Left SL/SR and Right SL/SR** are additional source-only controls. Map each to a normal button or trigger, assign a button-only alternate Shift mapping, or use it in action/macro chords, cancellation and modifiers. Extra mappings default to disabled. The live playtest shows raw extras separately; they are not fictitious output channels on the emulated Switch Pro/XInput controller.
+Switch 2's **C, GL, GR, Left SL/SR and Right SL/SR** are additional input controls. Base and Shift mappings can route them to ordinary buttons, triggers, or rail outputs; they also remain available in action/macro chords, cancellation and modifiers. Extra input mappings default to disabled. **Left SL, Left SR, Right SL and Right SR** are real output destinations in both native Joy-Con and Switch Pro reports. C/GL/GR remain input sources, not destinations. XInput and generic HID have no rail-button equivalents. Macro and swing output actions retain their existing ordinary-button contract.
 
 Controller Studio uses the supplied lightweight SVGs for Switch 2 Pro, Joy-Con 2 left/right solo and paired layouts, original Switch Pro, DualSense, Xbox, and Wii Remote/Nunchuk views. Hotspots follow the artwork's actual coordinates; solo Joy-Con views rotate with their firmware input mappings. Rear buttons and rails are labeled below the front view rather than drawn in fictitious positions. On narrow screens, pan the diagram or use the **Source control** menu.
 
 **Auto** uses matching-owner live metadata to distinguish Joy-Con pairs/solo halves and Wii horizontal, vertical, and Nunchuk layouts. **Preview** changes only the editor's diagram and source labels; it does not pair controllers or change saved mappings, and physical highlighting is disabled. Source choices reflect the layout while stored unavailable mappings are retained. Legacy Wii metadata without orientation uses a visibly labeled horizontal reference with physical highlighting disabled.
 
 **Wii orientation** is separate from layout preview. Select a connected Wii Remote owner, choose **Horizontal** or **Vertical**, and click **Apply orientation**. Studio waits for firmware confirmation before reporting success. This changes the current connection's physical button mapping, not saved profiles or adapter configuration. Nunchuk mappings remain vertical while attached; unplugging restores the selected standalone orientation. Changing orientation clears old held-input/macro/capture state and advances the logical input generation without reconnecting Bluetooth. Reconnect uses the horizontal default, or vertical if + is held while connecting.
+
+**Native Joy-Con output layout:** for a Pro Controller, DualSense or other full
+controller feeding the native hub, choose **Paired**, **Left sideways** or
+**Right sideways** in the profile's Mapping section. This is output routing,
+not physical Bluetooth grouping or artwork Preview. Sideways mode rotates face
+actions, stick axes and the motion frame coherently, uses the mapped left stick
+and click for the selected half, and leaves the other half neutral. Both USB
+children remain enumerated.
+
+For a single right Joy-Con game, select the full controller's owner and a
+separate game profile, choose **Right sideways**, then map two real buttons to
+**Right SL/Right SR**. The explicit **Map shoulders to SL/SR** button changes
+only that draft's two base shoulder mappings; selecting a layout never remaps
+buttons automatically. D-pad sources can be mapped to the horizontal face
+positions through the ordinary mapping controls. Save, activate the intended
+profile, then assign the controller in Switch **Change Grip/Order** with the
+mapped SL+SR combination. Keep existing game profiles intact rather than
+replacing them. Console/game compatibility still requires hardware qualification.
+
+**Swap left & right sticks (including clicks)** is in Analog. It works in both
+native Joy-Con and ordinary Pro-emulation firmware (and other output modes):
+each physical stick is calibrated first, then the output axis pairs and mapped
+stick clicks exchange sides. Final-output macro overrides remain downstream.
+In native solo mode, turning this on makes the physical right stick drive the
+selected Joy-Con instead of the physical left stick. Native layout routing is
+ignored by Pro-emulation firmware; neither this setting nor rail bits change a
+Pro Controller's identity into a Joy-Con for Joy-Con-only games.
+
+**D-pad as an alternate left stick:** the output menu also offers **Left Stick
+Up, Down, Left and Right** movement destinations. These are distinct from the
+left-stick click. **Map D-pad to left stick** changes only the four base D-pad
+mappings in the unsaved draft; other buttons and analog settings stay intact.
+Base/Shift buttons, extra sources and thresholded triggers can use these
+destinations in both native Joy-Con and Pro-emulation firmware.
+
+Directions always target the **mapped left stick after calibration and stick
+swapping**, before native sideways rotation. Opposite directions cancel per
+axis. Cardinals use full scale; diagonals are normalized inside the stick's
+radius. Any nonzero mapped-left analog vector takes priority over the entire
+digital vector. If analog drift prevents D-pad movement, adjust the physical
+stick's calibration/inner deadzone in Analog; no hidden deadzone is added.
+Movement releases when its sources release and never presses the stick click.
+Final-output macro overrides retain their existing downstream behavior.
 
 **Joy-Con 2 pair profiles:** the first successful join of an L + R combination creates a separate **Nintendo Joy-Con 2 (L + R)** owner with eight profiles. It initially copies the left bank's profiles, names, and active selection; its alias starts empty. Both solo banks stay unchanged. Pair edits, names, and active selections are independent thereafter. Splitting or losing a half restores solo banks; joining the same members again restores their existing pair bank without copying. Different member combinations have different banks. Select the L + R owner—not either solo owner—to edit paired settings.
 
@@ -367,7 +410,7 @@ Pair keys contain both complete Bluetooth addresses and address types, in canoni
 The read-only playtest endpoint (`0x39`) uses schema 5, 56 bytes: byte 55 identifies unspecified (0), Joy-Con 2 left solo (1), right solo (2), pair (3), legacy Wii Remote with unknown orientation (4), Wii Remote + Nunchuk (5), Wii horizontal (6), or Wii vertical (7). Host tools still read schema 2/54-byte, schema 3/55-byte and schema 4/56-byte payloads. Orientation requests (`0x3d`) contain the 14-byte controller identity, four-byte little-endian connection generation, and orientation byte (0 horizontal, 1 vertical); stale/replaced/non-Wii/extension targets are rejected before Bluetooth-core dispatch. These operations do not change profile records or persistent configuration.
 
 Profile names and controller aliases are stored as independently checksummed
-catalog metadata. Runtime profiles use schema 9 and unchanged 384-byte records. Schemas 1–8 retain existing settings, including schema-8 Remote swing mappings; new Nunchuk and combined actions default to disabled. Names remain separate. The
+catalog metadata. Runtime profiles use schema 11 and unchanged 384-byte records. Schemas 1–10 retain existing settings; schemas before 10 default native layout to Paired and stick swapping to off. Byte 376 stores the native layout and bit 0 of byte 377 stores stick swapping; bytes 378–383 remain reserved. Schema 11 adds four left-stick direction destinations without changing input-control indices or record size. Names remain separate. Update firmware and restart the profile editor together before saving the new schema. The
 editor can rename and copy profiles across controllers and slots, import or
 export JSON backups, and reset one section without discarding the rest of the
 draft. Its response-curve cards provide named presets, exact Q8.8 fine
@@ -1386,7 +1429,7 @@ Use the physical controller's row from `profiles list`, not the global fallback.
 can remove an approval after its profile-catalog entry has been forgotten.
 Approvals persist in adapter configuration schema 4 (232 bytes), alongside the
 Joy-Con default mode. Schema 1/2 migration starts with no approvals; schema 3
-migration preserves its approval list. Profile schema 9/catalog 3 are separate.
+migration preserves its approval list. Profile schema 11/catalog 3 are separate.
 
 The native encoder preserves safe unity bytes when synchronized, otherwise
 encodes independent actuator/band/substep state with documented quantization.
@@ -1849,7 +1892,7 @@ records are compacted into its peer and the new superblock is published last.
 Interrupted or corrupt appends leave the previous valid record available.
 Catalogs 1/2 and retired four-profile banks migrate through the alternate arena;
 the old published data is retained until all copies and the new superblock
-verify. Schema 1–8 profiles retain their meaning when decoded as schema 9.
+verify. Schema 1–10 profiles retain their meaning when decoded as schema 11.
 Keep a profile export before downgrading: older firmware cannot read the new
 catalog/profile format.
 

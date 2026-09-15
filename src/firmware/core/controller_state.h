@@ -44,7 +44,8 @@ struct ControllerState {
     bool button_left_stick;
     bool button_right_stick;
 
-    // Source-only controls: C, GL, GR, left SL/SR, right SL/SR.
+    // C, GL, GR, left SL/SR, right SL/SR: raw sources before profile mapping,
+    // explicitly mapped Switch-family outputs afterward.
     uint8_t extra_buttons = 0;
 
     uint16_t left_trigger;

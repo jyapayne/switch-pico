@@ -312,6 +312,9 @@ void test_current_schema_validation_and_atomic_selection() {
   updated.nunchuk_swing = {255, 0, 18, 0};
   updated.combined_swing = {15, 255, 16};
   updated.combination_window_ms = 200;
+  updated.native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+  updated.swap_sticks = true;
+  updated.button_map[4] = CONTROLLER_PROFILE_RIGHT_SL_OUTPUT;
   updated.macros[0].trigger_mask = 1u << 24;
   updated.macros[0].cancel_control = 19;
   updated.macros[0].step_count = 1;
@@ -325,7 +328,7 @@ void test_current_schema_validation_and_atomic_selection() {
   require(controller_profile_encode(updated, encoded, sizeof(encoded)),
           "extended service profile did not encode");
   require(profile_service_begin(
-              20, id, 6, CONTROLLER_PROFILE_SWING_SCHEMA_VERSION,
+              20, id, 6, CONTROLLER_PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION,
               CONTROLLER_PROFILE_ENCODED_SIZE, 0) ==
               ConfigurationTransactionStatus::kUnsupportedSchema &&
               profile_service_begin(21, id, 6, CONTROLLER_PROFILE_SCHEMA_VERSION,
@@ -361,7 +364,8 @@ void test_current_schema_validation_and_atomic_selection() {
   } malformed_gestures[] = {
       {366, 25}, {367, 0}, {368, 0}, {369, 3}, {370, 25},
       {371, 1}, {371, 4}, {372, 16}, {373, 0}, {374, 25},
-      {375, 29}, {375, 201}, {376, 1}, {121, 0}};
+      {375, 29}, {375, 201}, {376, 3}, {377, 2}, {378, 1}, {121, 0},
+      {4, CONTROLLER_PROFILE_OUTPUT_CONTROL_COUNT}};
   uint8_t stored_before[sizeof(flash.bytes)];
   memcpy(stored_before, flash.bytes, sizeof(stored_before));
   uint32_t transaction_id = 25;
@@ -411,6 +415,9 @@ void test_current_schema_validation_and_atomic_selection() {
           "service did not receive both parts of the profile payload");
   profile_service_selected_snapshot(&selected);
   require(selected.metadata.generation == old_selection.metadata.generation &&
+              selected.profile.native_joycon_layout ==
+                  old_selection.profile.native_joycon_layout &&
+              selected.profile.swap_sticks == old_selection.profile.swap_sticks &&
               active_snapshot(id).profile.turbo_defaults.rate_hz ==
                   old_selection.profile.turbo_defaults.rate_hz &&
               selected.profile.nunchuk_swing.macro ==
@@ -438,12 +445,17 @@ void test_current_schema_validation_and_atomic_selection() {
               selected.profile.combined_swing.macro == CONTROLLER_PROFILE_NO_BUTTON &&
               selected.profile.combined_swing.modifier == 16 &&
               selected.profile.combination_window_ms == 200 &&
+              selected.profile.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo &&
+              selected.profile.swap_sticks &&
+              selected.profile.button_map[4] == CONTROLLER_PROFILE_RIGHT_SL_OUTPUT &&
               active_snapshot(id).profile.swing.button == 2 &&
               active_snapshot(id).profile.swing.sensitivity == 2 &&
               active_snapshot(id).profile.swing.modifier == 24 &&
               active_snapshot(id).profile.nunchuk_swing.macro == 0 &&
               active_snapshot(id).profile.combined_swing.button == 15 &&
               active_snapshot(id).profile.combination_window_ms == 200 &&
+              active_snapshot(id).profile.native_joycon_layout == ControllerProfileNativeJoyconLayout::kLeftSolo &&
+              active_snapshot(id).profile.swap_sticks &&
               active_snapshot(id).profile.macros[0].trigger_mask == (1u << 24) &&
               active_snapshot(id).profile.macros[0].cancel_control == 19 &&
               active_snapshot(id).profile.turbo_defaults.rate_hz == 30,

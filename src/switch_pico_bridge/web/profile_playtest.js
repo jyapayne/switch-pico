@@ -88,16 +88,42 @@
     );
   }
 
+  const railOutputs = ["left_sl", "left_sr", "right_sl", "right_sr"];
+  const leftStickDirectionOutputs = [
+    "left_stick_up",
+    "left_stick_down",
+    "left_stick_left",
+    "left_stick_right",
+  ];
+
   function transformMappings(sample, profile, shiftActive = false) {
     const buttons = new Set();
     const triggers = { left: 0, right: 0 };
+    const directions = {
+      up: false,
+      down: false,
+      left: false,
+      right: false,
+    };
     const consumed = profile.shift.mode !== "off" ? profile.shift.modifier : null;
     const map = shiftActive ? profile.shift : profile;
+    const knownButtons = new Set([
+      ...Object.keys(profile.button_map || {}),
+      ...railOutputs,
+    ]);
     const route = (output, value = 65535) => {
       if (output === "left_trigger" || output === "right_trigger") {
         const side = output === "left_trigger" ? "left" : "right";
         triggers[side] = Math.max(triggers[side], value);
-      } else if (output && Object.hasOwn(profile.button_map, output)) {
+      } else if (output === "left_stick_up") {
+        directions.up = true;
+      } else if (output === "left_stick_down") {
+        directions.down = true;
+      } else if (output === "left_stick_left") {
+        directions.left = true;
+      } else if (output === "left_stick_right") {
+        directions.right = true;
+      } else if (output && knownButtons.has(output)) {
         buttons.add(output);
       }
     };
@@ -113,13 +139,64 @@
       const value = transformTrigger(sample.triggers[side], config);
       if (config.output === "left_trigger" || config.output === "right_trigger") {
         route(config.output, value);
-      } else if (value >= config.digital_threshold) {
+      } else if (
+        value >= config.digital_threshold &&
+        (value > 0 || (!railOutputs.includes(config.output) && !leftStickDirectionOutputs.includes(config.output)))
+      ) {
         route(config.output);
       }
     }
+    if (profile.swap_sticks) {
+      const leftClick = buttons.has("left_stick");
+      const rightClick = buttons.has("right_stick");
+      if (leftClick) buttons.delete("left_stick");
+      if (rightClick) buttons.delete("right_stick");
+      if (leftClick) buttons.add("right_stick");
+      if (rightClick) buttons.add("left_stick");
+    }
     return {
-      buttons: Object.keys(profile.button_map).filter((button) => buttons.has(button)),
+      buttons: [...knownButtons].filter((button) => buttons.has(button)),
       triggers,
+      directions,
+    };
+  }
+
+  function resolveDirectionsVector(directions) {
+    const horizontal = (directions.right ? 1 : 0) - (directions.left ? 1 : 0);
+    const vertical = (directions.down ? 1 : 0) - (directions.up ? 1 : 0);
+    if (horizontal === 0 && vertical === 0) {
+      return { x: 0, y: 0 };
+    }
+    if (horizontal !== 0 && vertical !== 0) {
+      return {
+        x: horizontal * 23169,
+        y: vertical * 23169,
+      };
+    }
+    return {
+      x: horizontal * 32767,
+      y: vertical * 32767,
+    };
+  }
+
+  function transformSticks(sample, profile, mapped = null) {
+    const leftCalibrated = transformStick(sample.left_stick, profile.sticks.left);
+    const rightCalibrated = transformStick(sample.right_stick, profile.sticks.right);
+    const swapped = profile.swap_sticks
+      ? { left: rightCalibrated, right: leftCalibrated }
+      : { left: leftCalibrated, right: rightCalibrated };
+
+    let outputLeft = swapped.left;
+    if (outputLeft.x === 0 && outputLeft.y === 0) {
+      const directions = mapped === null
+        ? transformMappings(sample, profile).directions : mapped.directions;
+      const directionVector = resolveDirectionsVector(directions);
+      outputLeft = directionVector;
+    }
+
+    return {
+      left: outputLeft,
+      right: swapped.right,
     };
   }
 
@@ -140,6 +217,7 @@
 
   root.ProfilePlaytestMath = Object.freeze({
     transformStick,
+    transformSticks,
     transformTrigger,
     transformMappings,
     stickCoordinates,

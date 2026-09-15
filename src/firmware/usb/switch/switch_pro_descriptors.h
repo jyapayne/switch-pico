@@ -278,8 +278,8 @@ typedef struct __attribute((packed, aligned(1)))
     uint8_t dpadUp : 1;
     uint8_t dpadRight : 1;
     uint8_t dpadLeft : 1;
-    uint8_t buttonLeftSL : 1;
     uint8_t buttonLeftSR : 1;
+    uint8_t buttonLeftSL : 1;
     uint8_t buttonL : 1;
     uint8_t buttonZL : 1;
 
