@@ -3,160 +3,161 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Switch Pico Profile Studio</title>
+  <title>Switch Pico Controller Studio</title>
   <link rel="stylesheet" href="/style.css">
 </head>
-<body>
-  <div class="ambient ambient-one"></div>
-  <div class="ambient ambient-two"></div>
+<body class="bg-slate-950 text-slate-100 min-h-screen antialiased selection:bg-sky-500/30 selection:text-sky-200 font-sans">
+  <!-- Accessibility Skip Link -->
+  <a href="#main-content" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:px-4 focus:py-2 focus:bg-sky-500 focus:text-slate-950 focus:font-bold focus:rounded-lg focus:shadow-lg focus:outline-none focus:ring-2 focus:ring-white">
+    Skip to main content
+  </a>
+
+  <!-- Header / App Topbar -->
   <header class="topbar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span></div>
+      <div class="brand-mark" aria-hidden="true">
+        <span></span>
+        <span></span>
+      </div>
       <div>
         <p class="eyebrow">Switch Pico</p>
-        <h1>Controller Studio</h1>
+        <h1 class="text-base sm:text-lg font-bold tracking-tight text-white leading-tight">Controller Studio</h1>
       </div>
     </div>
+
     <div class="topbar-meta">
-      <p>Map · tune · automate</p>
       <div class="connection" id="connectionState" data-state="loading" role="status" aria-live="polite">
-        <span class="connection-dot"></span>
-        <span id="connectionText">Connecting to adapter…</span>
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span id="connectionText" class="truncate">Connecting to adapter…</span>
       </div>
-      <button class="button button-secondary adapter-settings-button" id="adapterSettingsButton" type="button" aria-haspopup="dialog" aria-controls="adapterSettingsDialog">Adapter settings</button>
+
+      <button class="button button-secondary adapter-settings-button" id="adapterSettingsButton" type="button" aria-haspopup="dialog" aria-controls="adapterSettingsDialog">
+        <svg class="w-4 h-4 inline-block -mt-0.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+        </svg>
+        <span>Adapter settings</span>
+      </button>
     </div>
   </header>
 
-  <main class="workspace">
+  <!-- Main Studio Workspace -->
+  <main class="workspace" id="main-content" tabindex="-1">
+    <!-- Sidebar: Profile Bank & Owner Selection -->
     <aside class="sidebar">
       <div class="sidebar-heading">
         <div>
-          <p class="eyebrow">Profile bank</p>
-          <h2>Your layouts</h2>
+          <p class="eyebrow">Your controllers</p>
+          <h2 class="text-lg font-semibold">Profiles</h2>
         </div>
-        <button class="icon-button" id="refreshButton" type="button" title="Refresh controllers" aria-label="Refresh controllers">↻</button>
+        <button class="icon-button" id="refreshButton" type="button" title="Refresh controllers" aria-label="Refresh controllers">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+          </svg>
+        </button>
       </div>
-      <label class="field-label" for="identitySelect">Profile owner</label>
-      <select id="identitySelect" class="select"></select>
-      <p class="field-help">The default applies when a controller has no dedicated layout.</p>
 
-      <div class="identity-tools">
+      <div class="mt-4">
+        <label class="field-label" for="identitySelect">Controller</label>
+        <select id="identitySelect" class="select"></select>
+        <p class="field-help">The default profile applies to controllers without their own settings.</p>
+      </div>
+
+      <details class="identity-tools help-details">
+        <summary>Controller name &amp; details</summary>
         <label class="field-label" for="controllerAlias">Controller alias</label>
-        <input class="number-input" id="controllerAlias" maxlength="31" placeholder="Optional nickname">
+        <input class="number-input" id="controllerAlias" maxlength="31" placeholder="Optional nickname" autocomplete="off">
         <div class="identity-actions">
           <button class="button button-secondary" id="saveAliasButton" type="button">Save alias</button>
           <button class="button button-ghost" id="identifyButton" type="button">Identify</button>
         </div>
         <p class="controller-details" id="controllerDetails"></p>
+      </details>
+
+      <div class="mt-5">
+        <p class="field-label mb-2">Profile slots</p>
+        <div class="profile-list" id="profileList" aria-label="Profiles"></div>
       </div>
 
-      <div class="profile-list" id="profileList" aria-label="Profiles"></div>
-
       <div class="sidebar-note">
-        <span class="note-icon">i</span>
-        <p>Each controller has eight independent slots. Tune a draft here, then save it atomically to the Pico.</p>
+        <span class="note-icon" aria-hidden="true">i</span>
+        <p>Eight profiles per controller. Save a draft to store its settings; Make active selects the profile used during play.</p>
       </div>
     </aside>
 
+    <!-- Main Editor Shell -->
     <section class="editor-shell">
+      <!-- Profile Header / Identity & Core Actions -->
       <div class="editor-header">
-        <div>
-          <p class="eyebrow" id="profileOwner">Global fallback</p>
-          <div class="title-line">
-            <h2 id="profileTitle">Profile 1</h2>
+        <div class="space-y-2">
+          <p class="eyebrow" id="profileOwner">Default profile</p>
+          <div class="title-line flex items-center gap-2.5">
+            <h2 id="profileTitle" class="text-xl sm:text-2xl font-bold tracking-tight text-white">Profile 1</h2>
             <span class="active-badge" id="activeBadge" hidden>Active</span>
-            <span class="dirty-badge" id="dirtyBadge" hidden>Unsaved</span>
+            <span class="dirty-badge" id="dirtyBadge" hidden>Unsaved draft</span>
           </div>
           <div class="profile-name-editor">
-            <label for="profileName">Profile name</label>
-            <input id="profileName" maxlength="31" placeholder="Optional name">
-            <button class="button button-secondary" id="saveProfileNameButton" type="button">Rename</button>
+            <label for="profileName" class="sr-only">Profile name</label>
+            <input id="profileName" maxlength="31" placeholder="Profile name (optional)" autocomplete="off">
+            <button class="button button-secondary" id="saveProfileNameButton" type="button" title="Save this name to Pico immediately">Rename</button>
           </div>
         </div>
+
         <div class="header-actions">
-          <button class="button button-ghost" id="copyProfileButton" type="button">Copy</button>
-          <button class="button button-ghost" id="exportProfileButton" type="button">Export</button>
-          <button class="button button-ghost" id="importProfileButton" type="button">Import</button>
-          <input id="importProfileFile" type="file" accept="application/json,.json" hidden>
-          <button class="button button-ghost" id="resetDraftButton" type="button">Start from defaults</button>
-          <button class="button button-secondary" id="activateButton" type="button">Make active</button>
-          <button class="button button-primary" id="saveButton" type="button">Save to Pico</button>
+          <div class="action-group-secondary flex flex-wrap gap-2 items-center">
+            <button class="button button-ghost" id="copyProfileButton" type="button" title="Copy draft to another slot">Copy</button>
+            <button class="button button-ghost" id="exportProfileButton" type="button" title="Export profile as JSON">Export</button>
+            <button class="button button-ghost" id="importProfileButton" type="button" title="Import profile from JSON">Import</button>
+            <input id="importProfileFile" type="file" accept="application/json,.json" hidden>
+            <button class="button button-ghost" id="resetDraftButton" type="button" title="Reset current draft to factory defaults">Reset defaults</button>
+          </div>
+          <div class="action-group-primary flex flex-wrap gap-2 items-center">
+            <button class="button button-secondary" id="activateButton" type="button" title="Use this saved profile during play">Make active</button>
+            <button class="button button-primary" id="saveButton" type="button" title="Save this profile's draft settings">Save to Pico</button>
+          </div>
         </div>
       </div>
 
+      <!-- Seven Navigation Section Anchors -->
       <nav class="section-nav" aria-label="Editor sections">
-        <a href="#mapping">Mapping</a>
-        <a href="#shortcuts">Shortcuts</a>
-        <a href="#shift">Shift</a>
-        <a href="#analog">Analog</a>
-        <a href="#feedback">Feedback</a>
+        <a href="#mapping">Button mapping</a>
+        <a href="#analog">Sticks &amp; triggers</a>
+        <a href="#shift">Shift layer</a>
+        <a href="#shortcuts">Profile shortcuts</a>
+        <a href="#feedback">Rumble</a>
         <a href="#turbo">Turbo</a>
-        <a href="#macro">Macro</a>
+        <a href="#macro">Actions &amp; macros</a>
       </nav>
 
+      <!-- Loading State Overlay -->
       <div class="loading-card" id="loadingCard">
         <div class="spinner"></div>
-        <p>Reading profile from the adapter…</p>
+        <p class="text-sm font-medium text-slate-400">Reading profile from the adapter…</p>
       </div>
 
+      <!-- Profile Form Containing All 7 Section Panels -->
       <form id="profileForm" hidden>
-        <section class="panel" id="mapping">
+        <!-- 01 · Mapping Section -->
+        <section class="panel" id="mapping" aria-labelledby="mappingTitle">
           <div class="panel-heading">
             <div>
               <p class="eyebrow">01 · Controls</p>
-              <h3>Button mapping</h3>
+              <h3 id="mappingTitle">Button mapping</h3>
             </div>
-            <div class="panel-heading-actions"><p>Choose what each physical button should produce.</p><button class="section-reset" type="button" data-reset-section="mapping">Reset section</button></div>
+            <div class="panel-heading-actions">
+              <p>Choose what each physical button produces.</p>
+              <button class="section-reset" type="button" data-reset-section="mapping">Reset section</button>
+            </div>
           </div>
+
           <div class="controller-mapper">
             <div class="controller-canvas" id="controllerCanvas" data-style="generic">
               <div class="controller-caption">
                 <span class="controller-live" id="controllerLayoutStatus">Reference layout</span>
                 <strong id="controllerModel">Generic controller</strong>
               </div>
-              <div class="layout-picker">
-                <label class="field-label" for="controllerLayoutPreview">Auto / layout preview</label>
-                <select class="select" id="controllerLayoutPreview" aria-describedby="controllerLayoutHelp">
-                  <option value="auto">Auto · selected owner / live metadata</option>
-                  <option value="xbox">Preview · Xbox</option>
-                  <option value="dualsense">Preview · DualSense</option>
-                  <option value="switch-pro">Preview · original Switch Pro</option>
-                  <option value="switch2-pro">Preview · Switch 2 Pro</option>
-                  <option value="joycon2-pair">Preview · Joy-Con 2 pair</option>
-                  <option value="joycon2-left">Preview · Joy-Con 2 left solo</option>
-                  <option value="joycon2-right">Preview · Joy-Con 2 right solo</option>
-                  <option value="wii-horizontal">Preview · Wii horizontal / accelerometer</option>
-                  <option value="wii-vertical">Preview · Wii vertical</option>
-                  <option value="wii-nunchuk">Preview · Wii Remote + Nunchuk</option>
-                </select>
-                <p class="field-help" id="controllerLayoutHelp">Preview changes only this editor's source labels and diagram, never firmware topology or saved mappings.</p>
-              </div>
-              <div class="native-joycon-control" id="nativeJoyconControl">
-                <label class="field-label" for="nativeJoyconLayoutSelect">Native Joy-Con layout</label>
-                <div class="native-joycon-actions">
-                  <select class="select" id="nativeJoyconLayoutSelect" aria-describedby="nativeJoyconHelp">
-                    <option value="paired">Paired · standard dual Joy-Con orientation</option>
-                    <option value="left_solo">Left sideways · solo Joy-Con (L)</option>
-                    <option value="right_solo">Right sideways · solo Joy-Con (R)</option>
-                  </select>
-                  <button class="button button-secondary" id="mapShouldersButton" type="button" hidden>Map shoulders to SL/SR</button>
-                  <button class="button button-secondary" id="mapDpadButton" type="button">Map D-pad to left stick</button>
-                </div>
-                <p class="field-help" id="nativeJoyconHelp">Native-hub output only; this does not change Pro emulation's controller identity. Unlike physical Joy-Con grouping in Adapter settings or Wii orientation, this is a per-profile draft setting: choose Save to Pico to store it. Both USB devices remain enumerated; solo keeps the other side neutral. Assign solo on Switch Change Grip/Order by pressing the sources mapped to the selected side's SL+SR.</p>
-                <p class="field-help">Changing layout never remaps buttons. “Map shoulders to SL/SR” changes only the two base shoulder destinations in this draft. “Map D-pad to left stick” changes only the four base D-pad destinations (Up, Down, Left, Right) to left-stick movement in this draft. You can also map any source, including D-pad directions, to the horizontal face positions. Solo uses the mapped left stick; enable stick swap below to use the physical right stick. Digital directions apply only when the mapped left analog stick is neutral within its deadzone (any nonzero analog stick input takes priority). In native sideways solo mode, wire rotation happens after mapped left directions. SL/SR mappings work in native and Pro emulation; C/GL/GR are physical input sources, not output destinations.</p>
-              </div>
-              <div class="wii-orientation-control" id="wiiOrientationControl" hidden>
-                <label class="field-label" for="wiiOrientationSelect">Wii orientation</label>
-                <div class="wii-orientation-actions">
-                  <select class="select" id="wiiOrientationSelect" aria-describedby="wiiOrientationHelp wiiOrientationStatus" disabled>
-                    <option value="horizontal">Horizontal · sideways D-pad &amp; 1/2 buttons</option>
-                    <option value="vertical">Vertical · upright pointer orientation</option>
-                  </select>
-                  <button class="button button-secondary" id="applyWiiOrientationButton" type="button" disabled>Apply orientation</button>
-                </div>
-                <p class="field-help" id="wiiOrientationHelp">Applies to the active connection only (not saved in profile slots). Nunchuk automatically locks orientation to vertical.</p>
-                <p class="wii-orientation-status" id="wiiOrientationStatus" data-state="idle" role="status" aria-live="polite"></p>
-              </div>
+
+              <!-- Interactive Controller Viewport & Hotspots -->
               <div class="controller-viewport" tabindex="0" role="region" aria-label="Controller diagram; scroll horizontally on narrow screens">
                 <div class="controller-photo-wrap" id="controllerPhotoWrap">
                   <div class="controller-stage" id="controllerStage">
@@ -165,76 +166,125 @@
                   </div>
                 </div>
               </div>
-              <p class="controller-hint">Select a control on the illustration or below it. On narrow screens, swipe sideways or use the Source control menu.</p>
-              <p class="field-label" id="extraControlsLabel">Off-art controls · rear, rails or unlocated sources</p>
+              <p class="controller-hint">Select a control on the diagram or use the Source control menu.</p>
+
+              <!-- Layout Selection Controls -->
+              <details class="help-details">
+                <summary>Diagram preview &amp; details</summary>
+                <label class="field-label" for="controllerLayoutPreview">Diagram preview</label>
+                <select class="select" id="controllerLayoutPreview" aria-describedby="controllerLayoutHelp">
+                  <option value="auto">Auto · selected controller</option>
+                  <option value="xbox">Preview · Xbox Wireless Controller</option>
+                  <option value="dualsense">Preview · PlayStation 5 DualSense</option>
+                  <option value="switch-pro">Preview · Nintendo Switch Pro</option>
+                  <option value="switch2-pro">Preview · Nintendo Switch 2 Pro</option>
+                  <option value="joycon2-pair">Preview · Joy-Con 2 Pair (L+R)</option>
+                  <option value="joycon2-left">Preview · Joy-Con 2 Left Solo</option>
+                  <option value="joycon2-right">Preview · Joy-Con 2 Right Solo</option>
+                  <option value="wii-horizontal">Preview · Wii Remote Horizontal</option>
+                  <option value="wii-vertical">Preview · Wii Remote Vertical</option>
+                  <option value="wii-nunchuk">Preview · Wii Remote + Nunchuk</option>
+                </select>
+                <p class="field-help" id="controllerLayoutHelp">Preview changes only the diagram and labels, not controller behavior or saved mappings.</p>
+                <p class="field-help" id="controllerLayoutNote"></p>
+              </details>
+
+              <!-- Native Joy-Con Per-Profile Mode Settings -->
+
+              <!-- Wii Remote Active Live Orientation -->
+              <div class="wii-orientation-control" id="wiiOrientationControl" hidden>
+                <label class="field-label" for="wiiOrientationSelect">Wii orientation · live setting</label>
+                <div class="wii-orientation-actions">
+                  <select class="select" id="wiiOrientationSelect" aria-describedby="wiiOrientationHelp wiiOrientationStatus" disabled>
+                    <option value="horizontal">Horizontal · Sideways D-pad &amp; 1/2 buttons</option>
+                    <option value="vertical">Vertical · Upright pointer orientation</option>
+                  </select>
+                  <button class="button button-secondary" id="applyWiiOrientationButton" type="button" disabled>Apply orientation</button>
+                </div>
+                <p class="field-help" id="wiiOrientationHelp">Changes the current connection immediately, not this profile. A connected Nunchuk requires vertical orientation.</p>
+                <p class="wii-orientation-status" id="wiiOrientationStatus" data-state="idle" role="status" aria-live="polite"></p>
+              </div>
+
+              <!-- Unlocated / Off-Art Controls -->
+              <p class="field-label" id="extraControlsLabel">Additional controls</p>
               <div class="extra-controls" id="extraControls" role="group" aria-labelledby="extraControlsLabel"></div>
-              <p class="field-help" id="controllerLayoutNote"></p>
-              <p class="controller-credit">Original vector artwork supplied for Switch Pico Controller Studio.</p>
+
             </div>
 
+            <!-- Inspector Panel for Selected Control -->
             <aside class="mapping-inspector">
               <p class="eyebrow">Selected control</p>
               <label class="field-label" for="selectedSource">Source control</label>
               <select class="select" id="selectedSource" aria-describedby="selectedControlDescription"></select>
-              <div class="selected-control-mark" id="selectedControlGlyph">S</div>
+              
+              <div class="selected-control-mark" id="selectedControlGlyph" aria-hidden="true">S</div>
               <h4 id="selectedControlName">South button</h4>
-              <p id="selectedControlDescription">Physical South currently produces South.</p>
+              <p id="selectedControlDescription">Physical South produces South output.</p>
+              
               <label class="field-label" for="selectedMapping">Output action</label>
               <select class="select" id="selectedMapping"></select>
+              
               <div class="mapping-key">
-                <span><i class="key-dot mapped"></i>Mapped</span>
-                <span><i class="key-dot disabled"></i>Disabled</span>
+                <span><i class="key-dot mapped" aria-hidden="true"></i> Mapped</span>
+                <span><i class="key-dot disabled" aria-hidden="true"></i> Disabled</span>
               </div>
             </aside>
           </div>
+              <div class="native-joycon-control" id="nativeJoyconControl">
+                <label class="field-label" for="nativeJoyconLayoutSelect">Native Joy-Con layout</label>
+                <div class="native-joycon-actions">
+                  <select class="select" id="nativeJoyconLayoutSelect" aria-describedby="nativeJoyconHelp">
+                    <option value="paired">Paired · Standard dual Joy-Con orientation</option>
+                    <option value="left_solo">Left sideways · Solo Joy-Con (L)</option>
+                    <option value="right_solo">Right sideways · Solo Joy-Con (R)</option>
+                  </select>
+                  <button class="button button-secondary" id="mapShouldersButton" type="button" hidden>Map shoulders to SL/SR</button>
+                  <button class="button button-secondary" id="mapDpadButton" type="button">Map D-pad to left stick</button>
+                </div>
+                <p class="field-help">Saved with this profile. Native layout applies only to native Joy-Con output, not Pro Controller emulation or Bluetooth grouping.</p>
+                <details class="help-details mt-2">
+                  <summary>How solo layouts and quick mappings work</summary>
+                  <div class="space-y-2 mt-2 pt-2 border-t border-slate-800 text-xs text-slate-400 leading-relaxed" id="nativeJoyconHelp">
+                    <p>Native-hub output only; this does not alter Pro Controller emulation identity. Unlike adapter-wide grouping, this is saved inside the current profile draft (select <strong>Save to Pico</strong> to store). Both USB devices remain enumerated; solo keeps the other side neutral. Assign solo on Switch Change Grip/Order by pressing the sources mapped to the selected side's SL+SR.</p>
+                    <p>Changing layout never remaps buttons. The shoulder shortcut changes only the two base shoulder mappings; the D-pad shortcut changes only its four base mappings. Solo uses the mapped left stick. Enable stick swapping in Sticks &amp; triggers to use the physical right stick.</p>
+                    <p>Digital directions apply only when the mapped left analog stick is neutral within its deadzone; any nonzero analog input takes priority. Sideways rotation is applied afterward. SL/SR outputs work in native and Pro emulation; C, GL and GR are input controls only.</p>
+                  </div>
+                </details>
+              </div>
         </section>
 
-        <section class="panel" id="shortcuts" aria-labelledby="shortcutsTitle">
-          <div class="panel-heading">
-            <div><p class="eyebrow">Direct selection</p><h3 id="shortcutsTitle">Profile shortcuts</h3></div>
-            <div class="panel-heading-actions"><p>Hold a modifier and press one face or D-pad button to select a profile directly.</p><button class="section-reset" type="button" data-reset-section="shortcuts">Reset section</button></div>
-          </div>
-          <div class="modifier-controls" id="shortcutModifierFields"></div>
-          <div class="mapping-grid" id="shortcutFields"></div>
-          <p class="field-help">Each selector is unique. Shortcut chords take priority over cycling, motion toggle, Shift and macros. Release before selecting again.</p>
-        </section>
-
-        <section class="panel" id="shift" aria-labelledby="shiftTitle">
-          <div class="panel-heading">
-            <div><p class="eyebrow">Alternate layer</p><h3 id="shiftTitle">Shift button mapping</h3></div>
-            <div class="panel-heading-actions"><p>Hold or toggle one modifier to use these alternate button outputs.</p><button class="section-reset" type="button" data-reset-section="shift">Reset section</button></div>
-          </div>
-          <div class="modifier-controls" id="shiftFields"></div>
-          <div class="mapping-grid" id="shiftMapFields"></div>
-          <p class="field-help">The modifier is consumed while Shift is enabled. Stick and trigger transforms stay on the base profile. Turbo settings and macro triggers remain tied to physical controls.</p>
-        </section>
-
-        <section class="panel" id="analog">
+        <!-- 02 · Analog Section -->
+        <section class="panel" id="analog" aria-labelledby="analogTitle">
           <div class="panel-heading">
             <div>
               <p class="eyebrow">02 · Response</p>
-              <h3>Sticks &amp; triggers</h3>
+              <h3 id="analogTitle">Sticks &amp; triggers</h3>
             </div>
-            <div class="panel-heading-actions"><p>Values use the controller's normalized integer range.</p><button class="section-reset" type="button" data-reset-section="analog">Reset section</button></div>
+            <div class="panel-heading-actions">
+              <p>Tune deadzones, response curves, and analog routing.</p>
+              <button class="section-reset" type="button" data-reset-section="analog">Reset section</button>
+            </div>
           </div>
+
+          <!-- Live Playtest Scope Card -->
           <div class="playtest-panel" id="playtestPanel" data-state="waiting">
             <div class="playtest-heading">
               <div>
-                <p class="eyebrow">Live playtest</p>
+                <p class="eyebrow">Live input scope</p>
                 <h4 id="playtestTitle">Waiting for controller input</h4>
               </div>
               <span class="playtest-status" id="playtestStatus">Waiting</span>
             </div>
-            <p class="playtest-help" id="playtestHelp">
-              Select a connected controller to compare its raw input with this draft.
-            </p>
+            <p class="playtest-help" id="playtestHelp">Select a connected controller to compare its input with this draft.</p>
+            
             <div class="playtest-grid">
+              <!-- Left Stick Scope -->
               <article class="playtest-card">
                 <div class="playtest-card-heading">
                   <strong>Left stick</strong>
                   <span id="playtestLeftValues">0, 0 → 0, 0</span>
                 </div>
-                <div class="stick-scope" data-playtest-stick="left">
+                <div class="stick-scope" data-playtest-stick="left" aria-label="Left analog stick scope">
                   <span class="stick-ring stick-ring-outer"></span>
                   <span class="stick-ring stick-ring-inner"></span>
                   <span class="stick-axis stick-axis-x"></span>
@@ -243,12 +293,14 @@
                   <i class="stick-dot stick-dot-output" title="Draft output"></i>
                 </div>
               </article>
+
+              <!-- Right Stick Scope -->
               <article class="playtest-card">
                 <div class="playtest-card-heading">
                   <strong>Right stick</strong>
                   <span id="playtestRightValues">0, 0 → 0, 0</span>
                 </div>
-                <div class="stick-scope" data-playtest-stick="right">
+                <div class="stick-scope" data-playtest-stick="right" aria-label="Right analog stick scope">
                   <span class="stick-ring stick-ring-outer"></span>
                   <span class="stick-ring stick-ring-inner"></span>
                   <span class="stick-axis stick-axis-x"></span>
@@ -257,9 +309,11 @@
                   <i class="stick-dot stick-dot-output" title="Draft output"></i>
                 </div>
               </article>
+
+              <!-- Triggers Playtest -->
               <article class="playtest-card trigger-playtest">
                 <div class="playtest-card-heading">
-                  <strong>Triggers</strong>
+                  <strong>Analog triggers</strong>
                   <span>Raw → draft output</span>
                 </div>
                 <div class="trigger-meter" data-playtest-trigger="left">
@@ -281,71 +335,132 @@
                   <output>0 → 0</output>
                 </div>
                 <div class="playtest-legend">
-                  <span><i class="legend-raw"></i>Raw</span>
-                  <span><i class="legend-output"></i>Draft output</span>
-                  <span><i class="legend-threshold"></i>Digital threshold</span>
+                  <span><i class="legend-raw"></i> Raw input</span>
+                  <span><i class="legend-output"></i> Draft output</span>
+                  <span><i class="legend-threshold"></i> Digital click threshold</span>
                 </div>
               </article>
             </div>
+
             <div class="mapping-playtest">
               <p><strong>Raw extra inputs:</strong> <span id="playtestExtraInputs">None</span></p>
               <p><strong>Draft button output:</strong> <span id="playtestMappedButtons">None</span></p>
-              <p class="field-help" id="playtestMappingHelp">Base and Shift mapping preview only; shortcuts, macros and Turbo are not simulated. Digital stick directions apply only when the mapped left analog vector is neutral within inner deadzones.</p>
+              <p class="field-help" id="playtestMappingHelp">Base and Shift mapping preview only. Digital stick directions engage when the mapped left stick is neutral.</p>
             </div>
           </div>
+
+          <!-- Dynamic Analog Fields: Curves, Deadzones, Inversion -->
           <div class="analog-grid" id="analogFields"></div>
+
+          <!-- Stick Swap Routing Subpanel -->
           <div class="subpanel stick-swap-panel" id="stickSwapPanel">
             <div class="subpanel-heading">
-              <h4>Stick swap</h4>
-              <span>Output routing</span>
+              <div>
+                <h4 class="text-sm font-bold text-white">Stick swap</h4>
+                <p class="text-xs text-slate-400 mt-0.5">Route left stick axes and clicks to right stick outputs.</p>
+              </div>
+              <span class="text-xs text-slate-400">Output routing</span>
             </div>
-            <label class="checkbox-pill">
+            <label class="checkbox-pill mt-2">
               <input type="checkbox" id="swapSticksCheckbox" data-kind="swap-sticks" aria-describedby="swapSticksHelp">
               <span>Swap left &amp; right sticks (including clicks)</span>
             </label>
-            <p class="field-help" id="swapSticksHelp">Swaps output axes and mapped stick clicks in both native and Pro emulation. Save to Pico to store this draft setting. Calibrations, deadzones, response curves and invert settings remain tied to their original physical sticks.</p>
+            <p class="field-help" id="swapSticksHelp">Swaps stick outputs and mapped clicks in native and Pro emulation. Calibration, deadzones, response curves and inversion stay with their original physical sticks. Save to Pico to store this setting.</p>
           </div>
         </section>
 
-        <section class="panel" id="feedback">
+        <!-- 03 · Shift Layer Section -->
+        <section class="panel" id="shift" aria-labelledby="shiftTitle">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">03 · Identity</p>
-              <h3>Feedback</h3>
+              <p class="eyebrow">03 · Alternate layer</p>
+              <h3 id="shiftTitle">Shift button mapping</h3>
             </div>
-            <div class="panel-heading-actions"><p>Scale rumble and choose profile-change confirmation.</p><button class="section-reset" type="button" data-reset-section="feedback">Reset section</button></div>
+            <div class="panel-heading-actions">
+              <p>Hold or toggle a modifier to activate an alternate button map.</p>
+              <button class="section-reset" type="button" data-reset-section="shift">Reset section</button>
+            </div>
+          </div>
+          <div class="modifier-controls" id="shiftFields"></div>
+          <div class="mapping-grid" id="shiftMapFields"></div>
+          <p class="field-help mt-3">The Shift modifier is consumed while active. Analog sticks and triggers remain on the base profile.</p>
+        </section>
+
+        <!-- 04 · Shortcuts Section -->
+        <section class="panel" id="shortcuts" aria-labelledby="shortcutsTitle">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">04 · Direct selection</p>
+              <h3 id="shortcutsTitle">Profile shortcuts</h3>
+            </div>
+            <div class="panel-heading-actions">
+              <p>Hold a modifier and press a selector button to switch slots instantly.</p>
+              <button class="section-reset" type="button" data-reset-section="shortcuts">Reset section</button>
+            </div>
+          </div>
+          <div class="modifier-controls" id="shortcutModifierFields"></div>
+          <div class="mapping-grid" id="shortcutFields"></div>
+          <p class="field-help mt-3">Shortcut chords take top priority over cycling, Shift layers, and macro triggers.</p>
+        </section>
+
+        <!-- 05 · Feedback Section -->
+        <section class="panel" id="feedback" aria-labelledby="feedbackTitle">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">05 · Feedback</p>
+              <h3 id="feedbackTitle">Rumble &amp; confirmation</h3>
+            </div>
+            <div class="panel-heading-actions">
+              <p>Adjust rumble strength and feedback when switching profiles.</p>
+              <button class="section-reset" type="button" data-reset-section="feedback">Reset section</button>
+            </div>
           </div>
           <div class="subpanel" id="rumbleFields"></div>
         </section>
 
-        <section class="panel" id="turbo">
+        <!-- 06 · Turbo Section -->
+        <section class="panel" id="turbo" aria-labelledby="turboTitle">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">04 · Repeat</p>
-              <h3>Turbo behavior</h3>
+              <p class="eyebrow">06 · Repeat</p>
+              <h3 id="turboTitle">Turbo behavior</h3>
             </div>
-            <div class="panel-heading-actions"><p>Hold Turbo repeats while pressed; Auto Burst toggles continuous repetition; Burst plays a fixed pulse count per fresh press.</p><button class="section-reset" type="button" data-reset-section="turbo">Reset section</button></div>
+            <div class="panel-heading-actions">
+              <p>Repeat while held, toggle continuous repetition, or play a fixed burst.</p>
+              <button class="section-reset" type="button" data-reset-section="turbo">Reset section</button>
+            </div>
           </div>
           <div class="subpanel turbo-defaults" id="turboDefaultFields"></div>
           <p class="timing-notice" id="turboTimingNotice" role="status" aria-live="polite"></p>
           <div class="turbo-grid" id="turboFields"></div>
         </section>
 
-        <section class="panel" id="macro">
+        <!-- 07 · Macro Section -->
+        <section class="panel" id="macro" aria-labelledby="macroTitle">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">05 · Actions</p>
-              <h3>Bindings &amp; custom macro</h3>
+              <p class="eyebrow">07 · Actions</p>
+              <h3 id="macroTitle">Actions &amp; macros</h3>
             </div>
-            <div class="panel-heading-actions"><button class="section-reset" type="button" data-reset-section="macro">Reset section</button></div>
+            <div class="panel-heading-actions">
+              <button class="section-reset" type="button" data-reset-section="macro">Reset section</button>
+            </div>
           </div>
+
+          <!-- Builtin Action Chords -->
           <div class="builtin-actions" id="builtinActions"></div>
+
+          <!-- Wii Motion Gestures / Swings Subpanel -->
           <div class="subpanel swing-controls" id="swingFields"></div>
+
+          <!-- Macro Selection Tabs & General Config -->
           <div class="macro-controls" id="macroControls"></div>
+
+          <!-- Macro Firmware Live Capture Recorder -->
           <section class="macro-capture" id="macroCapture" aria-labelledby="macroCaptureTitle" data-state="idle">
             <div class="macro-preview-heading">
               <div>
-                <p class="eyebrow">Live input · bounded firmware recorder</p>
+                <p class="eyebrow">Record controller input</p>
                 <h4 id="macroCaptureTitle">Record into macro 1</h4>
               </div>
               <div class="macro-preview-actions">
@@ -353,9 +468,10 @@
                 <button class="button button-ghost" id="macroCaptureStop" type="button" disabled>Stop recording</button>
               </div>
             </div>
-            <p class="field-help">Records raw input before profile mapping, not controller output. Selected analog channels are explicitly quantized; this is not lossless arbitrary-rate capture. Firmware retains timestamped changes between UI polls, within its input-report precision and the budgets below.</p>
+            <p class="field-help">Records input before profile mapping, not the output sent to the console. Analog values are rounded to the selected increments to fit the available macro storage; recording is not lossless.</p>
+
             <fieldset id="macroCaptureOptions" class="capture-options">
-              <legend>Channels to override in every recorded step</legend>
+              <legend>Channels to record in each step</legend>
               <div class="check-grid">
                 <label class="checkbox-pill"><input type="checkbox" data-capture-channel="1" checked><span>Buttons</span></label>
                 <label class="checkbox-pill"><input type="checkbox" data-capture-channel="2"><span>Left stick</span></label>
@@ -369,6 +485,7 @@
                 <div class="number-field"><label for="macroCaptureDuration">Time limit · ms</label><input class="number-input" id="macroCaptureDuration" form="macroCaptureSettings" type="number" min="1" max="80000" step="1" value="10000" required></div>
               </div>
             </fieldset>
+
             <p class="field-help" id="macroCaptureBudget"></p>
             <div class="macro-preview-timing">
               <strong id="macroCaptureState" role="status" aria-live="polite">Ready</strong>
@@ -377,17 +494,20 @@
             <progress id="macroCaptureProgress" max="1" value="0" aria-label="Recording event capacity"></progress>
             <p class="capture-notice" id="macroCaptureNotice" role="status" aria-live="polite"></p>
             <ol id="macroCaptureEvents" class="capture-events" aria-label="Retained recorded states"></ol>
-            <div class="macro-preview-actions">
+            
+            <div class="macro-preview-actions mt-3">
               <button class="button button-secondary" id="macroCaptureUse" type="button" disabled>Use recorded steps</button>
               <button class="button button-ghost" id="macroCaptureDiscard" type="button" disabled>Discard recording</button>
               <button class="button button-ghost" id="macroCaptureRecover" type="button" hidden>Read retained recording</button>
             </div>
-            <p class="field-help">Use replaces only this macro’s steps in the unsaved draft. Trigger, cancel and playback settings stay unchanged. Nothing is written to flash until you choose Save to Pico. Stop is requested on hiding or leaving this page; recordings never resume automatically.</p>
+            <p class="field-help">Use recorded steps replaces this macro’s steps in the draft, keeping its trigger, cancel and playback settings. Save to Pico stores the draft. Leaving this section or hiding the page requests recording to stop; it never resumes automatically.</p>
           </section>
+
+          <!-- Macro Visual Simulator & Preview -->
           <section class="macro-preview" id="macroPreview" aria-labelledby="macroPreviewTitle" data-state="stopped">
             <div class="macro-preview-heading">
               <div>
-                <p class="eyebrow">Visual only · never sent to the controller</p>
+                <p class="eyebrow">Visual preview · no controller output</p>
                 <h4 id="macroPreviewTitle">Macro 1 draft preview</h4>
               </div>
               <div class="macro-preview-actions">
@@ -396,17 +516,20 @@
                 <button class="button button-ghost" id="macroPreviewRestart" type="button">Restart</button>
               </div>
             </div>
-            <p class="field-help">Highlighted fields override input for this step. Passthrough fields keep controller input; their values are not simulated. Zero-duration steps take no preview time.</p>
-            <p class="field-help" id="macroPreviewModeHelp"></p>
+            <p class="field-help" id="macroPreviewModeHelp">Highlighted fields override input for this step. Passthrough channels retain physical input.</p>
+            <p class="field-help">Only highlighted outputs are simulated. Other outputs keep live controller input during real playback. Zero-duration steps take no preview time.</p>
+            
             <div class="macro-preview-timing">
               <span id="macroPreviewStatus" role="status" aria-live="polite">Ready</span>
               <output id="macroPreviewTime">0 / 0 ms</output>
             </div>
             <progress id="macroPreviewProgress" max="1" value="0" aria-label="Draft preview elapsed time"></progress>
+            
             <div class="macro-preview-buttons" data-preview-field="buttons" data-mode="passthrough">
               <div class="playtest-card-heading"><strong>Buttons</strong><span data-preview-mode>Passthrough</span></div>
               <div class="check-grid" id="macroPreviewButtons"></div>
             </div>
+
             <div class="playtest-grid">
               <article class="playtest-card" data-preview-field="left_stick" data-mode="passthrough">
                 <div class="playtest-card-heading"><strong>Left stick</strong><span data-preview-mode>Passthrough</span></div>
@@ -438,6 +561,8 @@
               </article>
             </div>
           </section>
+
+          <!-- Macro Step Sequence List -->
           <div class="macro-steps-heading">
             <div>
               <p class="eyebrow">Sequence</p>
@@ -448,62 +573,83 @@
               <button class="button button-secondary" id="addMacroStepButton" type="button">Add state step</button>
             </span>
           </div>
-          <p class="field-help" id="macroReorderHelp">Insert adds a 100 ms button step before the current step (5 bytes). Drag a step handle, use Move up / Move down, or press Alt + Arrow Up / Down on its handle to reorder.</p>
+          <p class="field-help" id="macroReorderHelp">Drag handle, use Move up/down, or press Alt + Arrow Up/Down to reorder steps.</p>
           <p class="macro-notice" id="macroNotice" role="status" aria-live="polite"></p>
           <div class="macro-steps" id="macroSteps" role="list" aria-label="Selected macro steps" aria-describedby="macroReorderHelp"></div>
         </section>
       </form>
     </section>
   </main>
+  
   <form id="macroCaptureSettings" hidden></form>
 
+  <!-- Adapter Settings Dialog -->
   <dialog class="adapter-settings-dialog" id="adapterSettingsDialog" aria-labelledby="adapterSettingsTitle" aria-describedby="adapterSettingsDescription">
     <div class="adapter-settings-heading">
-      <h2 id="adapterSettingsTitle">Adapter settings</h2>
+      <div>
+        <p class="eyebrow">Hardware configuration</p>
+        <h2 id="adapterSettingsTitle" class="text-lg font-bold text-white">Adapter settings</h2>
+      </div>
       <button class="button button-ghost" id="closeAdapterSettingsButton" type="button" autofocus>Close</button>
     </div>
-    <p class="field-help" id="adapterSettingsDescription">These settings apply to the whole adapter, not the selected profile. Use Apply to save changes; closing keeps unapplied selections.</p>
-      <section class="joycon-mode" aria-labelledby="joyconModeTitle">
-        <p class="eyebrow">Adapter-wide setting</p>
-        <h3 id="joyconModeTitle">Joy-Con 2 default mode</h3>
-        <label class="field-label" for="joyconModeSelect">Default arrangement</label>
-        <select id="joyconModeSelect" class="select" aria-describedby="joyconModeHelp joyconModeStatus" disabled>
-          <option value="paired">Paired · L + R together</option>
-          <option value="individual">Individual · separate players</option>
-        </select>
-        <p class="field-help">Saved on the adapter; changing it applies live and clears temporary joins/splits. Not an artwork preview.</p>
-        <details class="joycon-mode-help">
-          <summary>Controller shortcut &amp; profile banks</summary>
-          <div id="joyconModeHelp">
-            <p><strong>Paired:</strong> L + R share one player and a separate L+R profile bank. Unmatched halves stay separate.</p>
-            <p><strong>Individual:</strong> each half is a sideways player using its own solo bank. Choose the L or R profile owner to edit it.</p>
-            <p><strong>Join / split this pair:</strong> hold <strong>ZL + Minus</strong> on the left and <strong>ZR + Plus</strong> on the right for <strong>2 seconds</strong>. A short pulse confirms success. Release all four buttons before using it again.</p>
-            <p>The shortcut affects only those halves and overrides this default until either disconnects. Other Joy-Cons are unchanged. Each half's complete two-button chord is reserved until both buttons release, even while waiting for the other half. Ambiguous solo selections do not join.</p>
-            <p>All saved banks and unsaved profile drafts are kept. Your chosen owner does not change automatically.</p>
-            <p>Saved preference is not a live pairing report. A pair waits for its L+R bank to be ready; the diagram and live playtest report the actual arrangement.</p>
-          </div>
-        </details>
-        <button class="button button-secondary" id="applyJoyconModeButton" type="button" disabled>Apply default mode</button>
-        <p class="joycon-mode-status" id="joyconModeStatus" data-state="loading" role="status" aria-live="polite">Reading saved preference…</p>
-      </section>
+    <p class="field-help" id="adapterSettingsDescription">These settings apply to the whole adapter. Apply saves them immediately; closing keeps your unapplied selection without changing the adapter.</p>
+    
+    <section class="joycon-mode" aria-labelledby="joyconModeTitle">
+      <p class="eyebrow">Adapter default</p>
+      <h3 id="joyconModeTitle">Joy-Con 2 default mode</h3>
+      <label class="field-label" for="joyconModeSelect">Default arrangement</label>
+      <select id="joyconModeSelect" class="select" aria-describedby="joyconModeHelp joyconModeStatus" disabled>
+        <option value="paired">Paired · L + R combined as one player</option>
+        <option value="individual">Individual · Separate sideways players</option>
+      </select>
+      <p class="field-help">Stored in Pico flash; applying changes resets temporary Joy-Con splits or joins.</p>
+      
+      <details class="joycon-mode-help mt-3">
+        <summary>Join/split shortcut &amp; profile behavior</summary>
+        <div id="joyconModeHelp" class="mt-2 space-y-2 text-xs text-slate-400">
+          <p><strong>Paired:</strong> Left and Right Joy-Cons share one player identity and a combined L+R profile bank.</p>
+          <p><strong>Individual:</strong> Each half functions as an independent sideways controller using its own solo profile bank.</p>
+          <p><strong>Quick join / split:</strong> Hold <strong>ZL + Minus</strong> on (L) and <strong>ZR + Plus</strong> on (R) for <strong>2 seconds</strong>. A short rumble pulse confirms the change.</p>
+          <p>Release all four buttons before using the shortcut again. It affects only these halves and overrides the default until either disconnects; other Joy-Cons are unchanged. Unmatched halves stay separate.</p>
+          <p>Paired and solo profiles are independent. All saved profiles and unsaved drafts are kept. The saved default is not a live pairing report; the diagram shows the current arrangement.</p>
+        </div>
+      </details>
+      <div class="mt-4">
+        <button class="button button-secondary w-full" id="applyJoyconModeButton" type="button" disabled>Apply default mode</button>
+      </div>
+      <p class="joycon-mode-status" id="joyconModeStatus" data-state="loading" role="status" aria-live="polite">Reading saved preference…</p>
+    </section>
   </dialog>
 
-  <dialog class="copy-dialog" id="copyDialog">
-    <form method="dialog">
-      <p class="eyebrow">Duplicate profile</p>
-      <h3>Choose a destination</h3>
-      <p class="field-help">Copy this current draft, including unsaved settings, to the destination. This replaces its stored profile and name; the source draft is unchanged.</p>
-      <label class="field-label" for="copyIdentity">Controller</label>
-      <select class="select" id="copyIdentity"></select>
-      <label class="field-label" for="copySlot">Profile slot</label>
-      <select class="select" id="copySlot"></select>
-      <div class="dialog-actions">
+  <!-- Copy Profile Modal Dialog -->
+  <dialog class="copy-dialog" id="copyDialog" aria-labelledby="copyDialogTitle">
+    <form method="dialog" class="space-y-4">
+      <div>
+        <p class="eyebrow">Duplicate profile</p>
+        <h3 id="copyDialogTitle" class="text-lg font-bold text-white">Choose destination</h3>
+      </div>
+      <p class="field-help">Copy this draft, including unsaved changes, to another profile. This immediately replaces the destination’s saved settings and name. The source draft is unchanged.</p>
+      
+      <div>
+        <label class="field-label" for="copyIdentity">Target controller</label>
+        <select class="select" id="copyIdentity"></select>
+      </div>
+      <div>
+        <label class="field-label" for="copySlot">Profile slot</label>
+        <select class="select" id="copySlot"></select>
+      </div>
+      
+      <div class="dialog-actions pt-2">
         <button class="button button-ghost" value="cancel">Cancel</button>
         <button class="button button-primary" id="confirmCopyButton" value="default">Copy draft to Pico</button>
       </div>
     </form>
   </dialog>
+
+  <!-- System Toast Notifications -->
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Runtime Scripts -->
   <script src="/playtest.js" defer></script>
   <script src="/assets/controller_layouts.js" defer></script>
   <script src="/app.js" defer></script>

@@ -184,9 +184,10 @@ def _controller_presentation(
         (0x054C, 0x0CE6): ("Sony DualSense", "playstation", "dualsense"),
         (0x054C, 0x0DF2): ("Sony DualSense Edge", "playstation", "dualsense"),
         (0x054C, 0x09CC): ("Sony DualShock 4", "playstation", "generic"),
-        # VID/PID cannot distinguish Wii extensions or Wii U Pro from Remote Plus.
-        (0x057E, 0x0306): ("Nintendo Wii controller", "generic", "generic"),
-        (0x057E, 0x0330): ("Nintendo Wii / Wii U controller", "generic", "generic"),
+        # Wii-family IDs do not establish orientation, extensions, or Wii U Pro.
+        # Use family reference artwork without narrowing the available sources.
+        (0x057E, 0x0306): ("Nintendo Wii controller", "wii", "wii-reference"),
+        (0x057E, 0x0330): ("Nintendo Wii / Wii U controller", "wii", "wii-reference"),
     }
     exact = known.get((identity.vendor_id, identity.product_id))
     if exact is not None:
@@ -278,8 +279,10 @@ class ProfileEditorServer(HTTPServer):
 
     def find_device(self) -> config_manager.UsbDevice:
         if self._device is None:
+            # Browser polling handles reconnection. Waiting the transaction
+            # timeout here blocks every request on this single-threaded server.
             self._device = config_manager.find_pico(
-                self.bus, self.device_address, self.operation_timeout
+                self.bus, self.device_address, timeout=0.0
             )
         return self._device
 

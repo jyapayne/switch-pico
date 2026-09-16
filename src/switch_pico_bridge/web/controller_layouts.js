@@ -193,5 +193,11 @@ const ControllerLayouts = (() => {
       note: "Nunchuk stick uses LEFT axes with calibrated travel and has no click. B→south, A→east, 1/2→left/right shoulder, Nunchuk C→west and Z→north. Nunchuk C is a normal face source, not the Switch 2 C extra. Power is not remappable.",
     },
   };
+  layouts["wii-reference"] = {
+    ...layouts["wii-remote"],
+    name: "Wii Remote · reference layout",
+    referenceOnly: true,
+    note: "Wii-family reference, shown with the default horizontal controls. The saved identity cannot confirm orientation, extensions, or distinguish a Wii U Pro Controller. Connect the controller for its detected layout, or choose a diagram preview. All source mappings remain available; physical highlighting is off.",
+  };
   return layouts;
 })();

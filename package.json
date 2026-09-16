@@ -1,0 +1,14 @@
+{
+  "name": "switch-pico-profile-editor",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Tailwind CSS toolchain for Switch Pico Profile Studio",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/switch_pico_bridge/web/input.css -o ./src/switch_pico_bridge/web/profile_editor.css --minify",
+    "watch:css": "tailwindcss -i ./src/switch_pico_bridge/web/input.css -o ./src/switch_pico_bridge/web/profile_editor.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "4.3.1",
+    "tailwindcss": "4.3.1"
+  }
+}

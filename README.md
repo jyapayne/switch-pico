@@ -350,13 +350,60 @@ Output mode is selected before TinyUSB starts and never changes while mounted. A
 
 Development USB identities are `CAFE:4010` (XInput), `CAFE:4020` (DInput), and `CAFE:4021` (Mac). DInput and Mac expose four input-only generic HID interfaces and no rumble. Mac uses X/Y/Z/Rx sticks plus Simulation Brake/Accelerator triggers. Switch reports input, rumble, and motion capability; XInput reports input and rumble.
 
-`profiles edit` starts a local-only browser editor at `http://127.0.0.1:8765/`. It exposes every profile field: all 16 buttons plus the L2/R2 analog triggers can be remapped to ordinary buttons, triggers, or Switch SL/SR rail outputs; both sticks and triggers retain independent deadzone/saturation/curve settings; and rumble, confirmation, Turbo/Auto Burst, built-in action chords, and four custom macro sequences are editable. Its live playtest compares current raw stick and trigger input with the unsaved draft, shows deadzone/saturation boundaries and digital thresholds, and highlights pressed physical controls. Select a controller identity and one of its eight profile slots, use **Start from defaults** for a new draft, then **Save to Pico**. The backend validates the complete profile before using the existing chunked atomic transaction; invalid drafts never reach flash. Use `profiles edit --no-browser` for a printed URL or `profiles edit --port PORT` to choose another local port.
+`profiles edit` starts **Controller Studio**, a local-only browser editor at
+`http://127.0.0.1:8765/`. Select a controller and one of its eight profile slots
+in the sidebar. The editor has seven focused sections: **Button mapping**,
+**Sticks & triggers**, **Shift layer**, **Profile shortcuts**, **Rumble**,
+**Turbo**, and **Actions & macros**. Section links support keyboard navigation,
+browser history, and direct URLs such as `/#analog`; switching sections keeps
+the current draft. **Reset defaults** starts a new default draft,
+**Save to Pico** stores it, and **Make active** separately selects it for play.
+Rename and controller alias actions save their metadata immediately; Copy
+replaces the destination profile and name, including any unsaved draft settings.
+
+The editor exposes every profile field: button, analog-trigger and rail-output
+mappings; independent stick/trigger deadzones, saturation and response curves;
+rumble and confirmation; Turbo/Auto Burst; action chords; and four custom macros.
+Live playtest compares controller input with the draft and highlights pressed
+controls. Detailed diagram, native-output and adapter help is expandable.
+Saving an invalid field opens its section and focuses the field. The backend
+validates the complete profile before the existing chunked atomic transaction;
+invalid drafts never reach flash. Use `profiles edit --no-browser` for a printed
+URL or `profiles edit --port PORT` to choose another local port.
+
+USB failures clear the adapter connection indicator and disable device actions
+without discarding the draft. Discovery checks once per request; it does not
+hold the editor's single-threaded server for the transaction timeout while the
+Pico is absent. Background tabs show **Connection check paused** and recheck on
+return. Controller disconnection and unsupported live-input features are
+separate from adapter availability.
+
+**Studio styling:** Tailwind CSS is compiled locally and the resulting
+`src/switch_pico_bridge/web/profile_editor.css` ships with the Python package.
+Running Studio needs neither Node.js nor an internet connection. When changing
+the HTML, JavaScript class names, or `web/input.css`, rebuild the stylesheet from
+the repository root using the pinned development dependencies:
+
+```sh
+npm ci
+npm run build:css
+```
+
+`npm run watch:css` rebuilds while developing. Include the generated
+`profile_editor.css` with source changes; no Tailwind CDN is used at runtime.
 
 Switch 2's **C, GL, GR, Left SL/SR and Right SL/SR** are additional input controls. Base and Shift mappings can route them to ordinary buttons, triggers, or rail outputs; they also remain available in action/macro chords, cancellation and modifiers. Extra input mappings default to disabled. **Left SL, Left SR, Right SL and Right SR** are real output destinations in both native Joy-Con and Switch Pro reports. C/GL/GR remain input sources, not destinations. XInput and generic HID have no rail-button equivalents. Macro and swing output actions retain their existing ordinary-button contract.
 
 Controller Studio uses the supplied lightweight SVGs for Switch 2 Pro, Joy-Con 2 left/right solo and paired layouts, original Switch Pro, DualSense, Xbox, and Wii Remote/Nunchuk views. Hotspots follow the artwork's actual coordinates; solo Joy-Con views rotate with their firmware input mappings. Rear buttons and rails are labeled below the front view rather than drawn in fictitious positions. On narrow screens, pan the diagram or use the **Source control** menu.
 
 **Auto** uses matching-owner live metadata to distinguish Joy-Con pairs/solo halves and Wii horizontal, vertical, and Nunchuk layouts. **Preview** changes only the editor's diagram and source labels; it does not pair controllers or change saved mappings, and physical highlighting is disabled. Source choices reflect the layout while stored unavailable mappings are retained. Legacy Wii metadata without orientation uses a visibly labeled horizontal reference with physical highlighting disabled.
+
+Disconnected Wii-family owners use a labeled Wii Remote reference instead of
+the generic gamepad artwork. The reference shows default horizontal controls,
+keeps every source mapping editable, and does not highlight physical input.
+Saved Wii-family identifiers cannot establish orientation, extensions, or
+distinguish a Wii U Pro Controller. Matching live metadata replaces the reference
+with the detected layout; reconnecting or disconnecting never changes the draft.
 
 **Wii orientation** is separate from layout preview. Select a connected Wii Remote owner, choose **Horizontal** or **Vertical**, and click **Apply orientation**. Studio waits for firmware confirmation before reporting success. This changes the current connection's physical button mapping, not saved profiles or adapter configuration. Nunchuk mappings remain vertical while attached; unplugging restores the selected standalone orientation. Changing orientation clears old held-input/macro/capture state and advances the logical input generation without reconnecting Bluetooth. Reconnect uses the horizontal default, or vertical if + is held while connecting.
 
@@ -378,7 +425,7 @@ profile, then assign the controller in Switch **Change Grip/Order** with the
 mapped SL+SR combination. Keep existing game profiles intact rather than
 replacing them. Console/game compatibility still requires hardware qualification.
 
-**Swap left & right sticks (including clicks)** is in Analog. It works in both
+**Swap left & right sticks (including clicks)** is in **Sticks & triggers**. It works in both
 native Joy-Con and ordinary Pro-emulation firmware (and other output modes):
 each physical stick is calibrated first, then the output axis pairs and mapped
 stick clicks exchange sides. Final-output macro overrides remain downstream.
@@ -399,7 +446,7 @@ swapping**, before native sideways rotation. Opposite directions cancel per
 axis. Cardinals use full scale; diagonals are normalized inside the stick's
 radius. Any nonzero mapped-left analog vector takes priority over the entire
 digital vector. If analog drift prevents D-pad movement, adjust the physical
-stick's calibration/inner deadzone in Analog; no hidden deadzone is added.
+stick's calibration/inner deadzone in **Sticks & triggers**; no hidden deadzone is added.
 Movement releases when its sources release and never presses the stick click.
 Final-output macro overrides retain their existing downstream behavior.
 
@@ -512,7 +559,7 @@ The AIO firmware enables motion automatically for original Wii Remotes with an e
 - **Nunchuk stick travel:** the parser reads the 16-byte extension calibration at `A40020` before activating MotionPlus. It validates both checksum bytes and the X/Y min/center/max ordering, then scales each side of each axis independently into the full normalized range, clamps overshoot, and inverts Y. It preserves the notched gate rather than expanding diagonals into square corners. Unreadable/invalid calibration uses documented nominal travel (center 128, ±96), not the full 0–255 byte range. Replacement Nunchuks reload their own calibration. Existing left-stick profile tuning applies; saved right-stick tuning is not copied or overwritten.
 - **Motion:** ordinary remotes use continuous `0x31`; MotionPlus and Nunchuk use combined `0x35` reports. The parser checks primary/backup accelerometer factory calibration and both fast/slow gyro calibration blocks, including checksums. Invalid calibration disables only the affected sensor rather than inventing readings. MotionPlus selects sensitivity independently for each axis; factory-only zero correction can retain temperature-dependent gyro drift.
 - **Nunchuk passthrough:** MotionPlus and Nunchuk samples alternate. Held Nunchuk controls persist across gyro packets, moved C/Z bits are decoded, and the remote's accelerometer remains the motion source. Attaching or removing a Nunchuk triggers serialized extension discovery, updates Studio's layout, and clears detached stick/C/Z state. Extension identifiers accept the upstream-compatible type suffix rather than requiring a vendor-specific prefix; initializing extensions get bounded reply-paced retries. Periodic discovery of an inactive external MotionPlus attached alone and Classic Controller MotionPlus passthrough remain unimplemented. Existing ordinary Classic Controller, Wii U Pro, Balance Board and uDraw paths remain separate.
-- **Motion gesture bindings:** Studio's Macro section provides **Wii Remote swing**, **Nunchuk swing**, and **Both together**. Each can select a final output button or one of the four configured macros, plus an optional held modifier. Remote and Nunchuk have independent Low/Medium/High sensitivity. All new bindings default to disabled; existing Remote bindings are preserved. No sensor bar or MotionPlus is required, and gestures remain available when gyro output is disabled. For Zelda on Switch, choose **Y** (logical `west`; use the Switch preview for Nintendo button labels).
+- **Motion gesture bindings:** Studio's **Actions & macros** section provides **Wii Remote swing**, **Nunchuk swing**, and **Both together**. Each can select a final output button or one of the four configured macros, plus an optional held modifier. Remote and Nunchuk have independent Low/Medium/High sensitivity. All new bindings default to disabled; existing Remote bindings are preserved. No sensor bar or MotionPlus is required, and gestures remain available when gyro output is disabled. For Zelda on Switch, choose **Y** (logical `west`; use the Switch preview for Nintendo button labels).
 - **Combined priority:** when Both together is enabled and both calibrated sensors are fresh, individual gestures wait for the combination window (30–200 ms, default 100 ms). One full swing can pair with smaller sustained movement from the other sensor, before or after it within the inclusive window. Confirmation uses half that sensor's normal acceleration threshold while retaining the force/tilt guard and fresh-sample evidence requirement; individual thresholds are unchanged. Two small movements alone do not trigger an action. Confirmation is consumed once, including the confirming source's rearm/cooldown, so a later full swing from that same stroke cannot leak an individual action. Without an eligible combined binding or a fresh Nunchuk stream, Remote actions do not acquire the delay. Disconnects, lost modifiers, stale samples and active macros discard pending evidence rather than replaying it.
 - **Stroke detection and macros:** initially settle each enabled sensor for 120 ms. Further strokes need only a 20 ms lower-force gap and at least 200 ms between presses; early rebounds are discarded. Buttons generate 80 ms presses. Gesture macros run one cycle regardless of their physical-trigger playback mode and must contain a positive-duration step before binding. Physical macro triggers and cancel controls take priority; gestures during active macros are ignored, not queued. The detector retains stroke history so repeated gesture macros do not require full stops. Profile changes and reserved hotkeys cancel pending gesture output; physical button holds remain intact.
 - **Independent Nunchuk acceleration:** plain and MotionPlus passthrough reports use separate calibrated samples and freshness counters. Nunchuk acceleration never replaces the Remote's console IMU. Invalid factory accelerometer calibration disables Nunchuk/combined gestures without disabling the stick, C/Z buttons, or Remote gestures; unplugging and replacement discard the old Nunchuk sample.

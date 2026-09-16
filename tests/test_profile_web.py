@@ -18,13 +18,16 @@ from tests.test_config_manager import FakeDevice, custom_profile, native_rumble_
 
 @contextmanager
 def running_server(
-    monkeypatch: pytest.MonkeyPatch, device: FakeDevice | None
+    monkeypatch: pytest.MonkeyPatch,
+    device: FakeDevice | None,
+    *,
+    operation_timeout: float = 1.0,
 ) -> Iterator[tuple[str, str]]:
     server = profile_web.ProfileEditorServer(
         ("127.0.0.1", 0),
         bus=None,
         device_address=None,
-        timeout=1.0,
+        timeout=operation_timeout,
     )
     if device is not None:
         monkeypatch.setattr(server, "find_device", lambda: device)
@@ -179,6 +182,49 @@ def test_native_hub_editor_discovers_root_and_preserves_saved_state(
         config_manager.OP_REBOOT,
         config_manager.OP_BOOTSEL_REBOOT,
     }.intersection(device.requests)
+
+
+def test_editor_disconnect_does_not_block_requests_and_rediscovers_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = FakeDevice()
+    attached = True
+    transfer = device.ctrl_transfer
+
+    def find(**arguments: object) -> tuple[FakeDevice, ...]:
+        if attached and (arguments["idVendor"], arguments["idProduct"]) == (
+            0xCAFE, 0x4010
+        ):
+            return (device,)
+        return ()
+
+    def ctrl_transfer(*args: Any, **kwargs: Any) -> Any:
+        if not attached:
+            raise usb.core.USBError("device disconnected")
+        return transfer(*args, **kwargs)
+
+    monkeypatch.setattr(config_manager.usb.core, "find", find)
+    monkeypatch.setattr(device, "ctrl_transfer", ctrl_transfer)
+    with running_server(
+        monkeypatch, None, operation_timeout=15.0
+    ) as (base_url, _):
+        status, before = request_json(f"{base_url}/api/profiles")
+        assert status == 200
+        attached = False
+        status, _ = request_json(f"{base_url}/api/profiles/1/1/playtest")
+        assert status == 503
+        # request_json's two-second deadline is independent of the 15-second
+        # transaction timeout. Neither rediscovery nor the next request waits.
+        status, unavailable = request_json(f"{base_url}/api/profiles")
+        assert status == 400
+        assert "error" in unavailable
+        status, _ = request_json(f"{base_url}/api/schema")
+        assert status == 200
+        attached = True
+        device.address += 1
+        status, after = request_json(f"{base_url}/api/profiles")
+        assert status == 200
+        assert after == before
 
 
 @pytest.mark.parametrize(
@@ -607,26 +653,42 @@ def test_live_metadata_cannot_turn_an_unrelated_identity_into_a_pair(
     assert sample["controller"]["layout"] == "xbox"
 
 
-def test_wii_pid_does_not_claim_a_remote_or_extension_without_live_metadata(
+@pytest.mark.parametrize("product_id", [0x0306, 0x0330])
+def test_wii_family_reference_preserves_sources_until_live_layout_is_known(
     monkeypatch: pytest.MonkeyPatch,
+    product_id: int,
 ) -> None:
     device = FakeDevice()
     device.stable_identity = replace(
-        device.stable_identity, vendor_id=0x057E, product_id=0x0330
+        device.stable_identity, vendor_id=0x057E, product_id=product_id
     )
     device.profile_identities = [device.global_identity, device.stable_identity]
     device.active_profiles[device.stable_identity.to_bytes()] = 0
+    device.profiles[device.stable_identity.to_bytes(), 0] = (
+        config_manager.ControllerProfile.default().to_bytes()
+    )
     with running_server(monkeypatch, device) as (base_url, _):
         status, listing = request_json(f"{base_url}/api/profiles")
         assert status == 200
-        assert listing["identities"][1]["controller"]["layout"] == "generic"
+        owner = listing["identities"][1]
+        assert owner["controller"]["layout"] == "wii-reference"
+        assert owner["controller"]["style"] == "wii"
+        assert owner["source_controls"] == list(config_manager.LOGICAL_CONTROLS)
+        device.playtest_connected = False
+        status, offline = request_json(f"{base_url}/api/profiles/1/1/playtest")
+        assert status == 200
+        assert offline["connected"] is False
+        assert offline["layout"] is None
+        assert offline["controller"] == owner["controller"]
+        assert offline["source_controls"] == owner["source_controls"]
+        device.playtest_connected = True
         for code, expected in (
-            (0, "generic"),
+            (0, "wii-reference"),
             (4, "wii-remote"),
             (5, "wii-nunchuk"),
             (6, "wii-horizontal"),
             (7, "wii-vertical"),
-            (0, "generic"),
+            (0, "wii-reference"),
         ):
             device.playtest_layout = code
             status, sample = request_json(f"{base_url}/api/profiles/0/1/playtest")
@@ -637,6 +699,8 @@ def test_wii_pid_does_not_claim_a_remote_or_extension_without_live_metadata(
                     config_manager.EXTRA_BUTTONS
                 )
                 assert ("left_shoulder" in sample["source_controls"]) == (code == 5)
+            else:
+                assert sample["source_controls"] == owner["source_controls"]
 
 
 def test_editor_reads_writes_and_activates_profiles_atomically(

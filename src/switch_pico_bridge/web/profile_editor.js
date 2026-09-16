@@ -202,6 +202,64 @@ const elements = {
   toast: document.querySelector("#toast"),
 };
 
+const sectionLinks = document.querySelectorAll(".section-nav a");
+const sectionPanels = Array.from(sectionLinks, (link) =>
+  document.getElementById(link.hash.slice(1))
+);
+let selectedSection = null;
+
+function showSection(id) {
+  const panel = sectionPanels.find((section) => section.id === id) || sectionPanels[0];
+  if (selectedSection === panel) return;
+  if (selectedSection) {
+    stopMacroPreview("Preview stopped: section changed.");
+    clearMacroDrag();
+    stopCapture("Recording stopped because you navigated to another section.");
+  }
+  selectedSection = panel;
+  sectionPanels.forEach((section) => {
+    section.hidden = section !== panel;
+  });
+  sectionLinks.forEach((link) => {
+    if (link.hash === `#${panel.id}`) {
+      link.setAttribute("aria-current", "page");
+      // Keep the current section visible in the horizontally scrolling mobile nav.
+      link.parentElement.scrollLeft = link.offsetLeft - (link.parentElement.clientWidth - link.offsetWidth) / 2;
+    } else link.removeAttribute("aria-current");
+  });
+}
+
+function showSectionFromHash() {
+  showSection(window.location.hash.slice(1));
+}
+
+function revealInvalidControl(control) {
+  // A modal copy dialog would otherwise keep the invalid draft field inert.
+  if (elements.copyDialog.open) elements.copyDialog.close();
+  const panel = sectionPanels.find((section) => section.contains(control));
+  if (panel) {
+    showSection(panel.id);
+    if (window.location.hash !== `#${panel.id}`) window.location.hash = panel.id;
+  }
+  for (let ancestor = control.parentElement; ancestor && ancestor !== elements.form; ancestor = ancestor.parentElement) {
+    if (ancestor.tagName === "DETAILS") ancestor.open = true;
+    if (ancestor.hidden) ancestor.hidden = false;
+  }
+}
+
+function reportProfileValidity() {
+  // Validate only this form's controls, not the separate recording settings.
+  // Report one field at a time so other hidden panels never receive focus.
+  for (const control of elements.form.elements) {
+    if (control.willValidate && !control.validity.valid) {
+      revealInvalidControl(control);
+      control.reportValidity();
+      return false;
+    }
+  }
+  return true;
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -282,8 +340,8 @@ function syncControllerPresentation() {
   const layout = ControllerLayouts[layoutId] || ControllerLayouts.generic;
   const reported = live?.source_controls || owner?.source_controls || state.schema.controls;
   const sources = preview ? Object.keys(layout.controls) : reported.filter(control =>
-    layout.generic || Object.hasOwn(layout.controls, control));
-  const topologyKnown = layoutId !== "wii-remote" &&
+    layout.generic || layout.referenceOnly || Object.hasOwn(layout.controls, control));
+  const topologyKnown = !layout.referenceOnly && layoutId !== "wii-remote" &&
     (!(layoutId.startsWith("joycon2-") || layoutId.startsWith("wii-")) || live?.layout === layoutId);
   const liveDiagram = Boolean(live && !preview && topologyKnown && !layout.generic);
   const style = preview ? layout.style : controller.style || layout.style;
@@ -459,8 +517,8 @@ function renderPlaytest(sample) {
     clearPlaytest(
       sample.connected
         ? sample.identity?.is_joycon_pair
-          ? "Paired input belongs to the L+R profile owner. Select that owner for paired settings; this draft and its layout are unchanged."
-          : "Live input belongs to another profile owner; this draft and its layout are unchanged."
+          ? "Paired input uses the L+R controller profiles. Select L+R for paired settings; this draft and its layout are unchanged."
+          : "Live input belongs to another controller; this draft and its layout are unchanged."
         : "Connect or move the selected controller to compare its raw input with this draft."
     );
     return;
@@ -626,7 +684,7 @@ async function pollPlaytest() {
       profileIndex === state.profileIndex
     ) {
       clearPlaytest(
-        `${error.message}. Flash current firmware to enable live playtest.`,
+        `Live input unavailable: ${error.message}`,
         "error"
       );
     }
@@ -643,22 +701,36 @@ function isDirty() {
 }
 
 function setConnection(mode, text) {
+  if (mode === "ready" && document.hidden) {
+    mode = "loading";
+    text = "Connection check paused";
+  }
   const wasConnected = state.adapterConnected;
   state.adapterConnected = mode === "ready";
-  if (wasConnected && !state.adapterConnected) stopMacroPreview("Preview stopped: adapter disconnected.");
-  if (wasConnected && !state.adapterConnected && captureBlocking()) {
-    stopCapture("Adapter disconnected; retaining the last received recording.");
+  if (wasConnected && !state.adapterConnected) {
+    stopMacroPreview("Preview stopped: adapter disconnected.");
+    if (captureBlocking()) {
+      stopCapture("Adapter disconnected; retaining the last received recording.");
+    }
+    clearPlaytest("Adapter connection unavailable. Your draft is retained.", "error");
   }
   elements.connection.dataset.state = mode;
   elements.connectionText.textContent = text;
-  elements.copyProfile.disabled = state.busy || !state.adapterConnected;
-  if (state.profile) {
-    elements.save.disabled =
-      !state.adapterConnected || state.busy || !isDirty();
-    elements.activate.disabled =
-      !state.adapterConnected || state.busy || state.active;
-  }
+  updateDeviceActions();
   renderCapture();
+}
+
+function updateDeviceActions() {
+  const unavailable = state.busy || captureBlocking() || !state.adapterConnected;
+  elements.save.disabled = unavailable || !isDirty();
+  elements.activate.disabled = unavailable || !state.profile || state.active;
+  elements.copyProfile.disabled = unavailable || !state.profile;
+  elements.confirmCopy.disabled = unavailable || !state.profile;
+  elements.saveProfileName.disabled = unavailable || !state.profile;
+  elements.saveAlias.disabled = unavailable || currentOwner()?.index === 0;
+  elements.identify.disabled = unavailable || !state.identifyAvailable;
+  renderJoyconMode();
+  renderWiiOrientation();
 }
 
 let toastTimer = 0;
@@ -675,7 +747,16 @@ async function api(path, options = {}) {
   if (options.method && options.method !== "GET") {
     headers["X-Switch-Pico-Token"] = state.token;
   }
-  const response = await fetch(path, { ...options, headers });
+  let response;
+  try {
+    response = await fetch(path, { ...options, headers });
+  } catch (error) {
+    setConnection("error", "Editor server unavailable");
+    throw error;
+  }
+  // USB failures are connection failures, not unsupported playtest features.
+  // Ordinary 400 validation/feature errors must not disconnect a healthy Pico.
+  if (response.status === 503) setConnection("error", "Adapter unavailable");
   let payload;
   try {
     payload = await response.json();
@@ -703,7 +784,7 @@ function renderJoyconMode() {
   let status;
   let mode;
   const saved = joyconMode.saved === null ? "" :
-    `Saved default: ${label(joyconMode.saved)} · generation ${joyconMode.generation}.`;
+    `Saved default: ${label(joyconMode.saved)}.`;
   const selection = joyconModeChanged()
     ? ` Selection: ${label(joyconMode.selected)} — not applied.` : "";
   if (joyconMode.applying) {
@@ -818,7 +899,7 @@ function renderWiiOrientation() {
     elements.wiiOrientation.disabled = true;
     elements.applyWiiOrientation.disabled = true;
     elements.wiiOrientationStatus.dataset.state = "unsupported";
-    elements.wiiOrientationStatus.textContent = "Default profile owner cannot set orientation. Select the connected Wii Remote.";
+    elements.wiiOrientationStatus.textContent = "Select the connected Wii Remote instead of the default profiles to set orientation.";
     return;
   }
 
@@ -854,29 +935,20 @@ function renderWiiOrientation() {
 function setBusy(busy) {
   state.busy = busy;
   busy ||= captureBlocking();
-  elements.save.disabled =
-    busy || !state.adapterConnected || !isDirty();
-  elements.activate.disabled =
-    busy || !state.adapterConnected || state.active;
   elements.resetDraft.disabled = busy;
   elements.refresh.disabled = busy;
   elements.identity.disabled = busy;
-  elements.identify.disabled = busy || !state.identifyAvailable;
   elements.profileName.disabled = busy;
-  elements.saveProfileName.disabled = busy || !state.adapterConnected;
   elements.controllerAlias.disabled =
     busy || currentOwner()?.index === 0;
-  elements.saveAlias.disabled =
-    busy || !state.adapterConnected || currentOwner()?.index === 0;
-  elements.copyProfile.disabled = busy || !state.adapterConnected;
   elements.importProfile.disabled = busy;
   elements.exportProfile.disabled = busy;
   if (state.schema && state.profile) updateMacroBudgets();
   document.querySelectorAll(".profile-button").forEach((button) => {
     button.disabled = busy;
   });
+  updateDeviceActions();
   renderCapture();
-  renderWiiOrientation();
   renderNativeLayout();
 }
 
@@ -927,7 +999,7 @@ function syncLibraryMetadata(identities, restoreStoredOwner = false) {
     restoreStoredOwner ? storedOwnerKey() : oldOwner?.key
   ) || storedOwnerKey();
   if (oldOwner && state.profile && !identities.some((entry) => entry.key === oldOwner.key)) {
-    throw new Error("The selected profile owner is unavailable. Your draft is retained; reconnect the owner or export it before choosing another.");
+    throw new Error("The selected controller is unavailable. Your draft is retained; reconnect the controller or export the draft before choosing another.");
   }
   state.identities = identities;
   const nextOwner = (
@@ -1004,8 +1076,8 @@ function renderProfileList() {
     const selected = index === state.profileIndex;
     const active = owner && owner.active_profile === index + 1;
     return `
-      <button class="profile-button${selected ? " selected" : ""}" type="button" data-profile-index="${index}">
-        <span class="profile-number"><span>${index + 1}</span>${escapeHtml(state.profileNames[index] || `Profile ${index + 1}`)}</span>
+      <button class="profile-button${selected ? " selected" : ""}" type="button" data-profile-index="${index}" aria-pressed="${selected}" aria-label="Profile ${index + 1}${state.profileNames[index] ? `: ${escapeHtml(state.profileNames[index])}` : ""}${active ? ", active on Pico" : ""}">
+        <span class="profile-number"><span aria-hidden="true">${index + 1}</span>${escapeHtml(state.profileNames[index] || `Profile ${index + 1}`)}</span>
         ${active ? '<span class="mini-active">Active</span>' : ""}
       </button>`;
   }).join("");
@@ -1145,7 +1217,7 @@ function renderShortcuts() {
     <div class="control-card">
       <label for="shortcut-modifier">Shortcut modifier</label>
       <select class="select" id="shortcut-modifier" data-kind="shortcut-modifier" aria-describedby="shortcut-modifier-help">${modifierOptions(shortcuts.modifier, shortcuts.profiles)}</select>
-      <p class="field-help" id="shortcut-modifier-help">None clears every shortcut. Switch 2 extra inputs can act as modifiers. Trigger modifiers are available for known Xbox, PlayStation and Switch 2 owners.</p>
+      <p class="field-help" id="shortcut-modifier-help">None clears every shortcut. Switch 2 extra inputs can act as modifiers. Trigger modifiers are available for recognized Xbox, PlayStation and Switch 2 controllers.</p>
     </div>`;
   elements.shortcuts.innerHTML = shortcuts.profiles.map((selector, index) => `
     <div class="control-card">
@@ -1277,21 +1349,23 @@ function renderButtonMap() {
   elements.controllerCanvas.dataset.layout = layoutId;
   elements.controllerLayoutStatus.dataset.state = liveDiagram ? "live" : "preview";
   elements.controllerLayoutStatus.textContent = preview ? "Manual layout preview" :
-    liveDiagram ? "Live · matching owner" : live ? "Live input · reference diagram" : "Offline · owner reference";
+    liveDiagram ? "Live · selected controller" : live ? "Live input · reference diagram" : "Offline · controller reference";
   elements.controllerModel.textContent = layout.name;
   elements.controllerLayoutHelp.textContent = preview
-    ? `Manual preview only${live ? `; connected input is ${live.controller.model}` : ""}. No topology or saved mapping is changed. Physical highlighting is off.`
+    ? `Layout preview only${live ? `; connected input is ${live.controller.model}` : ""}. The controller setup and saved mappings are unchanged. Physical highlighting is off.`
+    : layout.referenceOnly
+      ? "Wii-family reference only: orientation and extensions are unknown. Connect the selected controller for its detected layout. No mappings are changed or hidden."
     : live && !topologyKnown
       ? layoutId === "wii-remote"
         ? "Legacy firmware does not report Wii orientation. This reference shows the default horizontal mapping; physical highlighting is off. Choose a preview or update firmware."
-        : "Legacy firmware does not report Joy-Con pair/solo topology. This is an owner reference, not detected solo mode. Choose a preview or update firmware."
-      : "Auto uses only the selected owner's metadata. Preview changes this editor's source labels and diagram, never firmware topology or saved mappings.";
+        : "Legacy firmware does not report paired or solo Joy-Con mode. This diagram is a controller reference, not a detected solo layout. Choose a preview or update firmware."
+      : "Auto uses the selected controller's details. Preview changes source labels and the diagram only, never the controller setup or saved mappings.";
   elements.controllerLayoutNote.textContent =
     !preview && live?.layout === "joycon2-pair" && !live.identity?.is_joycon_pair
-      ? "This older firmware reports paired input through a physical controller's profile bank. There is no independent L+R bank; edits still affect the selected existing owner. Update firmware for separate pair profiles. The grip is illustrative, not detected."
+      ? "This older firmware uses an individual controller's profiles for paired input. There are no separate L+R profiles; edits still affect the selected controller. Update firmware for separate pair profiles. The grip is illustrative, not detected."
       : layout.note ||
-        (layout.generic ? "Generic reference art is not a model identification. Additional reported sources are unlocated, not buttons on this drawing." :
-          "Rear triggers are listed off-art below the front view. Unavailable stored mappings are retained.");
+        (layout.generic ? "This is a generic reference, not an identified controller model. Additional reported inputs are listed separately from the diagram." :
+          "Rear triggers are listed below the front view. Saved mappings for unavailable controls are retained.");
   const diagramKey = `${layoutId}:${sources.join(",")}`;
   if (diagramKey !== state.diagramKey) {
     const focusedSource = elements.controllerCanvas.contains(document.activeElement)
@@ -1346,7 +1420,7 @@ function renderButtonMap() {
     hotspot.classList.toggle("disabled-map", output == null);
     if (!liveDiagram) hotspot.classList.remove("pressed");
     hotspot.setAttribute("aria-pressed", String(button === selected));
-    hotspot.title = `${sourceLabel(button)} [${button}] → ${output == null ? "Disabled" : outputLabel(output)}`;
+    hotspot.title = `${sourceLabel(button)} → ${output == null ? "Disabled" : outputLabel(output)}`;
     hotspot.setAttribute("aria-label", hotspot.title);
   });
   elements.selectedSource.innerHTML = sourceOptions(selected);
@@ -1354,7 +1428,7 @@ function renderButtonMap() {
   elements.selectedControlGlyph.textContent = sourceGlyph(selected);
   elements.selectedControlName.textContent = sourceLabel(selected);
   elements.selectedControlDescription.textContent =
-    `${sourceAvailable(selected) ? "Source" : "Stored / unavailable source"} ${sourceLabel(selected)} [${selected}] produces ${mappedOutput == null ? "no output" : outputLabel(mappedOutput)}.${sourceAvailable(selected) ? "" : " Its mapping is retained; change the preview to locate it."}`;
+    `${sourceLabel(selected)} produces ${mappedOutput == null ? "no output" : outputLabel(mappedOutput)}.${sourceAvailable(selected) ? "" : " This control is unavailable in the current layout; its saved mapping is retained."}`;
   elements.selectedMapping.innerHTML = buttonOptions(mappedOutput, true, state.schema.output_controls, style);
   renderWiiOrientation();
 }
@@ -1613,7 +1687,7 @@ function renderTurbo() {
     const override = settings.overrides[button];
     const off = state.profile.turbo[button] === "off";
     return `<div class="control-card turbo-card" data-turbo-button="${button}" data-source-card="${button}"${sourceAvailable(button) ? "" : " hidden"}>
-      <label for="turbo-${button}"><span data-source-label="${button}">${escapeHtml(sourceLabel(button))}</span> · physical source</label>
+      <label for="turbo-${button}"><span data-source-label="${button}">${escapeHtml(sourceLabel(button))}</span> · controller input</label>
       <select class="select" id="turbo-${button}" data-kind="turbo" data-name="${button}">
         ${modeOptions(state.schema.turbo_modes, state.profile.turbo[button])}
       </select>
@@ -1745,7 +1819,7 @@ function macroBudgetError(macros) {
   }
   const budget = macroBudget(macros);
   if (budget.steps > MACRO_SHARED_STEP_LIMIT) return "The four macros share a limit of 16 steps.";
-  if (budget.bytes > MACRO_BYTE_LIMIT) return "The four macros share a limit of 136 sparse bytes.";
+  if (budget.bytes > MACRO_BYTE_LIMIT) return "The four macros share 136 bytes of storage.";
   return "";
 }
 
@@ -1825,7 +1899,7 @@ function renderCapture() {
   elements.captureProgress.max = Math.max(1, options.max_events);
   elements.captureProgress.value = count;
   elements.captureBudget.textContent =
-    `${count}/${options.max_events} recorded states · ${count * options.stepBytes}/${options.max_events * options.stepBytes} reserved sparse bytes · ` +
+    `${count}/${options.max_events} recorded states · ${count * options.stepBytes}/${options.max_events * options.stepBytes} reserved bytes · ` +
     `other macros: ${options.otherBudget.steps}/16 shared steps, ${options.otherBudget.bytes}/136 bytes. ` +
     "Initial input counts as a state; held states split at 10 seconds. Capture stops before exceeding capacity.";
   const terminalNotice = {
@@ -1840,7 +1914,7 @@ function renderCapture() {
   elements.captureNotice.textContent = [
     session?.error, terminalNotice, page?.conversion_error,
     session?.message, originWarning,
-    session?.used ? "Recorded steps are now in the unsaved draft. Review the visual preview below; Save remains a separate action." : "",
+    session?.used ? "Recorded steps are in the unsaved draft. Review the preview, then use Save to Pico to store the profile." : "",
     !session && !sourceReady ? "Connect the selected controller and wait for its live input before recording." : "",
     !session && !options.channels ? "Select at least one channel." : "",
     !session && !options.max_events ? "Other macros leave no room for a recorded state. Free shared steps or bytes first." : "",
@@ -1917,7 +1991,7 @@ function finishCaptureRequest(session) {
 async function beginCapture() {
   if (elements.captureRecord.disabled || state.busy || macroCapture.session ||
       state.playtestRequestActive || state.libraryRequestActive) return;
-  if (!elements.form.reportValidity() || !macroInputsValid(true)) return;
+  if (!reportProfileValidity() || !macroInputsValid(true)) return;
   const options = captureOptions();
   if (!options.channels || !options.max_events) return;
   const owner = currentOwner();
@@ -2013,7 +2087,7 @@ async function stopCapture(message = "") {
 async function useCapture() {
   const session = macroCapture.session;
   if (!session?.terminal || macroCapture.requestActive || !captureOriginMatches(session)) return;
-  if (!session.page?.steps?.length || !elements.form.reportValidity()) return;
+  if (!session.page?.steps?.length || !reportProfileValidity()) return;
   const candidate = clone(state.profile);
   candidate.macros[session.macroIndex].steps = clone(session.page.steps);
   const error = macroBudgetError(candidate.macros);
@@ -2086,7 +2160,7 @@ function updateMacroBudgets() {
     `${budget.steps}/${MACRO_SHARED_STEP_LIMIT} shared steps`
   );
   elements.macroControls.querySelector("[data-budget-bytes]")?.replaceChildren(
-    `${budget.bytes}/${MACRO_BYTE_LIMIT} sparse bytes`
+    `${budget.bytes}/${MACRO_BYTE_LIMIT} bytes`
   );
   const progress = elements.macroControls.querySelector("[data-budget-progress]");
   if (progress) progress.value = budget.bytes;
@@ -2100,7 +2174,7 @@ function updateMacroBudgets() {
   elements.macroDuration.textContent =
     `${macro.steps.length}/8 steps · ${bytes} bytes · ${duration} ms total · ${budget.duration} ms across all macros`;
   elements.addMacroStep.disabled = state.busy || !canAddMacroStep(DEFAULT_MACRO_STEP_BYTES, budget);
-  elements.addMacroStep.title = "Add a 100 ms button step (5 sparse bytes)";
+  elements.addMacroStep.title = "Add a 100 ms button step (5 bytes)";
   let startsAt = 0;
   elements.macroSteps.querySelectorAll("[data-step-index]").forEach((card) => {
     const index = Number(card.dataset.stepIndex);
@@ -2132,7 +2206,10 @@ function updateMacroBudgets() {
 function macroInputsValid(report = false) {
   const invalid = elements.macroSteps.querySelector("input:invalid") ||
     elements.macroControls.querySelector("input:invalid");
-  if (report && invalid) invalid.reportValidity();
+  if (report && invalid) {
+    revealInvalidControl(invalid);
+    invalid.reportValidity();
+  }
   return !invalid;
 }
 
@@ -2306,7 +2383,7 @@ function renderMacro() {
     actionChordCard(
       "profile_switch",
       "Cycle active profile",
-      `Advance through profile slots 1–${state.schema.profile_capacity}.`,
+      `Cycle through profiles 1–${state.schema.profile_capacity}.`,
       state.profile.switching_chord,
       state.schema.default_switching_chord
     ),
@@ -2432,8 +2509,8 @@ function renderMacro() {
       </div>
       <div class="macro-budget">
         <strong data-budget-steps>${budget.steps}/16 shared steps</strong>
-        <span data-budget-bytes>${budget.bytes}/136 sparse bytes</span>
-        <progress data-budget-progress max="136" value="${budget.bytes}" aria-label="Shared macro sparse byte budget"></progress>
+        <span data-budget-bytes>${budget.bytes}/136 bytes</span>
+        <progress data-budget-progress max="136" value="${budget.bytes}" aria-label="Shared macro storage"></progress>
       </div>
     </div>
     ${actionChordCard(
@@ -2485,7 +2562,7 @@ function renderMacroSteps() {
   const controllerStyle = currentControllerStyle();
 
   elements.macroSteps.innerHTML = macro.steps.length === 0
-    ? '<div class="macro-step end"><p class="field-help">No steps yet. Add a state step to build this macro.</p></div>'
+    ? '<div class="macro-step end"><p class="field-help">No steps yet. Add a step or record controller input to build this macro.</p></div>'
     : macro.steps.map((step, index) => {
       const overrides = new Set(step.overrides);
       const outputButtons = new Set(step.output_buttons);
@@ -2515,7 +2592,7 @@ function renderMacroSteps() {
             ${macroNumber(index, "triggers.right", step.triggers.right, 0, 65535, "Right trigger", !overrides.has("right_trigger"))}
           </div>
           <div class="step-group">
-            <span class="step-group-title">Fields this step overrides</span>
+            <span class="step-group-title">Outputs controlled by this step</span>
             <div class="check-grid">
               ${state.schema.macro_overrides.map((name) => `
                 <label class="checkbox-pill">
@@ -3067,7 +3144,16 @@ elements.captureRecover.addEventListener("click", () => {
 elements.captureOptions.addEventListener("input", renderCapture);
 elements.captureOptions.addEventListener("change", renderCapture);
 window.addEventListener("pagehide", () => stopCapture("Recording stopped because you left the editor."));
-window.addEventListener("hashchange", () => stopCapture("Recording stopped because you navigated to another section."));
+window.addEventListener("hashchange", showSectionFromHash);
+sectionLinks.forEach((link) => {
+  link.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    // Reveal the destination before the anchor's native scrolling and focus.
+    // Leave the default action intact for keyboard navigation and history.
+    showSection(link.hash.slice(1));
+  });
+});
+sectionPanels.forEach((panel) => { panel.tabIndex = -1; });
 document.querySelector("#macroCaptureSettings").addEventListener("submit", (event) => {
   event.preventDefault();
 });
@@ -3076,6 +3162,11 @@ document.addEventListener("visibilitychange", () => {
     stopMacroPreview("Preview stopped: tab hidden.");
     clearMacroDrag();
     stopCapture("Recording stopped because the tab was hidden.");
+    setConnection("loading", "Connection check paused");
+  } else {
+    setConnection("loading", "Checking adapter…");
+    pollPlaytest();
+    pollLibraryMetadata();
   }
   updateMacroPreviewControls();
   renderCapture();
@@ -3091,7 +3182,7 @@ elements.saveProfileName.addEventListener("click", async () => {
   setBusy(true);
   try {
     const value = elements.profileName.value.trim();
-    const result = await api(
+    await api(
       `/api/profiles/${state.identityIndex}/${state.profileIndex + 1}/name`,
       {
         method: "PUT",
@@ -3104,7 +3195,7 @@ elements.saveProfileName.addEventListener("click", async () => {
     elements.profileTitle.textContent = value || `Profile ${state.profileIndex + 1}`;
     renderProfileList();
     updateDirtyState();
-    toast(`Profile name saved · generation ${result.stored_generation}`);
+    toast("Profile name saved to Pico.");
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -3126,7 +3217,7 @@ elements.saveAlias.addEventListener("click", async () => {
     owner.alias = value;
     owner.label = result.label;
     renderIdentities();
-    toast(`Controller alias saved · generation ${result.stored_generation}`);
+    toast("Controller alias saved to Pico.");
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -3198,7 +3289,7 @@ elements.importProfileFile.addEventListener("change", async () => {
 });
 
 elements.copyProfile.addEventListener("click", () => {
-  if (!elements.form.reportValidity()) return;
+  if (!reportProfileValidity()) return;
   elements.copyIdentity.innerHTML = state.identities.map((identity) => (
     `<option value="${identity.index}">${escapeHtml(identity.label)}</option>`
   )).join("");
@@ -3215,10 +3306,10 @@ elements.copyProfile.addEventListener("click", () => {
 
 elements.confirmCopy.addEventListener("click", async (event) => {
   event.preventDefault();
-  if (!elements.form.reportValidity()) return;
+  if (!reportProfileValidity()) return;
   setBusy(true);
   try {
-    const result = await api(
+    await api(
       `/api/profiles/${state.identityIndex}/${state.profileIndex + 1}/copy`,
       {
         method: "POST",
@@ -3237,7 +3328,7 @@ elements.confirmCopy.addEventListener("click", async (event) => {
       renderProfileList();
     }
     elements.copyDialog.close();
-    toast(`Profile copied · generation ${result.stored_generation}`);
+    toast(`Draft copied to profile ${elements.copySlot.value} on Pico.`);
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -3285,16 +3376,18 @@ document.querySelectorAll("[data-reset-section]").forEach((button) => {
 });
 
 elements.save.addEventListener("click", async () => {
-  if (!elements.form.reportValidity()) return;
+  if (!reportProfileValidity()) return;
   const error = macroBudgetError(state.profile.macros);
   if (error) {
+    showSection("macro");
+    window.location.hash = "macro";
     macroNotice(error, true);
     toast(error, true);
     return;
   }
   setBusy(true);
   try {
-    const result = await api(`/api/profiles/${state.identityIndex}/${state.profileIndex + 1}`, {
+    await api(`/api/profiles/${state.identityIndex}/${state.profileIndex + 1}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state.profile),
@@ -3314,7 +3407,7 @@ elements.save.addEventListener("click", async () => {
     }
     state.original = canonical(state.profile);
     updateDirtyState();
-    toast(`Saved atomically · generation ${result.stored_generation} · CRC ${result.stored_crc}`);
+    toast("Profile saved to Pico.");
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -3323,17 +3416,18 @@ elements.save.addEventListener("click", async () => {
 });
 
 elements.activate.addEventListener("click", async () => {
+  if (!reportProfileValidity()) return;
   if (isDirty()) {
-    toast("Save or discard the draft before activating this profile.", true);
+    toast("Use Save to Pico or discard the draft before activating this profile.", true);
     return;
   }
   setBusy(true);
   try {
-    const result = await api(`/api/profiles/${state.identityIndex}/${state.profileIndex + 1}/activate`, { method: "POST" });
+    await api(`/api/profiles/${state.identityIndex}/${state.profileIndex + 1}/activate`, { method: "POST" });
     state.identities[state.identityIndex].active_profile = state.profileIndex + 1;
     state.active = true;
     renderEditor();
-    toast(`Profile ${state.profileIndex + 1} is active · generation ${result.stored_generation}`);
+    toast(`Profile ${state.profileIndex + 1} is now active.`);
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -3364,4 +3458,5 @@ async function start() {
   }
 }
 
+showSectionFromHash();
 start();
