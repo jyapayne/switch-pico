@@ -3,7 +3,8 @@
 #include "controller_input.h"
 
 #if SWITCH2_BRIDGE_FULL_INPUT
-// Core 0 only. One coherent profile/motion evaluation feeds both native children.
+// Core 0 only. Each source pair shares one coherent profile/motion evaluation.
+// Child instances remain A_R, A_L, B_R, B_L; transport state is child-local.
 void probe_native_gamepad_input_init();
 void probe_native_gamepad_input_set_stick_calibration(uint8_t instance, const uint8_t calibration[9]);
 void probe_native_gamepad_input_set_native_stream(uint8_t instance, bool enabled);

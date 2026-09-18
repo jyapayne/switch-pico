@@ -8,7 +8,10 @@ import pytest
 
 
 @pytest.mark.parametrize("source", ("GAMEPAD", "DUALSENSE"))
-def test_native_gamepad_backend_native(tmp_path: Path, source: str) -> None:
+@pytest.mark.parametrize("controller_count", (2, 4))
+def test_native_gamepad_backend_native(
+    tmp_path: Path, source: str, controller_count: int
+) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
@@ -39,6 +42,7 @@ def test_native_gamepad_backend_native(tmp_path: Path, source: str) -> None:
             "-DSWITCH_PICO_ENABLE_CLASSIC=1",
             "-DSWITCH2_BRIDGE_FULL_INPUT=1",
             f"-DSWITCH2_BRIDGE_{source}_INPUT=1",
+            f"-DPROBE_CONTROLLER_COUNT={controller_count}",
             f"-I{root / 'tests' / 'bluepad32_native_stubs'}",
             f"-I{firmware}",
             f"-I{root / 'bluepad32_config'}",
@@ -49,19 +53,22 @@ def test_native_gamepad_backend_native(tmp_path: Path, source: str) -> None:
         check=True,
         cwd=root,
     )
-    for scenario in (
-        "stable-logical-slot",
-        "source-isolation",
-        "cue-lifetime",
-        "cue-races",
-    ):
-        subprocess.run([str(executable), scenario], check=True, cwd=root)
+    scenarios = ["stable-logical-slot", "cue-lifetime", "cue-races"]
+    if controller_count == 2:
+        scenarios.append("source-isolation")
+    else:
+        scenarios.extend(("two-pair-sources", "two-pair-cues", "explicit-precedence"))
     if source == "GAMEPAD":
-        for scenario in (
-            "sensorless-admission",
-            "independent-motion",
-            "paired-source",
-            "pair-cue-races",
-            "mono-rumble",
-        ):
-            subprocess.run([str(executable), scenario], check=True, cwd=root)
+        scenarios.extend(("paired-source", "pair-cue-races", "mono-rumble"))
+        if controller_count == 2:
+            scenarios.extend(("sensorless-admission", "independent-motion"))
+        else:
+            scenarios.extend(
+                (
+                    "paired-explicit-conflict",
+                    "topology-reservations",
+                    "stable-ble-reservation",
+                )
+            )
+    for scenario in scenarios:
+        subprocess.run([str(executable), scenario], check=True, cwd=root)

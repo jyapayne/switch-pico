@@ -2,8 +2,17 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 
-def test_native_hub_management_native(tmp_path: Path) -> None:
+
+@pytest.mark.parametrize(
+    ("controller_count", "neutral_input"),
+    [(2, False), (2, True), (4, True)],
+    ids=["native-management", "neutral-one-pair", "neutral-two-pair"],
+)
+def test_native_hub_management_native(
+    tmp_path: Path, controller_count: int, neutral_input: bool
+) -> None:
     root = Path(__file__).resolve().parents[1]
     cc = shutil.which("cc") or shutil.which("gcc")
     cxx = shutil.which("c++") or shutil.which("g++")
@@ -15,7 +24,17 @@ def test_native_hub_management_native(tmp_path: Path) -> None:
         f"-I{root / 'tools' / 'pico_usb_address_probe'}",
         f"-I{root / 'tools' / 'switch2_usb_probe'}",
     ]
-    flags = ["-Wall", "-Wextra", "-Werror", "-pedantic", "-DSWITCH2_PROBE_HUB=1"]
+    flags = [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-pedantic",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-DSWITCH2_PROBE_HUB=1",
+        f"-DPROBE_CONTROLLER_COUNT={controller_count}",
+    ]
+    flags.append(f"-DSWITCH2_PROBE_NEUTRAL_INPUT={int(neutral_input)}")
     transport = tmp_path / "native_hub_transport.o"
     executable = tmp_path / "native_hub_management_test"
     subprocess.run(
@@ -48,6 +67,7 @@ def test_native_hub_management_native(tmp_path: Path) -> None:
             "-std=c++17",
             *flags,
             *includes,
+            "-Wl,--gc-sections",
             *(str(root / path) for path in sources),
             str(transport),
             "-o",
@@ -56,4 +76,20 @@ def test_native_hub_management_native(tmp_path: Path) -> None:
         check=True,
         cwd=root,
     )
-    subprocess.run([str(executable)], check=True, cwd=root)
+    for reboot_slot in ("root", "child"):
+        subprocess.run([str(executable), reboot_slot], check=True, cwd=root)
+    router_executable = tmp_path / "native_hub_router_test"
+    subprocess.run(
+        [
+            cc,
+            "-std=c11",
+            *flags,
+            *includes,
+            str(root / "tests" / "native_hub_router_test.c"),
+            "-o",
+            str(router_executable),
+        ],
+        check=True,
+        cwd=root,
+    )
+    subprocess.run([str(router_executable)], check=True, cwd=root)

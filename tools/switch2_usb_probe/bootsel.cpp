@@ -19,7 +19,7 @@ struct BootselTransfer {
     bool pending;
     bool validated;
 };
-// Control state is independent even when the two children enumerate together.
+// Each root/child control transfer owns its validation state independently.
 BootselTransfer bootsel_transfers[PROBE_CONTROLLER_COUNT + 1];
 bool bootsel_delay_started;
 uint32_t bootsel_deadline_ms;
@@ -41,7 +41,7 @@ bool probe_management_vendor_control(uint8_t rhport, uint8_t stage,
         request->bRequest != static_cast<uint8_t>(Operation::kBootselReboot) ||
         request->wValue != kRequestValue || request->wIndex != kRequestIndex ||
         request->wLength != kRequestHeaderSize) {
-#if SWITCH2_PROBE_HUB
+#if SWITCH2_PROBE_HUB && !SWITCH2_PROBE_NEUTRAL_INPUT
         return rhport == 0 &&
             usb_configuration_management_vendor_control(rhport, stage, request);
 #else
@@ -53,7 +53,7 @@ bool probe_management_vendor_control(uint8_t rhport, uint8_t stage,
         // Any short OUT leaves nonzero reserved/CRC bytes and fails decoding.
         memset(transfer.envelope, 0xff, sizeof(transfer.envelope));
         transfer.pending = native_hub_control_xfer(
-            rhport, request, transfer.envelope, sizeof(transfer.envelope));
+            rhport, request, transfer.envelope, sizeof(transfer.envelope), false);
         return transfer.pending;
     }
     if (stage == CONTROL_STAGE_DATA) {

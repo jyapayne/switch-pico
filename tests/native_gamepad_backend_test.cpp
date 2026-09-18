@@ -56,9 +56,9 @@ void report_dualsense(uni_hid_device_t& pad, bool fresh_motion = true) {
     platform_on_controller_data(&pad, &pad.controller);
 }
 
-Bluepad32NativeGamepadSnapshot bridge_snapshot() {
+Bluepad32NativeGamepadSnapshot bridge_snapshot(uint8_t pair = 0) {
     Bluepad32NativeGamepadSnapshot result{};
-    bluepad32_input_backend_native_snapshot(&result);
+    bluepad32_input_backend_native_snapshot(pair, &result);
     return result;
 }
 
@@ -72,10 +72,10 @@ void source_isolation() {
 #endif
     require(platform_on_device_ready(&ordinary) == UNI_ERROR_INVALID_CONTROLLER,
             "an ineligible controller must not enter dedicated output slots");
-    bluepad32_input_backend_select_native_source(ordinary.conn.btaddr);
+    bluepad32_input_backend_select_native_source(0, ordinary.conn.btaddr);
     require(!bridge_snapshot().controller.active, "an ineligible device cannot become the native source");
     platform_on_device_disconnected(&ordinary);
-    bluepad32_input_backend_select_native_source(nullptr);
+    bluepad32_input_backend_select_native_source(0, nullptr);
     auto first = dualsense(0);
     auto second = dualsense(1);
     require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS, "first DS5 must connect");
@@ -121,7 +121,7 @@ void source_isolation() {
             "a missed ambiguous interval still needs a new adapter epoch");
     platform_on_device_connected(&second);
     require(platform_on_device_ready(&second) == UNI_ERROR_SUCCESS, "Edge reconnect must succeed");
-    bluepad32_input_backend_select_native_source(first.conn.btaddr);
+    bluepad32_input_backend_select_native_source(0, first.conn.btaddr);
     report_dualsense(first);
     report_dualsense(second);
     require(bridge_snapshot().slot == 0, "explicit source must ignore another live PS5");
@@ -265,7 +265,7 @@ void cue_races() {
     process_rumble_timer(&g_rumble_timer);
     require(pad.last_rumble_duration_ms == 0, "in-flight cancellation must retain a bounded stop obligation");
     require(bluepad32_input_backend_native_sample_request(1, 1, &token), "reselection race must queue");
-    during_dualsense_dispatch = [] { bluepad32_input_backend_select_native_source(nullptr); };
+    during_dualsense_dispatch = [] { bluepad32_input_backend_select_native_source(0, nullptr); };
     process_rumble_timer(&g_rumble_timer);
     during_dualsense_dispatch = nullptr;
     require(bluepad32_input_backend_native_sample_result(1, token) == -1,
@@ -329,7 +329,7 @@ void sensorless_admission() {
             "unknown-family normal AIO gamepads must not face a native brand whitelist");
     report_gamepad(generic);
     require(!bridge_snapshot().controller.active, "two logical gamepads are ambiguous");
-    bluepad32_input_backend_select_native_source(xbox.conn.btaddr);
+    bluepad32_input_backend_select_native_source(0, xbox.conn.btaddr);
     now_ms = 110;
     report_gamepad(xbox);
     require(bridge_snapshot().controller.active && bridge_snapshot().slot == 0 &&
@@ -338,7 +338,7 @@ void sensorless_admission() {
     platform_on_device_disconnected(&xbox);
     report_gamepad(generic);
     require(!bridge_snapshot().controller.active, "explicit selection cannot migrate on disconnect");
-    bluepad32_input_backend_select_native_source(nullptr);
+    bluepad32_input_backend_select_native_source(0, nullptr);
     generic.controller.gamepad.buttons = BUTTON_B;
     report_gamepad(generic);
     require(bridge_snapshot().controller.active && bridge_snapshot().controller.state.button_east &&
@@ -379,7 +379,7 @@ void independent_motion() {
     report_gamepad(ds4);
     require(!bridge_snapshot().gyro_valid && bridge_snapshot().accel_valid,
             "gyro capability loss must not suppress working acceleration or controls");
-    bluepad32_input_backend_select_native_source(nullptr);
+    bluepad32_input_backend_select_native_source(0, nullptr);
     ++ds.report_sequence;
     ds.gyro_valid = true;
     report_gamepad(ds4);
@@ -458,7 +458,7 @@ void paired_source() {
                 bridge_snapshot().gyro_received_us == 100000 &&
                 bridge_snapshot().gyro_q10[2] == initial.gyro_q10[2],
             "left controls merge without refreshing or replacing the right motion owner");
-    bluepad32_input_backend_select_native_source(right.conn.btaddr);
+    bluepad32_input_backend_select_native_source(0, right.conn.btaddr);
     ++l.report_sequence;
     report_gamepad(left);
     require(bridge_snapshot().controller.active && !bridge_snapshot().gyro_valid,
@@ -487,12 +487,12 @@ void paired_source() {
     require(right.last_rumble_duration_ms == 0 && left.last_rumble_duration_ms == 990 &&
                 bluepad32_input_backend_native_sample_result(0, stop) == 1,
             "stopping one paired side preserves the other side's original finite deadline");
-    bluepad32_input_backend_select_native_source(nullptr);
+    bluepad32_input_backend_select_native_source(0, nullptr);
     set_runtime_joycon_mode(JoyConMode::kIndividual);
     require(!bridge_snapshot().controller.active &&
                 bluepad32_input_backend_native_sample_result(1, lc) == -1,
             "live split retires the pair immediately and fails auto selection closed");
-    bluepad32_input_backend_select_native_source(right.conn.btaddr);
+    bluepad32_input_backend_select_native_source(0, right.conn.btaddr);
     ++r.report_sequence;
     ++r.accel_sequence;
     ++r.gyro_sequence;
@@ -535,7 +535,7 @@ void pair_cue_races() {
         uni_hid_device_t* pad, uint16_t delay, uint16_t duration, uint8_t weak, uint8_t strong) {
         play_rumble(pad, delay, duration, weak, strong);
         now_ms += 2000;
-        bluepad32_input_backend_select_native_source(nullptr);
+        bluepad32_input_backend_select_native_source(0, nullptr);
     };
     require(bluepad32_input_backend_native_sample_request(0, 1, &rc) &&
                 bluepad32_input_backend_native_sample_request(1, 1, &lc), "reselection race cues must queue");
@@ -624,6 +624,369 @@ extern "C" bool uni_hid_parser_native_motion_snapshot(
     return false;
 }
 
+namespace {
+
+void two_pair_sources() {
+    start_pairing_backend();
+    auto first = dualsense(2);
+    auto second = dualsense(0);
+    require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&second) == UNI_ERROR_SUCCESS,
+            "two independent physical pads must be admitted");
+    auto& a = motion_fixture(first).metadata;
+    auto& b = motion_fixture(second).metadata;
+    first.controller.gamepad.buttons = BUTTON_A | BUTTON_SHOULDER_L;
+    second.controller.gamepad.buttons = BUTTON_B | BUTTON_SHOULDER_R;
+    a.gyro_q10[2] = 10000;
+    b.gyro_q10[2] = -20000;
+    now_ms = 100;
+    report_gamepad(first);
+    now_ms = 110;
+    report_gamepad(second);
+    const auto initial_a = bridge_snapshot(0);
+    const auto initial_b = bridge_snapshot(1);
+    require(initial_a.controller.active && initial_b.controller.active &&
+                initial_a.slot != initial_b.slot &&
+                initial_a.controller.state.button_south && !initial_a.controller.state.button_east &&
+                initial_b.controller.state.button_east && !initial_b.controller.state.button_south &&
+                initial_a.gyro_q10[2] == 10000 && initial_b.gyro_q10[2] == -20000,
+            "each pair must publish only its own controls and calibrated motion");
+    initialize_runtime_profile_storage();
+    auto profile_a = controller_profile_default(initial_a.controller.identity, 2);
+    auto profile_b = controller_profile_default(initial_b.controller.identity, 5);
+    profile_a.confirmation_policy = profile_b.confirmation_policy = ControllerProfileConfirmationPolicy::kNone;
+    profile_a.button_map[static_cast<uint8_t>(ControllerProfileLogicalButton::kSouth)] =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kNorth);
+    profile_b.button_map[static_cast<uint8_t>(ControllerProfileLogicalButton::kEast)] =
+        static_cast<uint8_t>(ControllerProfileLogicalButton::kWest);
+    require(runtime_profile_storage.set(initial_a.controller.identity, 2, profile_a) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(initial_a.controller.identity, 2) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.set(initial_b.controller.identity, 5, profile_b) == ProfileStorageResult::kOk &&
+                runtime_profile_storage.activate(initial_b.controller.identity, 5) == ProfileStorageResult::kOk,
+            "independent identities must retain distinct active mapping banks");
+    controller_profile_runtime_reset();
+    const auto mapped_a = controller_profile_runtime_transform(
+        initial_a.slot, initial_a.controller, now_ms, AdapterUsbMode::kXInput);
+    const auto mapped_b = controller_profile_runtime_transform(
+        initial_b.slot, initial_b.controller, now_ms, AdapterUsbMode::kXInput);
+    require(mapped_a.state.button_north && !mapped_a.state.button_south &&
+                mapped_b.state.button_west && !mapped_b.state.button_east,
+            "each published source must use its own saved profile mapping");
+    now_ms = 120;
+    ++a.report_sequence;
+    ++a.accel_sequence;
+    first.controller.gamepad.buttons = BUTTON_X;
+    report_gamepad(first);
+    require(bridge_snapshot(0).controller.state.button_west &&
+                bridge_snapshot(0).accel_received_us == 120000 &&
+                bridge_snapshot(0).gyro_received_us == 100000 &&
+                bridge_snapshot(1).controller.state.button_east &&
+                bridge_snapshot(1).received_us == 110000 &&
+                bridge_snapshot(1).gyro_received_us == 110000,
+            "one source's input and independent sensor clocks must not freshen the other source");
+    require(bluepad32_input_backend_capture_start(
+                initial_b.slot, initial_b.controller.connection_generation, CaptureOptions{}),
+            "Pair B must be recordable while Pair A changes connections");
+    uint64_t old_a, live_b;
+    require(bluepad32_input_backend_native_sample_request(0, 1, &old_a) &&
+                bluepad32_input_backend_native_sample_request(3, 1, &live_b),
+            "both sources must accept independent pending feedback");
+    platform_on_device_disconnected(&first);
+    auto extra = dualsense(1);
+    require(platform_on_device_ready(&extra) == UNI_ERROR_SUCCESS, "third source may connect without assignment");
+    report_dualsense(extra);
+    require(!bridge_snapshot(0).controller.active &&
+                bridge_snapshot(1).controller.connection_generation == initial_b.controller.connection_generation &&
+                bluepad32_input_backend_native_sample_result(0, old_a) == -1 &&
+                bluepad32_input_backend_native_sample_result(3, live_b) == 0,
+            "a new third pad cannot steal a disconnected reservation or retire the independent pair");
+    auto reconnected = dualsense(3);
+    memcpy(reconnected.conn.btaddr, first.conn.btaddr, sizeof(first.conn.btaddr));
+    reconnected.product_id = first.product_id;
+    platform_on_device_connected(&reconnected);
+    require(platform_on_device_ready(&reconnected) == UNI_ERROR_SUCCESS, "reserved source must reconnect");
+    now_ms = 130;
+    report_dualsense(reconnected);
+    require(bridge_snapshot(0).controller.active &&
+                controller_identity_equal(bridge_snapshot(0).controller.identity, initial_a.controller.identity) &&
+                bridge_snapshot(0).slot != initial_a.slot &&
+                bridge_snapshot(1).slot == initial_b.slot &&
+                bridge_snapshot(1).controller.connection_generation == initial_b.controller.connection_generation,
+            "stable reservations must restore Pair A across physical and logical slot changes without moving Pair B");
+    ++b.report_sequence;
+    second.controller.gamepad.buttons = BUTTON_Y;
+    report_gamepad(second);
+    Bluepad32CaptureSnapshot capture{};
+    require(bluepad32_input_backend_capture_page(0, 0, &capture) &&
+                capture.state == CaptureState::kRecording && capture.total_events == 2,
+            "Pair B capture must keep recording real changes across Pair A's disconnect and rebind");
+    process_rumble_timer(&g_rumble_timer);
+    require(extra.rumble_calls == 0 && reconnected.rumble_calls == 0 &&
+                second.last_high == 0 && second.last_low == 160 &&
+                bluepad32_input_backend_native_sample_result(3, live_b) == 1,
+            "pending Pair B work must reach only its original physical source after Pair A reconnects");
+    const auto restored = bridge_snapshot(0);
+    const auto remapped = controller_profile_runtime_transform(
+        restored.slot, restored.controller, now_ms, AdapterUsbMode::kXInput);
+    require(remapped.state.button_north && !remapped.state.button_south &&
+                runtime_profile_storage.find(initial_b.controller.identity)->active_profile == 5,
+            "reconnecting at another logical slot must preserve A's saved mapping and B's active profile");
+}
+
+void two_pair_cues() {
+    start_pairing_backend();
+    auto first = dualsense(0);
+    auto second = dualsense(1);
+    require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&second) == UNI_ERROR_SUCCESS, "both cue sources must connect");
+    report_dualsense(first);
+    report_dualsense(second);
+    const auto before_b = bridge_snapshot(1);
+    uint64_t ar, al, br, bl;
+    require(bluepad32_input_backend_native_sample_request(0, 6, &ar) &&
+                bluepad32_input_backend_native_sample_request(1, 7, &al) &&
+                bluepad32_input_backend_native_sample_request(2, 3, &br) &&
+                bluepad32_input_backend_native_sample_request(3, 1, &bl),
+            "all four virtual sides must accept independent cues");
+    process_rumble_timer(&g_rumble_timer);
+    require(first.last_high == 96 && first.last_low == 220 && first.last_rumble_duration_ms == 60 &&
+                second.last_high == 96 && second.last_low == 160 && second.last_rumble_duration_ms == 25 &&
+                bluepad32_input_backend_native_sample_result(2, ar) == -1 &&
+                bluepad32_input_backend_native_sample_result(0, br) == -1,
+            "R/L contributions and completion tokens must be scoped to their physical pair");
+    now_ms = 25;
+    process_rumble_timer(&g_rumble_timer);
+    require(second.last_high == 0 && second.last_low == 160 && second.last_rumble_duration_ms == 975 &&
+                first.last_high == 96 && first.last_low == 220,
+            "Pair B's pulse boundary must not replace Pair A's independently timed motors");
+    const uint8_t absent[6] = {0xee, 0, 0, 0, 0, 1};
+    bluepad32_input_backend_select_native_source(0, absent);
+    process_rumble_timer(&g_rumble_timer);
+    require(first.last_rumble_duration_ms == 0 && second.last_low == 160 &&
+                bluepad32_input_backend_native_sample_result(0, ar) == -1 &&
+                bluepad32_input_backend_native_sample_result(1, al) == -1 &&
+                bluepad32_input_backend_native_sample_result(2, br) == 1 &&
+                bluepad32_input_backend_native_sample_result(3, bl) == 1 &&
+                bridge_snapshot(1).controller.connection_generation == before_b.controller.connection_generation,
+            "disabling Pair A must stop only A and preserve B's accepted cues and input epoch");
+    bluepad32_input_backend_native_sample_cancel(2);
+    now_ms = 40;
+    process_rumble_timer(&g_rumble_timer);
+    bluepad32_input_backend_select_native_source(0, nullptr);
+    require(bluepad32_input_backend_native_sample_request(0, 1, &ar) &&
+                bluepad32_input_backend_native_sample_request(2, 6, &br),
+            "retired sides can accept fresh boot-unique work");
+    during_dualsense_dispatch = [] {
+        during_dualsense_dispatch = nullptr;
+        bluepad32_input_backend_select_native_source(0, nullptr);
+    };
+    process_rumble_timer(&g_rumble_timer);
+    require(bluepad32_input_backend_native_sample_result(0, ar) == -1 &&
+                bluepad32_input_backend_native_sample_result(2, br) == 1 &&
+                second.last_high == 96 && second.last_low == 160 && second.last_rumble_duration_ms == 60,
+            "reselection during A's driver call must reject stale A completion without retiring B's next dispatch");
+    process_rumble_timer(&g_rumble_timer);
+    require(first.last_rumble_duration_ms == 0 && second.last_high == 96,
+            "a raced A submission must be stopped without canceling B's physical timer");
+    platform_on_device_disconnected(&first);
+    now_ms = 100;
+    process_rumble_timer(&g_rumble_timer);
+    require(second.last_high == 0 && second.last_low == 160 && second.last_rumble_duration_ms == 900,
+            "B's remaining left pulse must retain its original deadline after A disconnects");
+}
+
+void explicit_precedence() {
+    start_pairing_backend();
+    auto first = dualsense(0);
+    auto second = dualsense(1);
+    bluepad32_input_backend_select_native_source(1, second.conn.btaddr);
+    require(platform_on_device_ready(&second) == UNI_ERROR_SUCCESS, "explicit Pair B may arrive first");
+    report_dualsense(second);
+    require(!bridge_snapshot(0).controller.active && bridge_snapshot(1).controller.active,
+            "automatic Pair A cannot borrow an explicitly reserved source");
+    require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS, "independent automatic source must connect");
+    report_dualsense(first);
+    const auto initial_a = bridge_snapshot(0);
+    auto duplicate = dualsense(2);
+    memcpy(duplicate.conn.btaddr, second.conn.btaddr, sizeof(second.conn.btaddr));
+    duplicate.product_id = second.product_id;
+    require(platform_on_device_ready(&duplicate) == UNI_ERROR_SUCCESS, "ambiguous-address fixture must connect");
+    report_dualsense(duplicate);
+    require(!bridge_snapshot(1).controller.active &&
+                bridge_snapshot(0).controller.connection_generation == initial_a.controller.connection_generation,
+            "an ambiguous explicit address must fail only its affected pair closed");
+    platform_on_device_disconnected(&duplicate);
+    report_dualsense(second);
+    require(bridge_snapshot(1).controller.active, "the unique explicit match must resume after ambiguity clears");
+    bluepad32_input_backend_select_native_source(0, second.conn.btaddr);
+    report_dualsense(second);
+    require(!bridge_snapshot(0).controller.active && !bridge_snapshot(1).controller.active,
+            "two explicit selectors matching one logical pad must never broadcast it");
+    bluepad32_input_backend_select_native_source(0, nullptr);
+    report_dualsense(first);
+    report_dualsense(second);
+    require(controller_identity_equal(bridge_snapshot(0).controller.identity, identity_for_device(&first)) &&
+                controller_identity_equal(bridge_snapshot(1).controller.identity, identity_for_device(&second)),
+            "releasing an explicit conflict restores separate automatic and explicit sources");
+}
+
+void paired_explicit_conflict() {
+    start_pairing_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    bluepad32_input_backend_select_native_source(0, left.conn.btaddr);
+    bluepad32_input_backend_select_native_source(1, right.conn.btaddr);
+    ready_switch2(left);
+    uint64_t old;
+    require(bluepad32_input_backend_native_sample_request(0, 1, &old), "solo explicit source cue must queue");
+    ready_switch2(right);
+    motion_fixture(left);
+    motion_fixture(right);
+    report_gamepad(right);
+    uint64_t rejected;
+    require(!bridge_snapshot(0).controller.active && !bridge_snapshot(1).controller.active &&
+                bluepad32_input_backend_native_sample_result(0, old) == -1 &&
+                !bluepad32_input_backend_native_sample_request(2, 1, &rejected),
+            "paired physical halves matched by different explicit selectors must retire old work and fail both closed");
+    bluepad32_input_backend_select_native_source(1, nullptr);
+    ++sensors[right.idx].metadata.report_sequence;
+    report_gamepad(right);
+    require(bridge_snapshot(0).controller.active && !bridge_snapshot(1).controller.active,
+            "an explicit logical pair reserves both halves against automatic assignment");
+    auto independent = dualsense(2);
+    require(platform_on_device_ready(&independent) == UNI_ERROR_SUCCESS, "independent second source must connect");
+    report_dualsense(independent);
+    const auto before_b = bridge_snapshot(1);
+    uint64_t rc, lc, bc;
+    require(bluepad32_input_backend_native_sample_request(0, 6, &rc) &&
+                bluepad32_input_backend_native_sample_request(1, 1, &lc) &&
+                bluepad32_input_backend_native_sample_request(3, 7, &bc),
+            "paired real halves and independent pad must accept separate feedback");
+    process_rumble_timer(&g_rumble_timer);
+    require(right.last_high == 96 && left.last_low == 160 && independent.last_low == 220,
+            "feedback must respect both logical pair and paired physical side");
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    ++sensors[left.idx].metadata.report_sequence;
+    ++sensors[right.idx].metadata.report_sequence;
+    report_gamepad(left);
+    report_gamepad(right);
+    require(bridge_snapshot(0).controller.active &&
+                controller_identity_equal(bridge_snapshot(0).controller.identity, identity_for_device(&left)) &&
+                bridge_snapshot(1).controller.connection_generation == before_b.controller.connection_generation &&
+                bluepad32_input_backend_native_sample_result(0, rc) == -1 &&
+                bluepad32_input_backend_native_sample_result(1, lc) == -1 &&
+                bluepad32_input_backend_native_sample_result(3, bc) == 1,
+            "splitting a physical pair retires only its old cues and cannot duplicate its unselected member into Pair B");
+}
+
+void topology_reservations() {
+    start_pairing_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    ready_switch2(left);
+    ready_switch2(right);
+    motion_fixture(left);
+    motion_fixture(right);
+    report_gamepad(right);
+    auto independent = dualsense(2);
+    require(platform_on_device_ready(&independent) == UNI_ERROR_SUCCESS, "independent automatic source must connect");
+    report_dualsense(independent);
+    const auto before_b = bridge_snapshot(1);
+    const auto pair_identity = bridge_snapshot(0).controller.identity;
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    ++sensors[left.idx].metadata.report_sequence;
+    ++sensors[right.idx].metadata.report_sequence;
+    report_gamepad(left);
+    report_gamepad(right);
+    require(!bridge_snapshot(0).controller.active &&
+                bridge_snapshot(1).controller.connection_generation == before_b.controller.connection_generation,
+            "a split remembered pair is ambiguous without moving the independent pair");
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    ++sensors[right.idx].metadata.report_sequence;
+    report_gamepad(right);
+    require(bridge_snapshot(0).controller.active &&
+                controller_identity_equal(bridge_snapshot(0).controller.identity, pair_identity) &&
+                bridge_snapshot(1).controller.connection_generation == before_b.controller.connection_generation,
+            "remerging the same remembered members must restore only their reserved pair");
+    platform_on_device_disconnected(&independent);
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    bluepad32_input_backend_select_native_source(0, left.conn.btaddr);
+    bluepad32_input_backend_select_native_source(1, right.conn.btaddr);
+    bluepad32_input_backend_select_native_source(0, nullptr);
+    bluepad32_input_backend_select_native_source(1, nullptr);
+    ++sensors[left.idx].metadata.report_sequence;
+    ++sensors[right.idx].metadata.report_sequence;
+    report_gamepad(left);
+    report_gamepad(right);
+    require(bridge_snapshot(0).controller.active && bridge_snapshot(1).controller.active,
+            "individually reserved physical halves must first own separate logical streams");
+    set_runtime_joycon_mode(JoyConMode::kPaired);
+    ++sensors[right.idx].metadata.report_sequence;
+    report_gamepad(right);
+    require(!bridge_snapshot(0).controller.active && !bridge_snapshot(1).controller.active,
+            "merging two independently reserved sources must fail both closed rather than duplicate the merged pair");
+    set_runtime_joycon_mode(JoyConMode::kIndividual);
+    ++sensors[left.idx].metadata.report_sequence;
+    ++sensors[right.idx].metadata.report_sequence;
+    report_gamepad(left);
+    report_gamepad(right);
+    require(bridge_snapshot(0).controller.active && bridge_snapshot(1).controller.active &&
+                bridge_snapshot(0).slot != bridge_snapshot(1).slot,
+            "splitting conflicting members restores their previous independent reservations");
+}
+
+void stable_ble_reservation() {
+    start_pairing_backend();
+    auto first = device(0, true, UNI_BT_CONN_PROTOCOL_BLE);
+    auto independent = dualsense(1);
+    bluepad32_input_backend_select_native_source(1, independent.conn.btaddr);
+    require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&independent) == UNI_ERROR_SUCCESS,
+            "an unresolved BLE gamepad may connect beside an explicit stable source");
+    report_gamepad(first);
+    report_dualsense(independent);
+    const auto initial_b = bridge_snapshot(1);
+    require(!bridge_snapshot(0).controller.active && initial_b.controller.active,
+            "automatic reservations must not promote an unresolved BLE connection address to a stable identity");
+    const bd_addr_t identity = {0xc2, 0x10, 0x20, 0x30, 0x40, 0x50};
+    dispatch_identity_event(SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED, first,
+                            BD_ADDR_TYPE_LE_RANDOM, identity);
+    first.controller.gamepad.buttons = BUTTON_A;
+    report_gamepad(first);
+    const auto initial_a = bridge_snapshot(0);
+    uint64_t old_a, live_b;
+    require(initial_a.controller.active && initial_a.controller.state.button_south &&
+                bluepad32_input_backend_native_sample_request(0, 1, &old_a) &&
+                bluepad32_input_backend_native_sample_request(3, 1, &live_b),
+            "resolved identity publication must activate its own stream and feedback without waiting for another connection");
+    dispatch_identity_event(SM_EVENT_IDENTITY_RESOLVING_STARTED, first,
+                            BD_ADDR_TYPE_LE_RANDOM, identity);
+    require(!bridge_snapshot(0).controller.active &&
+                bridge_snapshot(1).controller.connection_generation == initial_b.controller.connection_generation &&
+                bluepad32_input_backend_native_sample_result(0, old_a) == -1 &&
+                bluepad32_input_backend_native_sample_result(3, live_b) == 0,
+            "identity loss must retire only the uncertain source's input and pending work");
+    platform_on_device_disconnected(&first);
+    auto reconnect = device(2, true, UNI_BT_CONN_PROTOCOL_BLE);
+    reconnect.vendor_id = first.vendor_id;
+    reconnect.product_id = first.product_id;
+    platform_on_device_connected(&reconnect);
+    require(platform_on_device_ready(&reconnect) == UNI_ERROR_SUCCESS, "BLE controller must reconnect at a different transport index");
+    report_gamepad(reconnect);
+    require(!bridge_snapshot(0).controller.active, "a fresh unresolved BLE address must not steal the remembered stable source");
+    dispatch_identity_event(SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED, reconnect,
+                            BD_ADDR_TYPE_LE_RANDOM, identity);
+    reconnect.controller.gamepad.buttons = BUTTON_B;
+    report_gamepad(reconnect);
+    require(bridge_snapshot(0).controller.active && bridge_snapshot(0).controller.state.button_east &&
+                !bridge_snapshot(0).controller.state.button_south &&
+                controller_identity_equal(bridge_snapshot(0).controller.identity, initial_a.controller.identity) &&
+                bridge_snapshot(1).controller.connection_generation == initial_b.controller.connection_generation,
+            "resolving a new BLE connection address must recover the original pair reservation without reviving cached controls");
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     require(argc == 2, "scenario required");
     const std::string scenario = argv[1];
@@ -636,6 +999,12 @@ int main(int argc, char** argv) {
     else if (scenario == "paired-source") paired_source();
     else if (scenario == "pair-cue-races") pair_cue_races();
     else if (scenario == "mono-rumble") mono_rumble();
+    else if (scenario == "two-pair-sources") two_pair_sources();
+    else if (scenario == "two-pair-cues") two_pair_cues();
+    else if (scenario == "explicit-precedence") explicit_precedence();
+    else if (scenario == "paired-explicit-conflict") paired_explicit_conflict();
+    else if (scenario == "topology-reservations") topology_reservations();
+    else if (scenario == "stable-ble-reservation") stable_ble_reservation();
     else require(false, "unknown native gamepad scenario");
     return 0;
 }

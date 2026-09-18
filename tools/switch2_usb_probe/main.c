@@ -7,13 +7,22 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include "model.h"
 
-#ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if defined(SWITCH_PICO_SWITCH2_USB_BRIDGE) || SWITCH2_PROBE_NEUTRAL_INPUT
 #include "bootsel.h"
+#endif
+#ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
 #include "controller_input.h"
-#else
+#elif !SWITCH2_PROBE_NEUTRAL_INPUT
 #include "platform/pico/bootsel_button_sample.h"
 #include "button_test.h"
+#endif
+#if SWITCH2_PROBE_NEUTRAL_INPUT
+#include "platform/pico/system_clock.h"
+#if !defined(SWITCH2_PROBE_USB_INIT) || !defined(SWITCH2_PROBE_MEMORY)
+#error "Neutral hub requires native USB protocol initialization and captured stick calibration"
+#endif
 #endif
 #include "pico/stdlib.h"
 #include "hardware/sync.h"
@@ -75,7 +84,7 @@ typedef struct {
 #ifdef SWITCH2_PROBE_TRACE_NATIVE_INPUT
     uint32_t last_native_trace_ms;
 #endif
-#else
+#elif !SWITCH2_PROBE_NEUTRAL_INPUT
     probe_button_state button_test;
     uint32_t last_button_ms;
     bool button_sample_error;
@@ -116,6 +125,13 @@ static void gate_join_shoulders(uint8_t instance, uint8_t report_id,
 #endif
 
 int probe_debug_printf(const char* format, ...) {
+#if SWITCH2_PROBE_HUB
+    // Native-hub producers and the UART consumer all run on Core0 foreground.
+    // Neither USB IRQ nor the Core1 observer accesses this ring. Masking IRQs
+    // across a message copy prevents completion service and can lose the next
+    // address's token; do not turn a diagnostic into USB backpressure.
+    hard_assert(get_core_num() == 0 && __get_current_exception() == 0);
+#endif
     char message[512];
     va_list args;
     va_start(args, format);
@@ -123,39 +139,45 @@ int probe_debug_printf(const char* format, ...) {
     va_end(args);
     if (result <= 0) return result;
     const size_t size = (size_t)result < sizeof(message) ? (size_t)result : sizeof(message) - 1;
+#if !SWITCH2_PROBE_HUB
     const uint32_t interrupts = save_and_disable_interrupts();
-#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
-    const uint32_t mask_started = time_us_32();
+#elif defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
     const uint32_t trace_parent = native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_LOG_COPY);
 #endif
-    if (LOG_CAPACITY - (log_written - log_read) >= size) {
-        for (size_t i = 0; i < size; ++i)
-            log_bytes[(log_written + i) % LOG_CAPACITY] = message[i];
+    const bool queued = LOG_CAPACITY - (log_written - log_read) >= size;
+    if (queued) {
+        const size_t offset = log_written % LOG_CAPACITY;
+        const size_t first = size < LOG_CAPACITY - offset ? size : LOG_CAPACITY - offset;
+        memcpy(log_bytes + offset, message, first);
+        memcpy(log_bytes, message + first, size - first);
         log_written += (uint32_t)size;
         log_dropped += (uint32_t)result - (uint32_t)size;
     } else {
         log_dropped += (uint32_t)result;
     }
-#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
-    native_hub_trace_phase(trace_parent);
-    const uint32_t mask_elapsed = time_us_32() - mask_started;
-#endif
+#if !SWITCH2_PROBE_HUB
     restore_interrupts(interrupts);
-#if SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
-    native_hub_note_log_mask(mask_elapsed, (uint32_t)size, interrupts != 0);
+#elif defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    native_hub_trace_phase(trace_parent);
 #endif
-    return result;
+    return queued ? result : -1;
 }
 
 static void drain_log(void) {
     while (uart_is_writable(uart0)) {
+#if !SWITCH2_PROBE_HUB
         const uint32_t interrupts = save_and_disable_interrupts();
+#endif
         if (log_read == log_written) {
+#if !SWITCH2_PROBE_HUB
             restore_interrupts(interrupts);
+#endif
             break;
         }
         const char value = log_bytes[log_read++ % LOG_CAPACITY];
+#if !SWITCH2_PROBE_HUB
         restore_interrupts(interrupts);
+#endif
         uart_putc_raw(uart0, value);
     }
 }
@@ -427,7 +449,7 @@ static void consume_bulk_packet(probe_usb_controller* controller, const uint8_t*
     }
 }
 
-#ifndef SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if !defined(SWITCH_PICO_SWITCH2_USB_BRIDGE) && !SWITCH2_PROBE_NEUTRAL_INPUT
 static void button_test_task(probe_usb_controller* controller, uint32_t now) {
     probe_protocol_state* protocol = &controller->protocol;
     const bool ready = probe_transport_mounted(controller->instance) &&
@@ -679,7 +701,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
                                 const tusb_control_request_t* request) {
     if (stage == CONTROL_STAGE_SETUP)
         log_packet("VENDOR_CONTROL", rhport, 0, (const uint8_t*)request, sizeof(*request));
-#ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if defined(SWITCH_PICO_SWITCH2_USB_BRIDGE) || SWITCH2_PROBE_NEUTRAL_INPUT
     if (probe_management_vendor_control(rhport, stage, request))
         return true;
 #endif
@@ -776,15 +798,29 @@ int main(void) {
     #endif
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
     probe_controller_input_clock_init();
+#elif SWITCH2_PROBE_NEUTRAL_INPUT
+    system_clock_initialize();
 #endif
     stdio_init_all();
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
     probe_debug_printf("\n[PROBE] " PROBE_JOYCON_PRODUCT " Bluetooth-to-USB controller/native mouse bridge\n");
+#elif SWITCH2_PROBE_NEUTRAL_INPUT
+    probe_debug_printf("\n[PROBE] Neutral native USB hub transport-only experiment: %u pair(s), %u children\n",
+                       PROBE_CONTROLLER_COUNT / 2, PROBE_CONTROLLER_COUNT);
 #else
     probe_debug_printf("\n[PROBE] " PROBE_JOYCON_PRODUCT " USB enumeration recorder\n");
 #endif
 #if SWITCH2_PROBE_HUB
+#if PROBE_CONTROLLER_COUNT == 4
+    probe_debug_printf("[PROBE] NATIVE_HUB: two pairs in A_R/A_L/B_R/B_L order; each HID0/vendor1 EP1/2; no shoulder gate\n");
+    for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance)
+        probe_debug_printf("[PROBE] CHILD slot=%u pair=%c side=%c pid=%04x report=%02x\n",
+                           instance + 1, 'A' + instance / 2,
+                           probe_model_is_left(instance) ? 'L' : 'R',
+                           probe_model_pid(instance), probe_model_report_id(instance));
+#else
     probe_debug_printf("[PROBE] NATIVE_HUB: device1 right PID2066, device2 left PID2067; each HID0/vendor1 EP1/2; no shoulder gate\n");
+#endif
 #endif
 #if SWITCH2_PROBE_COMPOSITE
 #ifdef SWITCH2_PROBE_JOIN_CHORD_GATE
@@ -804,7 +840,8 @@ int main(void) {
 #if SWITCH2_BRIDGE_WII_INPUT
     probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; selected Wii IR/MotionPlus source enabled\n");
 #elif SWITCH2_BRIDGE_FULL_INPUT
-    probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; one supported gamepad feeds the native R/L pair\n");
+    probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; up to %u supported gamepad(s) feed %u native R/L pair(s)\n",
+                       PROBE_CONTROLLER_COUNT / 2, PROBE_CONTROLLER_COUNT / 2);
 #else
     probe_debug_printf("[PROBE] UART0 GP0=TX, 115200 8N1; %u selected Joy-Con Bluetooth source(s)\n",
                        PROBE_CONTROLLER_COUNT);
@@ -833,12 +870,15 @@ int main(void) {
     probe_debug_printf("[PROBE] Wii IR drives native mouse movement; buttons retain profile mapping; MotionPlus bias learns in background\n");
     probe_debug_printf("[PROBE] Hold BOOTSEL2s for pairing; Wii cue feedback uses bounded ERM patterns, not HD audio waveforms\n");
 #elif SWITCH2_BRIDGE_FULL_INPUT
-    probe_debug_printf("[PROBE] Full gamepad controls on R/L; IMU mask=%u; Wii bias learns without startup settling\n",
-                       (unsigned)SWITCH2_BRIDGE_IMU_TARGET_MASK);
+    probe_debug_printf("[PROBE] Full gamepad controls on %u pair(s); IMU side mask=%u; Wii bias learns without startup settling\n",
+                       PROBE_CONTROLLER_COUNT / 2, (unsigned)SWITCH2_BRIDGE_IMU_TARGET_MASK);
     probe_debug_printf("[PROBE] Hold BOOTSEL 2s for Bluetooth pairing (never clears pairings); cues use source capabilities\n");
 #else
     probe_debug_printf("[PROBE] Live Joy-Con buttons/stick/native mouse; hold BOOTSEL 2s for Bluetooth pairing (never clears pairings)\n");
 #endif
+#elif SWITCH2_PROBE_NEUTRAL_INPUT
+    probe_debug_printf("[PROBE] Neutral captured-calibration reports only; physical BOOTSEL input disabled; no Bluetooth, mouse/IMU samples or motor cue acknowledgements\n");
+    probe_debug_printf("[PROBE] Private software BOOTSEL on root/children enabled; profile/configuration management disabled\n");
 #else
     probe_debug_printf("[PROBE] Manual input test: hold BOOTSEL for SL+SR, release for neutral; no controller forwarding\n");
 #endif
@@ -858,10 +898,12 @@ int main(void) {
     uint32_t last_heartbeat = 0;
     while (true) {
 #if SWITCH2_PROBE_HUB
+#ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
 #if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
         native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_RADIO_POLL);
 #endif
         probe_controller_input_task();
+#endif
 #if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
         native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_USB_TASK);
 #endif
@@ -877,7 +919,7 @@ int main(void) {
         native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_PROTOCOL);
 #endif
         const uint32_t now = to_ms_since_boot(get_absolute_time());
-#ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
+#if defined(SWITCH_PICO_SWITCH2_USB_BRIDGE) || SWITCH2_PROBE_NEUTRAL_INPUT
         probe_bootsel_task(now);
 #endif
 #ifdef SWITCH2_PROBE_USB_INIT
@@ -888,7 +930,7 @@ int main(void) {
         for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
             controller_input_task(&controllers[instance], now);
-#else
+#elif !SWITCH2_PROBE_NEUTRAL_INPUT
             button_test_task(&controllers[instance], now);
 #endif
 #if !defined(SWITCH2_PROBE_JOIN_CHORD_GATE) || SWITCH2_PROBE_HUB

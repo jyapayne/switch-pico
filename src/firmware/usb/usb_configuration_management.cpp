@@ -192,7 +192,7 @@ size_t encode_transaction(uint8_t* output, size_t output_size) {
 size_t encode_info(uint8_t* output, size_t output_size) {
     uint8_t payload[8] = {
 #if SWITCH2_PROBE_HUB
-        0, 89, 0, 2,
+        0, 100, 0, 2,
         kNativeHubActiveMode,
         USB_OUTPUT_CAPABILITY_INPUT | USB_OUTPUT_CAPABILITY_RUMBLE |
             USB_OUTPUT_CAPABILITY_MOTION,
@@ -716,7 +716,8 @@ bool management_control_xfer(uint8_t rhport,
                              const tusb_control_request_t* request,
                              void* buffer, uint16_t length) {
 #if SWITCH2_PROBE_HUB
-    return native_hub_control_xfer(rhport, request, buffer, length);
+    return native_hub_control_xfer(rhport, request, buffer, length,
+                                   (request->bmRequestType & 0x80u) != 0);
 #else
     return tud_control_xfer(rhport, request, buffer, length);
 #endif

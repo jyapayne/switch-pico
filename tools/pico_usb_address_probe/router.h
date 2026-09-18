@@ -3,7 +3,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(PROBE_CONTROLLER_COUNT)
+#define PROBE_ROUTER_SLOTS (PROBE_CONTROLLER_COUNT + 1u)
+#else
 #define PROBE_ROUTER_SLOTS 3u
+#endif
 #define PROBE_ROUTER_UNASSIGNED 0xffu
 
 typedef struct {

@@ -17,16 +17,18 @@ namespace {
 constexpr size_t kSlotCount = 2;
 constexpr size_t kMaximumPayloadSize = 512;
 constexpr size_t kStorageSize = kSlotCount * FLASH_SECTOR_SIZE;
-constexpr size_t kReservedStorageSize = 2 * kStorageSize;
+constexpr size_t kReservedBankCount = PROBE_CONTROLLER_COUNT > 2 ? PROBE_CONTROLLER_COUNT : 2;
+constexpr size_t kReservedStorageSize = kReservedBankCount * kStorageSize;
 constexpr size_t kConfigurationStorageSize =
     CONFIGURATION_STORAGE_COPY_COUNT * FLASH_SECTOR_SIZE;
 constexpr size_t kConfigurationStorageOffset =
     PICO_FLASH_BANK_STORAGE_OFFSET - kConfigurationStorageSize;
 constexpr size_t kProfileStorageOffset =
     kConfigurationStorageOffset - PROFILE_STORAGE_TOTAL_SIZE;
-// Keep the original right bank adjacent to profiles; reserve the left bank below.
+// Preserve the original R/L banks; each additional child takes the next lower bank.
 constexpr uint32_t kRightStorageOffset = kProfileStorageOffset - kStorageSize;
 constexpr uint32_t kLeftStorageOffset = kRightStorageOffset - kStorageSize;
+constexpr uint32_t kReservedStorageOffset = kProfileStorageOffset - kReservedStorageSize;
 constexpr uint32_t kFlashSafeTimeoutMs = 5000;
 constexpr uint32_t kFormatVersion = 1;
 
@@ -74,7 +76,7 @@ static_assert(PICO_FLASH_BANK_STORAGE_OFFSET >=
               "pairing storage offset underflows flash");
 static_assert(kLeftStorageOffset + kStorageSize == kRightStorageOffset);
 static_assert(kRightStorageOffset + kStorageSize == kProfileStorageOffset);
-static_assert(kLeftStorageOffset + kReservedStorageSize == kProfileStorageOffset);
+static_assert(kReservedStorageOffset + kReservedStorageSize == kProfileStorageOffset);
 static_assert(kProfileStorageOffset + PROFILE_STORAGE_TOTAL_SIZE ==
               kConfigurationStorageOffset);
 static_assert(kConfigurationStorageOffset + kConfigurationStorageSize ==
@@ -128,11 +130,11 @@ bool is_erased(const uint8_t *bytes, size_t size) {
 bool storage_region_available(uint32_t storage_offset) {
     const uintptr_t binary_end = reinterpret_cast<uintptr_t>(&__flash_binary_end);
     return binary_end >= XIP_BASE &&
-           binary_end - XIP_BASE <= kLeftStorageOffset &&
+           binary_end - XIP_BASE <= kReservedStorageOffset &&
            storage_offset % FLASH_SECTOR_SIZE == 0 &&
            storage_offset <= PICO_FLASH_SIZE_BYTES &&
            kStorageSize <= PICO_FLASH_SIZE_BYTES - storage_offset &&
-           storage_offset >= kLeftStorageOffset &&
+           storage_offset >= kReservedStorageOffset &&
            storage_offset + kStorageSize <= kProfileStorageOffset;
 }
 
@@ -385,5 +387,9 @@ bool probe_storage_save(uint8_t instance, const uint8_t *data, size_t size) {
 
 uint32_t probe_storage_offset(uint8_t instance) {
     if (instance >= PROBE_CONTROLLER_COUNT) return UINT32_MAX;
+#if SWITCH2_PROBE_COMPOSITE || SWITCH2_PROBE_HUB
+    return static_cast<uint32_t>(kRightStorageOffset - instance * kStorageSize);
+#else
     return probe_model_is_left(instance) ? kLeftStorageOffset : kRightStorageOffset;
+#endif
 }

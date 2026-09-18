@@ -8,20 +8,42 @@
 #include "model.h"
 #include "pico/stdlib.h"
 #include "platform/pico/bootsel_pairing_button.h"
+#include "platform/pico/system_clock.h"
 #include "profile/controller_profile_runtime.h"
 #include "profile/profile_service.h"
 
 namespace {
 uint64_t now_us = 1000000;
 uint32_t stage;
-Bluepad32NativeGamepadSnapshot source;
-ControllerProfile profile;
+Bluepad32NativeGamepadSnapshot sources[BLUEPAD32_NATIVE_PAIR_COUNT];
+ControllerProfile profiles[BLUEPAD32_NATIVE_PAIR_COUNT];
+// Existing single-pair scenarios exercise PairA in both executable configurations.
+Bluepad32NativeGamepadSnapshot& source = sources[0];
+ControllerProfile& profile = profiles[0];
+bool selected[BLUEPAD32_NATIVE_PAIR_COUNT];
+uint64_t cue_tokens[PROBE_CONTROLLER_COUNT];
+uint64_t next_cue_token;
 uint32_t profile_generation = 1;
-bool alternating_shortcut;
-bool shortcut_phase;
-probe_controller_input controls[2];
-uint8_t reports[2][63];
+bool alternating_shortcuts[BLUEPAD32_NATIVE_PAIR_COUNT];
+bool shortcut_phases[BLUEPAD32_NATIVE_PAIR_COUNT];
+bool& alternating_shortcut = alternating_shortcuts[0];
+bool latching_shortcuts[BLUEPAD32_NATIVE_PAIR_COUNT];
+struct SlotShortcut {
+    bool active = false;
+    bool latched = false;
+    uint32_t connection_generation = 0;
+};
+SlotShortcut slot_shortcuts[BLUEPAD32_INPUT_BACKEND_SLOT_COUNT];
+probe_controller_input controls[PROBE_CONTROLLER_COUNT];
+uint8_t reports[PROBE_CONTROLLER_COUNT][63];
+
+uint8_t source_pair(uint8_t slot) {
+    for (uint8_t pair_index = 0; pair_index < BLUEPAD32_NATIVE_PAIR_COUNT; ++pair_index)
+        if (sources[pair_index].controller.active && sources[pair_index].slot == slot) return pair_index;
+    assert(false);
+    return 0;
 }
+} // namespace
 
 uint32_t time_us_32() { return static_cast<uint32_t>(now_us); }
 absolute_time_t get_absolute_time() { return now_us; }
@@ -34,25 +56,58 @@ void bluepad32_input_backend_start() { stage = 2; }
 void bluepad32_input_backend_poll() {}
 void bluepad32_input_backend_diagnostics(Bluepad32BackendDiagnostics* out) { *out = {}; out->initialization_stage = stage; }
 void bluepad32_input_backend_open_pairing_window() {}
-void bluepad32_input_backend_select_native_source(const uint8_t*) {}
-void bluepad32_input_backend_native_snapshot(Bluepad32NativeGamepadSnapshot* out) { *out = source; }
-bool bluepad32_input_backend_native_sample_request(uint8_t, uint8_t, uint64_t*) { return false; }
-int bluepad32_input_backend_native_sample_result(uint8_t, uint64_t) { return -1; }
-void bluepad32_input_backend_native_sample_cancel(uint8_t) {}
+void bluepad32_input_backend_select_native_source(uint8_t pair_index, const uint8_t*) {
+    assert(pair_index < BLUEPAD32_NATIVE_PAIR_COUNT);
+    selected[pair_index] = true;
+}
+void bluepad32_input_backend_native_snapshot(uint8_t pair_index, Bluepad32NativeGamepadSnapshot* out) {
+    assert(pair_index < BLUEPAD32_NATIVE_PAIR_COUNT);
+    *out = selected[pair_index] ? sources[pair_index] : Bluepad32NativeGamepadSnapshot{};
+}
+bool bluepad32_input_backend_native_sample_request(uint8_t instance, uint8_t, uint64_t* token) {
+    if (instance >= PROBE_CONTROLLER_COUNT || !sources[instance / 2].controller.active || !token) return false;
+    *token = cue_tokens[instance] = ++next_cue_token;
+    return true;
+}
+int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t token) {
+    return instance < PROBE_CONTROLLER_COUNT && token && cue_tokens[instance] == token ? 1 : -1;
+}
+void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
+    assert(instance < PROBE_CONTROLLER_COUNT);
+    cue_tokens[instance] = 0;
+}
 void bluepad32_input_backend_queue_profile_feedback(uint8_t, uint32_t, uint8_t, ControllerProfileConfirmationPolicy) {}
-void controller_profile_runtime_reset() { profile = controller_profile_default(controller_identity_global(), 0); }
+void controller_profile_runtime_reset() {
+    for (ControllerProfile& value : profiles)
+        value = controller_profile_default(controller_identity_global(), 0);
+}
 uint32_t profile_service_database_generation() { return profile_generation; }
 bool controller_profile_runtime_take_initial_profile_indication(uint8_t, ControllerProfileRuntimeProfileChangeEvent*) { return false; }
 bool controller_profile_runtime_take_profile_change(uint8_t, ControllerProfileRuntimeProfileChangeEvent*) { return false; }
 ControllerProfileTransformResult controller_profile_runtime_transform(
-    uint8_t, const Bluepad32SlotSnapshot& input, uint32_t, AdapterUsbMode) {
-    if (!input.active) return {};
-    auto result = controller_profile_transform(input.state, profile);
-    if (alternating_shortcut) {
+    uint8_t slot, const Bluepad32SlotSnapshot& input, uint32_t, AdapterUsbMode) {
+    if (!input.active) {
+        slot_shortcuts[slot] = {};
+        return {};
+    }
+    const uint8_t pair_index = source_pair(slot);
+    auto result = controller_profile_transform(input.state, profiles[pair_index]);
+    if (alternating_shortcuts[pair_index]) {
         // Model a runtime synthetic transition spanning the two halves. Two
         // evaluations for one paired report would expose contradictory states.
-        shortcut_phase = !shortcut_phase;
-        result.state.button_system = result.state.button_capture = shortcut_phase;
+        shortcut_phases[pair_index] = !shortcut_phases[pair_index];
+        result.state.button_system = result.state.button_capture = shortcut_phases[pair_index];
+    }
+    if (latching_shortcuts[pair_index]) {
+        // Model a macro/Shift latch owned by a runtime SLOT, not a USB pair.
+        auto& shortcut = slot_shortcuts[slot];
+        if (!shortcut.active || shortcut.connection_generation != input.connection_generation) {
+            shortcut = {};
+            shortcut.active = true;
+            shortcut.connection_generation = input.connection_generation;
+        }
+        if (input.state.button_select) shortcut.latched = true;
+        result.state.button_system = result.state.button_capture = shortcut.latched;
     }
     return result;
 }
@@ -92,15 +147,20 @@ void quaternion(uint8_t instance, double out[4]) {
     out[largest] = 1 / sqrt(norm);
     for (unsigned i = 0; i < 3; ++i) out[(largest + i + 1) & 3] = ratios[i] * out[largest];
 }
-void publish(bool motion = true) {
-    now_us += 4000;
-    source.received_us = time_us_32();
-    ++source.state_generation;
+void publish_at_current_time(uint8_t pair_index, bool motion) {
+    Bluepad32NativeGamepadSnapshot& snapshot = sources[pair_index];
+    snapshot.received_us = time_us_32();
+    ++snapshot.state_generation;
     if (motion) {
-        source.accel_received_us = source.gyro_received_us = time_us_32();
-        ++source.accel_sequence;
-        ++source.gyro_sequence;
+        snapshot.accel_received_us = snapshot.gyro_received_us = time_us_32();
+        ++snapshot.accel_sequence;
+        ++snapshot.gyro_sequence;
     }
+}
+
+void publish(bool motion = true, uint8_t pair_index = 0) {
+    now_us += 4000;
+    publish_at_current_time(pair_index, motion);
 }
 uint32_t peek(uint8_t instance) {
     probe_controller_input_poll(instance, now_ms(), &controls[instance]);
@@ -110,7 +170,7 @@ void consume(uint8_t instance) {
     const uint32_t token = peek(instance);
     assert(token && probe_controller_input_commit_native_report(instance, token));
 }
-void pair() { consume(0); consume(1); }
+void pair(uint8_t pair_index = 0) { consume(pair_index * 2); consume(pair_index * 2 + 1); }
 void no_mouse_or_rails() {
     for (unsigned i = 0; i < 2; ++i) {
         assert((reports[i][3] & 0xc0) == 0);
@@ -673,15 +733,301 @@ void solo_motion_rotates_coherently_and_resets_frame() {
     }
 }
 
+#if PROBE_CONTROLLER_COUNT == 4
+void publish_both(bool motion = true) {
+    now_us += 4000;
+    publish_at_current_time(0, motion);
+    publish_at_current_time(1, motion);
+}
+
+void prepare_two_sources(bool motion) {
+    for (uint8_t pair_index = 0; pair_index < BLUEPAD32_NATIVE_PAIR_COUNT; ++pair_index) {
+        auto& snapshot = sources[pair_index];
+        const uint32_t connection_generation = snapshot.controller.connection_generation + 1;
+        snapshot = {};
+        snapshot.slot = pair_index;
+        snapshot.controller.active = true;
+        snapshot.controller.connection_generation = connection_generation;
+        snapshot.controller.identity = controller_identity_global();
+        snapshot.accel_valid = snapshot.gyro_valid = motion;
+        snapshot.accel_q13[1] = 8192;
+        profiles[pair_index] = controller_profile_default(controller_identity_global(), 0);
+        alternating_shortcuts[pair_index] = false;
+    }
+    ++profile_generation;
+    for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
+        probe_controller_input_set_native_stream(instance, true);
+        calibrate(instance, 2048, 2048, 1000, 1000, 1000, 1000);
+    }
+    publish_both(motion);
+    pair(0);
+    pair(1);
+}
+
+void two_pair_controls_and_profile_coherence() {
+    prepare_two_sources(false);
+    auto& a = sources[0].controller.state;
+    auto& b = sources[1].controller.state;
+    a.button_south = a.dpad_up = true;
+    a.button_left_shoulder = a.button_right_shoulder = true;
+    b.button_east = b.dpad_down = true;
+    sources[0].battery = 255;
+    sources[1].battery = 0;
+    publish_both(false); pair(0); pair(1);
+    assert(reports[0][2] == 0x11 && reports[1][2] == 0x18);
+    assert(reports[2][2] == 0x02 && reports[3][2] == 0x01);
+    assert(reports[0][1] == 0x25 && reports[1][1] == 0x25);
+    assert(reports[2][1] == 0x01 && reports[3][1] == 0x01);
+    a.button_left_shoulder = a.button_right_shoulder = false;
+    b.button_left_shoulder = b.button_right_shoulder = true;
+    publish_both(false); pair(1); pair(0);
+    assert(reports[0][2] == 0x01 && reports[1][2] == 0x08);
+    assert(reports[2][2] == 0x12 && reports[3][2] == 0x11); // Real L+R only on PairB.
+
+    // Digital mapped-left movement after swapping feeds only A's solo frame.
+    // B independently inverts its physical left stick, then swaps it to right.
+    a = {}; b = {};
+    a.dpad_up = a.button_south = true;
+    a.left_stick_x = INT16_MAX;
+    profiles[0].button_map[12] = CONTROLLER_PROFILE_LEFT_STICK_UP_OUTPUT;
+    profiles[0].native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    profiles[0].swap_sticks = true;
+    b.dpad_down = true;
+    b.left_stick_y = INT16_MAX;
+    profiles[1].sticks[0].invert_y = true;
+    profiles[1].swap_sticks = true;
+    ++profile_generation;
+    publish_both(false);
+    consume(0); pair(1); inactive_child(1);
+    assert(reports[0][2] == 0x02 && stick_x(0) == 1048 && stick_y(0) == 2048);
+    assert(reports[2][2] == 0 && stick_x(2) == 2048 && stick_y(2) == 3048);
+    assert(reports[3][2] == 0x01 && stick_x(3) == 2048 && stick_y(3) == 2048);
+    profiles[0].native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+    ++profile_generation;
+    pair(1); consume(1); inactive_child(0);
+    assert(reports[1][2] == 0x04 && stick_x(1) == 3048 && stick_y(1) == 2048);
+    assert(reports[2][2] == 0 && stick_y(2) == 3048 && reports[3][2] == 0x01);
+    // A and B may select different solo sides without neutralizing each other.
+    profiles[1].native_joycon_layout = ControllerProfileNativeJoyconLayout::kRightSolo;
+    b.right_stick_x = INT16_MAX;
+    ++profile_generation;
+    publish_both(false);
+    consume(2); consume(1); inactive_child(0); inactive_child(3);
+    assert(stick_x(1) == 3048 && stick_y(1) == 2048);
+    assert(stick_x(2) == 2048 && stick_y(2) == 3048);
+
+    a = {}; b = {};
+    profiles[0] = profiles[1] = controller_profile_default(controller_identity_global(), 0);
+    ++profile_generation;
+    alternating_shortcuts[0] = alternating_shortcuts[1] = true;
+    shortcut_phases[0] = false;
+    shortcut_phases[1] = true;
+    for (unsigned round = 0; round < 4; ++round) {
+        publish_both(false);
+        consume(0); consume(2); consume(1); consume(3);
+        assert(reports[0][3] == reports[1][3] && reports[2][3] == reports[3][3]);
+        assert(reports[0][3] != reports[2][3]);
+    }
+    const uint8_t a_before = reports[0][3], b_before = reports[2][3];
+    // A's same-millisecond publication must re-evaluate A, not B; alternating
+    // slot-local transitions make both duplicate and missing evaluations visible.
+    publish_at_current_time(0, false);
+    consume(0); consume(2); consume(1); consume(3);
+    assert(reports[0][3] != a_before && reports[0][3] == reports[1][3]);
+    assert(reports[2][3] == b_before && reports[2][3] == reports[3][3]);
+    alternating_shortcuts[0] = alternating_shortcuts[1] = false;
+}
+
+void two_pair_transport_and_disconnect_isolation() {
+    prepare_two_sources(true);
+    sources[0].controller.state.button_south = true;
+    sources[1].controller.state.button_north = true;
+    publish_both();
+    uint32_t pending[PROBE_CONTROLLER_COUNT];
+    uint64_t cues[PROBE_CONTROLLER_COUNT];
+    for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
+        pending[instance] = peek(instance);
+        assert(pending[instance]);
+        assert(bluepad32_input_backend_native_sample_request(instance, 1, &cues[instance]));
+    }
+    assert(!probe_controller_input_commit_native_report(0, pending[2]));
+    uint8_t saved_b[2][63];
+    memcpy(saved_b, reports + 2, sizeof(saved_b));
+    sources[0].controller.active = false;
+    // Recheck the actual owning source, even before any poll sees its loss.
+    assert(!probe_controller_input_commit_native_report(0, pending[0]));
+    assert(!probe_controller_input_commit_native_report(1, pending[1]));
+    inactive_child(0); inactive_child(1);
+    for (uint8_t instance = 0; instance < 2; ++instance)
+        assert(bluepad32_input_backend_native_sample_result(instance, cues[instance]) == -1);
+    for (uint8_t instance = 2; instance < 4; ++instance) {
+        assert(bluepad32_input_backend_native_sample_result(instance, cues[instance]) == 1);
+        assert(peek(instance) == pending[instance]);
+        assert(memcmp(saved_b[instance - 2], reports[instance], 63) == 0);
+        assert(probe_controller_input_commit_native_report(instance, pending[instance]));
+    }
+    const uint32_t b_pending = peek(2);
+    sources[0].controller.active = true;
+    ++sources[0].controller.connection_generation;
+    publish(true, 0); pair(0);
+    assert(reports[0][2] == 0x01 && reports[2][2] == 0x08);
+    assert(!probe_controller_input_commit_native_report(0, pending[0]));
+    assert(probe_controller_input_commit_native_report(2, b_pending));
+
+    // Repeated updates on three endpoints must neither consume a blocked
+    // endpoint's counter nor starve the other source's two endpoints.
+    publish_both();
+    const uint32_t blocked_left = peek(1);
+    const uint8_t left_counter = reports[1][0];
+    const uint32_t blocked_b = peek(2);
+    const uint8_t b_counter = reports[2][0];
+    for (unsigned update = 0; update < 40; ++update) {
+        sources[1].controller.state.button_east = (update & 1u) != 0;
+        publish_both(); consume(0); pair(1);
+    }
+    assert(!probe_controller_input_commit_native_report(1, blocked_left));
+    assert(!probe_controller_input_commit_native_report(2, blocked_b));
+    consume(1);
+    assert(reports[1][0] == left_counter);
+    assert(reports[2][0] == static_cast<uint8_t>(b_counter + 39));
+    assert(reports[2][2] == 0x0a);
+    probe_controller_input_set_native_stream(0, false);
+    assert(!peek(0));
+    publish_both();
+    const uint32_t left_pending = peek(1);
+    pair(1);
+    assert(probe_controller_input_commit_native_report(1, left_pending));
+    probe_controller_input_set_native_stream(0, true);
+    consume(0);
+    assert(reports[0][2] == 0x01);
+
+    // USB suspension also remains child-local on PairB.
+    publish_both();
+    const uint32_t a_pending = peek(0), b_left_pending = peek(3);
+    probe_controller_input_set_native_stream(2, false);
+    assert(!peek(2));
+    assert(probe_controller_input_commit_native_report(0, a_pending));
+    assert(probe_controller_input_commit_native_report(3, b_left_pending));
+    assert(bluepad32_input_backend_native_sample_result(2, cues[2]) == -1);
+    assert(bluepad32_input_backend_native_sample_result(3, cues[3]) == 1);
+    probe_controller_input_set_native_stream(2, true);
+
+    const uint32_t expires = peek(0);
+    // B stays live while A's queued report expires, then A's source times out.
+    for (unsigned update = 0; update < 26; ++update) { publish(true, 1); pair(1); }
+    assert(!probe_controller_input_commit_native_report(0, expires));
+    for (unsigned update = 0; update < 100; ++update) { publish(true, 1); pair(1); }
+    const uint32_t surviving_b = peek(2);
+    inactive_child(0); inactive_child(1);
+    assert(probe_controller_input_commit_native_report(2, surviving_b));
+    assert(controls[2].active && controls[3].active && reports[2][2] == 0x0a);
+}
+
+void two_pair_motion_provenance_and_resets() {
+    prepare_two_sources(true);
+    const uint8_t side = (SWITCH2_BRIDGE_IMU_TARGET_MASK & 1) ? 0 : 1;
+    const uint8_t a_imu = side, b_imu = 2 + side;
+    sources[0].gyro_q10[1] = 90 * 1024;
+    sources[1].gyro_q10[1] = -45 * 1024;
+    for (unsigned sample = 0; sample < 250; ++sample) {
+        publish_both();
+        consume(0); consume(2); consume(1); consume(3);
+    }
+    for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
+        const bool enabled = (SWITCH2_BRIDGE_IMU_TARGET_MASK & (1u << (instance & 1u))) != 0;
+        assert(imu_length(instance) == (enabled ? 30 : 0));
+    }
+    double a[4], b[4];
+    quaternion(a_imu, a); quaternion(b_imu, b);
+    assert(fabs(fabs(a[0]) - sqrt(.5)) < .015);
+    assert(fabs(fabs(b[0]) - cos(3.141592653589793 / 8)) < .015);
+    assert(a[3] * b[3] < 0); // Opposite physical yaw cannot share one integrator.
+    if (SWITCH2_BRIDGE_IMU_TARGET_MASK == 3) {
+        assert(memcmp(reports[0] + probe_model_imu_data_offset(0),
+                      reports[1] + probe_model_imu_data_offset(1), 30) == 0);
+        assert(memcmp(reports[2] + probe_model_imu_data_offset(2),
+                      reports[3] + probe_model_imu_data_offset(3), 30) == 0);
+    }
+    sources[0].gyro_q10[1] = sources[1].gyro_q10[1] = 0;
+    publish_both(); pair(0); pair(1);
+    quaternion(b_imu, b);
+    const uint8_t* b_block = reports[b_imu] + probe_model_imu_data_offset(b_imu);
+    const uint32_t b_ticks = bits(b_block, 0, 12);
+    publish(false, 1); pair(1);
+    publish(true, 0); pair(0);
+    pair(1);
+    assert(imu_length(2) == 0 && imu_length(3) == 0); // A cannot manufacture a B sample.
+
+    const uint32_t pending_a = peek(a_imu);
+    sources[0].controller.active = false;
+    inactive_child(0); inactive_child(1);
+    sources[0].controller.active = true;
+    ++sources[0].controller.connection_generation;
+    publish(true, 0); pair(0);
+    assert(!probe_controller_input_commit_native_report(a_imu, pending_a));
+    quaternion(a_imu, a);
+    assert(fabs(fabs(a[0]) - 1) < 1e-6); // Only A reconnects at identity heading.
+    publish(true, 1); pair(1);
+    double after[4]; quaternion(b_imu, after);
+    for (unsigned axis = 0; axis < 4; ++axis) assert(fabs(after[axis] - b[axis]) < 1e-6);
+    b_block = reports[b_imu] + probe_model_imu_data_offset(b_imu);
+    assert(bits(b_block, 12, 12) == ((bits(b_block, 0, 12) - b_ticks) & 0xfffu));
+
+    // Reframing A to solo must not reset B's heading or in-flight motion.
+    profiles[0].native_joycon_layout = ControllerProfileNativeJoyconLayout::kLeftSolo;
+    ++profile_generation;
+    publish_both();
+    const uint32_t b_pending = peek(b_imu);
+    uint8_t saved[63]; memcpy(saved, reports[b_imu], sizeof(saved));
+    consume(1); inactive_child(0);
+    assert(peek(b_imu) == b_pending && memcmp(saved, reports[b_imu], sizeof(saved)) == 0);
+    assert(probe_controller_input_commit_native_report(b_imu, b_pending));
+    quaternion(b_imu, after);
+    for (unsigned axis = 0; axis < 4; ++axis) assert(fabs(after[axis] - b[axis]) < 1e-6);
+}
+
+void recycled_slot_preserves_the_new_pairs_runtime() {
+    prepare_two_sources(false);
+    const uint32_t old_a = peek(0);
+    // A disconnects without another poll. B reconnects into A's recycled
+    // physical slot and starts a held synthetic action before A sees its loss.
+    sources[0].controller.active = false;
+    sources[1].slot = sources[0].slot;
+    ++sources[1].controller.connection_generation;
+    sources[1].controller.state.button_select = true;
+    latching_shortcuts[1] = true;
+    publish(false, 1); pair(1);
+    assert(reports[2][3] == 1 && reports[3][3] == 1);
+    sources[1].controller.state.button_select = false;
+    publish(false, 1); pair(1);
+    const uint32_t pending_b = peek(2);
+    inactive_child(0); inactive_child(1);
+    assert(!probe_controller_input_commit_native_report(0, old_a));
+    assert(probe_controller_input_commit_native_report(2, pending_b));
+    // The next evaluation exposes accidental inactive-transform retirement;
+    // checking only the already-cached report would miss that runtime reset.
+    publish(false, 1); pair(1);
+    assert(reports[2][3] == 1 && reports[3][3] == 1);
+    sources[0].slot = 1;
+    sources[0].controller.active = true;
+    ++sources[0].controller.connection_generation;
+    publish(false, 0); pair(0);
+    publish(false, 1); pair(1);
+    assert(reports[2][3] == 1 && reports[3][3] == 1);
+    latching_shortcuts[1] = false;
+}
+#endif
+
 } // namespace
 
 int main() {
     assert(!probe_controller_input_peek_native_report(0, now_ms(), reports[0]));
     probe_controller_input_init();
     assert(probe_controller_input_start());
-    probe_controller_input_set_native_stream(0, true);
-    probe_controller_input_set_native_stream(1, true);
-    assert(!peek(0) && !peek(1));
+    for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
+        probe_controller_input_set_native_stream(instance, true);
+        assert(!peek(instance));
+    }
     mapped_halves_and_calibration();
     independent_backpressure_and_resets();
     if (SWITCH2_BRIDGE_IMU_TARGET_MASK == 3) real_motion_admission_and_loss();
@@ -692,5 +1038,11 @@ int main() {
     profile_changes_retire_tokens_without_source_publication();
     digital_dpad_reaches_the_mapped_left_stick();
     solo_motion_rotates_coherently_and_resets_frame();
+#if PROBE_CONTROLLER_COUNT == 4
+    two_pair_controls_and_profile_coherence();
+    two_pair_transport_and_disconnect_isolation();
+    two_pair_motion_provenance_and_resets();
+    recycled_slot_preserves_the_new_pairs_runtime();
+#endif
     return 0;
 }

@@ -85,7 +85,8 @@ static inline bool probe_transport_control_xfer(uint8_t rhport,
                                                  const tusb_control_request_t* request,
                                                  void* buffer, uint16_t length) {
 #if SWITCH2_PROBE_HUB
-    return native_hub_control_xfer(rhport, request, buffer, length);
+    return native_hub_control_xfer(rhport, request, buffer, length,
+                                   (request->bmRequestType & 0x80u) != 0);
 #else
     return tud_control_xfer(rhport, request, buffer, length);
 #endif

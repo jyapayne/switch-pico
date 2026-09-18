@@ -27,6 +27,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+// Returns the formatted length when queued, or -1 if the whole message cannot
+// fit. A diagnostic consumer may retry later; native logging never masks IRQs.
 int probe_debug_printf(const char* format, ...);
 #ifdef __cplusplus
 }

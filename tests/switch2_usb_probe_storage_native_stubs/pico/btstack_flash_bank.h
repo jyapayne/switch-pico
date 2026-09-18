@@ -1,0 +1,6 @@
+#pragma once
+
+#include "hardware/flash.h"
+
+#define PICO_FLASH_BANK_TOTAL_SIZE (2u * FLASH_SECTOR_SIZE)
+#define PICO_FLASH_BANK_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - PICO_FLASH_BANK_TOTAL_SIZE)

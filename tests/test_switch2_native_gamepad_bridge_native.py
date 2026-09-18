@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("controller_count", [2, 4], ids=["one-pair", "two-pair"])
 @pytest.mark.parametrize("imu_target", [1, 2, 3], ids=["right", "left", "both"])
 def test_native_gamepad_bridge_mapping_motion_and_backpressure(
     tmp_path: Path,
     imu_target: int,
+    controller_count: int,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
@@ -29,6 +31,7 @@ def test_native_gamepad_bridge_mapping_motion_and_backpressure(
             "-DSWITCH2_BRIDGE_FULL_INPUT=1",
             "-DSWITCH2_BRIDGE_SOURCE_AUTO=1",
             "-DSWITCH2_PROBE_HUB=1",
+            *(["-DPROBE_CONTROLLER_COUNT=4"] if controller_count == 4 else []),
             f"-DSWITCH2_BRIDGE_IMU_TARGET_MASK={imu_target}",
             "-DSWITCH_PICO_BLUEPAD32=1",
             "-DSWITCH_PICO_ENABLE_CLASSIC=1",

@@ -12,7 +12,15 @@ struct SystemClockStatus {
     int32_t temperature_millicelsius;
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Core 0, before board/peripheral initialization and before launching core 1.
-void system_clock_initialize();
+void system_clock_initialize(void);
 // Core 0 only; reads the dedicated on-chip temperature ADC channel.
-SystemClockStatus system_clock_status();
+struct SystemClockStatus system_clock_status(void);
+
+#ifdef __cplusplus
+}
+#endif

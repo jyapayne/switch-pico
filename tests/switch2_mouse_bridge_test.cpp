@@ -3,6 +3,7 @@
 #include "input/bluepad32_input_backend.h"
 #include "input/switch2_mouse_capture.h"
 #include "platform/pico/bootsel_pairing_button.h"
+#include "platform/pico/system_clock.h"
 #include "parser/uni_hid_parser_switch2.h"
 #include "pico/stdlib.h"
 #include <array>

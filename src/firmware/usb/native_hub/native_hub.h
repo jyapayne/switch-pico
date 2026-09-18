@@ -9,9 +9,14 @@
 extern "C" {
 #endif
 
-// Native SIE hub: device slot 0 is the hub; controller instances 0/1 map to
-// device slots 1/2 (right/left). The caller owns Bluetooth on Core 0; this
-// transport owns Core 1. No external USB wiring is used.
+#ifndef PROBE_CONTROLLER_COUNT
+#define PROBE_CONTROLLER_COUNT 2u
+#endif
+
+// Native SIE hub: slot 0 is the hub; instances map to slots instance+1,
+// ordered pair A right/left, then (in the neutral experiment) pair B right/left.
+// The caller owns protocols on Core 0; this transport owns Core 1. No external
+// USB wiring is used.
 // Recover a timed-out test firmware to BOOTSEL instead of rebooting forever.
 void native_hub_startup_guard(void);
 bool native_hub_init(void);
@@ -29,9 +34,12 @@ uint32_t native_hub_vendor_write(uint8_t instance, const void* data, uint32_t le
 uint32_t native_hub_vendor_write_flush(uint8_t instance);
 // OUT packets are delivered directly and once through tud_vendor_rx_cb;
 // there is no second receive FIFO to drain in this backend.
+// Pre-approved IN replies may arm STATUS_OUT in IRQ after their final IN.
+// Opt in only when SETUP validates the reply and DATA cannot reject status;
+// DATA/ACK callbacks still run in foreground. OUT requests must pass false.
 bool native_hub_control_xfer(uint8_t device_slot,
                              const tusb_control_request_t* request,
-                             void* buffer, uint16_t length);
+                             void* buffer, uint16_t length, bool read_status_preapproved);
 bool native_hub_control_status(uint8_t device_slot,
                                const tusb_control_request_t* request);
 

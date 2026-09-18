@@ -41,7 +41,12 @@ static void test_descriptors(void) {
         ((uint16_t)probe_device_descriptor[11] << 8);
     assert(product_id == (SWITCH2_PROBE_JOYCON_LEFT ? 0x2067 : 0x2066));
     assert(probe_configuration_descriptor[2] == sizeof(probe_configuration_descriptor));
-    assert(probe_configuration_descriptor[4] == 2 * PROBE_CONTROLLER_COUNT);
+    const unsigned functions = SWITCH2_PROBE_COMPOSITE ? 2 : 1;
+    assert(probe_configuration_descriptor[4] == 2 * functions);
+#if SWITCH2_PROBE_HUB
+    assert((probe_left_device_descriptor[10] |
+            ((uint16_t)probe_left_device_descriptor[11] << 8)) == 0x2067);
+#endif
     unsigned interface_count = 0, endpoint_count = 0;
     unsigned interface = 0, seen_endpoints = 0;
     for (size_t offset = 9; offset < sizeof(probe_configuration_descriptor);) {
@@ -67,8 +72,8 @@ static void test_descriptors(void) {
         }
         offset += descriptor[0];
     }
-    assert(interface_count == 2 * PROBE_CONTROLLER_COUNT);
-    assert(endpoint_count == 4 * PROBE_CONTROLLER_COUNT);
+    assert(interface_count == 2 * functions);
+    assert(endpoint_count == 4 * functions);
     // Read HID short items as a host would: each function advertises only its
     // own native report plus common 05, with sizes matching report generation.
     for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
@@ -91,7 +96,11 @@ static void test_descriptors(void) {
                 case 0x90: output_bits[report_id] += report_size * report_count; break;
             }
         }
-        const bool is_left = SWITCH2_PROBE_COMPOSITE ? instance == 1 : SWITCH2_PROBE_JOYCON_LEFT;
+        const bool is_left = (SWITCH2_PROBE_COMPOSITE || SWITCH2_PROBE_HUB) ?
+                             (instance & 1u) != 0 : SWITCH2_PROBE_JOYCON_LEFT;
+        assert(probe_model_is_left(instance) == is_left);
+        assert(probe_model_pid(instance) == (is_left ? 0x2067 : 0x2066));
+        assert(probe_model_report_id(instance) == (is_left ? 7 : 8));
         probe_protocol_state state;
         probe_protocol_reset(&state, is_left);
         initialize(&state);
@@ -435,43 +444,50 @@ static void test_interleaved_reports_and_features(void) {
 }
 
 static void test_interleaved_callbacks_and_pairing(void) {
-    const uint8_t addresses[2][6] = {
+    enum { count = PROBE_CONTROLLER_COUNT > 2 ? PROBE_CONTROLLER_COUNT : 2 };
+    const uint8_t addresses[4][6] = {
         {0x64, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
         {0x65, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
+        {0x66, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
+        {0x67, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
     };
-    controller_context controllers[2] = {
-        {.expected_sample = 3, .source_available = true,
-         .source_token = UINT64_C(0x100000001), .storage_available = true},
-        {.expected_sample = 3, .source_available = false,
-         .source_token = UINT64_C(0x200000001), .storage_available = false},
-    };
-    probe_protocol_state states[2];
-    for (unsigned side = 0; side < 2; ++side) {
-        probe_protocol_reset(&states[side], side != 0);
-        states[side].context = &controllers[side];
-        states[side].play_sample = play_sample;
-        states[side].save_pairing = save_pairing;
-        memcpy(states[side].controller_address, addresses[side], 6);
+    controller_context controllers[count];
+    memset(controllers, 0, sizeof(controllers));
+    probe_protocol_state states[count];
+    for (unsigned instance = 0; instance < count; ++instance) {
+        controllers[instance].expected_sample = 3;
+        controllers[instance].source_available = instance != 1;
+        controllers[instance].storage_available = instance != 1;
+        controllers[instance].source_token = ((uint64_t)(instance + 1) << 32) | 1;
+        probe_protocol_reset(&states[instance], (instance & 1u) != 0);
+        states[instance].context = &controllers[instance];
+        states[instance].play_sample = play_sample;
+        states[instance].save_pairing = save_pairing;
+        memcpy(states[instance].controller_address, addresses[instance], 6);
     }
     uint8_t reply[PROBE_REPLY_MAX_SIZE];
-    uint8_t cue_replies[2][8];
-    uint64_t tokens[2] = {0, UINT64_MAX};
-    assert(probe_protocol_command(&states[0], sample_command, sizeof(sample_command),
-                                  cue_replies[0], 8, &tokens[0]) == 8);
-    assert(probe_protocol_command(&states[1], sample_command, sizeof(sample_command),
-                                  cue_replies[1], 8, &tokens[1]) == 0);
-    assert(tokens[0] == UINT64_C(0x100000001) && tokens[1] == 0);
-    controllers[1].source_available = true;
-    assert(probe_protocol_command(&states[1], sample_command, sizeof(sample_command),
-                                  cue_replies[1], 8, &tokens[1]) == 8);
-    assert(tokens[0] == UINT64_C(0x100000001) && tokens[1] == UINT64_C(0x200000001));
+    uint64_t tokens[count];
     const uint8_t cue_ack[] = {0x0a, 1, 0, 2, 0, 0xf8, 0, 0};
-    assert(memcmp(cue_replies[0], cue_ack, 8) == 0);
-    assert(memcmp(cue_replies[1], cue_ack, 8) == 0);
+    for (unsigned instance = 0; instance < count; ++instance) {
+        tokens[instance] = UINT64_MAX;
+        if (instance == 1) {
+            assert(probe_protocol_command(&states[instance], sample_command, sizeof(sample_command),
+                                          reply, sizeof(reply), &tokens[instance]) == 0);
+            assert(tokens[instance] == 0);
+            controllers[instance].source_available = true;
+        }
+        assert(probe_protocol_command(&states[instance], sample_command, sizeof(sample_command),
+                                      reply, sizeof(reply), &tokens[instance]) == sizeof(cue_ack));
+        assert(memcmp(reply, cue_ack, sizeof(cue_ack)) == 0);
+        for (unsigned previous = 0; previous <= instance; ++previous)
+            assert(tokens[previous] == (((uint64_t)(previous + 1) << 32) | 1));
+    }
 
-    const uint8_t hosts[2][16] = {
+    const uint8_t hosts[4][16] = {
         {0x15, 0x91, 0, 1, 0, 8, 0, 0, 0, 1, 1, 2, 3, 4, 5, 6},
         {0x15, 0x91, 0, 1, 0, 8, 0, 0, 0, 1, 7, 8, 9, 10, 11, 12},
+        {0x15, 0x91, 0, 1, 0, 8, 0, 0, 0, 1, 13, 14, 15, 16, 17, 18},
+        {0x15, 0x91, 0, 1, 0, 8, 0, 0, 0, 1, 19, 20, 21, 22, 23, 24},
     };
     const uint8_t device_component[] = {
         0x5c, 0xf6, 0xee, 0x79, 0x2c, 0xdf, 0x05, 0xe1,
@@ -483,69 +499,69 @@ static void test_interleaved_callbacks_and_pairing(void) {
         {0x66, 0xe9, 0x4b, 0xd4, 0xef, 0x8a, 0x2c, 0x3b,
          0x88, 0x4c, 0xfa, 0x59, 0xca, 0x34, 0x2b, 0x2e},
     };
-    uint8_t challenges[2][25] = {
-        {0x15, 0x91, 0, 2, 0, 17, 0, 0, 0},
-        {0x15, 0x91, 0, 2, 0, 17, 0, 0, 0},
-    };
+    uint8_t challenges[count][25];
     const uint8_t finalize[] = {0x15, 0x91, 0, 3, 0, 1, 0, 0, 0};
-    for (unsigned side = 0; side < 2; ++side) {
-        assert(probe_protocol_command(&states[side], hosts[side], sizeof(hosts[side]),
+    for (unsigned instance = 0; instance < count; ++instance) {
+        assert(probe_protocol_command(&states[instance], hosts[instance], sizeof(hosts[instance]),
                                       reply, sizeof(reply), NULL) == 17);
-        assert(memcmp(reply + 11, addresses[side], 6) == 0);
-    }
-    for (unsigned side = 0; side < 2; ++side) {
+        assert(memcmp(reply + 11, addresses[instance], 6) == 0);
         uint8_t key[] = {0x15, 0x91, 0, 4, 0, 17, 0, 0, 0,
                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        memcpy(challenges[instance], key, sizeof(key));
+        challenges[instance][3] = 2;
         for (unsigned i = 0; i < 16; ++i) {
             // R uses AES's 000102...0f / 001122...ff vector; L uses all zeros.
-            key[9 + i] = device_component[i] ^ (side ? 0 : 15u - i);
-            challenges[side][9 + i] = side ? 0 : (uint8_t)((15u - i) * 0x11u);
+            key[9 + i] = device_component[i] ^ ((instance & 1u) ? 0 : 15u - i);
+            challenges[instance][9 + i] = (instance & 1u) ? 0 : (uint8_t)((15u - i) * 0x11u);
         }
-        assert(probe_protocol_command(&states[side], key, sizeof(key),
+        assert(probe_protocol_command(&states[instance], key, sizeof(key),
                                       reply, sizeof(reply), NULL) == 25);
     }
-    assert(probe_protocol_command(&states[0], challenges[0], sizeof(challenges[0]),
-                                  reply, sizeof(reply), NULL) == 25);
-    assert(memcmp(reply + 9, ciphertexts[0], 16) == 0);
-    // Right confirmation cannot authorize the left's finalize.
-    assert(probe_protocol_command(&states[1], finalize, sizeof(finalize),
-                                  reply, sizeof(reply), NULL) == 0);
-    assert(controllers[0].saves == 0 && controllers[1].saves == 0);
-    assert(probe_protocol_command(&states[1], challenges[1], sizeof(challenges[1]),
-                                  reply, sizeof(reply), NULL) == 25);
-    assert(memcmp(reply + 9, ciphertexts[1], 16) == 0);
-    assert(probe_protocol_command(&states[0], finalize, sizeof(finalize),
-                                  reply, sizeof(reply), NULL) == 9);
-    assert(reply[8] == 1);
-    assert(probe_protocol_command(&states[1], finalize, sizeof(finalize),
-                                  reply, sizeof(reply), NULL) == 0);
-    assert(controllers[0].saves == 1 && controllers[1].saves == 0);
-    controllers[1].storage_available = true;
-    assert(probe_protocol_command(&states[1], finalize, sizeof(finalize),
-                                  reply, sizeof(reply), NULL) == 9);
-    assert(reply[8] == 1);
-    assert(controllers[0].saves == 1 && controllers[1].saves == 1);
+    for (unsigned instance = 0; instance < count; ++instance) {
+        assert(probe_protocol_command(&states[instance], challenges[instance], sizeof(challenges[instance]),
+                                      reply, sizeof(reply), NULL) == 25);
+        assert(memcmp(reply + 9, ciphertexts[instance & 1u], 16) == 0);
+        // A confirmation cannot authorize any sibling, including the same-side
+        // child in the other pair. A failed durable save cannot be acknowledged.
+        for (unsigned pending = instance + 1; pending < count; ++pending)
+            assert(probe_protocol_command(&states[pending], finalize, sizeof(finalize),
+                                          reply, sizeof(reply), NULL) == 0);
+        if (instance == 1) {
+            assert(probe_protocol_command(&states[instance], finalize, sizeof(finalize),
+                                          reply, sizeof(reply), NULL) == 0);
+            assert(controllers[instance].saves == 0);
+            controllers[instance].storage_available = true;
+        }
+        assert(probe_protocol_command(&states[instance], finalize, sizeof(finalize),
+                                      reply, sizeof(reply), NULL) == 9);
+        assert(reply[8] == 1);
+        for (unsigned sibling = 0; sibling < count; ++sibling)
+            assert(controllers[sibling].saves == (unsigned)(sibling <= instance));
+    }
 
-    // After independent resets, each durable record must resume only its own
-    // challenge association; swapping the two contexts' records is rejected.
-    for (unsigned side = 0; side < 2; ++side) {
-        probe_protocol_reset(&states[side], side != 0);
-        memcpy(states[side].controller_address, addresses[side], 6);
-        assert(!probe_protocol_restore_pairing(&states[side], controllers[1 - side].pairing_blob,
-                                               PROBE_PAIRING_BLOB_SIZE));
-        assert(probe_protocol_restore_pairing(&states[side], controllers[side].pairing_blob,
+    // Each durable record resumes only its own identity and host association.
+    for (unsigned instance = 0; instance < count; ++instance) {
+        probe_protocol_reset(&states[instance], (instance & 1u) != 0);
+        memcpy(states[instance].controller_address, addresses[instance], 6);
+        for (unsigned sibling = 0; sibling < count; ++sibling) {
+            if (sibling == instance) continue;
+            assert(!probe_protocol_restore_pairing(&states[instance], controllers[sibling].pairing_blob,
+                                                   PROBE_PAIRING_BLOB_SIZE));
+        }
+        assert(probe_protocol_restore_pairing(&states[instance], controllers[instance].pairing_blob,
                                               PROBE_PAIRING_BLOB_SIZE));
     }
-    for (unsigned side = 0; side < 2; ++side) {
-        assert(probe_protocol_command(&states[side], hosts[1 - side], sizeof(hosts[0]),
+    for (unsigned instance = 0; instance < count; ++instance) {
+        const unsigned sibling = (instance + (count == 4 ? 2 : 1)) % count;
+        assert(probe_protocol_command(&states[instance], hosts[sibling], sizeof(hosts[sibling]),
                                       reply, sizeof(reply), NULL) == 17);
-        assert(probe_protocol_command(&states[side], challenges[side], sizeof(challenges[side]),
+        assert(probe_protocol_command(&states[instance], challenges[instance], sizeof(challenges[instance]),
                                       reply, sizeof(reply), NULL) == 0);
-        assert(probe_protocol_command(&states[side], hosts[side], sizeof(hosts[side]),
+        assert(probe_protocol_command(&states[instance], hosts[instance], sizeof(hosts[instance]),
                                       reply, sizeof(reply), NULL) == 17);
-        assert(probe_protocol_command(&states[side], challenges[side], sizeof(challenges[side]),
+        assert(probe_protocol_command(&states[instance], challenges[instance], sizeof(challenges[instance]),
                                       reply, sizeof(reply), NULL) == 25);
-        assert(memcmp(reply + 9, ciphertexts[side], 16) == 0);
+        assert(memcmp(reply + 9, ciphertexts[instance & 1u], 16) == 0);
     }
 }
 
@@ -556,37 +572,102 @@ static bool read_memory(void* context, uint32_t address, uint8_t* output, size_t
 static void test_indexed_memory(void) {
     probe_protocol_state states[PROBE_CONTROLLER_COUNT];
     uint8_t instances[PROBE_CONTROLLER_COUNT];
+    const uint8_t addresses[4][6] = {
+        {0x64, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
+        {0x65, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
+        {0x66, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
+        {0x67, 0xf9, 0xd8, 0x93, 0x05, 0xa2},
+    };
+    const uint8_t versions[4][12] = {
+        {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
+        {13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24},
+        {25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36},
+        {37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48},
+    };
+    uint8_t reports[PROBE_CONTROLLER_COUNT][PROBE_INPUT_SIZE];
     for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
         instances[instance] = instance;
         probe_protocol_reset(&states[instance], probe_model_is_left(instance));
         states[instance].context = &instances[instance];
         states[instance].read_memory = read_memory;
+        memcpy(states[instance].controller_address, addresses[instance], 6);
+        states[instance].firmware_version = versions[instance];
+        uint8_t calibration[9];
+        assert(probe_memory_stick_calibration(instance, calibration));
+        memcpy(states[instance].stick_center, calibration, 3);
+        initialize(&states[instance]);
+        set_features(&states[instance], 2, 0x17);
+        set_features(&states[instance], 4, 0x17);
+        states[instance].report_counter = 0x21 + instance;
     }
-    const uint8_t calibrations[2][9] = {
-        {0x10, 0x08, 0x81, 0, 3, 0x30, 0, 4, 0x40}, // Valid user override.
-        {0, 0x09, 0x90, 0, 3, 0x30, 0, 4, 0x40}, // Invalid user, factory fallback.
-    };
+    const uint8_t firmware_query[] = {0x10, 0x91, 0, 1, 0, 0, 0, 0};
+    const uint8_t address_query[] = {0x15, 0x91, 0, 1, 0, 0, 0, 0};
     const uint8_t command[] = {
         0x02, 0x91, 0, 4, 0, 8, 0, 0, 9, 0x7e, 0, 0, 0xa8, 0x30, 1, 0,
     };
     for (unsigned remaining = PROBE_CONTROLLER_COUNT; remaining; --remaining) {
         const uint8_t instance = (uint8_t)(remaining - 1);
-        const bool is_left = SWITCH2_PROBE_COMPOSITE ? instance == 1 : SWITCH2_PROBE_JOYCON_LEFT;
+        const bool is_left = (SWITCH2_PROBE_COMPOSITE || SWITCH2_PROBE_HUB) ?
+                             (instance & 1u) != 0 : SWITCH2_PROBE_JOYCON_LEFT;
+        const uint8_t pair = instance / 2;
         uint8_t reply[PROBE_REPLY_MAX_SIZE], calibration[9];
         assert(probe_memory_stick_calibration(instance, calibration));
-        assert(memcmp(calibration, calibrations[is_left], sizeof(calibration)) == 0);
+        const uint8_t expected_calibration[] = {
+            (uint8_t)((is_left ? 0 : 0x10) + pair * 0x20),
+            is_left ? 9 : 8, is_left ? 0x90 : 0x81, 0, 3, 0x30, 0, 4, 0x40,
+        };
+        assert(memcmp(calibration, expected_calibration, sizeof(calibration)) == 0);
         assert(probe_protocol_command(&states[instance], command, sizeof(command),
                                       reply, sizeof(reply), NULL) == 25);
-        const uint8_t factory[] = {0, is_left ? 9 : 8, is_left ? 0x90 : 0x80, 0, 3, 0x30, 0, 4, 0x40};
+        const uint8_t factory[] = {
+            (uint8_t)(pair * 0x20), is_left ? 9 : 8, is_left ? 0x90 : 0x80,
+            0, 3, 0x30, 0, 4, 0x40,
+        };
         assert(memcmp(reply + 16, factory, sizeof(factory)) == 0);
+        assert(probe_protocol_command(&states[instance], firmware_query, sizeof(firmware_query),
+                                      reply, sizeof(reply), NULL) == 20);
+        assert(memcmp(reply + 8, versions[instance], 12) == 0);
+        assert(probe_protocol_command(&states[instance], address_query, sizeof(address_query),
+                                      reply, sizeof(reply), NULL) == 17);
+        assert(memcmp(reply + 11, addresses[instance], 6) == 0);
+        // No source is present: enabling features must not invent input or cue ACKs.
+        uint64_t token = UINT64_MAX;
+        assert(probe_protocol_command(&states[instance], sample_command, sizeof(sample_command),
+                                      reply, sizeof(reply), &token) == 0);
+        assert(token == 0);
+        uint8_t expected[PROBE_INPUT_SIZE] = {0};
+        expected[0] = (uint8_t)(0x21 + instance);
+        expected[1] = 0x25;
+        expected[4] = 7;
+        memcpy(expected + 5, expected_calibration, 3);
+        assert(probe_protocol_report(&states[instance], is_left ? 7 : 8,
+                                     reports[instance], PROBE_INPUT_SIZE) == PROBE_INPUT_SIZE);
+        assert(memcmp(reports[instance], expected, sizeof(expected)) == 0);
         const uint32_t ends[] = {0x14fff, 0x1fcfff};
         for (unsigned region = 0; region < 2; ++region) {
             uint8_t output[2] = {0xa5, 0xa5};
             assert(!probe_memory_read(instance, ends[region], output, sizeof(output)));
             assert(output[0] == 0xa5 && output[1] == 0xa5);
             assert(probe_memory_read(instance, ends[region], output, 1));
-            assert(output[0] == (uint8_t)((region ? 0xf1 : 0xe1) + is_left));
+            assert(output[0] == (uint8_t)((region ? 0xf1 : 0xe1) + is_left + pair * 2));
             assert(output[1] == 0xa5);
+        }
+    }
+    // Reset each child in turn: the remaining children's complete wire snapshots
+    // and captured identity queries must remain unchanged, including same-side peers.
+    for (uint8_t reset = 0; reset < PROBE_CONTROLLER_COUNT; ++reset) {
+        probe_protocol_reset(&states[reset], probe_model_is_left(reset));
+        uint8_t output[PROBE_REPLY_MAX_SIZE];
+        assert(probe_protocol_report(&states[reset], probe_model_report_id(reset),
+                                     output, sizeof(output)) == 0);
+        for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
+            if (instance <= reset) continue;
+            assert(probe_protocol_report(&states[instance], probe_model_report_id(instance),
+                                         output, sizeof(output)) == PROBE_INPUT_SIZE);
+            assert(memcmp(output, reports[instance], PROBE_INPUT_SIZE) == 0);
+            assert(probe_protocol_command(&states[instance], address_query, sizeof(address_query),
+                                          output, sizeof(output), NULL) == 17);
+            assert(memcmp(output + 11, addresses[instance], 6) == 0);
         }
     }
     uint8_t output[9];

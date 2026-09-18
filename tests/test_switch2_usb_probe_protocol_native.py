@@ -9,15 +9,26 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    ("left", "composite"),
-    [(False, False), (True, False), (False, True)],
-    ids=["right", "left", "composite"],
+    ("left", "composite", "hub", "count"),
+    [
+        (False, False, False, 1),
+        (True, False, False, 1),
+        (False, True, False, 2),
+        (False, False, True, 2),
+        (False, False, True, 4),
+    ],
+    ids=["right", "left", "composite", "hub-one-pair", "hub-two-pairs"],
 )
 @pytest.mark.parametrize(
     "imu_mode", [None, "OMIT_NATIVE_IMU", "ZERO_NATIVE_IMU_PAYLOAD"]
 )
 def test_switch2_usb_probe_protocol(
-    tmp_path: Path, left: bool, composite: bool, imu_mode: str | None
+    tmp_path: Path,
+    left: bool,
+    composite: bool,
+    hub: bool,
+    count: int,
+    imu_mode: str | None,
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("cc") or shutil.which("gcc")
@@ -41,20 +52,28 @@ def test_switch2_usb_probe_protocol(
             "Pico SDK mbedTLS required; configure firmware or set PICO_SDK_PATH"
         )
     probe = root / "tools" / "switch2_usb_probe"
-    sides = [False, True] if composite else [left]
+    sides = (
+        [bool(instance & 1) for instance in range(count)]
+        if composite or hub
+        else [left]
+    )
     factory_rows = []
     user_rows = []
-    for is_left in sides:
-        factory_center = "0x00, 0x09, 0x90" if is_left else "0x00, 0x08, 0x80"
+    for instance, is_left in enumerate(sides):
+        # A and B must differ even for the same side: detect side-indexed aliases.
+        pair = instance // 2
+        factory_center = (
+            f"{pair * 0x20}, {9 if is_left else 8}, {0x90 if is_left else 0x80}"
+        )
         factory_rows.append(
             f"{{[0xa8] = {factory_center}, 0, 3, 0x30, 0, 4, 0x40,"
-            f" [8191] = {0xE2 if is_left else 0xE1}}}"
+            f" [8191] = {(0xE2 if is_left else 0xE1) + pair * 2}}}"
         )
         # L deliberately has invalid user calibration despite valid magic.
-        user_center = "0, 0, 0" if is_left else "0x10, 0x08, 0x81"
+        user_center = "0, 0, 0" if is_left else f"{0x10 + pair * 0x20}, 0x08, 0x81"
         user_rows.append(
             f"{{[0x40] = 0xb2, 0xa1, {user_center}, 0, 3, 0x30, 0, 4, 0x40,"
-            f" [4095] = {0xF2 if is_left else 0xF1}}}"
+            f" [4095] = {(0xF2 if is_left else 0xF1) + pair * 2}}}"
         )
     (tmp_path / "probe_memory_data.h").write_text(
         '#include "model.h"\n'
@@ -77,6 +96,9 @@ def test_switch2_usb_probe_protocol(
             f'-DMBEDTLS_CONFIG_FILE="{probe / "mbedtls_config.h"}"',
             f"-DSWITCH2_PROBE_JOYCON_LEFT={int(left)}",
             f"-DSWITCH2_PROBE_COMPOSITE={int(composite)}",
+            f"-DSWITCH2_PROBE_HUB={int(hub)}",
+            f"-DPROBE_CONTROLLER_COUNT={count}",
+            f"-DSWITCH2_PROBE_NEUTRAL_INPUT={int(hub)}",
             *([f"-DSWITCH2_PROBE_{imu_mode}=1"] if imu_mode else []),
             f"-I{probe}",
             f"-I{tmp_path}",

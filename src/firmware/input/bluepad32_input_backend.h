@@ -109,6 +109,14 @@ void bluepad32_input_backend_wii_sample_cancel();
 #endif
 
 #if SWITCH2_BRIDGE_FULL_INPUT
+#ifdef PROBE_CONTROLLER_COUNT
+static_assert(PROBE_CONTROLLER_COUNT == 2 || PROBE_CONTROLLER_COUNT == 4);
+constexpr uint8_t BLUEPAD32_NATIVE_PAIR_COUNT = PROBE_CONTROLLER_COUNT / 2;
+#else
+constexpr uint8_t BLUEPAD32_NATIVE_PAIR_COUNT = 1;
+#endif
+static_assert(BLUEPAD32_NATIVE_PAIR_COUNT == 1 || BLUEPAD32_NATIVE_PAIR_COUNT == 2);
+
 // One logical gamepad, calibrated SDL axes before legacy int16 conversion.
 // Sensor receipt times advance independently, only on actual parser ingress.
 struct Bluepad32NativeGamepadSnapshot {
@@ -128,11 +136,16 @@ struct Bluepad32NativeGamepadSnapshot {
     int32_t gyro_q10[3]{};
 };
 
-// nullptr selects the uniquely eligible ready logical gamepad; ambiguity fails closed.
-// Reselection invalidates input and cue tokens without modifying pairings.
-void bluepad32_input_backend_select_native_source(const uint8_t address[6]);
-void bluepad32_input_backend_native_snapshot(Bluepad32NativeGamepadSnapshot* output);
-// Instance 0 is R, 1 is L. Samples 0..7 are bounded compatibility cues, not HD
+// nullptr selects automatic assignment: one pair requires a uniquely eligible
+// gamepad; two pairs reserve stable logical identities in first-free order for
+// this boot. Explicit member addresses reserve the whole logical controller.
+// Conflicts fail closed. Reselection retires only affected input/cue epochs,
+// without modifying pairings or saved profiles.
+void bluepad32_input_backend_select_native_source(
+    uint8_t pair_index, const uint8_t address[6]);
+void bluepad32_input_backend_native_snapshot(
+    uint8_t pair_index, Bluepad32NativeGamepadSnapshot* output);
+// Instances are A_R, A_L, then B_R, B_L. Samples 0..7 are bounded compatibility cues, not HD
 // haptics. A side stop removes only that side's contribution. Mono drivers combine
 // both contributions on their one actuator; this does not promise stereo output.
 // Result: 0 pending, 1 source-driver dispatch, -1 retired/failed/consumed.

@@ -485,12 +485,19 @@ void retire_wii_slot(uint8_t slot_index) {
 #endif
 
 #if SWITCH2_BRIDGE_FULL_INPUT
-bool g_native_explicit_address = false;
-uint8_t g_native_address[6]{};
-uint8_t g_native_slot = 0xff;
-uint32_t g_native_generation = 0;
-Bluepad32NativeGamepadSnapshot g_native_snapshot{};
-NativeGamepadCue g_native_cues[2]{};
+struct NativeGamepadBinding {
+    bool explicit_address = false;
+    uint8_t address[6]{};
+    // A reservation survives disconnect and retains both known pair members.
+    // Never use a physical index or an unresolved BLE address as this key.
+    ControllerIdentity reservation{};
+    uint8_t slot = 0xff;
+    uint32_t generation = 0;
+    Bluepad32NativeGamepadSnapshot snapshot{};
+};
+constexpr uint8_t kNativeChildCount = BLUEPAD32_NATIVE_PAIR_COUNT * 2;
+NativeGamepadBinding g_native_bindings[BLUEPAD32_NATIVE_PAIR_COUNT]{};
+NativeGamepadCue g_native_cues[kNativeChildCount]{};
 uint64_t g_next_native_token = 1;
 uni_hid_device_t* g_native_pending_devices[kSlotCount]{};
 NativeGamepadReportIngress g_native_reports[kSlotCount]{};
@@ -505,15 +512,49 @@ bool native_device_allowed(const uni_hid_device_t* device) {
 #endif
 }
 
-bool native_address_matches(const uni_hid_device_t* device) {
-    return device != nullptr && memcmp(device->conn.btaddr, g_native_address, 6) == 0;
+bool native_identity_overlaps(const ControllerIdentity& first,
+                              const ControllerIdentity& second) {
+    if (!first.stable || !second.stable) return false;
+    if (controller_identity_equal(first, second)) return true;
+    ControllerIdentity first_members[2];
+    ControllerIdentity second_members[2];
+    const bool first_pair = controller_identity_joycon_pair_members(
+        first, &first_members[0], &first_members[1]);
+    const bool second_pair = controller_identity_joycon_pair_members(
+        second, &second_members[0], &second_members[1]);
+    for (uint8_t a = 0; a < (first_pair ? 2 : 1); ++a)
+        for (uint8_t b = 0; b < (second_pair ? 2 : 1); ++b)
+            if (controller_identity_equal(first_pair ? first_members[a] : first,
+                                          second_pair ? second_members[b] : second))
+                return true;
+    return false;
+}
+
+bool native_address_matches(const BackendSlot& slot, const uint8_t address[6]) {
+    return (slot.device != nullptr && memcmp(slot.device->conn.btaddr, address, 6) == 0) ||
+        (slot.companion != nullptr && memcmp(slot.companion->conn.btaddr, address, 6) == 0) ||
+        (slot.identity.stable &&
+         (memcmp(slot.identity.address, address, 6) == 0 ||
+          (controller_identity_is_joycon_pair(slot.identity) &&
+           memcmp(slot.identity.partner_address, address, 6) == 0)));
 }
 
 bool eligible_native_gamepad(const BackendSlot& slot) {
     return slot.active && native_device_allowed(slot.device) &&
-        (slot.companion == nullptr || native_device_allowed(slot.companion)) &&
-        (!g_native_explicit_address || native_address_matches(slot.device) ||
-         native_address_matches(slot.companion));
+        (slot.companion == nullptr || native_device_allowed(slot.companion));
+}
+
+uint8_t native_pair_for_slot(uint8_t slot) {
+    for (uint8_t pair = 0; pair < BLUEPAD32_NATIVE_PAIR_COUNT; ++pair)
+        if (g_native_bindings[pair].slot == slot) return pair;
+    return 0xff;
+}
+
+uint8_t native_unique_slot(uint8_t mask) {
+    if (mask == 0 || (mask & (mask - 1u)) != 0) return 0xff;
+    for (uint8_t slot = 0; slot < kSlotCount; ++slot)
+        if ((mask & (1u << slot)) != 0) return slot;
+    return 0xff;
 }
 
 uni_hid_device_t* native_rumble_target(const BackendSlot& slot, uint8_t side) {
@@ -533,38 +574,108 @@ void cancel_native_cue_locked(NativeGamepadCue& cue) {
     // The slot's last motor output remains owned until the timer replaces it.
 }
 
-void refresh_native_source_locked(bool reselection = false) {
-    uint8_t selected = 0xff;
-    for (uint8_t index = 0; index < kSlotCount; ++index) {
-        if (!eligible_native_gamepad(g_slots[index])) continue;
-        if (selected != 0xff) {
-            selected = 0xff;  // Never blend or choose by connection order.
+void refresh_native_source_locked(uint8_t reselected_pair = 0xff) {
+    uint8_t candidates[BLUEPAD32_NATIVE_PAIR_COUNT]{};
+    uint8_t reserved = 0;
+    uint8_t explicit_reserved = 0;
+    for (uint8_t pair = 0; pair < BLUEPAD32_NATIVE_PAIR_COUNT; ++pair) {
+        const NativeGamepadBinding& binding = g_native_bindings[pair];
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            const BackendSlot& slot = g_slots[index];
+            if (!eligible_native_gamepad(slot)) continue;
+            const uint8_t bit = static_cast<uint8_t>(1u << index);
+            const bool overlaps = BLUEPAD32_NATIVE_PAIR_COUNT > 1 &&
+                native_identity_overlaps(binding.reservation, slot.identity);
+            if (overlaps) {
+                reserved |= bit;
+                if (binding.explicit_address) explicit_reserved |= bit;
+            }
+            if (binding.explicit_address) {
+                if (native_address_matches(slot, binding.address)) {
+                    candidates[pair] |= bit;
+                    reserved |= bit;
+                    explicit_reserved |= bit;
+                }
+            } else if (BLUEPAD32_NATIVE_PAIR_COUNT == 1) {
+                candidates[pair] |= bit;
+            } else if (overlaps &&
+                       !(controller_identity_is_joycon_pair(binding.reservation) &&
+                         controller_identity_is_joycon_pair(slot.identity) &&
+                         !controller_identity_equal(binding.reservation, slot.identity))) {
+                // A missing half may survive alone. A split is ambiguous; a
+                // different companion must not silently replace a reserved pair.
+                candidates[pair] |= bit;
+            }
+        }
+    }
+    for (uint8_t pair = 0; pair < BLUEPAD32_NATIVE_PAIR_COUNT; ++pair) {
+        const NativeGamepadBinding& binding = g_native_bindings[pair];
+        if (binding.explicit_address) continue;
+        candidates[pair] &= static_cast<uint8_t>(~explicit_reserved);
+        if (BLUEPAD32_NATIVE_PAIR_COUNT == 1 || binding.reservation.stable) continue;
+        for (uint8_t index = 0; index < kSlotCount; ++index) {
+            const BackendSlot& slot = g_slots[index];
+            const uint8_t bit = static_cast<uint8_t>(1u << index);
+            if ((reserved & bit) != 0 || !eligible_native_gamepad(slot) ||
+                !slot.identity.stable) continue;
+            uint8_t matches = 0;
+            for (uint8_t other = 0; other < kSlotCount; ++other)
+                if (eligible_native_gamepad(g_slots[other]) &&
+                    native_identity_overlaps(slot.identity, g_slots[other].identity))
+                    matches |= static_cast<uint8_t>(1u << other);
+            reserved |= matches;
+            if (native_unique_slot(matches) != index) continue;
+            candidates[pair] = bit;
             break;
         }
-        selected = index;
     }
-    if (!reselection && selected == g_native_slot &&
-        (selected == 0xff ||
-         g_slots[selected].connection_generation == g_native_generation)) return;
-    for (NativeGamepadCue& cue : g_native_cues) cancel_native_cue_locked(cue);
-    g_native_snapshot = {};
-    g_native_slot = selected;
-    g_native_generation = 0;
-    if (selected != 0xff) {
-        BackendSlot& slot = g_slots[selected];
-        g_macro_capture.disconnect(selected, slot.connection_generation, time_us_32());
-        // A missed inactive snapshot must still retire the adapter's old epoch.
-        g_native_generation = ++slot.connection_generation;
+    uint8_t selected[BLUEPAD32_NATIVE_PAIR_COUNT];
+    bool changed[BLUEPAD32_NATIVE_PAIR_COUNT];
+    uint8_t retired_slots = 0;
+    for (uint8_t pair = 0; pair < BLUEPAD32_NATIVE_PAIR_COUNT; ++pair) {
+        selected[pair] = native_unique_slot(candidates[pair]);
+        for (uint8_t other = 0; other < BLUEPAD32_NATIVE_PAIR_COUNT; ++other)
+            if (other != pair && (candidates[pair] & candidates[other]) != 0)
+                selected[pair] = 0xff;
+        NativeGamepadBinding& binding = g_native_bindings[pair];
+        changed[pair] = pair == reselected_pair || selected[pair] != binding.slot ||
+            (selected[pair] != 0xff &&
+             g_slots[selected[pair]].connection_generation != binding.generation);
+        if (!changed[pair]) continue;
+        for (uint8_t side = 0; side < 2; ++side)
+            cancel_native_cue_locked(g_native_cues[pair * 2 + side]);
+        if (binding.slot != 0xff) retired_slots |= static_cast<uint8_t>(1u << binding.slot);
+        if (selected[pair] != 0xff) retired_slots |= static_cast<uint8_t>(1u << selected[pair]);
+        binding.snapshot = {};
+    }
+    // Retire all changed owners before activating any binding: swapping two
+    // explicit selections cannot increment one live pair's epoch underneath it.
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        if ((retired_slots & (1u << index)) == 0) continue;
+        BackendSlot& slot = g_slots[index];
+        g_macro_capture.disconnect(index, slot.connection_generation, time_us_32());
+        ++slot.connection_generation;
         ++slot.state_generation;
         slot.native_motion = {};
+    }
+    for (uint8_t pair = 0; pair < BLUEPAD32_NATIVE_PAIR_COUNT; ++pair) {
+        NativeGamepadBinding& binding = g_native_bindings[pair];
+        if (changed[pair]) {
+            binding.slot = selected[pair];
+            binding.generation = selected[pair] == 0xff
+                ? 0 : g_slots[selected[pair]].connection_generation;
+        }
+        if (selected[pair] != 0xff && !controller_identity_is_joycon_pair(binding.reservation))
+            binding.reservation = g_slots[selected[pair]].identity;
     }
 }
 
 void retire_native_slot(uint8_t index) {
-    if (g_native_slot == index) {
-        g_native_slot = 0xff;
-        g_native_generation = 0;
-        g_native_snapshot = {};
+    for (NativeGamepadBinding& binding : g_native_bindings) {
+        if (binding.slot != index) continue;
+        binding.slot = 0xff;
+        binding.generation = 0;
+        binding.snapshot = {};
     }
     for (NativeGamepadCue& cue : g_native_cues)
         if (cue.slot == index) cue = {};
@@ -572,9 +683,11 @@ void retire_native_slot(uint8_t index) {
     g_slots[index].native_output = {};
 }
 
-bool native_cue_current(const NativeGamepadCue& cue) {
-    return cue.slot < kSlotCount && cue.slot == g_native_slot &&
-        cue.connection_generation == g_native_generation &&
+bool native_cue_current(uint8_t pair, const NativeGamepadCue& cue) {
+    if (pair >= BLUEPAD32_NATIVE_PAIR_COUNT || cue.slot >= kSlotCount) return false;
+    const NativeGamepadBinding& binding = g_native_bindings[pair];
+    return cue.slot == binding.slot && cue.connection_generation == binding.generation &&
+        g_slots[cue.slot].active &&
         cue.connection_generation == g_slots[cue.slot].connection_generation;
 }
 #endif
@@ -1268,6 +1381,9 @@ void publish_ble_identity(const BleIdentityMapping& mapping) {
             }
         }
     }
+#if SWITCH2_BRIDGE_FULL_INPUT
+    refresh_native_source_locked();
+#endif
     state_lock_exit();
     if (observe_identity) {
         profile_service_observe_identity_on_storage_core(
@@ -1315,6 +1431,9 @@ void clear_ble_identity_for_handle(hci_con_handle_t connection_handle) {
             slot.identity = controller_identity_global();
         }
     }
+#if SWITCH2_BRIDGE_FULL_INPUT
+    refresh_native_source_locked();
+#endif
     state_lock_exit();
 }
 
@@ -1504,27 +1623,29 @@ void publish_device_state(uint8_t slot, uni_hid_device_t* device,
         }
 #endif
 #if SWITCH2_BRIDGE_FULL_INPUT
-        if (slot == g_native_slot && target.native_motion.has_report &&
-            target.connection_generation == g_native_generation) {
+        const uint8_t pair = native_pair_for_slot(slot);
+        if (pair != 0xff && target.native_motion.has_report &&
+            target.connection_generation == g_native_bindings[pair].generation) {
             const NativeGamepadIngress& motion = target.native_motion;
-            g_native_snapshot.slot = slot;
-            g_native_snapshot.controller = {
+            Bluepad32NativeGamepadSnapshot& snapshot = g_native_bindings[pair].snapshot;
+            snapshot.slot = slot;
+            snapshot.controller = {
                 target.active, target.connection_generation, target.identity,
                 target.pre_hotkey_button_mask, target.state,
                 target.accelerometer, target.nunchuk_accelerometer};
-            g_native_snapshot.state_generation = target.state_generation;
-            g_native_snapshot.received_us = motion.received_us;
-            g_native_snapshot.battery = device->controller.battery;
-            g_native_snapshot.track_stationary_bias =
+            snapshot.state_generation = target.state_generation;
+            snapshot.received_us = motion.received_us;
+            snapshot.battery = device->controller.battery;
+            snapshot.track_stationary_bias =
                 device->controller_type == CONTROLLER_TYPE_WiiController;
-            g_native_snapshot.accel_valid = motion.accel_valid;
-            g_native_snapshot.gyro_valid = motion.gyro_valid;
-            g_native_snapshot.accel_sequence = motion.accel_sequence;
-            g_native_snapshot.gyro_sequence = motion.gyro_sequence;
-            g_native_snapshot.accel_received_us = motion.accel_received_us;
-            g_native_snapshot.gyro_received_us = motion.gyro_received_us;
-            memcpy(g_native_snapshot.accel_q13, motion.accel_q13, sizeof(motion.accel_q13));
-            memcpy(g_native_snapshot.gyro_q10, motion.gyro_q10, sizeof(motion.gyro_q10));
+            snapshot.accel_valid = motion.accel_valid;
+            snapshot.gyro_valid = motion.gyro_valid;
+            snapshot.accel_sequence = motion.accel_sequence;
+            snapshot.gyro_sequence = motion.gyro_sequence;
+            snapshot.accel_received_us = motion.accel_received_us;
+            snapshot.gyro_received_us = motion.gyro_received_us;
+            memcpy(snapshot.accel_q13, motion.accel_q13, sizeof(motion.accel_q13));
+            memcpy(snapshot.gyro_q10, motion.gyro_q10, sizeof(motion.gyro_q10));
         }
 #endif
         g_macro_capture.observe(slot, target.connection_generation,
@@ -2807,6 +2928,7 @@ struct NativeGamepadCueDispatch {
     uint16_t duration_ms = 0;
     uint8_t magnitude[2]{};
     uint8_t slot = 0xff;
+    uint8_t pair = 0xff;
 };
 
 // Source drivers use a shared finite timer (or one per paired half). Recompute
@@ -2817,14 +2939,15 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
                             NativeGamepadCueDispatch* command) {
     BackendSlot& slot = g_slots[index];
     NativeGamepadMotorOutput& previous = slot.native_output;
+    const uint8_t pair = native_pair_for_slot(index);
     bool busy = false;
     bool pending = false;
     uint16_t duration = UINT16_MAX;
     uint8_t magnitude[2]{};
-    for (uint8_t side = 0; side < 2; ++side) {
-        NativeGamepadCue& cue = g_native_cues[side];
+    for (uint8_t side = 0; pair != 0xff && side < 2; ++side) {
+        NativeGamepadCue& cue = g_native_cues[pair * 2 + side];
         if (cue.slot != index) continue;
-        if (!native_cue_current(cue) ||
+        if (!native_cue_current(pair, cue) ||
             (cue.result == 0 && now_ms - cue.requested_ms >= kNativeGamepadCueDeadlineMs) ||
             (cue.active && now_ms - cue.started_ms >= kNativeGamepadCueDeadlineMs))
             cancel_native_cue_locked(cue);
@@ -2881,8 +3004,9 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
     command->magnitude[0] = magnitude[0];
     command->magnitude[1] = magnitude[1];
     command->slot = index;
+    command->pair = pair;
     for (uint8_t side = 0; side < 2; ++side)
-        if (command->token[side] != 0) g_native_cues[side].in_flight = true;
+        if (command->token[side] != 0) g_native_cues[pair * 2 + side].in_flight = true;
     return true;
 }
 
@@ -2912,11 +3036,10 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
             slot.companion == command.companion &&
             slot.connection_generation == command.connection_generation;
         for (uint8_t side = 0; side < 2; ++side) {
-            if (paired && side != target) continue;
-            const NativeGamepadCue& cue = g_native_cues[side];
-            if (command.token[side] != 0)
-                current &= cue.token == command.token[side] && cue.in_flight &&
-                    cue.result != -1 && native_cue_current(cue);
+            if ((paired && side != target) || command.token[side] == 0) continue;
+            const NativeGamepadCue& cue = g_native_cues[command.pair * 2 + side];
+            current &= cue.token == command.token[side] && cue.in_flight &&
+                cue.result != -1 && native_cue_current(command.pair, cue);
         }
         state_lock_exit();
         // No backend lock crosses a driver call. Recheck every real target:
@@ -2957,10 +3080,11 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
     }
     state_lock_enter();
     for (uint8_t side = 0; side < 2; ++side) {
-        NativeGamepadCue& cue = g_native_cues[side];
-        if (command.token[side] == 0 || cue.token != command.token[side]) continue;
+        if (command.token[side] == 0) continue;
+        NativeGamepadCue& cue = g_native_cues[command.pair * 2 + side];
+        if (cue.token != command.token[side]) continue;
         cue.in_flight = false;
-        if (!native_cue_current(cue) ||
+        if (!native_cue_current(command.pair, cue) ||
             (cue.result == 0 && dispatch_ms - cue.requested_ms >= kNativeGamepadCueDeadlineMs)) {
             cancel_native_cue_locked(cue);
         } else if (submitted[side] && cue.result == 0) {
@@ -4700,22 +4824,26 @@ void bluepad32_input_backend_snapshot(uint8_t slot_index,
 }
 
 #if SWITCH2_BRIDGE_FULL_INPUT
-void bluepad32_input_backend_select_native_source(const uint8_t address[6]) {
-    if (!g_initialized) return;
+void bluepad32_input_backend_select_native_source(
+    uint8_t pair_index, const uint8_t address[6]) {
+    if (!g_initialized || pair_index >= BLUEPAD32_NATIVE_PAIR_COUNT) return;
     state_lock_enter();
-    g_native_explicit_address = address != nullptr;
-    if (address != nullptr) memcpy(g_native_address, address, 6);
-    else memset(g_native_address, 0, sizeof(g_native_address));
-    refresh_native_source_locked(true);
+    NativeGamepadBinding& binding = g_native_bindings[pair_index];
+    binding.explicit_address = address != nullptr;
+    if (address != nullptr) memcpy(binding.address, address, 6);
+    else memset(binding.address, 0, sizeof(binding.address));
+    binding.reservation = {};
+    refresh_native_source_locked(pair_index);
     state_lock_exit();
 }
 
-void bluepad32_input_backend_native_snapshot(Bluepad32NativeGamepadSnapshot* output) {
+void bluepad32_input_backend_native_snapshot(
+    uint8_t pair_index, Bluepad32NativeGamepadSnapshot* output) {
     if (output == nullptr) return;
     *output = {};
-    if (!g_initialized) return;
+    if (!g_initialized || pair_index >= BLUEPAD32_NATIVE_PAIR_COUNT) return;
     state_lock_enter();
-    *output = g_native_snapshot;
+    *output = g_native_bindings[pair_index].snapshot;
     state_lock_exit();
 }
 
@@ -4723,18 +4851,19 @@ bool bluepad32_input_backend_native_sample_request(
     uint8_t instance, uint8_t sample_id, uint64_t* token) {
     if (token == nullptr) return false;
     *token = 0;
-    if (!g_initialized || instance >= 2 || sample_id >= 8) return false;
+    if (!g_initialized || instance >= kNativeChildCount || sample_id >= 8) return false;
     state_lock_enter();
     NativeGamepadCue& cue = g_native_cues[instance];
-    const uint8_t index = g_native_slot;
+    const NativeGamepadBinding& binding = g_native_bindings[instance / 2];
+    const uint8_t index = binding.slot;
     const bool accepted = index < kSlotCount && g_next_native_token != 0 &&
-        native_rumble_capable(g_slots[index], instance) &&
+        native_rumble_capable(g_slots[index], instance & 1u) &&
         !cue.in_flight && (sample_id == 0 || (cue.result != 0 && !cue.active));
     if (accepted) {
         cue = {};
         cue.token = g_next_native_token++;
         cue.slot = index;
-        cue.connection_generation = g_native_generation;
+        cue.connection_generation = binding.generation;
         cue.requested_ms = btstack_run_loop_get_time_ms();
         cue.sample_id = sample_id;
         cue.result = 0;
@@ -4745,12 +4874,12 @@ bool bluepad32_input_backend_native_sample_request(
 }
 
 int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t token) {
-    if (!g_initialized || instance >= 2 || token == 0) return -1;
+    if (!g_initialized || instance >= kNativeChildCount || token == 0) return -1;
     state_lock_enter();
     NativeGamepadCue& cue = g_native_cues[instance];
     int result = -1;
     if (cue.token == token && !cue.consumed) {
-        if (!native_cue_current(cue) ||
+        if (!native_cue_current(instance / 2, cue) ||
             (cue.result == 0 &&
              btstack_run_loop_get_time_ms() - cue.requested_ms >= kNativeGamepadCueDeadlineMs))
             cancel_native_cue_locked(cue);
@@ -4762,7 +4891,7 @@ int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t toke
 }
 
 void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
-    if (!g_initialized || instance >= 2) return;
+    if (!g_initialized || instance >= kNativeChildCount) return;
     state_lock_enter();
     cancel_native_cue_locked(g_native_cues[instance]);
     state_lock_exit();

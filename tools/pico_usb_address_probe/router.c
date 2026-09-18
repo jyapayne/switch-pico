@@ -38,14 +38,20 @@ extern bool native_hub_select_device(uint8_t address, uint8_t owner, uint32_t cu
 #define TOKEN_IN_SIGNATURE 0x95a6a666u
 #define TOKEN_SETUP_SIGNATURE 0x9a56a666u
 #define NO_READER 2u
-#define SETUP_SEQUENCE_MASK 0x3fffffffu
-#define SETUP_SLOT_SHIFT 30u
-#define SETUP_INVALID (3u << SETUP_SLOT_SHIFT)
+#if PROBE_ROUTER_SLOTS > 3u
+#define SETUP_SLOT_BITS 3u
+#else
+#define SETUP_SLOT_BITS 2u
+#endif
+#define SETUP_SLOT_SHIFT (32u - SETUP_SLOT_BITS)
+#define SETUP_SEQUENCE_MASK ((1u << SETUP_SLOT_SHIFT) - 1u)
+#define SETUP_INVALID_OWNER ((1u << SETUP_SLOT_BITS) - 1u)
+#define SETUP_INVALID (SETUP_INVALID_OWNER << SETUP_SLOT_SHIFT)
 #define RAW_BITS 40u
 
 _Static_assert(SIO_GPIO_HI_IN_USB_DP_BITS == (1u << 24), "SIO USB DP layout");
 _Static_assert(SIO_GPIO_HI_IN_USB_DM_BITS == (1u << 25), "SIO USB DM layout");
-_Static_assert(PROBE_ROUTER_SLOTS == 3u, "Packed setup owner has three slots");
+_Static_assert(PROBE_ROUTER_SLOTS <= SETUP_INVALID_OWNER, "Packed setup owner must reserve an invalid value");
 
 typedef struct {
     uint8_t owner[128];
@@ -103,7 +109,7 @@ static __force_inline void invalidate_setup(void) {
 
 static __force_inline void publish_setup(uint8_t slot) {
     const uint32_t sequence = (atomic_read(&setup_publication) + 1u) & SETUP_SEQUENCE_MASK;
-    const uint32_t owner = slot < PROBE_ROUTER_SLOTS ? slot : 3u;
+    const uint32_t owner = slot < PROBE_ROUTER_SLOTS ? slot : SETUP_INVALID_OWNER;
     __atomic_store_n(&setup_publication, sequence | (owner << SETUP_SLOT_SHIFT),
                      __ATOMIC_RELEASE);
 }
@@ -185,8 +191,9 @@ void probe_router_init(uint32_t system_clock_hz) {
     token_words[6] = TOKEN_OUT_SIGNATURE;
     token_words[10] = TOKEN_IN_SIGNATURE;
     token_words[5] = TOKEN_SETUP_SIGNATURE;
-    const uint8_t addresses[PROBE_ROUTER_SLOTS] = {0u, PROBE_ROUTER_UNASSIGNED,
-                                                PROBE_ROUTER_UNASSIGNED};
+    uint8_t addresses[PROBE_ROUTER_SLOTS];
+    memset(addresses, PROBE_ROUTER_UNASSIGNED, sizeof(addresses));
+    addresses[0] = 0u;
     memset(&counters, 0, sizeof(counters));
     published_generation = 0u;
     reader_index = NO_READER;
@@ -313,14 +320,12 @@ static __force_inline void route_header(const routing_table* table, uint32_t add
         return;
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
     if (atomic_read(&enabled) != 0u) {
+        const bool selected = native_hub_select_device((uint8_t)address, table->owner[address], cutoff);
 #if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        // Keep diagnostic PID classification behind the address-critical call.
+        __asm volatile ("" : "+r"(signature) : : "memory");
         const uint8_t pid = signature == TOKEN_OUT_SIGNATURE ? PID_OUT :
             signature == TOKEN_IN_SIGNATURE ? PID_IN : PID_SETUP;
-        const bool selected = (pid == PID_OUT || (pid == PID_IN && table->owner[address] == 0))
-            ? native_hub_select_device_traced((uint8_t)address, table->owner[address], cutoff, pid)
-            : native_hub_select_device((uint8_t)address, table->owner[address], cutoff);
-#else
-        const bool selected = native_hub_select_device((uint8_t)address, table->owner[address], cutoff);
 #endif
         if (!selected) {
 #if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
@@ -328,6 +333,9 @@ static __force_inline void route_header(const routing_table* table, uint32_t add
 #endif
             return;
         }
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        native_hub_note_selected_token((uint8_t)address, table->owner[address], cutoff, pid);
+#endif
         if (initial_address != address) ++packet->retargets;
     }
 #else

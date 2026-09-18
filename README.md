@@ -860,6 +860,482 @@ Receive PID state is selected before accepting OUT traffic.
 Transmit payloads are prepared outside the bank lock and published by Core 0;
 unavailable IN buffers NAK rather than expose another device's packet.
 
+**Live two-pair GAMEPAD mode (0.92):** `SWITCH2_PROBE_PAIR_COUNT=2` with
+`SWITCH2_BRIDGE_INPUT=GAMEPAD` and `SWITCH2_PROBE_NEUTRAL_INPUT=OFF` routes two
+independent logical controllers to A-R/A-L and B-R/B-L on hub ports 1–4.
+`DUALSENSE` supports the same routing with its existing source-type restriction.
+The virtual identities and native pairing banks are the same as the neutral
+experiment; controller profiles and Bluetooth pairings are not reset.
+
+By default the first two eligible stable controller identities take the two
+available pairs. Each identity is reserved for that boot: reconnect restores
+its pair, a missing source leaves only that pair neutral, and a third controller
+does not take a reserved pair. A power cycle clears automatic reservations.
+For assignments stable across power cycles, configure physical Bluetooth
+addresses with `SWITCH2_BRIDGE_SOURCE_ADDRESS` (A) and
+`SWITCH2_BRIDGE_SECOND_SOURCE_ADDRESS` (B). Empty fields select automatic mode.
+Explicit selections take precedence, and one logical controller can never drive
+both pairs. Conflicting paired Joy-Con halves fail closed rather than duplicate
+input. Automatic mode waits for BLE identity resolution. One-pair automatic
+builds retain their previous uniquely-eligible-controller rule.
+
+Each pair has its own profile evaluation, Shift/macros, stick routing, motion
+integrator, freshness and feedback state. Each half retains its own calibrated
+report, counter and delivery token. Disconnecting or remapping one source does
+not reset the other, including when physical slot indices are reused. The
+existing IMU target mask is side-local and repeats for each pair. Physical
+Bluetooth capacity remains four devices: a physical Joy-Con pair uses two links.
+
+With the four private capture sets described below prepared, build separately:
+
+```sh
+cmake -S . -B build-switch2-native-two-pair-live \
+  -C build-switch2-native-two-pair/private-inputs/inputs.cmake \
+  -DPICO_BOARD=pico2_w -DCMAKE_BUILD_TYPE=Release \
+  -DSWITCH_PICO_INPUT_BACKEND=BLUEPAD32 -DSWITCH_PICO_BLUETOOTH_MODE=MIXED \
+  -DSWITCH_PICO_SWITCH2_USB_BRIDGE=ON -DSWITCH2_BRIDGE_INPUT=GAMEPAD \
+  -DSWITCH2_PROBE_HUB=ON -DSWITCH2_PROBE_PAIR_COUNT=2 \
+  -DSWITCH2_PROBE_NEUTRAL_INPUT=OFF -DSWITCH2_PROBE_ACK_SETUP04=ON \
+  -DSWITCH2_PROBE_USB_INIT=ON -DSWITCH2_PROBE_TRACE_NATIVE_INPUT=ON \
+  -DSWITCH_PICO_HD_RUMBLE=OFF -DSWITCH_PICO_HAPTICS_EXPERIMENT=OFF \
+  -DSWITCH_PICO_CYW43_PACKET_READ=OFF -DSWITCH_PICO_HCI_CREDIT_BATCH=OFF \
+  -DSWITCH_PICO_HCI_CREDIT_BUFFER=OFF
+cmake --build build-switch2-native-two-pair-live --parallel 4
+```
+
+The output is `build-switch2-native-two-pair-live/switch-pico.uf2` (plus ELF).
+Full root management and explicit software BOOTSEL remain available. On the
+Switch, use real controls mapped to L+R to register each paired layout in
+Change Grip/Order; a solo layout instead uses its mapped SL+SR. Neutral reports
+cannot complete this player-assignment step. Do not substitute synthesized
+presses or mirrored controller input as qualification.
+
+For a PC live-input check, connect both physical sources and deliberately press
+buttons and move sticks differently on both throughout the run:
+
+```sh
+uv run python tools/native_joycon_hub_check.py \
+  --build-dir build-switch2-native-two-pair-live --pairs 2 --input-only \
+  --output build-switch2-native-two-pair-live/live-input-qualification.json \
+  --timeout 120 --duration 10
+```
+
+Omit `--input-only` only when both sources provide fresh IMU and deliberately
+move them differently. Qualification requires real activity on all four native
+halves and distinct exercised pair evidence; unassigned/neutral pairs cannot
+pass. Shared R/L motion is allowed within each full-gamepad pair, not treated as
+proof of physical isolation. These checks do not prove Switch gameplay or
+physical latency. Host regressions cover two independent L+R inputs, per-pair
+profiles/motion/feedback, reconnect and recycled-slot isolation, and compatibility
+with one-pair mode.
+
+**0.92 live Switch registration:** the user confirmed both pairs connected on
+Change Grip/Order after using a paired DualSense profile (L1+R1) and the Wii's
+existing mapped L+R combination (Nunchuk C + Remote 2). UART showed all four
+children initialized and active, matching player LED masks within each pair
+(3 for A-R/A-L, 1 for B-R/B-L), and continuing native input reports. This confirms
+two-pair registration, not independent gameplay or extended stability. The
+earlier PC descriptor stress check hit an intermittent read error; successful
+button captures and Switch registration do not resolve that separate issue.
+The private evidence is `build-switch2-native-two-pair-live/switch-0.92-live-summary.json`.
+
+**0.93 IRQ-safe logging candidate:** the 0.92 capture later stopped all four
+USB input streams near 284.34 seconds after boot while Bluetooth callbacks and
+USB SOF continued. A root endpoint `0x8f` halt-clear was the final logged control
+request. The latched EP0 sequence-error flag had already appeared near startup,
+so neither that flag nor the final halt-clear proves the cause by itself.
+
+The native logger did disable IRQs while copying complete diagnostic messages;
+the trace measured a 13 microsecond masked interval. USB completion service must
+run before the observer can select the next device, so this creates a concrete
+missed-token mechanism. Native-hub log producers and the UART consumer are all
+Core 0 foreground code; the USB IRQ and Core 1 never access their ring. Version
+0.93 enforces that ownership and removes logger-owned IRQ masking, while keeping
+message order, whole-message overflow behavior and packet diagnostics. Ring
+copies use at most two contiguous spans. Caller-owned critical sections are not
+unmasked. Non-hub builds retain their existing synchronization.
+
+The real-logger host regression fails before the fix when a completion arrives
+during the copy and the next device token cannot proceed, then passes after it.
+It also covers wraparound, overflow, caller IRQ-state preservation and rejection
+of ISR/Core 1 producers. Linked native logging contains no IRQ-mask writes, and
+the selector, observer and USB IRQ remain in SRAM. The obsolete logger-owned
+mask-duration fields were removed from new flight dumps; execution-phase and USB
+error/progress diagnostics remain. This fixes the reproduced logging defect,
+not a proven end-to-end explanation of the four-minute stall. A user-paced
+longer PC/Switch run is still required before calling transport stability fixed;
+there is no periodic reset or automatic retry workaround.
+
+**0.94 trace-coverage candidate:** PC checks on 0.93 reproduced a configuration
+descriptor read failure on both B-L and B-R. Detailed libusb logging captured
+`-EPROTO` (`-71`) with zero host-reported response bytes on B-R after 58 ms,
+before the 500 ms request timeout. This is not evidence of a particular failed
+wire phase or proof that the PC fault caused the earlier Switch stall.
+
+The recorder had a separate coverage defect: normal host idle after input
+froze its live ring throughout a multi-second UART dump, and root management
+polling repeatedly rearmed that idle capture. Version 0.94 copies the last 64
+published records into an immutable snapshot, excluding the producer's possible
+in-flight slot, and immediately resumes recording. IRQs remain enabled during
+the copy. Two bounded snapshots retain the current dump and one pending capture;
+`HUB_FLIGHT_END lost=` reports cumulative snapshot-queue overflow, including
+drops after the final snapshot was enqueued. A full logger returns an admission
+failure; snapshot output retries the same line rather than silently skipping it.
+
+An idle episode captures once until actual input completion resumes. Pending
+controls capture once per unchanged generation/stage/position. A new child
+SETUP also snapshots an incomplete prior request before replacing its state.
+`HUB_FLIGHT_FREEZE reason=` distinguishes idle (0), pending control (1) and
+superseded child control (2); the historical tag now describes the brief copy
+freeze, not a recording pause throughout UART output. `HUB_FLIGHT_CONTROL_CLOCK`
+retains the SETUP/completion event-queue cycles and the first IN publication
+attempt's cycle, PID and length. Flags distinguish absent events from valid zero
+cycle counts. Publication can target a software shadow awaiting bank restoration;
+these clocks do not measure physical endpoint readiness or on-wire acceptance.
+
+Post-selection observations add child SETUP and the first observed IN after it
+without changing the selector's bank/IRQ guards. Endpoint bits are not decoded
+at that decision point, and the early/full address observations can describe
+the same token: these are not packet counts or proof of an EP0 ACK. Host
+regressions cover ongoing recording during dumps, immutable FIFO snapshots,
+overflow/backpressure, one-shot triggers and superseded-request evidence. This
+candidate improves diagnosis; it does **not** claim to fix the USB protocol
+failure. Flashing and the next hardware capture remain separately readiness-gated.
+Additional tracing can change observer timing; SRAM placement and host harness
+results are not substitutes for on-hardware qualification.
+
+**0.95 targeted-retention candidate:** the initialized-stream 0.94 run passed
+38 configuration reads, then failed a single-packet, 64-byte B-R identity read
+with `-EPROTO` and zero host-reported bytes. Its retained snapshots contained
+186 routine root records out of 192 total and reported 16 dropped snapshots;
+none described that failed identity request. The fault is therefore not limited
+to configuration descriptors or multi-packet replies, but its cause is still
+unproven.
+
+The traced selection wrapper now retains successful address/owner handovers,
+not repeated successful same-owner polls. Rejected selections remain recorded.
+Child post-selection observations retain SETUP and the first IN and OUT after
+it; they still do not decode endpoint bits or prove physical acceptance. This
+reduces routine polling noise without changing the transport's selection guards.
+
+`tools/native_joycon_hub_check.py --capture-trace-on-error` is an explicit,
+default-off diagnostic option for trace-enabled native hub builds starting with
+0.95. On the first child EP0 transfer error, it sends one root vendor IN to latch
+the child's actual current control state **before interface cleanup**. It does
+not retry the failed request, initialize streams, change profiles or pairings,
+write flash, or reset USB. The marker observes the remaining scenario deadline;
+a failed/refused/malformed marker preserves the original transfer error.
+It cannot be combined with `--reboot-bootsel`.
+
+The root-only marker is `C0/5e`, value `5452`, index = hub child port (1–2 or
+1–4, not a profile identity index), length 16. Its reply contains `NHTR`, version
+1, status (0 captured, 1 busy), echoed port, reserved zero, then little-endian
+32-bit snapshot time and control generation. Busy replies zero both values;
+zero time/generation can also be valid when status is captured. The receipt
+matches `HUB_FLIGHT_FREEZE reason=3` and its control header; it confirms snapshot
+admission, not completed UART delivery or that the failed SETUP reached the SIE.
+The JSON `failure_trace` keeps the host's failed request separately from the
+device's captured state, which may describe an earlier request.
+
+The two-snapshot bound is unchanged. A host marker can replace only a waiting
+automatic snapshot when full, counting that displacement in `lost=`. It never
+rewrites the current dump or a waiting host snapshot; available space can hold
+two independently protected host snapshots. Routine automatic triggers cannot
+evict either. The existing logger-backpressure behavior remains, so capture
+consumers must wait for the matching dump's END before treating it as complete.
+Host tests reproduce the old root-poll eviction and verify retained child
+evidence, priority admission, receipt matching and original-error preservation.
+No on-hardware timing or USB fault fix is claimed by these diagnostics.
+
+**0.96 synchronous EP0 handover candidate:** the 0.95 host failure marker
+retained the actual A-R version request: SETUP was processed and a 16-byte
+DATA1 reply was prepared, but no first IN completion was recorded. A host-only
+reproduction found that alternating root/child polls could repeatedly clear
+EP0 availability before the next foreground restoration: none of 200 polls
+found a ready reply, even with foreground processing after every poll.
+
+Core 1 now copies the selected device's prepared EP0 IN image into shared DPRAM
+and publishes its availability before the selector returns. The address is
+committed ahead of that payload copy to preserve the narrow address-routing
+path; EP0 IN remains unavailable until the copy finishes. The copy uses aligned
+four-word groups and a short tail, bounded by the 64-byte endpoint packet size.
+The same-owner fast path and lock, pending-SETUP, buffer-completion and expired
+cutoff guards remain. The deferred restoration flag/function and the fixture's
+hidden pre-token foreground restoration have been removed.
+
+The USB reset IRQ now revokes all software buffer readiness and the separate
+root interrupt buffer before foreground reset processing. This prevents an
+inactive bank from republishing pre-reset data during that interval; protocol
+reset callbacks and persistent settings remain owned by their existing paths.
+Regressions cover that boundary, alternating root/child and child/child replies,
+short/full packets, padding ZLPs, status handovers, private endpoint completions,
+and interleaved profile readback with its full contents and CRC. The corrected
+host reproduction finds a prepared reply ready on all 200 alternating selections;
+a separate smoke check delivers exact replies for every length from 0 to 64.
+
+This fixes the reproduced scheduling-dependent liveness defect, not a proven
+complete explanation of the hardware `EPROTO` or Switch long-run stall. Linked
+selector/IRQ code stays in SRAM without a Core 1 memcpy call or new IRQ masking.
+The selector's post-call trace clock and slow-switch count now include synchronous
+EP0 preparation; neither is an exact address-write timestamp. Physical address
+and SIE-response timing still require readiness-gated hardware qualification.
+The existing opt-in host failure marker remains available; there is no automatic
+retry/reset workaround or persistent storage-layout change.
+
+**0.97 early address-commit candidate:** the 0.96 marked failure recorded a full
+18-byte A-L IN completion with software STATUS_OUT still pending. OUT handovers
+entered with 75–79 timer ticks before the router cutoff, while the linked child
+path had 119 instructions before the address store. That is a timing concern,
+not a measured address-write timestamp or proof of the wire-level failure.
+
+On an owner change, the 0.97 selector cleared hardware buffer controls 0–5,
+disabled the old root interrupt endpoint and cleared its stall-arm state before
+publishing the new address and owner. Incoming-bank calculation and installation
+followed the address write. No old-owner ready buffer was exposed at that commit
+point in the host model. The existing lock, pending-SETUP, buffer-status and
+expired-cutoff guards remain; rejected selections leave the old bank untouched.
+Same-owner polls and address-only updates preserve their established behavior.
+Diagnostic hit counting is kept off the successful address-critical path.
+
+Incoming metadata is still written without AVAIL, settled, and published with
+the correct endpoint/stall state. Prepared EP0 data is copied synchronously as
+in 0.96; the foreground restoration dependency is not reintroduced. The linked
+successful owner-change path reaches the address store in 48 instructions,
+versus 119 for a child and 104 for root in the compared 0.96 paths. These counts
+exclude the wrapper and are not hardware cycle or SIE-response guarantees.
+
+`HUB_FLIGHT commit=` records the most recent Core 1 selector address-write cycle
+after the register/owner stores. It is fresh for a recorded wrapper handover;
+a same-owner post-selection observation may refer to an earlier write. Failed
+selections report zero. This separates address commitment from the existing
+post-return clock, but does not prove when the SIE recognized the new address.
+
+`HUB_FLIGHT_STATUS_OUT` adds control/device generation, IN/OUT shadow words,
+STATUS_OUT publication-attempt and completion cycles, flags and completion
+length. Flags distinguish a successful publication attempt from merely assigning
+the STATUS_OUT software stage. Completion evidence follows the existing event
+generation/reset checks. Shadow/generation values are individual observations,
+not an atomic multiword snapshot. Resetting a control also clears its live
+diagnostic watch, while already captured snapshots remain immutable.
+
+Host tests cover early-commit visibility, rejected/same-owner/address-only
+selections, status publication and completion, generation invalidation, and
+post-reset evidence lifetime. Physical SIE ownership and address/response timing
+remain unqualified until the readiness-gated hardware run; software zeroing is
+not itself proof that a physical controller transaction was quiescent. No
+automatic retry/reset workaround or persistent storage-layout change is added.
+
+**0.98 coherent-bank publication candidate:** the 0.97 hardware run failed during
+stream initialization, before descriptor rounds. All four initialization OUTs
+completed at the host, but only A-R and A-L reached firmware callbacks; B-L's
+first bulk reply timed out. A fresh EP2 receive-sequence error (`0x20`) appeared
+during that episode. This implicates receive sequencing/ownership, but does not
+identify which transaction or internal SIE event caused the failure.
+
+The selector now installs the incoming PID/length/SEL metadata with AVAIL clear,
+endpoint buffer pointers, root EP15 control and stall-arm state **before** the
+address/owner write. The metadata-to-AVAIL settling interval remains. Private
+buffers are then published; shared EP0 IN data is still copied synchronously
+before its AVAIL publication. Lock/completion/SETUP/cutoff guards and the existing
+completion-driven PID advancement are unchanged. There is no retry, sequence-error
+clearing workaround or persistent-storage change.
+
+The pre-selection trace wrapper is removed. The router calls the selector
+directly for every token, then the success/failure posthook. Successful handovers
+and child SETUP/first IN/OUT remain observable; repeated same-owner polls are
+omitted. Observation bookkeeping advances even while snapshots freeze recording.
+New records use `pre=0`: before-clock/address/owner fields are unavailable.
+`commit=` remains the last selector address-write clock; a same-owner observation
+can still name an earlier commit, and failed selections report zero.
+
+Host regressions latch metadata at the commit-clock access rather than inspecting
+only the repaired return-time bank. The 0.97 selector fails this check; 0.98 passes
+with two and four children, independent DATA0/DATA1 EP2 transfers, distinct
+payloads and exactly-once callbacks. The linked selector reaches the address
+store in 86 instructions for a child and 78 for root, versus 0.96's 119/104 and
+0.97's incoherent 48-instruction path. Counts exclude caller/wrapper work and
+are not hardware cycles or proof of meeting the token deadline. Removed trace
+overhead changes that comparison; timing still requires hardware qualification.
+The register model does not reproduce physical SIE latching or bad-PID ACKs.
+The authorized 0.98 trial passed all 16 initialization exchanges, then failed
+A-R's version read with host `EPROTO` and zero transferred bytes. Its matched
+marker retained a prepared 16-byte DATA1 reply without a first IN completion;
+EP0 sequence error was set and EP2 sequence error was clear at capture. The
+bounded trace had no A-R commit after the publication-attempt timestamp, so it
+does not establish what happened on the failing IN. No retry/reset followed.
+
+**0.99 publication-observation candidate (diagnostics only):** an IN can arrive
+before Core0 prepares its reply, consuming the recorder's first-IN flag. Later
+same-owner IN tokens were then omitted even after reply publication. The host
+reproduction fails with the 0.98 observer and passes with 0.99; this fixes that
+observation gap, **not a proven physical EP0 transport defect**.
+
+Core0 now releases a per-child publication ticket after a successful first EP0
+IN arm, outside the bank lock and IRQ-masked region. Core1 retains the first
+observed device IN following a new notification, even without a handover.
+`HUB_FLIGHT` uses successful `why=20` and `pub=` for this observation;
+`HUB_FLIGHT_CONTROL_CLOCK pub=` associates the ticket with the watched control.
+Match child slot, ticket and a valid arm flag; inspect control/device generations
+for supersession. Tickets survive reset while the per-control watch clears.
+Ticket zero is valid after wrap when the observation/arm flags validate it.
+Frozen recording still consumes observed notifications, preventing replay after
+thaw. Rejected selections and OUT/SETUP observations do not consume them.
+
+Each retained record also includes a non-destructive `rxerr=` observation.
+These fields are sequential software observations: the decoder does not identify
+the IN endpoint, and a notification can outlive the control that published it.
+They prove neither current readiness nor SIE/host acceptance. The existing
+16-byte `NHTR` marker response remains version 1 and unchanged.
+
+The linked selector's normalized instructions match 0.98; bank publication,
+guards and PID advancement are unchanged. Postselection tracing costs more,
+so this is not a physical timing guarantee. The authorized 0.99 run passed all
+16 initialization exchanges and three descriptor rounds, then failed B-R's
+one-byte version read with host `EPROTO`. Ticket `0x26` matched the failed
+control and a one-byte firmware IN completion. STATUS_OUT remained pending:
+an OUT observation preceded its publication attempt by about 115 microseconds.
+EP0 sequence error was already set before the failed request, not a fresh
+transition attributable to it.
+
+**0.100 final-IN status handoff candidate:** pre-approved control reads now arm
+zero-length DATA1 STATUS_OUT in the USB IRQ after the final IN completes,
+without waiting for the foreground DATA callback. Status is not armed before
+the final IN, before a required terminating IN ZLP, for an unexpected completed
+length, or over a pending replacement SETUP. The existing settled buffer
+publication path is reused; no protocol callback or payload copy runs in IRQ.
+
+`native_hub_control_xfer` takes an explicit `read_status_preapproved` argument.
+Opt in only for an IN reply validated during SETUP whose DATA callback cannot
+reject status. Standard/class replies and the existing native identity/version
+and management reads use the fast handoff; callback-validated reads remain
+gated. OUT/write transfers, including BOOTSEL and settings/profile writes,
+must pass false and retain their validation-before-status behavior.
+
+The completion event carries the IRQ handoff, so foreground processing never
+rearms status that hardware may already have consumed. DATA then ACK callbacks
+remain foreground-only and exactly once for completed reads. A replacement
+SETUP preserves already queued final-IN/status completion ordering; reset
+invalidates it. Foreground DATA ownership is rechecked and claimed with IRQs
+masked, then callbacks run unmasked, matching the established ACK claim rule.
+
+Status publication trace evidence now carries the IRQ publication-attempt
+timestamp for eligible reads. The IN completion timestamp is the subsequent
+event-enqueue observation, not the physical bus completion instant; the status
+arm timestamp can therefore precede it. Snapshot/control generation validation
+and the existing publication-ticket provenance still apply.
+
+The host reproduction rejects immediate status with 0.99 and accepts it with
+0.100 for the root and every child, without a foreground pass. Regressions cover
+short/full/multi-packet replies, terminating ZLPs, SETUP/reset invalidation,
+malformed completion lengths, rejected DATA callbacks and duplicate prevention.
+The linked selector's normalized instructions match 0.99; the expanded IRQ
+contains no external calls. This removes a reproduced foreground readiness gap,
+but neither host models nor the observed delay prove the cause or resolution of
+physical `EPROTO`. The authorized 0.100 deployment preserved the persistent
+region byte-for-byte. Its single hardware capture passed all 16 initialization
+exchanges and 20 descriptor/isolation rounds (415 control requests), including
+one-, seven- and fifteen-byte version reads on all four children. No host error,
+retry or reset occurred; sustained traffic and gameplay remain unqualified.
+Gameplay rumble is not implemented in this native output path: HID output
+reports are logged, while built-in vibration samples use a separate cue path.
+
+**Neutral two-pair transport experiment (0.91):** the standalone probe can expose
+four native children, ordered **A-R, A-L, B-R, B-L** on hub ports 1–4. This is an
+explicit USB transport experiment, not multi-source GAMEPAD mode. Bluetooth,
+live motion, motor cues and BOOTSEL test-button injection are disabled. Reports
+remain neutral at the captured stick centers; native USB initialization and
+independent pairing persistence still work. This mode is useful for transport
+isolation, but cannot register players in Change Grip/Order without real buttons.
+Use live GAMEPAD mode for that step.
+
+The private CMake input file must provide `IDENTITY_FILE`, `VERSION_FILE`,
+`CONTROLLER_ADDRESS`, `FACTORY_FILE` and `USER_CALIBRATION_FILE` under each of
+the `SWITCH2_PROBE`, `SWITCH2_PROBE_SECOND`, `SWITCH2_PROBE_THIRD` and
+`SWITCH2_PROBE_FOURTH` prefixes. Advertised addresses and factory identities must
+be distinct; each factory image must agree with its identity response. Keep these
+private files out of commits. Pair A can retain its existing identities; a new
+virtual pair must not reuse Pair A's identity/address.
+
+With SDK/toolchain discovery configured and that private input file prepared,
+build without flashing or publishing:
+
+```sh
+cmake -S tools/switch2_usb_probe -B build-switch2-native-two-pair \
+  -C build-switch2-native-two-pair/private-inputs/inputs.cmake \
+  -DPICO_BOARD=pico2_w -DCMAKE_BUILD_TYPE=Release \
+  -DSWITCH2_PROBE_HUB=ON -DSWITCH2_PROBE_PAIR_COUNT=2 \
+  -DSWITCH2_PROBE_NEUTRAL_INPUT=ON -DSWITCH2_PROBE_ACK_SETUP04=ON \
+  -DSWITCH2_PROBE_USB_INIT=ON -DSWITCH2_PROBE_TRACE_NATIVE_INPUT=ON
+cmake --build build-switch2-native-two-pair --parallel 4
+```
+
+The outputs are `build-switch2-native-two-pair/switch2-usb-probe.elf` and `.uf2`.
+The standalone image uses the proven 240 MHz/1.3 V clock initialization,
+flash divider 4 with embedded XIP setup, a 16 KiB Core 0 stack and 4 KiB Core 1
+stack. It exposes the existing private software BOOTSEL request, but no full
+configuration/profile management interface. The request is validated at DATA,
+accepted only after its USB status ACK, then delayed 50 ms before entering ROM.
+Malformed, incomplete and superseded requests cannot schedule a reboot.
+
+Software recovery is an explicit operation, separate from qualification, and
+works even when none of the children enumerate:
+
+```sh
+uv run python tools/native_joycon_hub_check.py --reboot-bootsel \
+  --output build-switch2-native-two-pair/bootsel-recovery.json --timeout 30
+```
+
+It selects the uniquely identified Switch Pico root, sends the standard private
+request and confirms ROM BOOTSEL re-enumeration on the same physical port. It
+does not require build captures, claim interfaces, initialize controllers, write
+pairings, or actuate motors. Recovery success is not a qualification result, and
+a failed qualification never triggers recovery automatically. Physical BOOTSEL
+remains the fallback if the USB root itself is unresponsive. The normal
+configuration CLI still requires the adapter's full management interface.
+
+Original right/left pairing banks retain their offsets. Pair B adds two banks
+immediately below them, increasing the total reservation from 16 to 32 KiB;
+profiles, adapter settings and Bluetooth storage do not move. Unknown sector
+ownership is refused rather than erased. Before an authorized hardware trial,
+record/export profiles and settings and take a complete flash backup in BOOTSEL,
+including the new reservation. Restore the normal image after the experiment.
+
+After explicitly flashing the experiment, the non-pairing PC transport check is:
+
+```sh
+uv run python tools/native_joycon_hub_check.py \
+  --build-dir build-switch2-native-two-pair --pairs 2 --neutral \
+  --output build-switch2-native-two-pair/neutral-qualification.json \
+  --timeout 120 --duration 10
+```
+
+This checks all four identities, port ancestry, native descriptors, calibrated
+neutral reports, advancing counters and interleaved control/bulk isolation. It
+rejects motor requests and cannot qualify live input, IMU, Bluetooth routing or
+gameplay. Same-side neutral HID reports with identical calibration centers cannot
+by themselves prove source isolation. Default one-pair live checks and
+`--input-only` remain separate. Host regressions cover four-child address/endpoint
+and reset isolation, interrupted pairing writes, unknown-bank refusal and the
+new lower storage boundary. Those tests and SRAM placement checks do **not**
+qualify four-child USB timing or Switch enumeration; both require hardware tests.
+
+**0.91 PC hardware trial:** all four children enumerated on ports 1–4 and passed
+the short neutral transport check: A-R 446, A-L 446, B-R 440 and B-L 445 valid
+reports with advancing counters, 35 interleaved control/bulk rounds and no
+checker errors. Software BOOTSEL from the neutral firmware acknowledged the
+private request and re-enumerated in ROM on the same physical port. The exact
+pre-trial 0.89 program was restored; a verified full-flash read matched all
+4,194,304 bytes of the pre-trial backup. The firmware's offline storage decoder
+also recovered identical contents, names, aliases and selections for all 80
+profiles across ten owners. This is not a maximum-rate, long-run, Switch or
+gameplay qualification. Private captures and restoration evidence are in
+`build-switch2-native-two-pair/verification.json` and its referenced files.
+
+Avoid concurrent Controller Studio/CLI clients during multi-request profile
+exports: the selected-profile device state is shared between USB requests. This
+trial's concurrent CLI exports were not used as preservation proof; the raw
+flash comparison and offline-decoded exports are authoritative.
+
 **Qualification history:** the earlier RAM-only
 probe established three-address EP0 routing, not Joy-Con output. The
 `0.65-native-hub-ready` bridge subsequently passed interleaved native descriptor,
