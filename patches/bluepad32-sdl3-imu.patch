@@ -125,6 +125,24 @@ diff --git a/src/components/bluepad32/bt/uni_bt_bredr.c b/src/components/bluepad
          uni_hid_device_disconnect(device);
          uni_hid_device_delete(device);
          /* 'device' is destroyed, don't use */
+@@ -562,6 +567,17 @@ void uni_bt_bredr_on_gap_inquiry_result(uint16_t channel, const uint8_t* packet, uin
+         logi(", name '%s'", name_buffer);
+     }
+     logi("\n");
+ 
++    // Reconnect discovery is not a pairing request. Avoid paging nearby
++    // unpaired devices outside the explicit bondable window: their connection
++    // attempts compete with live controller input and native PCM for airtime.
++    if (!gap_get_bondable_mode()) {
++        link_key_t key;
++        link_key_type_t type;
++        if (!gap_get_link_key_for_bd_addr(addr, key, &type)) {
++            return;
++        }
++    }
++
+     supported = uni_hid_device_on_device_discovered(addr, name_buffer, cod, rssi) == UNI_ERROR_SUCCESS;
+     if (supported) {
 diff --git a/src/components/bluepad32/bt/uni_bt_le.c b/src/components/bluepad32/bt/uni_bt_le.c
 --- a/src/components/bluepad32/bt/uni_bt_le.c
 +++ b/src/components/bluepad32/bt/uni_bt_le.c

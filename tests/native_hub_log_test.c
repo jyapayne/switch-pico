@@ -25,6 +25,7 @@ static unsigned completions, missed_tokens;
 static uint32_t phase;
 static char serial_bytes[2 * LOG_CAPACITY];
 static size_t serial_size;
+static bool uart_backpressure;
 
 void native_test_service_interrupt(void) {
     if (pending_completion && !native_test_interrupt_mask) {
@@ -47,8 +48,20 @@ uint32_t native_hub_trace_phase(uint32_t next) {
     return previous;
 }
 
-bool uart_is_writable(void* uart) { (void)uart; return serial_size < sizeof(serial_bytes); }
+bool uart_is_writable(void* uart) { (void)uart; return !uart_backpressure && serial_size < sizeof(serial_bytes); }
 void uart_putc_raw(void* uart, char value) { (void)uart; serial_bytes[serial_size++] = value; }
+
+static void blocking_stdio_out(const char* bytes, int length) {
+    assert(!uart_backpressure && "stdio waited for UART instead of queuing");
+    for (int i = 0; i < length; ++i) uart_putc_raw(uart0,bytes[i]);
+}
+static void blocking_stdio_flush(void) {
+    assert(!uart_backpressure && "stdio flush waited for UART");
+}
+stdio_driver_t stdio_uart = {
+    .out_chars = blocking_stdio_out,
+    .out_flush = blocking_stdio_flush,
+};
 
 int main(int argc, char** argv) {
     if (argc == 2) {
@@ -99,6 +112,43 @@ int main(int argc, char** argv) {
     drain_log();
     assert(serial_size == strlen("caller owns mask"));
     assert(memcmp(serial_bytes, "caller owns mask", serial_size) == 0);
+
+    // Pico libc/Bluepad32 output must share the existing ordered queue. UART
+    // backpressure cannot stall radio polling or prevent USB IRQ completion.
+    buffer_uart_stdio();
+    serial_size = 0;
+    log_read = log_written = LOG_CAPACITY - 5;
+    missed_tokens = 0;
+    uart_backpressure = true;
+    stdio_uart.out_chars("radio first\n",12);
+    assert(probe_debug_printf("probe\n") == 6);
+    stdio_uart.out_chars("radio last\n",11);
+    if (stdio_uart.out_flush) stdio_uart.out_flush();
+    drain_log();
+    assert(serial_size == 0 && !pending_completion && missed_tokens == 0);
+    uart_backpressure = false;
+    drain_log();
+    const char expected[] = "radio first\nprobe\nradio last\n";
+    assert(serial_size == sizeof(expected)-1);
+    assert(memcmp(serial_bytes,expected,serial_size) == 0);
+
+    // Reject a whole stdout chunk when full; queued bytes remain intact.
+    inject_completion = false;
+    serial_size = 0; log_read = 0; log_written = LOG_CAPACITY;
+    memset(log_bytes,'s',sizeof(log_bytes));
+    uint32_t dropped = log_dropped;
+    stdio_uart.out_chars("overflow",8);
+    drain_log();
+    assert(serial_size == LOG_CAPACITY && log_dropped == dropped+8);
+    for (size_t i = 0; i < serial_size; ++i) assert(serial_bytes[i] == 's');
+
+    // Panic/IRQ stdio must not recurse into assertions or corrupt this
+    // foreground-only ring. Count those discarded bytes instead.
+    serial_size = 0; dropped = log_dropped;
+    test_core = 1; stdio_uart.out_chars("core",4); test_core = 0;
+    test_exception = 16; stdio_uart.out_chars("irq",3); test_exception = 0;
+    drain_log();
+    assert(serial_size == 0 && log_dropped == dropped+7);
     puts("native logging preserved USB progress, message order and caller IRQ state");
     return 0;
 }

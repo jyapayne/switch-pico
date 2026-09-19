@@ -22,12 +22,12 @@ enum class Delivery { kImmediate, kDeferred, kNever };
 enum class GenericKind { kCompatibility, kLed };
 
 constexpr uint32_t kPacketFrames = SWITCH_PICO_HD_PACKET_FRAMES;
-static_assert(kPacketFrames == 32 || kPacketFrames == 64);
+static_assert(kPacketFrames == 32);
 constexpr uint32_t kPackets = 18432 / kPacketFrames;
 constexpr uint32_t kPrimingPackets = 3072 / kPacketFrames;
 constexpr uint32_t kToneEndPacket = 15360 / kPacketFrames;
 constexpr uint32_t kPhasePackets = 768 / kPacketFrames;
-constexpr unsigned kSampleOffset = kPacketFrames == 32 ? 14 : 10;
+constexpr unsigned kSampleOffset = 14;
 
 struct Pcm {
     uint64_t at_us;
@@ -242,7 +242,7 @@ uint64_t due(uint64_t started, uint32_t packet) {
 const uint8_t* samples(const Pcm& packet) {
     const auto& b = packet.bytes;
     assert(b[3] == 0x91);
-    assert(b[kSampleOffset - 2] == (kPacketFrames == 32 ? 0x92 : 0xd2));
+    assert(b[kSampleOffset - 2] == 0x92);
     assert(b[kSampleOffset - 1] == 64);
     return b.data() + kSampleOffset;
 }
@@ -258,14 +258,9 @@ void verify_report(const Pcm& packet, uint32_t sent_index) {
         return;
     }
     assert(b[2] == 0 && b[3] == 0x91);
-    if (kPacketFrames == 32) {
-        assert(b[4] == 7 && b[5] == 0xfe);
-        for (unsigned i = 6; i < 10; ++i) assert(b[i] == 0);
-        assert(b[10] == 0xff && b[11] == static_cast<uint8_t>(sent_index - 1));
-    } else {
-        assert(b[4] == 3 && b[5] == 0x62 && b[6] == 16);
-        assert(b[7] == static_cast<uint8_t>(sent_index * 2));
-    }
+    assert(b[4] == 7 && b[5] == 0xfe);
+    for (unsigned i = 6; i < 10; ++i) assert(b[i] == 0);
+    assert(b[10] == 0xff && b[11] == static_cast<uint8_t>(sent_index - 1));
     samples(packet);
     for (unsigned i = kSampleOffset + kPacketFrames * 2; i < 139; ++i) {
         assert(b[i] == 0);
@@ -857,6 +852,169 @@ void stateful_rumble_generation_and_overflow() {
     assert(generic_sent.empty());
 }
 
+NativeHapticsFrame native_frame(bool left, bool right) {
+    NativeHapticsFrame frame{};
+    frame.actuators[0] = {1, {{385, 481, static_cast<uint16_t>(left ? 1023 : 0), 0}}};
+    frame.actuators[1] = {1, {{385, 481, 0, static_cast<uint16_t>(right ? 1023 : 0)}}};
+    return frame;
+}
+
+void verify_channels(const Pcm& packet, bool left, bool right) {
+    const auto* block = samples(packet);
+    unsigned active[2]{};
+    for (unsigned frame = 0; frame < kPacketFrames; ++frame) {
+        active[0] += block[2 * frame] != 0;
+        active[1] += block[2 * frame + 1] != 0;
+    }
+    assert(left ? active[0] > kPacketFrames / 2 : active[0] == 0);
+    assert(right ? active[1] > kPacketFrames / 2 : active[1] == 0);
+}
+
+void native_samples_through_real_packets() {
+    reset();
+    constexpr uint8_t slot = 3; // Selection is not hard-wired to physical slot zero.
+    assert(haptics_experiment_request(2, slot));
+    assert(haptics_experiment_native_selected(slot, 103));
+    assert(!haptics_experiment_native_selected(0, 100));
+    const uint64_t started = now_us;
+    NativeHapticsFrame frame{};
+    frame.actuators[0] = {3, {{385, 481, 1023, 0}, {385, 481, 0, 0}, {385, 481, 512, 0}}};
+    frame.actuators[1] = {2, {{385, 481, 0, 0}, {385, 481, 0, 1023}}};
+    assert(haptics_experiment_submit_native(slot, 103, now_us, frame));
+    assert(snapshot().last_pcm_end_us == 0); // Mailbox admission is not PCM delivery.
+    haptics_experiment_poll();
+    verify_report(pcm.front(), 0);
+    assert(snapshot().last_pcm_end_us == 0); // State-only setup has no sample interval.
+    run_until(due(started, 2) + 1000);
+    assert(pcm.size() == 3 && pcm[1].cid == devices[slot].conn.interrupt_cid);
+    assert(snapshot().last_pcm_end_us == static_cast<uint32_t>(due(started, 2)));
+    verify_report(pcm[1], 1);
+    const auto* first = samples(pcm[1]);
+    unsigned active_left = 0, active_right = 0;
+    for (unsigned n = 0; n < 32; ++n) {
+        if (n < 16) {
+            assert(first[2 * n + 1] == 0);
+            active_left += first[2 * n] != 0;
+        } else {
+            assert(first[2 * n] == 0);
+            active_right += first[2 * n + 1] != 0;
+        }
+    }
+    assert(active_left > 10 && active_right > 10); // Fixed 16-frame native spacing.
+    verify_channels(pcm[2], true, true); // Third left substep begins at sample 32.
+    run_until(started + 80000);
+    verify_silence(pcm.back()); // Original per-side 50 ms watchdog, no held PCM replay.
+    assert(generic_sent.empty());
+    assert(haptics_experiment_request(0, slot));
+    assert(haptics_experiment_native_selected(slot, 103));
+    assert(!haptics_experiment_submit_native(slot, 103, now_us, frame));
+    haptics_experiment_poll();
+    verify_silence(pcm.back()); // Drain emits an actual all-zero PCM stop.
+    assert(haptics_experiment_native_selected(slot, 103)); // Restore still owns output.
+    run_until(now_us + 10000);
+    assert(snapshot().state == HapticsExperimentState::kStopped);
+    assert(!haptics_experiment_native_selected(slot, 103));
+    assert(generic_sent.size() == 2); // Only the exclusive compatibility restoration.
+}
+
+void native_cancellation_generation_and_feedback() {
+    reset();
+    constexpr uint8_t slot = 2;
+    assert(haptics_experiment_request(2, slot));
+    const uint64_t started = now_us;
+    auto both = native_frame(true, true);
+    assert(haptics_experiment_submit_native(slot, 102, now_us, both));
+    haptics_experiment_poll();
+    run_until(due(started, 1) + 1000);
+    verify_channels(pcm.back(), true, true);
+
+    // Remove both already-synthesized history and mailbox work on just left.
+    assert(haptics_experiment_submit_native(slot, 102, now_us, both));
+    haptics_experiment_cancel_native(slot, 102, 1);
+    haptics_experiment_attach(slot, 202, &devices[slot]);
+    assert(snapshot().state == HapticsExperimentState::kRunning);
+    assert(haptics_experiment_native_selected(slot, 202));
+    assert(!haptics_experiment_native_selected(slot, 102));
+    assert(!haptics_experiment_submit_native(slot, 102, now_us, both));
+    haptics_experiment_cancel_native(slot, 102, 2); // Old generation cannot stop right.
+    run_until(due(started, 2) + 1000);
+    verify_channels(pcm.back(), false, true);
+
+    assert(haptics_experiment_native_feedback(&devices[slot], now_us, 200, 0, 30));
+    haptics_experiment_cancel_native(slot, 202, 3);
+    run_until(now_us + 22000);
+    verify_channels(pcm.back(), true, false); // Side cue survives host cancellation.
+    run_until(now_us + 50000);
+    verify_silence(pcm.back()); // Canceled right must not resume after the cue.
+    assert(haptics_experiment_native_feedback(&devices[slot], now_us, 0, 200, 30));
+    run_until(now_us + 22000);
+    verify_channels(pcm.back(), false, true);
+    assert(generic_sent.empty());
+    run_until(now_us + 50000);
+    verify_silence(pcm.back());
+
+    auto right = native_frame(false, true);
+    assert(haptics_experiment_submit_native(slot, 202, now_us, right));
+    run_until(now_us + 22000);
+    verify_channels(pcm.back(), false, true);
+    haptics_experiment_detach(&devices[slot]);
+    haptics_experiment_attach(slot, 203, &devices[slot]);
+    assert(!haptics_experiment_submit_native(slot, 202, now_us, both));
+    assert(haptics_experiment_request(2, slot));
+    haptics_experiment_poll();
+    run_until(now_us + 30000);
+    verify_silence(pcm.back()); // A real reconnect does not retain a native effect.
+}
+
+void native_mailbox_validation_and_pending_cancel() {
+    reset();
+    assert(haptics_experiment_request(2, 1));
+    auto both = native_frame(true, true);
+    for (unsigned i = 0; i < 16; ++i) {
+        assert(haptics_experiment_submit_native(1, 101, now_us, both));
+    }
+    auto invalid = both;
+    invalid.actuators[0].samples[0].low_amplitude = 0;
+    invalid.actuators[1].samples[0].high_frequency_code = 671;
+    assert(!haptics_experiment_submit_native(1, 101, now_us + 1000, invalid));
+    invalid.actuators[1].samples[0].high_frequency_code = 481;
+    invalid.actuators[1].samples[0].high_amplitude = 1024;
+    assert(!haptics_experiment_submit_native(1, 101, now_us + 1000, invalid));
+    invalid.actuators[1].sample_count = 4;
+    assert(!haptics_experiment_submit_native(1, 101, now_us + 1000, invalid));
+    assert(haptics_experiment_native_selected(1, 101)); // Rejection never enables fallback.
+    haptics_experiment_cancel_native(1, 101, 1);
+    haptics_experiment_attach(1, 201, &devices[1]); // Generation can also migrate Pending.
+    assert(!haptics_experiment_submit_native(1, 101, now_us, both));
+    assert(haptics_experiment_submit_native(1, 201, now_us, native_frame(false, true)));
+    haptics_experiment_poll();
+    run_until(now_us + 22000);
+    verify_channels(pcm.back(), false, true);
+    assert(snapshot().host_updates == 17 && snapshot().dropped_updates == 1);
+    assert(snapshot().connection_generation == 201);
+    assert(generic_sent.empty());
+}
+
+void native_pcm_delivery_watermark() {
+    reset((uint64_t{1} << 32) - 15000);
+    assert(haptics_experiment_request(2, 0));
+    assert(haptics_experiment_submit_native(0, 100, now_us, native_frame(true, false)));
+    haptics_experiment_poll();
+    const uint64_t started = now_us;
+    assert(snapshot().last_pcm_end_us == 0);
+    fail_sends = 1;
+    run_until(due(started, 1) + 1000);
+    assert(snapshot().send_failures == 1 && snapshot().last_pcm_end_us == 0);
+    run_until(due(started, 2) + 1000);
+    assert(snapshot().last_pcm_end_us == static_cast<uint32_t>(due(started, 2)));
+    verify_channels(pcm.back(), true, false);
+    const uint32_t delivered_end = snapshot().last_pcm_end_us;
+    assert(haptics_experiment_request(0, 0));
+    haptics_experiment_poll();
+    verify_silence(pcm.back());
+    assert(snapshot().last_pcm_end_us == delivered_end); // Urgent drain is not cue evidence.
+}
+
 }  // namespace
 
 // Transport attribution has its own native fixture; this fixture isolates PCM
@@ -996,5 +1154,9 @@ int main(int argc, char** argv) {
     stateful_rumble_prepare_feedback_and_zero();
     stateful_rumble_generation_and_overflow();
     gameplay_missing_callback_is_bounded();
+    native_samples_through_real_packets();
+    native_cancellation_generation_and_feedback();
+    native_mailbox_validation_and_pending_cancel();
+    native_pcm_delivery_watermark();
     std::cout << "haptics experiment behavioral regressions passed\n";
 }

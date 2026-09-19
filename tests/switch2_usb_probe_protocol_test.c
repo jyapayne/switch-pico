@@ -681,10 +681,21 @@ static void test_indexed_memory(void) {
 }
 
 static void expect_invalid_rumble(uint8_t report_id, const uint8_t* data, size_t length) {
-    probe_rumble_frame output = {.count = 3, .magnitude = {17, 93, 241}};
+    NativeHapticsActuatorFrame output;
+    memset(&output, 0xa5, sizeof(output));
+    NativeHapticsActuatorFrame before;
+    memcpy(&before, &output, sizeof(before));
     assert(!probe_protocol_decode_rumble(report_id, data, length, &output));
-    assert(output.count == 3);
-    assert(output.magnitude[0] == 17 && output.magnitude[1] == 93 && output.magnitude[2] == 241);
+    assert(memcmp(&output, &before, sizeof(output)) == 0);
+}
+
+static void expect_wave(const NativeHapticsSample* sample, uint16_t low_frequency,
+                        uint16_t high_frequency, uint16_t low_amplitude,
+                        uint16_t high_amplitude) {
+    assert(sample->low_frequency_code == low_frequency);
+    assert(sample->high_frequency_code == high_frequency);
+    assert(sample->low_amplitude == low_amplitude);
+    assert(sample->high_amplitude == high_amplitude);
 }
 
 static void test_native_rumble(void) {
@@ -695,49 +706,52 @@ static void test_native_rumble(void) {
         {0x50, 0x81, 0x01, 0x10, 0x1e, 0x00},
         {0x52, 0x9f, 0x19, 0xe0, 0x9d, 0x00},
     };
-    probe_rumble_frame output;
+    NativeHapticsActuatorFrame output;
     uint8_t wire[65];
     for (unsigned i = 0; i < 2; ++i) {
         memset(wire, 0xa5, sizeof(wire));
         wire[0] = 0x01;
         memcpy(wire + 1, captured_blocks[i], sizeof(captured_blocks[i]));
         assert(probe_protocol_decode_rumble(0, wire, 64, &output));
-        assert(output.count == 1 && output.magnitude[0] == i);
+        assert(output.sample_count == 1);
+        expect_wave(&output.samples[0], i ? 415 : 385, i ? 478 : 481, i ? 6 : 0, i ? 2 : 0);
         assert(probe_protocol_decode_rumble(1, wire + 1, 63, &output));
-        assert(output.count == 1 && output.magnitude[0] == i);
+        assert(output.sample_count == 1);
+        expect_wave(&output.samples[0], i ? 415 : 385, i ? 478 : 481, i ? 6 : 0, i ? 2 : 0);
     }
 
     // Manually specified byte boundaries, not an encoder/decoder roundtrip.
-    // Frequencies are both 1023: they must not leak into either amplitude,
-    // nor be rejected merely because this compatibility decoder ignores them.
+    // All four fields cross byte boundaries. The decoder preserves codes even
+    // outside a particular output actuator's renderable frequency range.
     static const struct {
         uint8_t sample[5];
-        uint8_t expected;
+        uint16_t low, high;
     } boundaries[] = {
-        {{0xff, 0x03, 0xf0, 0x3f, 0x00}, 0},   // amplitudes 0, 0
-        {{0xff, 0x0b, 0xf0, 0x3f, 0x00}, 0},   // 2, 0 rounds down
-        {{0xff, 0x03, 0xf0, 0xff, 0x00}, 1},   // 0, 3 rounds up
-        {{0xff, 0xff, 0xf0, 0x3f, 0x00}, 16},  // 63, 0
-        {{0xff, 0x03, 0xf1, 0x3f, 0x00}, 16},  // 64, 0
-        {{0xff, 0xff, 0xf7, 0x3f, 0x80}, 128}, // 511, 512
-        {{0xff, 0x03, 0xf8, 0xff, 0x7f}, 128}, // 512, 511
-        {{0xff, 0xff, 0xff, 0x3f, 0x00}, 255}, // 1023, 0
-        {{0xff, 0x03, 0xf0, 0xff, 0xff}, 255}, // 0, 1023
+        {{0xff, 0x03, 0xf0, 0x3f, 0x00}, 0, 0},
+        {{0xff, 0x0b, 0xf0, 0x3f, 0x00}, 2, 0},
+        {{0xff, 0x03, 0xf0, 0xff, 0x00}, 0, 3},
+        {{0xff, 0xff, 0xf0, 0x3f, 0x00}, 63, 0},
+        {{0xff, 0x03, 0xf1, 0x3f, 0x00}, 64, 0},
+        {{0xff, 0xff, 0xf7, 0x3f, 0x80}, 511, 512},
+        {{0xff, 0x03, 0xf8, 0xff, 0x7f}, 512, 511},
+        {{0xff, 0xff, 0xff, 0x3f, 0x00}, 1023, 0},
+        {{0xff, 0x03, 0xf0, 0xff, 0xff}, 0, 1023},
     };
     wire[1] = 0x5f;
     for (unsigned i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); ++i) {
         memcpy(wire + 2, boundaries[i].sample, 5);
         assert(probe_protocol_decode_rumble(0, wire, 17, &output));
-        assert(output.count == 1 && output.magnitude[0] == boundaries[i].expected);
+        assert(output.sample_count == 1);
+        expect_wave(&output.samples[0], 1023, 1023, boundaries[i].low, boundaries[i].high);
     }
 
     // Three distinguishable samples retain wire order; a shorter count ignores
     // stale later samples. Both callback envelopes accept minimal/compact/USB sizes.
     static const uint8_t ordered[16] = {
         0x70,
-        0x00, 0xfc, 0x0f, 0x00, 0x00, // amplitudes 1023, 0 -> 255
-        0x00, 0x00, 0x00, 0xc0, 0x3f, // amplitudes 0, 255 -> 64
-        0xff, 0xff, 0xf7, 0x3f, 0x80, // amplitudes 511, 512 -> 128
+        0x81, 0x05, 0x18, 0x5e, 0x40, // codes 385/481, amplitudes 513/257
+        0x82, 0x05, 0x18, 0x5e, 0x40, // adjacent frequency survives, no 7-bit quantization
+        0x83, 0x05, 0x18, 0x5e, 0x40,
     };
     static const size_t lengths[] = {17, 42, 64};
     memcpy(wire + 1, ordered, sizeof(ordered));
@@ -748,9 +762,9 @@ static void test_native_rumble(void) {
                 for (unsigned form = 0; form < 2; ++form) {
                     assert(probe_protocol_decode_rumble((uint8_t)form, wire + form,
                                                         lengths[i] - form, &output));
-                    assert(output.count == count && output.magnitude[0] == 255);
-                    if (count >= 2) assert(output.magnitude[1] == 64);
-                    if (count == 3) assert(output.magnitude[2] == 128);
+                    assert(output.sample_count == count);
+                    for (unsigned sample = 0; sample < count; ++sample)
+                        expect_wave(&output.samples[sample], (uint16_t)(385 + sample), 481, 513, 257);
                 }
             }
         }
@@ -758,9 +772,9 @@ static void test_native_rumble(void) {
 
     wire[1] = 0x4f; // HOLD: nonzero stale samples must not become a stop/update.
     assert(probe_protocol_decode_rumble(0, wire, 17, &output));
-    assert(output.count == 0);
+    assert(output.sample_count == 0);
     assert(probe_protocol_decode_rumble(1, wire + 1, 16, &output));
-    assert(output.count == 0);
+    assert(output.sample_count == 0);
 
     // Complete 16-byte block required even for HOLD or a one-sample update.
     for (unsigned count = 0; count <= 3; ++count) {

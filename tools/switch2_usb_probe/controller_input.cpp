@@ -491,9 +491,9 @@ extern "C" void probe_controller_input_set_full_stick_calibration(
 }
 
 extern "C" bool probe_controller_input_submit_rumble(
-    uint8_t instance, const uint8_t* magnitudes, uint8_t count) {
+    uint8_t instance, const NativeHapticsActuatorFrame* frame) {
     return g_flash_ready && instance < PROBE_CONTROLLER_COUNT &&
-        bluepad32_input_backend_native_rumble_submit(instance, magnitudes, count);
+        bluepad32_input_backend_native_rumble_submit(instance, frame);
 }
 
 extern "C" void probe_controller_input_cancel_rumble(uint8_t instance) {

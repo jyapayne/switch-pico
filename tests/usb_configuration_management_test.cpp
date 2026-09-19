@@ -790,7 +790,7 @@ std::vector<uint8_t> read_haptics_payload() {
     require(read_u32(control_payload, 16) ==
                 configuration_crc32(payload.data(), payload.size()),
             "experiment response CRC is invalid");
-    require(payload[71] == 0 && (payload[73] == 32 || payload[73] == 64) &&
+    require(payload[71] == 0 && payload[73] == 32 &&
                 payload[74] <= 1 && payload[75] == 0,
             "experiment reserved payload bytes must remain zero");
     return payload;
@@ -851,7 +851,7 @@ void test_haptics_experiment_requests() {
     }
 #else
     std::vector<uint8_t> expected(84, 0);
-    expected[73] = 64;
+    expected[73] = 32;
     perform_haptics_out(3, 0, false);
     perform_haptics_out(1, 4, false);
     perform_haptics_out(0, 0xff, false);
@@ -884,11 +884,30 @@ void test_haptics_experiment_requests() {
             "busy start overwrote the accepted run");
 
     // Model the independently progressing Core 1 service, not a USB echo.
-    current_haptics = {
-        1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,
-        123, 22000, 11001, 9876, 0xfffffff0, 0x30, 0x76543210,
-        1100000, HapticsExperimentState::kRunning, 2, 0, 1, 0x89abcdef, 0x12345678, 64, false,
-    };
+    current_haptics = {};
+    current_haptics.run_id = 1;
+    current_haptics.connection_generation = 0x11223344;
+    current_haptics.start_us = 0xffff0000;
+    current_haptics.generated_packets = 103;
+    current_haptics.sent_packets = 101;
+    current_haptics.skipped_packets = 2;
+    current_haptics.send_failures = 3;
+    current_haptics.can_send_requests = 106;
+    current_haptics.synchronous_callbacks = 4;
+    current_haptics.max_generate_us = 123;
+    current_haptics.max_send_gap_us = 22000;
+    current_haptics.max_lateness_us = 11001;
+    current_haptics.max_request_wait_us = 9876;
+    current_haptics.first_tone_due_us = 0xfffffff0;
+    current_haptics.first_tone_sent_us = 0x30;
+    current_haptics.last_sent_us = 0x76543210;
+    current_haptics.last_pcm_end_us = 0xfedcba98; // Internal cue coverage is not wire data.
+    current_haptics.elapsed_us = 1100000;
+    current_haptics.state = HapticsExperimentState::kRunning;
+    current_haptics.slot = 2;
+    current_haptics.mode = 1;
+    current_haptics.host_updates = 0x89abcdef;
+    current_haptics.dropped_updates = 0x12345678;
     const uint32_t fields[] = {
         1, 0x11223344, 0xffff0000, 103, 101, 2, 3, 106, 4,
         123, 22000, 11001, 9876, 0xfffffff0, 0x30, 0x76543210, 1100000,

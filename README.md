@@ -241,6 +241,11 @@ Pairing order determines the initial USB slot assignment. Up to four physical Bl
 
 With no active controller, the Pico runs Bluepad32 discovery and autoconnect. After any controller becomes active, active discovery pauses to protect input, motion, and rumble latency; bonded controllers may still initiate incoming reconnects. Pairing keys persist across Pico power cycles, so reconnect a previously paired controller by pressing its normal Home, PS, or Xbox power button. Hold BOOTSEL for the bounded pairing window before pairing a new controller or a controller that requires host-side discovery. Outside that window, BTstack remains non-bondable and rejects new Classic and BLE authentication.
 
+Closed-window Classic discovery only attempts peers with stored link keys.
+Unpaired inquiry results are ignored until the explicit pairing window opens,
+rather than consuming radio time with connections that cannot authenticate.
+Incoming reconnects and BLE discovery/address resolution are unchanged.
+
 Exception: a ready solo Joy-Con 2 keeps a low-duty passive BLE scan running for a remembered opposite half while physical capacity remains and no controller setup is pending. This reconnect does not require BOOTSEL, start Classic inquiry, or enable fresh pairing. Scanning stops when the pair completes; an explicit pairing window restores normal discovery.
 
 To clear every stored Classic, BLE and proprietary Switch 2 pairing without a PC, hold BOOTSEL continuously for 10 seconds. The normal pairing window opens after two seconds; continuing to hold until the LED changes to a rapid blink clears remembered controllers, disconnects active controllers, publishes neutral state to every slot, and closes new authentication. Release BOOTSEL, open a new pairing window, and pair controllers again. A persistent-storage failure is reported rather than acknowledging a successful clear.
@@ -655,9 +660,10 @@ fault-injection and right, left, Wii, donor-capture, standalone-probe and
 composite builds also pass. These checks do not establish Switch acceptance
 of both functions; that requires the console enumeration trial.
 
-Full-controller input splitting and continuous USB HD-rumble forwarding are
-not implemented yet. This experiment relays two genuine Joy-Cons, including
-their opaque motion/mouse packets and acknowledged built-in vibration cues.
+This JOYCON2 relay mode does not split a full controller or translate continuous
+USB HD rumble. It relays two genuine Joy-Cons, including opaque motion/mouse
+packets and acknowledged built-in cues. GAMEPAD/DUALSENSE mode below provides
+full-controller splitting and optional DualSense HD translation.
 
 The composite image has now been flashed with both pairing banks and all other
 persistent storage verified unchanged. Linux enumerates all four interfaces;
@@ -886,14 +892,14 @@ not reset the other, including when physical slot indices are reused. The
 existing IMU target mask is side-local and repeats for each pair. Physical
 Bluetooth capacity remains four devices: a physical Joy-Con pair uses two links.
 
-GAMEPAD/DUALSENSE builds from 0.101 translate native gameplay vibration into
-conventional source-driver rumble, including a Wii Remote used as a GAMEPAD
-source. Each virtual R/L half controls only its assigned source's right/weak
-or left/strong contribution; mono actuators combine those contributions.
-Source profile rumble gains apply. This does not require the optional DualSense
-HD-haptics experiment and does not reproduce HD carrier-wave frequencies.
-The separate JOYCON2 relay and dedicated Wii-IR builds retain their existing
-built-in sample support; this gameplay translation is for full-controller mode.
+GAMEPAD/DUALSENSE builds support native gameplay vibration. With HD enabled,
+0.108 preserves the native frequency/amplitude timeline for one selected
+DualSense, in any physical slot. Other/unselected controllers, including Wii
+Remotes, retain the conventional source-driver path introduced in 0.101.
+Each virtual R/L half controls only its assigned source's right/left actuator;
+mono motors combine their contributions. Profile gains apply in both paths.
+HD-disabled builds remain amplitude-only. The separate JOYCON2 relay and
+dedicated Wii-IR builds retain their existing built-in sample support.
 
 With the four private capture sets described below prepared, build separately:
 
@@ -906,11 +912,31 @@ cmake -S . -B build-switch2-native-two-pair-live \
   -DSWITCH2_PROBE_HUB=ON -DSWITCH2_PROBE_PAIR_COUNT=2 \
   -DSWITCH2_PROBE_NEUTRAL_INPUT=OFF -DSWITCH2_PROBE_ACK_SETUP04=ON \
   -DSWITCH2_PROBE_USB_INIT=ON -DSWITCH2_PROBE_TRACE_NATIVE_INPUT=ON \
+  -DSWITCH_PICO_SYS_CLOCK_MHZ=240 -DSWITCH_PICO_HD_PACKET_FRAMES=32 \
   -DSWITCH_PICO_HD_RUMBLE=OFF -DSWITCH_PICO_HAPTICS_EXPERIMENT=OFF \
   -DSWITCH_PICO_CYW43_PACKET_READ=OFF -DSWITCH_PICO_HCI_CREDIT_BATCH=OFF \
   -DSWITCH_PICO_HCI_CREDIT_BUFFER=OFF
 cmake --build build-switch2-native-two-pair-live --parallel 4
 ```
+
+That command explicitly retains the 240 MHz compatibility configuration. To
+build the **0.108 diagnostic HD candidate** using the same private inputs:
+
+```sh
+cmake -S . -B build-switch2-native-two-pair-live \
+  -DSWITCH_PICO_SYS_CLOCK_MHZ=300 -DSWITCH_PICO_OVERCLOCK_MV=1300 \
+  -DSWITCH_PICO_HD_RUMBLE=ON -DSWITCH_PICO_HAPTICS_EXPERIMENT=ON \
+  -DSWITCH_PICO_HD_PACKET_FRAMES=32 \
+  -DSWITCH_PICO_CYW43_PACKET_READ=ON -DSWITCH_PICO_HCI_CREDIT_BATCH=ON \
+  -DSWITCH_PICO_HCI_CREDIT_BUFFER=ON
+cmake --build build-switch2-native-two-pair-live --parallel 4
+```
+
+Only 32-frame PCM is supported. The reported non-working 64-frame generator is
+removed, not retained as a fallback. The 0.105 sampling/discovery corrections
+remain; 0.106 also removes blocking UART stdout from the radio poll and lets
+USB interrupts run during child-reset callbacks. The measured PC checks below
+do not establish Switch recognition or physical input latency. CMake does not flash.
 
 The output is `build-switch2-native-two-pair-live/switch-pico.uf2` (plus ELF).
 Full root management and explicit software BOOTSEL remain available. On the
@@ -1248,12 +1274,12 @@ retry or reset occurred; sustained traffic and gameplay remain unqualified.
 That 0.100 image did not implement gameplay rumble: HID output reports were
 logged, while built-in vibration samples used a separate cue path.
 
-**0.101 gameplay-rumble candidate:** native Output Report `0x01` now reaches the
-existing source-driver scheduler in GAMEPAD/DUALSENSE mode. Interrupt reports
-including the ID and SET_REPORT payloads excluding it are normalized without
-copying their padding. The decoder requires a complete 16-byte LRA block and
-format `01`, preserves one to three samples, and converts the larger of the two
-10-bit amplitudes to a conventional 8-bit magnitude. Count-zero HOLD does not
+**0.101 gameplay-rumble candidate (compatibility baseline):** native Output
+Report `0x01` reached the source-driver scheduler in GAMEPAD/DUALSENSE mode.
+Interrupt reports including the ID and SET_REPORT payloads excluding it were
+normalized without copying padding. That decoder required a complete 16-byte
+LRA block and format `01`, preserved one to three samples, and collapsed the
+larger ten-bit amplitude to an eight-bit magnitude. Count-zero HOLD does not
 change output or refresh its watchdog; an explicit zero-amplitude sample stops
 only that side. Unknown formats, wrong IDs and truncated frames do not dispatch.
 
@@ -1275,8 +1301,8 @@ expiry and reset/suspend cancellation. It does not qualify physical motor
 sensation, HD fidelity or console transport timing. The authorized 0.101 flash
 preserved persistent bytes; the user subsequently reported working rumble, but
 also second-player latency and failure to enumerate on the first cold connection
-to the Switch. HD reproduction is deferred. Picotool and management labels are
-synchronized from this candidate onward.
+to the Switch. HD reproduction was deferred at that stage. Picotool and
+management labels are synchronized from this candidate onward.
 
 **0.102 attach-last startup candidate:** the native initializer previously
 forced the physical D+ pull-up on before configuring the controller/EP0,
@@ -1298,12 +1324,200 @@ software attach-before-ready defect; it is not a physical USB timing trace.
 After the authorized 0.102 flash preserved persistent bytes, the user reported
 that the cold-start connection now works. That is user qualification, not an
 instrumented electrical measurement or a long-run reliability claim.
+Later testing on 0.102 still found intermittent unrecognized Switch input until
+unplug/replug. The user confirmed that UART report/completion counters were
+advancing during that failed-recognition state. Those counters do not establish
+that the Switch accepted the virtual controller or used its input.
 
-The Pico is running 0.102. Gameplay rumble, USB runtime scheduling and player
-routing are unchanged by the startup correction. Second-player latency
+The 0.102 startup correction left gameplay rumble, USB runtime scheduling and
+player routing unchanged. Second-player latency
 remains a separate open investigation: a 20-second concurrent PC capture showed
 roughly 231–232 reports/second across all four children, which does not establish
 equal physical input-to-display latency on the Switch.
+
+**0.103 HD candidate (rejected; device restored to 0.102):** native `0x01` decoding preserves
+both ten-bit frequency/amplitude bands. The selected DualSense receives
+32-frame `0x32`/`0x92` PCM, with native 1/96-octave carrier precision and
+16 PCM frames per substep (5.333 ms). This does not change original Switch
+8 ms decoding or the conventional 12 ms approximation. Low/strong and high/weak
+profile gains retain both bands; Wii and unselected devices keep conventional
+rumble. One DualSense stream remains selected, not one stream per pair.
+
+HD ownership includes startup, drain and restoration: rejection never silently
+falls back to compatibility. Side stops, the 50 ms receipt watchdog, USB
+reset/suspend and source epochs retire affected host work. Built-in cues remain
+side-local PCM overlays, and their completion requires actual successful PCM
+coverage of the admitted cue interval. Queue admission is not delivery evidence.
+Mailbox commit/cancellation are serialized without holding the backend lock
+across driver or timer callbacks.
+
+That candidate used a compiled 300 MHz/25-cycle bit period and phase 5;
+240 MHz retained its 20-cycle period and phase 4. Exact clock mismatch
+fails detached, and attach-last startup is unchanged. Required packet reads,
+credit batching and the 300 MHz HD guard were not weakened to accommodate
+64-frame transport; that non-working format was removed.
+
+Verification: 623 repository tests passed, including clock/startup matrices,
+frequency/substep fidelity, timestamp wrap, cue coverage, cancellation races
+and source isolation. A host smoke run exercised the production USB callback,
+decoder, profile/backend routing and PCM engine with instrumented transports:
+DualSense in physical slot 1 beside a Wii, raw and SET_REPORT forms, independent
+sides, profile gains, HOLD/watchdog behavior and reset/suspend isolation.
+Eleven firmware/probe targets built, including 300 MHz HD and 240 MHz baselines.
+The linked Core 1 receiver's direct-call graph remains in SRAM, with 25-cycle
+capture increments. That host verification did not actuate physical controllers.
+
+The authorized 0.103 flash was verified and the native hub re-enumerated on the PC.
+Configuration generation 21 / CRC `b58672ac`, all nine pairings and profile
+selections were unchanged. Full-flash readback confirmed all 3,239,936 bytes
+outside programmed sectors were unchanged. Diagnostics reached initialization
+stage 6; measured system/USB clocks were 300,001/48,000 kHz. No controller had
+reconnected during the post-flash checks, so HD remained idle.
+
+The subsequent Switch test failed: the user reported that input was no longer
+recognized. On the PC, Bluetooth reports and the idle HD stream progressed,
+but native child `GET_CONFIGURATION` requests intermittently failed with I/O
+errors before initialization. Root management success did not qualify child USB.
+This does not isolate the clock/phase change from the added HD/transport load.
+
+The preserved 0.102 image was restored and its write verified. Configuration,
+all nine pairings and profile selections remained unchanged. The same PC probe
+then passed child claiming, descriptor/EP0 isolation, native initialization and
+bulk isolation, receiving over 1,800 packets per child. Live two-player
+qualification did not pass: only one source was connected, and independent
+manual controls were not exercised. Bluetooth input continued after recovery.
+
+That recovery returned the device to 0.102 with conventional rumble. No manual
+motor test was run during the rollback. The later corrections are recorded below;
+Switch recognition and second-player latency remain separate qualification work.
+
+**0.105 USB timing and HD-startup correction:** the first sample offset is
+relative to a software timestamp taken after edge detection, not a fixed
+fraction of the physical USB bit period. Scaling phase 4 to 5 at 300 MHz was
+insufficient. Phase 5 failed 18/160 child controls with HD idle, 10/160 with it
+running, and 25/160 after stopping it. Phase 12 passed 2,400 unloaded controls
+and 4,000 with a connected DualSense and active 32-frame PCM. The receiver
+instructions and addresses were identical in that comparison. The source default
+is now phase 12 at 300 MHz; the 240 MHz phase-4 baseline is unchanged.
+
+A second startup failure exhausted the controller's eight ACL slots while
+outgoing discovery attempts paged nearby Pro Controllers, including an unpaired
+peer. Input/HCI polling continued, but completion gaps reached 166 ms and the
+HD send-permission watchdog expired. A bounded diagnostic cancellation of only
+the unpaired pending attempt allowed early auto-start and over 11,000 successful
+PCM submissions without that timeout. This was diagnostic code, not the final fix.
+
+The permanent Bluepad32 patch instead rejects unpaired **Classic inquiry
+results** before allocating a device or starting a page while non-bondable.
+Stored peers still reconnect; opening the pairing window admits new controllers.
+Incoming connections, BLE discovery, ACL capacity and timeout values are unchanged.
+A real patched-handler regression fails before this change and passes afterward.
+The external Bluepad32 checkout stays pristine.
+
+Both fixes are included in 0.105 without temporary observation/cancellation hooks.
+The complete suite passes 624 tests, and affected firmware/probe builds pass.
+Actual HD waveform/stop and automatic-start measurements are retained in the
+ignored deployment evidence. UART delivery, USB completion and PC protocol tests
+must not be promoted to proof of Switch-side recognition or physical latency.
+
+On the final 0.105 image, HD started automatically without a management re-arm.
+Loaded child-control checks passed 4,000/4,000 requests. A bounded native
+80/160/320 Hz test delivered 111 host updates and 284 PCM packets with no skips,
+drops or compatibility fallback during that test; zero commands returned PCM
+to silence while input continued. Both 60 ms built-in cues and explicit stops
+also received their native acknowledgements.
+
+The user accidentally unplugged/replugged USB between the waveform and cue
+checks. Those are separate boot epochs, not uninterrupted-operation evidence.
+The later boot again auto-started HD and reached 6,229 sent PCM packets with
+four skipped slots and zero send failures over the observed interval.
+Configuration generation 21 / CRC `b58672ac`, all nine pairings and profile
+selections remained unchanged. Switch-side recognition and physical sensation
+still require the user's console/controller observation.
+
+**0.106 foreground-response correction:** the user still observed unresponsive
+Switch input on 0.105. One preserved state stopped partway through child
+enumeration. A recorder opened before the next replug captured root port-status
+and child identity reads whose replies were not armed for **34.395 ms and
+33.720 ms**. The last observed host IN poll was 4.734 ms after the root SETUP;
+Core 0 was in `RADIO_POLL` throughout those polling records.
+
+Bluepad32's `uni_logv` used `vfprintf(stdout)` and the Pico UART's blocking
+output callback, bypassing the native hub's bounded logger. Native-hub startup
+now redirects UART stdout into that same ordered queue before Bluetooth starts.
+The SDK's UART setup and stdin callbacks remain intact. Output and flush do not
+wait for UART space; overflow and unsafe-context stdio are counted as dropped
+diagnostic bytes. The UART drain remains foreground-only and nonblocking.
+
+A separate register-model regression demonstrated that a sibling SETUP could
+prevent the next root status-change poll while a port-reset callback held USB
+IRQs disabled. The acknowledged port action is now claimed atomically, then
+its immutable request is executed with IRQs restored. A later bus reset still
+wins. The regression fails before this change and passes afterward for two
+and four children; this proves the hazard, not sole causation of the console stall.
+
+0.106 passed 624 tests and ten affected firmware/probe builds. It was flashed
+with configuration generation 21 / CRC `b58672ac`, all nine pairings and profile
+selections preserved. Cold PC enumeration captured child string-reply
+preparation at 50.1/100.7 us; these are not identical requests to the failed
+Switch capture. A 12-second root/child stress check passed 11,880 requests while
+Bluetooth input and automatically armed 32-frame HD continued; the observed HD
+run had no skipped packets or send failures. The user subsequently confirmed
+initial Switch game response, then loss of response after setting the controller
+down. The preserved trace stops USB input/address-routing progress near 113.2 s
+while Bluetooth reports, USB SOF and Core 0 continue. A root `CLEAR_FEATURE`
+for endpoint `0x8f` completed immediately before the final child polls; all EP0
+states were idle afterward. This is a separate unresolved transport failure,
+not evidence that controller inactivity caused it or that the endpoint clear
+was defective. **0.106 is not qualified for sustained Switch input.**
+
+**0.107 diagnostic follow-up:** the four-minute PC-only stream check on 0.106
+received 57,292 reports without USB errors, but did not reproduce the console
+stop. Linux rejected the attempted root endpoint-clear request before it
+appeared in the firmware trace; that operation was not exercised on the PC.
+The root hub driver was not detached to bypass the restriction.
+
+Trace-enabled 0.107 adds Core 1 capture-return and discarded-header counters,
+the last discarded raw SYNC/PID word, and routing enable/fault/table state.
+The counters update after capture or rejection, outside token sample deadlines;
+non-trace builds do not perform these counter updates. Compare their progress
+with hardware SOF and the existing address-routing counters. A sampled
+`a596a666` is a SOF header and `96a5a666` a NAK header, not a controller-input ACK.
+These observations help distinguish a quiet router from an inactive sampler;
+they are not a raw USB analyzer or a recovery mechanism.
+
+The diagnostic image was flashed with configuration, pairings and profile
+selections preserved. Its 20-second concurrent PC smoke received 18,900 child
+reports while completing 18,824 root/child controls without USB errors; observer
+counters and Bluetooth reports also advanced. The full suite passed 624 tests,
+then 17 focused tests passed after trace-only counter gating. All eleven
+affected firmware/probe builds passed, including the standalone RAM observer.
+This is additional diagnostic coverage, **not a fix or Switch qualification**.
+The user also reproduced the stop on 0.107. Afterward Core 1 continued sampling
+SOF headers with routing enabled and no observer fault. Both 0.106/0.107 captures
+place the root endpoint clear about 24 ms after the last observed root IN.
+The final root handshake remains unmeasured; no cause or recovery fix is claimed.
+
+**0.108 targeted root-response recorder:** existing-hardware tracing now retains
+the first sampled non-token header following a successfully selected root-IN
+candidate, its observation clock, and any subsequent drain-qualified SE0-to-J
+transition. A copy taken before root SETUP survives the recovery control's own
+response. New, rejected or unmapped tokens end attribution; idle qualification
+does not invent an EOP. These are header/transition observations, not endpoint
+decoding, a full packet validation, or an independent wire analyzer.
+
+Trace/plain receiver tests cover attribution, pre-SETUP preservation, missing
+EOP and counter rollover. The full suite passed 624 tests and all eleven
+affected builds passed. On the installed image, PC NAK observations survived
+the next control request; a concurrent 20-second check passed 19,167 HID reports
+and 21,152 controls. HD remained enabled at 300 MHz with 32-frame packets and
+automatically ran on slot 0: the measured snapshot had 6,686 packets sent,
+zero skips and zero send failures. No motor command was sent by these checks;
+they do not qualify physical rumble. Configuration, nine pairings and profile
+selections were preserved. The user subsequently reported no freeze and
+satisfactory rumble on a Switch trial, and accepted this image for now.
+Instrumentation can change timing; the disconnect's root cause and long-term
+reliability remain unqualified. This is not a demonstrated recovery fix.
 
 **Neutral two-pair transport experiment (0.91):** the standalone probe can expose
 four native children, ordered **A-R, A-L, B-R, B-L** on hub ports 1–4. This is an

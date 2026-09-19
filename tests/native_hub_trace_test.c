@@ -1437,6 +1437,72 @@ static void approved_status_reset_during_completion(void) {
     expect_no_control_packets();
 }
 
+static bool reset_hook_seen, reset_hook_bus_reset;
+
+static void service_during_child_reset(uint8_t instance) {
+    const uint8_t target = CHILDREN > 2 ? 3 : 2;
+    assert(instance == target-1u);
+    native_test_reset_hook = NULL;
+    reset_hook_seen = true;
+    if (reset_hook_bus_reset) {
+        native_test_bus_reset(false);
+        return;
+    }
+    // A sibling SETUP can arrive while reset bookkeeping reads stored state.
+    // Its IRQ must release SETUP_REC before the next root interrupt poll.
+    const tusb_control_request_t descriptor = descriptor_request();
+    assert(native_test_setup(1,&descriptor,false));
+    uint8_t packet[PACKET];
+    uint16_t length = 0;
+    assert(native_test_private_in(0,0x8f,packet,&length) &&
+        "child reset callback blocked the next hub status-change poll");
+    assert(length == 1 && packet[0] == (1u << target));
+}
+
+static void port_reset_interrupt_progress(bool bus_reset) {
+    const uint8_t target = CHILDREN > 2 ? 3 : 2;
+    uint8_t packet[PACKET];
+    uint16_t length = 0;
+    const tusb_control_request_t prepare[] = {
+        {.bRequest = TUSB_REQ_SET_ADDRESS, .wValue = 9},
+        {.bRequest = TUSB_REQ_SET_CONFIGURATION, .wValue = 1},
+        {.bmRequestType = 0x23, .bRequest = TUSB_REQ_SET_FEATURE,
+         .wValue = 8, .wIndex = target},
+    };
+    for (unsigned i = 0; i < sizeof(prepare)/sizeof(prepare[0]); ++i) {
+        assert(native_test_setup(0,&prepare[i],true));
+        assert(native_test_in(0,packet,&length,true) && length == 0);
+    }
+    const tusb_control_request_t reset = {
+        .bmRequestType = 0x23, .bRequest = TUSB_REQ_SET_FEATURE,
+        .wValue = 4, .wIndex = target,
+    };
+    assert(native_test_setup(0,&reset,true));
+    reset_hook_bus_reset = bus_reset;
+    native_test_reset_hook = service_during_child_reset;
+    assert(native_test_in(0,packet,&length,true) && length == 0);
+    assert(reset_hook_seen);
+    const tusb_control_request_t descriptor = descriptor_request();
+    if (bus_reset) {
+        assert(default_device == 0 && addresses[0] == 0 &&
+            devices[0].configuration == 0);
+        for (unsigned p = 0; p < CHILDREN; ++p)
+            assert(ports[p].status == 0 && ports[p].change == 0);
+        assert(native_test_setup(0,&descriptor,true));
+        assert(native_test_in(0,packet,&length,true) && length == 18);
+        assert(native_test_out(0,NULL,0,true));
+        return;
+    }
+    assert(native_test_in(1,packet,&length,true) && length == 18);
+    assert(memcmp(packet,hub_device,length) == 0);
+    assert(native_test_out(1,NULL,0,true));
+    native_test_advance(10000u);
+    assert(default_device == target && addresses[target] == 0);
+    assert(native_test_setup(target,&descriptor,true));
+    assert(native_test_in(target,packet,&length,true) && length == 18);
+    assert(native_test_out(target,NULL,0,true));
+}
+
 static void approved_status_port_reset(bool queued_status) {
     const uint8_t target = CHILDREN;
     uint8_t data[PACKET];
@@ -2208,6 +2274,8 @@ int main(int argc, char** argv) {
     else if (strcmp(argv[1],"approved-status-reset-during-completion") == 0) approved_status_reset_during_completion();
     else if (strcmp(argv[1],"approved-status-port-reset-ready") == 0) approved_status_port_reset(false);
     else if (strcmp(argv[1],"approved-status-port-reset-queued") == 0) approved_status_port_reset(true);
+    else if (strcmp(argv[1],"port-reset-interrupt-progress") == 0) port_reset_interrupt_progress(false);
+    else if (strcmp(argv[1],"port-reset-interrupt-reset") == 0) port_reset_interrupt_progress(true);
     else if (strcmp(argv[1],"approved-status-invalid-length") == 0) approved_status_invalid_length();
     else if (strcmp(argv[1],"approved-status-watch") == 0) approved_status_watch();
     else if (strcmp(argv[1],"status-out-rejected-data") == 0) status_out_rejected_data();

@@ -76,7 +76,7 @@ void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
     assert(instance < PROBE_CONTROLLER_COUNT);
     cue_tokens[instance] = 0;
 }
-bool bluepad32_input_backend_native_rumble_submit(uint8_t, const uint8_t*, uint8_t) {
+bool bluepad32_input_backend_native_rumble_submit(uint8_t, const NativeHapticsActuatorFrame*) {
     assert(false && "gameplay motor dispatch belongs to the native backend fixture");
     return false;
 }

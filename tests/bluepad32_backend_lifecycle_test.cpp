@@ -32,6 +32,7 @@ uni_platform* installed_platform = nullptr;
 bool observed_status_led_on = false;
 int observed_status_led_writes = 0;
 uint32_t now_ms = 0;
+uint32_t now_sub_ms_us = 0;
 struct WiiAccelFixture {
     uni_hid_device_t* device = nullptr;
     int32_t acceleration[3]{};
@@ -689,6 +690,8 @@ uint32_t time_us_32() {
     return now_ms * 1000u;
 }
 
+uint64_t time_us_64() { return uint64_t{now_ms} * 1000 + now_sub_ms_us; }
+
 
 void switch2_wake_initialize() {
     ++switch2_wake_initializations;
@@ -711,6 +714,7 @@ void switch2_wake_diagnostics(Switch2WakeDiagnostics*) {
 #include "core/controller_identity.cpp"
 namespace {
 unsigned state_lock_depth = 0;
+void (*after_backend_state_unlock)() = nullptr;
 
 void tracked_state_lock_enter(critical_section_t* lock) {
     critical_section_enter_blocking(lock);
@@ -721,6 +725,8 @@ void tracked_state_lock_exit(critical_section_t* lock) {
     require(state_lock_depth != 0, "state lock exit must match an enter");
     --state_lock_depth;
     critical_section_exit(lock);
+    if (state_lock_depth == 0 && after_backend_state_unlock)
+        after_backend_state_unlock();
 }
 }  // namespace
 
@@ -769,26 +775,34 @@ namespace {
 std::vector<btstack_timer_source_t*> native_timers;
 std::array<uint8_t, 143> last_native_packet{};
 uint16_t last_native_cid = 0;
+struct NativePacketObservation {
+    uint64_t sent_us;
+    uint16_t cid;
+    std::array<uint8_t, 143> data;
+};
+std::vector<NativePacketObservation> native_packets;
 }
 
 void native_test_add_timer(btstack_timer_source_t* timer) {
+    require(state_lock_depth == 0, "HD timer scheduling must not hold the backend lock");
     btstack_run_loop_remove_timer(timer);
     timer->due_ms = uint64_t{now_ms} + timer->timeout_ms + 1;
     native_timers.push_back(timer);
 }
 
 int btstack_run_loop_remove_timer(btstack_timer_source_t* timer) {
+    require(state_lock_depth == 0, "HD timer cancellation must not hold the backend lock");
     const auto found = std::find(native_timers.begin(), native_timers.end(), timer);
     if (found == native_timers.end()) return 0;
     native_timers.erase(found);
     return 1;
 }
 
-uint64_t time_us_64() { return uint64_t{now_ms} * 1000; }
 uint16_t l2cap_get_remote_mtu_for_local_cid(uint16_t) { return 143; }
 bool l2cap_can_send_packet_now(uint16_t) { return true; }
 int hci_number_free_acl_slots_for_handle(uint16_t) { return 8; }
 uint8_t l2cap_request_can_send_now_event(uint16_t cid) {
+    require(state_lock_depth == 0, "HD permission callbacks must not hold the backend lock");
     for (const auto& slot : g_slots) {
         if (slot.device != nullptr && slot.device->conn.interrupt_cid == cid) {
             (void)uni_platform_on_l2cap_can_send_now(slot.device, cid);
@@ -800,9 +814,11 @@ uint8_t l2cap_request_can_send_now_event(uint16_t cid) {
 }
 
 uint8_t l2cap_send(uint16_t cid, const uint8_t* data, uint16_t size) {
+    require(state_lock_depth == 0, "HD packet writes must not hold the backend lock");
     require(size == last_native_packet.size(), "native report size changed");
     std::copy(data, data + size, last_native_packet.begin());
     last_native_cid = cid;
+    native_packets.push_back({time_us_64(), cid, last_native_packet});
     return ERROR_CODE_SUCCESS;
 }
 
@@ -5351,12 +5367,11 @@ void require_native_channels(bool left, bool right) {
     require(status.state == HapticsExperimentState::kRunning &&
                 status.mode == 1,
             "stateful host rumble lost native gameplay ownership");
-    require(status.packet_frames == SWITCH_PICO_HD_PACKET_FRAMES,
-            "native gameplay ignored the configured packet frame count");
-    const unsigned sample_offset = status.packet_frames == 32 ? 14 : 10;
+    require(status.packet_frames == 32,
+            "native gameplay requires the supported 32-frame transport");
+    constexpr unsigned sample_offset = 14;
     require(last_native_packet[3] == 0x91 &&
-                last_native_packet[sample_offset - 2] ==
-                    (status.packet_frames == 32 ? 0x92 : 0xd2) &&
+                last_native_packet[sample_offset - 2] == 0x92 &&
                 last_native_packet[sample_offset - 1] == 64,
             "stateful channel inspection requires a native PCM block");
     unsigned active[2]{};

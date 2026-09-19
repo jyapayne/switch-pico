@@ -21,8 +21,9 @@
 #include "pico/unique_id.h"
 
 #ifndef NATIVE_HUB_SAMPLE_PHASE
-#define NATIVE_HUB_SAMPLE_PHASE 4u
+#define NATIVE_HUB_SAMPLE_PHASE PROBE_ROUTER_DEFAULT_PHASE
 #endif
+_Static_assert(NATIVE_HUB_SAMPLE_PHASE < FS_BIT_CYCLES, "Native SIO sample phase must fit one bit");
 #define CHILDREN PROBE_CONTROLLER_COUNT
 #define DEVICES (CHILDREN + 1u)
 #define CHANNELS 6u
@@ -1069,6 +1070,26 @@ static void setup_request(const event_t* event) {
     } else supported = false;
     if (!supported) stall(slot);
 }
+static void complete_port_change(const tusb_control_request_t* request, bool set) {
+    const unsigned index = request->wIndex - 1;
+    port_t* p = &ports[index];
+    switch (request->wValue) {
+    case 8:
+        if (set) { p->status |= POWER | CONNECT; p->change |= C_CONNECT; }
+        else { p->status = 0; p->change |= C_CONNECT; forget_port(index); }
+        break;
+    case 4:
+        forget_port(index); p->status = (p->status | RESET) & ~(ENABLE | SUSPEND);
+        p->deadline = time_us_32()+10000u; break;
+    case 1: p->status &= ~ENABLE; forget_port(index); break;
+    case 2:
+        if (set) p->status |= SUSPEND;
+        else { p->status &= ~SUSPEND; p->change |= C_SUSPEND; }
+        break;
+    default: p->change &= ~(1u << (request->wValue-16)); break;
+    }
+}
+
 static void control_complete(uint8_t slot) {
     control_t* c = &devices[slot].control;
     c->stage = IDLE;
@@ -1101,26 +1122,6 @@ static void control_complete(uint8_t slot) {
         set_buffer(slot,channel,ep->halted ? USB_BUF_CTRL_STALL : 0);
         spin_unlock(bank_lock,flags);
         if (!ep->halted && (channel & 1u)) arm_packet(slot,channel,NULL,0);
-        break;
-    }
-    case PORT_SET:
-    case PORT_CLEAR: {
-        unsigned index = c->request.wIndex - 1; port_t* p = &ports[index]; bool set = c->action == PORT_SET;
-        switch (c->request.wValue) {
-        case 8:
-            if (set) { p->status |= POWER | CONNECT; p->change |= C_CONNECT; }
-            else { p->status = 0; p->change |= C_CONNECT; forget_port(index); }
-            break;
-        case 4:
-            forget_port(index); p->status = (p->status | RESET) & ~(ENABLE | SUSPEND);
-            p->deadline = time_us_32()+10000u; break;
-        case 1: p->status &= ~ENABLE; forget_port(index); break;
-        case 2:
-            if (set) p->status |= SUSPEND;
-            else { p->status &= ~SUSPEND; p->change |= C_SUSPEND; }
-            break;
-        default: p->change &= ~(1u << (c->request.wValue-16)); break;
-        }
         break;
     }
     default: break;
@@ -1182,12 +1183,25 @@ static void __no_inline_not_in_flash_func(transfer_complete)(const event_t* even
                     tud_vendor_control_xfer_cb(slot,CONTROL_STAGE_ACK,&c->request);
             }
             else {
-                // Do not let a reset IRQ revoke ownership between checking it
-                // and publishing the acknowledged service transaction.
                 uint32_t flags = save_and_disable_interrupts();
-                if (event->reset_generation == d->reset_generation)
+                if (event->reset_generation != d->reset_generation) {
+                    restore_interrupts(flags);
+                    return;
+                }
+                if (c->action == PORT_SET || c->action == PORT_CLEAR) {
+                    // Claim this acknowledged action before allowing another
+                    // SETUP/reset IRQ. The immutable request stays valid while
+                    // child reset callbacks read storage and publish routing.
+                    // A later bus reset is queued and processed after this action.
+                    const tusb_control_request_t request = c->request;
+                    const bool set = c->action == PORT_SET;
+                    c->stage = IDLE;
+                    restore_interrupts(flags);
+                    complete_port_change(&request,set);
+                } else {
                     control_complete(slot);
-                restore_interrupts(flags);
+                    restore_interrupts(flags);
+                }
             }
         } else if (c->stage == DATA_IN && channel == 0) {
             // Claim DATA completion before reset can revoke it, as for ACK.
@@ -1283,7 +1297,7 @@ void native_hub_startup_guard(void) {
 }
 
 bool native_hub_init(void) {
-    if (started || clock_get_hz(clk_sys) != 240000000u) return false;
+    if (started || clock_get_hz(clk_sys) != FS_CLOCK_HZ) return false;
     bank_lock = spin_lock_instance(spin_lock_claim_unused(true));
     memset(devices,0,sizeof(devices)); memset(ports,0,sizeof(ports));
     snprintf(root_serial,sizeof(root_serial),"switch-pico-");
@@ -1303,7 +1317,8 @@ bool native_hub_init(void) {
     usb_hw->sie_ctrl = USB_SIE_CTRL_EP0_INT_1BUF_BITS;
     usb_hw->inte = USB_INTS_BUFF_STATUS_BITS | USB_INTS_BUS_RESET_BITS | USB_INTS_SETUP_REQ_BITS |
         USB_INTS_DEV_SUSPEND_BITS | USB_INTS_DEV_RESUME_FROM_HOST_BITS;
-    probe_router_init(clock_get_hz(clk_sys)); probe_router_set_phase(NATIVE_HUB_SAMPLE_PHASE);
+    probe_router_init(clock_get_hz(clk_sys));
+    if (!probe_router_set_phase(NATIVE_HUB_SAMPLE_PHASE)) return false;
     multicore_launch_core1(probe_router_core1);
     uint32_t deadline = time_us_32()+100000;
     probe_router_stats observer;
@@ -1325,9 +1340,9 @@ bool native_hub_init(void) {
     // even an immediate host reset/SETUP now has an initialized receiver.
     hw_set_bits(&usb_hw->phy_direct,USB_USBPHY_DIRECT_DP_PULLUP_EN_BITS);
 #if CHILDREN == 2
-    probe_debug_printf("[NATIVE_HUB] stock USB, SIO phase=%u, 240MHz; hub2068 R2066 L2067; isolated EP0/1/2 banks\n",NATIVE_HUB_SAMPLE_PHASE);
+    probe_debug_printf("[NATIVE_HUB] stock USB, SIO phase=%u, %uMHz; hub2068 R2066 L2067; isolated EP0/1/2 banks\n",NATIVE_HUB_SAMPLE_PHASE,(unsigned)FS_CLOCK_MHZ);
 #else
-    probe_debug_printf("[NATIVE_HUB] stock USB, SIO phase=%u, 240MHz; hub2068 children=%u order=AR/AL/BR/BL; isolated EP0/1/2 banks\n",NATIVE_HUB_SAMPLE_PHASE,CHILDREN);
+    probe_debug_printf("[NATIVE_HUB] stock USB, SIO phase=%u, %uMHz; hub2068 children=%u order=AR/AL/BR/BL; isolated EP0/1/2 banks\n",NATIVE_HUB_SAMPLE_PHASE,(unsigned)FS_CLOCK_MHZ,CHILDREN);
 #endif
     return true;
 }
@@ -1652,6 +1667,21 @@ void native_hub_task(void) {
                            " mtime=%08"PRIx32" watchdog=%08"PRIx32" nak_poll=%08"PRIx32"\n",
                            usb_hw->intr,usb_hw->inte,usb_hw->sof_rd,sio_hw->mtime,
                            usb_hw->dev_sm_watchdog,usb_hw->nak_poll);
+        probe_debug_printf("[HUB_OBSERVER] returns=%"PRIu32" discard=%"PRIu32" header=%08"PRIx32
+                           " enabled=%"PRIu32" fault=%"PRIu32" generation=%"PRIu32" reader=%"PRIu32
+                           " gpio=%08"PRIx32" mux=%08"PRIx32"\n",
+                           observer.capture_returns,observer.discarded_headers,observer.last_discarded_header,
+                           observer.enabled,observer.fatal_fault,observer.published_generation,observer.reader_index,
+                           sio_hw->gpio_hi_in,usb_hw->muxing);
+        probe_debug_printf("[HUB_ROOT_REPLY] in=%"PRIu32" cutoff=%08"PRIx32
+                           " header=%08"PRIx32" seen=%08"PRIx32" eop=%08"PRIx32
+                           " before_in=%"PRIu32" before_cutoff=%08"PRIx32
+                           " before_header=%08"PRIx32" before_seen=%08"PRIx32" before_eop=%08"PRIx32"\n",
+                           observer.root_in_count,observer.root_in_cutoff,observer.root_header,
+                           observer.root_header_cycle,observer.root_eop_cycle,
+                           observer.before_setup_in_count,observer.before_setup_in_cutoff,
+                           observer.before_setup_header,observer.before_setup_header_cycle,
+                           observer.before_setup_eop_cycle);
 #if CHILDREN == 2
         probe_debug_printf("[HUB_PORTS] status=%04x/%04x change=%04x/%04x\n",
                            ports[0].status,ports[1].status,ports[0].change,ports[1].change);

@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "model.h"
+#include "core/native_haptics.h"
 
 #define PROBE_COMMAND_MAX_SIZE 263u
 #define PROBE_REPLY_MAX_SIZE 96u
@@ -50,17 +51,14 @@ typedef struct {
     uint32_t report_counter;
 } probe_protocol_state;
 
-typedef struct {
-    uint8_t count;
-    uint8_t magnitude[3];
-} probe_rumble_frame;
-
-// Stateless Output 01 compatibility rumble: report_id 0 includes the leading
+// Stateless Output 01 waveform decoding: report_id 0 includes the leading
 // wire ID (17..64 bytes); report_id 1 omits it (16..63 bytes).
 // Count zero means HOLD/no update, not stop or watchdog refresh. A nonempty
 // zero-amplitude sample is stop. Malformed input leaves output unchanged.
+// Both 10-bit frequency and amplitude fields survive decoding; each physical
+// output backend chooses its own supported frequency range and rendering.
 bool probe_protocol_decode_rumble(uint8_t report_id, const uint8_t* data,
-                                  size_t length, probe_rumble_frame* output);
+                                  size_t length, NativeHapticsActuatorFrame* output);
 
 void probe_protocol_reset(probe_protocol_state* state, bool is_left);
 // Blob: own address[6], count[1], zero-padded host addresses[42][6], AES key[16].

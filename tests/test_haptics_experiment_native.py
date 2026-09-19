@@ -7,10 +7,7 @@ import pytest
 
 
 @pytest.mark.parametrize("ram", [0, 1], ids=["flash", "sram"])
-@pytest.mark.parametrize("packet_frames", [32, 64], ids=["32frames", "64frames"])
-def test_haptics_experiment_native(
-    tmp_path: Path, ram: int, packet_frames: int
-) -> None:
+def test_haptics_experiment_native(tmp_path: Path, ram: int) -> None:
     root = Path(__file__).resolve().parents[1]
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
@@ -27,16 +24,10 @@ def test_haptics_experiment_native(
             "-pedantic",
             "-DSWITCH_PICO_HAPTICS_EXPERIMENT=1",
             f"-DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM={ram}",
-            f"-DSWITCH_PICO_HD_PACKET_FRAMES={packet_frames}",
-            *(
-                [
-                    "-DSWITCH_PICO_CYW43_PACKET_READ=1",
-                    "-DSWITCH_PICO_HCI_CREDIT_BATCH=1",
-                    "-DSWITCH_PICO_SYS_CLOCK_MHZ=300",
-                ]
-                if packet_frames == 32
-                else []
-            ),
+            "-DSWITCH_PICO_HD_PACKET_FRAMES=32",
+            "-DSWITCH_PICO_CYW43_PACKET_READ=1",
+            "-DSWITCH_PICO_HCI_CREDIT_BATCH=1",
+            "-DSWITCH_PICO_SYS_CLOCK_MHZ=300",
             f"-I{root / 'tests' / 'haptics_experiment_native_stubs'}",
             f"-I{root / 'src' / 'firmware'}",
             str(root / "tests" / "haptics_experiment_test.cpp"),
@@ -52,7 +43,7 @@ def test_haptics_experiment_native(
     )
     subprocess.run([str(executable), str(corpus)], check=True, cwd=root)
     reports = corpus.read_bytes()
-    assert len(reports) == (18432 // packet_frames) * 143
+    assert len(reports) == (18432 // 32) * 143
     # Independent standard-library CRC across real module-generated packets:
     # A2 is covered once, CRC itself excluded, and stored little-endian.
     for offset in range(0, len(reports), 143):

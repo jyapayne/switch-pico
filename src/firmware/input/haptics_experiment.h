@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "core/native_haptics.h"
+
 #ifndef SWITCH_PICO_HD_PACKET_FRAMES
 #define SWITCH_PICO_HD_PACKET_FRAMES 32
 #endif
@@ -38,6 +40,9 @@ struct HapticsExperimentDiagnostics {
     uint32_t first_tone_due_us = 0;
     uint32_t first_tone_sent_us = 0;
     uint32_t last_sent_us = 0;
+    // Absolute (wrapping uint32) timeline end of the last successful gameplay
+    // PCM block, not send wall time. Setup/failed-send/drain never advance it.
+    uint32_t last_pcm_end_us = 0;
     uint32_t elapsed_us = 0;
     HapticsExperimentState state = HapticsExperimentState::kIdle;
     uint8_t slot = 0xff;
@@ -57,12 +62,29 @@ void haptics_experiment_snapshot(HapticsExperimentDiagnostics* output);
 bool haptics_experiment_submit(uint8_t slot, uint32_t generation,
                                uint64_t received_us,
                                const SwitchHapticsFrame& frame);
+// Full-precision native frames. Validation and generation/ownership checks are
+// atomic with mailbox admission; false never means permission to use rumble.
+// This and cancel_native only touch a bounded mailbox: no driver, timer or
+// backend callbacks. Backend state may enclose them (backend -> haptics lock);
+// the haptics lock must never acquire backend state.
+bool haptics_experiment_submit_native(uint8_t slot, uint32_t generation,
+                                      uint64_t received_us,
+                                      const NativeHapticsFrame& frame);
+// Core 0 safe, including Pending/Drain/Restore and fixture exclusivity.
+bool haptics_experiment_native_selected(uint8_t slot, uint32_t generation);
+// Bits 0/1 select left/right. Erase pending native work immediately; the BT
+// core consumes the silence fence before its next generated PCM block. Already
+// submitted packets cannot be recalled. Feedback and the other side survive.
+void haptics_experiment_cancel_native(uint8_t slot, uint32_t generation,
+                                      uint8_t side_mask);
 // Stateful, already profile-scaled XInput strengths, including explicit zero.
 bool haptics_experiment_submit_rumble(uint8_t slot, uint32_t generation,
                                       uint64_t received_us,
                                       uint8_t low, uint8_t high);
 
 // Core 1 / BTstack only. Poll consumes management requests, not PCM cadence.
+// Reattaching the same slot/device/CID migrates a logical source generation
+// without restarting PCM; cancel retired native sides before that migration.
 void haptics_experiment_attach(uint8_t slot, uint32_t generation,
                                uni_hid_device_t* device);
 void haptics_experiment_detach(uni_hid_device_t* device);
@@ -71,5 +93,9 @@ bool haptics_experiment_owns(const uni_hid_device_t* device);
 bool haptics_experiment_gameplay_owns(const uni_hid_device_t* device);
 bool haptics_experiment_feedback(uni_hid_device_t* device,
                                  uint8_t low, uint8_t high, uint16_t duration_ms);
+// BT-context side-isolated cue. Preserve its receipt timestamp and reduced
+// duration for PCM coverage accounting; admission alone is not delivery.
+bool haptics_experiment_native_feedback(uni_hid_device_t* device, uint64_t received_us,
+                                        uint8_t left, uint8_t right, uint16_t duration_ms);
 // Preserve fixture/drain exclusivity on unsolicited or control-CID events.
 bool haptics_experiment_blocks_generic(const uni_hid_device_t* device);

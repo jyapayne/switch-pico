@@ -27,6 +27,10 @@
 #include "pico/stdlib.h"
 #include "hardware/sync.h"
 #include "hardware/uart.h"
+#if SWITCH2_PROBE_HUB
+#include "pico/stdio/driver.h"
+#include "pico/stdio_uart.h"
+#endif
 #include "tusb.h"
 #include "descriptors.h"
 #include "protocol.h"
@@ -127,6 +131,40 @@ static void gate_join_shoulders(uint8_t instance, uint8_t report_id,
 }
 #endif
 
+static void count_dropped_log_bytes(uint32_t count) {
+    if (!count) return;
+#if SWITCH2_PROBE_HUB
+    __atomic_add_fetch(&log_dropped, count, __ATOMIC_RELAXED);
+#else
+    log_dropped += count;
+#endif
+}
+
+static bool queue_log_bytes(const char* message, size_t size, uint32_t requested) {
+#if !SWITCH2_PROBE_HUB
+    const uint32_t interrupts = save_and_disable_interrupts();
+#elif defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    const uint32_t trace_parent = native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_LOG_COPY);
+#endif
+    const bool queued = LOG_CAPACITY - (log_written - log_read) >= size;
+    if (queued) {
+        const size_t offset = log_written % LOG_CAPACITY;
+        const size_t first = size < LOG_CAPACITY - offset ? size : LOG_CAPACITY - offset;
+        memcpy(log_bytes + offset, message, first);
+        memcpy(log_bytes, message + first, size - first);
+        log_written += (uint32_t)size;
+        count_dropped_log_bytes(requested - (uint32_t)size);
+    } else {
+        count_dropped_log_bytes(requested);
+    }
+#if !SWITCH2_PROBE_HUB
+    restore_interrupts(interrupts);
+#elif defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    native_hub_trace_phase(trace_parent);
+#endif
+    return queued;
+}
+
 int probe_debug_printf(const char* format, ...) {
 #if SWITCH2_PROBE_HUB
     // Native-hub producers and the UART consumer all run on Core0 foreground.
@@ -142,29 +180,29 @@ int probe_debug_printf(const char* format, ...) {
     va_end(args);
     if (result <= 0) return result;
     const size_t size = (size_t)result < sizeof(message) ? (size_t)result : sizeof(message) - 1;
-#if !SWITCH2_PROBE_HUB
-    const uint32_t interrupts = save_and_disable_interrupts();
-#elif defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
-    const uint32_t trace_parent = native_hub_trace_phase(NATIVE_HUB_TRACE_PHASE_LOG_COPY);
-#endif
-    const bool queued = LOG_CAPACITY - (log_written - log_read) >= size;
-    if (queued) {
-        const size_t offset = log_written % LOG_CAPACITY;
-        const size_t first = size < LOG_CAPACITY - offset ? size : LOG_CAPACITY - offset;
-        memcpy(log_bytes + offset, message, first);
-        memcpy(log_bytes, message + first, size - first);
-        log_written += (uint32_t)size;
-        log_dropped += (uint32_t)result - (uint32_t)size;
-    } else {
-        log_dropped += (uint32_t)result;
-    }
-#if !SWITCH2_PROBE_HUB
-    restore_interrupts(interrupts);
-#elif defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
-    native_hub_trace_phase(trace_parent);
-#endif
-    return queued ? result : -1;
+    return queue_log_bytes(message, size, (uint32_t)result) ? result : -1;
 }
+
+#if SWITCH2_PROBE_HUB
+static void buffered_stdio_out(const char* bytes, int length) {
+    if (length <= 0) return;
+    // Stdio can also be called by panic/IRQ paths. Never recursively assert,
+    // race the foreground ring, or wait for UART from those contexts.
+    if (get_core_num() != 0 || __get_current_exception() != 0) {
+        count_dropped_log_bytes((uint32_t)length);
+        return;
+    }
+    queue_log_bytes(bytes, (size_t)length, (uint32_t)length);
+}
+
+static void buffer_uart_stdio(void) {
+    // Install before Bluetooth starts. Bluepad32's vfprintf/printf output
+    // must share the ordered queue rather than blocking RADIO_POLL on UART.
+    // Keep the SDK's UART initialization, stdin and availability callbacks.
+    stdio_uart.out_chars = buffered_stdio_out;
+    stdio_uart.out_flush = NULL; // Foreground drain_log owns physical output.
+}
+#endif
 
 static void drain_log(void) {
     while (uart_is_writable(uart0)) {
@@ -305,12 +343,11 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     if (instance < PROBE_CONTROLLER_COUNT && report_type == HID_REPORT_TYPE_OUTPUT &&
         controllers[instance].protocol.initialized &&
         probe_transport_mounted(instance) && !probe_transport_suspended(instance)) {
-        probe_rumble_frame frame;
+        NativeHapticsActuatorFrame frame;
         if (probe_protocol_decode_rumble(report_id, buffer, length, &frame)) {
             // Count-zero HOLD leaves both motor state and watchdog untouched.
             // Valid gameplay traffic must not fill the slow UART log ring.
-            if (frame.count && probe_controller_input_submit_rumble(
-                    instance, frame.magnitude, frame.count))
+            if (frame.sample_count && probe_controller_input_submit_rumble(instance, &frame))
                 controllers[instance].gameplay_rumble_seen = true;
             return;
         }
@@ -836,6 +873,9 @@ int main(void) {
     system_clock_initialize();
 #endif
     stdio_init_all();
+#if SWITCH2_PROBE_HUB
+    buffer_uart_stdio();
+#endif
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
     probe_debug_printf("\n[PROBE] " PROBE_JOYCON_PRODUCT " Bluetooth-to-USB controller/native mouse bridge\n");
 #elif SWITCH2_PROBE_NEUTRAL_INPUT
@@ -994,7 +1034,7 @@ int main(void) {
                                " log_dropped_bytes=%" PRIu32 "\n",
                                now, probe_transport_mounted(0), bulk_packets, hid_packets,
                                identity_requests, version_requests, setup_completions,
-                               input_reports, command_drops, log_dropped);
+                               input_reports, command_drops, __atomic_load_n(&log_dropped, __ATOMIC_RELAXED));
 #ifdef SWITCH2_PROBE_USB_INIT
             for (uint8_t instance = 0; instance < PROBE_CONTROLLER_COUNT; ++instance) {
                 probe_usb_controller* controller = &controllers[instance];

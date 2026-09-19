@@ -5,13 +5,14 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("clock_mhz", [240, 300], ids=["240MHz", "300MHz"])
 @pytest.mark.parametrize(
     ("controller_count", "neutral_input"),
     [(2, False), (2, True), (4, True)],
     ids=["native-management", "neutral-one-pair", "neutral-two-pair"],
 )
 def test_native_hub_management_native(
-    tmp_path: Path, controller_count: int, neutral_input: bool
+    tmp_path: Path, controller_count: int, neutral_input: bool, clock_mhz: int
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     cc = shutil.which("cc") or shutil.which("gcc")
@@ -33,6 +34,7 @@ def test_native_hub_management_native(
         "-fdata-sections",
         "-DSWITCH2_PROBE_HUB=1",
         f"-DPROBE_CONTROLLER_COUNT={controller_count}",
+        f"-DSWITCH_PICO_SYS_CLOCK_MHZ={clock_mhz}",
     ]
     flags.append(f"-DSWITCH2_PROBE_NEUTRAL_INPUT={int(neutral_input)}")
     transport = tmp_path / "native_hub_transport.o"
@@ -78,33 +80,40 @@ def test_native_hub_management_native(
     )
     for reboot_slot in ("root", "child"):
         subprocess.run([str(executable), reboot_slot], check=True, cwd=root)
-    router_executable = tmp_path / "native_hub_router_test"
-    subprocess.run(
-        [
-            cc,
-            "-std=c11",
-            *flags,
-            *includes,
-            str(root / "tests" / "native_hub_router_test.c"),
-            "-o",
-            str(router_executable),
-        ],
-        check=True,
-        cwd=root,
-    )
-    subprocess.run([str(router_executable)], check=True, cwd=root)
+    for trace in (False, True):
+        router_executable = tmp_path / f"native_hub_router_test_{int(trace)}"
+        trace_flags = ["-DSWITCH2_PROBE_TRACE_NATIVE_INPUT=1"] if trace else []
+        subprocess.run(
+            [
+                cc,
+                "-std=c11",
+                *flags,
+                *trace_flags,
+                *includes,
+                str(root / "tests" / "native_hub_router_test.c"),
+                "-o",
+                str(router_executable),
+            ],
+            check=True,
+            cwd=root,
+        )
+        subprocess.run([str(router_executable)], check=True, cwd=root)
 
 
+@pytest.mark.parametrize("clock_mhz", [240, 300], ids=["240MHz", "300MHz"])
 @pytest.mark.parametrize("controller_count", [2, 4], ids=["one-pair", "two-pair"])
 @pytest.mark.parametrize("trace_enabled", [False, True], ids=["plain", "trace"])
 def test_native_hub_cold_startup(
-    tmp_path: Path, controller_count: int, trace_enabled: bool
+    tmp_path: Path, controller_count: int, trace_enabled: bool, clock_mhz: int
 ) -> None:
     root = Path(__file__).resolve().parents[1]
     cc = shutil.which("cc") or shutil.which("gcc")
     assert cc is not None, "a host C compiler is required"
     executable = tmp_path / "native_hub_startup_test"
-    flags = [f"-DPROBE_CONTROLLER_COUNT={controller_count}"]
+    flags = [
+        f"-DPROBE_CONTROLLER_COUNT={controller_count}",
+        f"-DSWITCH_PICO_SYS_CLOCK_MHZ={clock_mhz}",
+    ]
     if trace_enabled:
         flags.append("-DSWITCH2_PROBE_TRACE_NATIVE_INPUT=1")
     subprocess.run(
@@ -131,5 +140,12 @@ def test_native_hub_cold_startup(
         check=True,
         cwd=root,
     )
-    for scenario in ("ready", "delayed", "timeout"):
+    for scenario in (
+        "ready",
+        "delayed",
+        "timeout",
+        "mismatched-clock",
+        "unsupported-clock",
+        "inexact-clock",
+    ):
         subprocess.run([str(executable), scenario], check=True, cwd=root)

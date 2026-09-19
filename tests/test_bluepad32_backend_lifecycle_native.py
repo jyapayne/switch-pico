@@ -10,15 +10,14 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
     compiler = shutil.which("c++") or shutil.which("g++")
     assert compiler is not None, "a host C++ compiler is required"
 
-    for bluetooth_mode, native, short_packets, wii_bridge in (
-        ("mixed", False, False, False),
-        ("mixed", True, False, False),
-        ("mixed", True, True, False),
-        ("ble", False, False, False),
-        ("classic", False, False, False),
-        ("mixed", False, False, True),
+    for bluetooth_mode, native, wii_bridge in (
+        ("mixed", False, False),
+        ("mixed", True, False),
+        ("ble", False, False),
+        ("classic", False, False),
+        ("mixed", False, True),
     ):
-        suffix = "_wii_bridge" if wii_bridge else "_native32" if short_packets else "_native64" if native else ""
+        suffix = "_wii_bridge" if wii_bridge else "_native32" if native else ""
         executable = (
             tmp_path / f"bluepad32_backend_lifecycle_test_{bluetooth_mode}{suffix}"
         )
@@ -42,7 +41,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                     "-DSWITCH_PICO_HAPTICS_EXPERIMENT=1",
                     "-DSWITCH_PICO_HD_RUMBLE=1",
                     "-DSWITCH_PICO_HAPTICS_EXPERIMENT_RAM=0",
-                    f"-DSWITCH_PICO_HD_PACKET_FRAMES={32 if short_packets else 64}",
+                    "-DSWITCH_PICO_HD_PACKET_FRAMES=32",
                     str(root / "src" / "firmware" / "input" / "haptics_experiment.cpp"),
                     str(
                         root
@@ -68,7 +67,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
                     ),
                 ]
             )
-        if short_packets:
+        if native:
             command.extend(
                 [
                     "-DSWITCH_PICO_CYW43_PACKET_READ=1",
@@ -116,7 +115,11 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
         )
         subprocess.run(command, check=True, cwd=root)
         if wii_bridge:
-            for scenario in ("wii-bridge-sensors", "wii-bridge-cues", "wii-bridge-cue-races"):
+            for scenario in (
+                "wii-bridge-sensors",
+                "wii-bridge-cues",
+                "wii-bridge-cue-races",
+            ):
                 subprocess.run([str(executable), scenario], check=True, cwd=root)
             continue
         subprocess.run([str(executable), "transport-policy"], check=True, cwd=root)

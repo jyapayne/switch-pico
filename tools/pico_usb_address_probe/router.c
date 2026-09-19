@@ -24,8 +24,6 @@ extern bool native_hub_select_device(uint8_t address, uint8_t owner, uint32_t cu
 // makes it a zero-wait-state cycle counter next to the GPIO inputs, avoiding
 // SysTick's PPB accesses and 24-bit down-counter arithmetic in every sample.
 // Deadlines use modular 32-bit arithmetic for intervals below 2^31 cycles.
-#define FS_CLOCK_HZ 240000000u
-#define FS_BIT_CYCLES 20u
 #define LINE_SE0 0u
 #define LINE_J 1u
 #define LINE_K 2u
@@ -85,6 +83,10 @@ static uint32_t fatal_fault;
 static bool valid_clock;
 static uint8_t address_decoder[2][256];
 static bool address_decoder_ready;
+#if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+enum { ROOT_OBSERVE_IDLE, ROOT_OBSERVE_HEADER, ROOT_OBSERVE_EOP };
+static uint8_t root_observation_stage; // Core1 only after initialization.
+#endif
 
 static __force_inline uint32_t atomic_read(const uint32_t* value) {
     return __atomic_load_n(value, __ATOMIC_RELAXED);
@@ -195,6 +197,9 @@ void probe_router_init(uint32_t system_clock_hz) {
     memset(addresses, PROBE_ROUTER_UNASSIGNED, sizeof(addresses));
     addresses[0] = 0u;
     memset(&counters, 0, sizeof(counters));
+#if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    root_observation_stage = ROOT_OBSERVE_IDLE;
+#endif
     published_generation = 0u;
     reader_index = NO_READER;
     enabled = 0u;
@@ -202,7 +207,7 @@ void probe_router_init(uint32_t system_clock_hz) {
     setup_publication = SETUP_INVALID;
     fatal_fault = 0u;
     valid_clock = system_clock_hz == FS_CLOCK_HZ;
-    counters.cycles_per_bit = system_clock_hz / 12000000u;
+    counters.cycles_per_bit = valid_clock ? FS_BIT_CYCLES : 0u;
     build_table(&tables[0], addresses, 0u);
 }
 
@@ -230,12 +235,12 @@ void probe_router_publish(const uint8_t addresses[PROBE_ROUTER_SLOTS], uint8_t d
 void probe_router_enable(bool enable) {
     // ARM qualification (observed hub tokens/SETUPs) belongs to the control
     // request handler. This additionally prevents enabling a failed observer.
-    __atomic_store_n(&enabled, enable && atomic_read(&counters.ready) != 0u &&
+    __atomic_store_n(&enabled, enable && valid_clock && atomic_read(&counters.ready) != 0u &&
                      atomic_read(&fatal_fault) == 0u, __ATOMIC_RELEASE);
 }
 
 bool probe_router_set_phase(uint32_t cycles) {
-    if (cycles >= atomic_read(&counters.cycles_per_bit) || atomic_read(&enabled) != 0u)
+    if (!valid_clock || cycles >= FS_BIT_CYCLES || atomic_read(&enabled) != 0u)
         return false;
     __atomic_store_n(&phase_cycles, cycles, __ATOMIC_RELEASE);
     return true;
@@ -261,7 +266,24 @@ void probe_router_snapshot(probe_router_stats* out) {
     SNAPSHOT(last_raw_count);
     SNAPSHOT(last_raw_eop);
     SNAPSHOT(last_raw_late);
+    SNAPSHOT(capture_returns);
+    SNAPSHOT(discarded_headers);
+    SNAPSHOT(last_discarded_header);
+    SNAPSHOT(root_in_count);
+    SNAPSHOT(root_in_cutoff);
+    SNAPSHOT(root_header);
+    SNAPSHOT(root_header_cycle);
+    SNAPSHOT(root_eop_cycle);
+    SNAPSHOT(before_setup_in_count);
+    SNAPSHOT(before_setup_in_cutoff);
+    SNAPSHOT(before_setup_header);
+    SNAPSHOT(before_setup_header_cycle);
+    SNAPSHOT(before_setup_eop_cycle);
 #undef SNAPSHOT
+    out->enabled = atomic_read(&enabled);
+    out->fatal_fault = atomic_read(&fatal_fault);
+    out->published_generation = atomic_read(&published_generation);
+    out->reader_index = atomic_read(&reader_index);
     const uint32_t setup = __atomic_load_n(&setup_publication, __ATOMIC_ACQUIRE);
     out->last_setup_sequence = setup & SETUP_SEQUENCE_MASK;
     const uint32_t slot = setup >> SETUP_SLOT_SHIFT;
@@ -308,20 +330,82 @@ static __force_inline bool sample_line(uint32_t* deadline, uint32_t* line) {
     return true;
 }
 
+#if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+static __force_inline void root_observe_token(uint8_t owner, uint32_t signature,
+                                              uint32_t cutoff, bool selected) {
+    if (selected && owner == 0 && signature == TOKEN_IN_SIGNATURE) {
+        // Early-prefix and full-address decisions share a cutoff. Do not reset
+        // an observation twice for the same token.
+        if (root_observation_stage == ROOT_OBSERVE_HEADER &&
+            atomic_read(&counters.root_in_cutoff) == cutoff) return;
+        count_one(&counters.root_in_count);
+        atomic_write(&counters.root_in_cutoff,cutoff);
+        atomic_write(&counters.root_header,0);
+        atomic_write(&counters.root_header_cycle,0);
+        atomic_write(&counters.root_eop_cycle,0);
+        root_observation_stage = ROOT_OBSERVE_HEADER;
+        return;
+    }
+    // A new token ends attribution to the preceding root IN, including when
+    // its selection fails. A later child's response must not become the root's.
+    root_observation_stage = ROOT_OBSERVE_IDLE;
+    if (selected && owner == 0 && signature == TOKEN_SETUP_SIGNATURE) {
+        atomic_write(&counters.before_setup_in_count,atomic_read(&counters.root_in_count));
+        atomic_write(&counters.before_setup_in_cutoff,atomic_read(&counters.root_in_cutoff));
+        atomic_write(&counters.before_setup_header,atomic_read(&counters.root_header));
+        atomic_write(&counters.before_setup_header_cycle,atomic_read(&counters.root_header_cycle));
+        atomic_write(&counters.before_setup_eop_cycle,atomic_read(&counters.root_eop_cycle));
+    }
+}
+
+static __force_inline void observe_discarded_header(uint32_t header) {
+    atomic_write(&counters.last_discarded_header,header);
+    count_one(&counters.discarded_headers);
+    if (root_observation_stage == ROOT_OBSERVE_HEADER) {
+        atomic_write(&counters.root_header,header);
+        atomic_write(&counters.root_header_cycle,cycles_now());
+        root_observation_stage = ROOT_OBSERVE_EOP;
+    }
+}
+#endif
+
+static __force_inline void root_observe_eop(uint32_t cycle, bool qualified) {
+#if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    if (root_observation_stage == ROOT_OBSERVE_EOP) {
+        // This is the drain's observed SE0-to-J qualification, not a measured
+        // two-bit EOP width. Idle/timeout must not attribute a later EOP here.
+        if (qualified) atomic_write(&counters.root_eop_cycle,cycle);
+        root_observation_stage = ROOT_OBSERVE_IDLE;
+    }
+#else
+    (void)cycle;
+    (void)qualified;
+#endif
+}
+
 static __force_inline void route_header(const routing_table* table, uint32_t address,
                                         uint32_t signature, uint32_t initial_address,
                                         uint32_t cutoff, raw_packet* packet) {
     // TinyUSB clears SETUP_REC only AFTER copying the hardware-validated SETUP
     // into its event callback. Until then, preserve both address and owner.
-    if (usb_hw->sie_status & USB_SIE_STATUS_SETUP_REC_BITS)
+    if (usb_hw->sie_status & USB_SIE_STATUS_SETUP_REC_BITS) {
+#if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        root_observe_token(PROBE_ROUTER_UNASSIGNED,signature,cutoff,false);
+#endif
         return;
+    }
     invalidate_setup();
-    if (address >= 128u || table->owner[address] >= PROBE_ROUTER_SLOTS)
+    if (address >= 128u || table->owner[address] >= PROBE_ROUTER_SLOTS) {
+#if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        root_observe_token(PROBE_ROUTER_UNASSIGNED,signature,cutoff,false);
+#endif
         return;
+    }
 #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB
     if (atomic_read(&enabled) != 0u) {
         const bool selected = native_hub_select_device((uint8_t)address, table->owner[address], cutoff);
 #if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        root_observe_token(table->owner[address],signature,cutoff,selected);
         // Keep diagnostic PID classification behind the address-critical call.
         __asm volatile ("" : "+r"(signature) : : "memory");
         const uint8_t pid = signature == TOKEN_OUT_SIGNATURE ? PID_OUT :
@@ -338,6 +422,11 @@ static __force_inline void route_header(const routing_table* table, uint32_t add
 #endif
         if (initial_address != address) ++packet->retargets;
     }
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    else {
+        root_observe_token(PROBE_ROUTER_UNASSIGNED,signature,cutoff,false);
+    }
+#endif
 #else
     if (initial_address != address && atomic_read(&enabled) != 0u) {
         if (cycles_after(cycles_now(), cutoff) >= 0) {
@@ -390,15 +479,25 @@ drain_prepared_capture:;
         uint32_t se0_since = 0;
         for (;;) {
             uint32_t line = receive_line(), now = cycles_now();
-            if (cycles_after(now,stop) >= 0) { result.resync = true; return result; }
+            if (cycles_after(now,stop) >= 0) {
+                root_observe_eop(now,false);
+                result.resync = true;
+                return result;
+            }
             if (line == LINE_SE0) {
                 if (!saw_se0) se0_since = now;
                 saw_se0 = true;
             } else {
                 // Half a bit rejects pad skew while allowing late ACK EOP entry.
                 if (line == LINE_J && saw_se0 &&
-                    cycles_after(now,se0_since) >= (int32_t)(FS_BIT_CYCLES / 2u)) break;
-                if (line == LINE_J && observe_idle_j()) break;
+                    cycles_after(now,se0_since) >= (int32_t)FS_HALF_BIT_CYCLES) {
+                    root_observe_eop(now,true);
+                    break;
+                }
+                if (line == LINE_J && observe_idle_j()) {
+                    root_observe_eop(now,false);
+                    break;
+                }
                 saw_se0 = false;
             }
         }
@@ -448,7 +547,7 @@ edge:
     const uint32_t sop_time = cycles_now();
     // This timestamp follows the PHY read and edge-detection instructions.
     // Captures showed an extra full-bit delay skipped SYNC's second symbol.
-    // Sweep the next sample relative to read completion, then keep 20-cycle
+    // Sweep the next sample relative to read completion, then keep one-bit
     // spacing; every stored line symbol is still physically observed.
     uint32_t deadline = sop_time + phase;
     result.sop = true;
@@ -458,7 +557,13 @@ edge:
 // PID rejection happens before any address/body samples. Reuse the prepared
 // frame: rebuilding its stack image here can miss the end of a short ACK/NAK
 // and the following token. All other result/address accumulators are still zero.
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+#define NOTE_DISCARDED_HEADER() observe_discarded_header(word0)
+#else
+#define NOTE_DISCARDED_HEADER() ((void)0)
+#endif
 #define DISCARD_NON_TOKEN() do { \
+        NOTE_DISCARDED_HEADER(); \
         result.sop = false; word0 = LINE_K; draining = true; \
         goto drain_prepared_capture; \
     } while (0)
@@ -533,6 +638,7 @@ edge:
 #undef ROUTE_EARLY
 #undef SET_EARLY_DECODER
 #undef DISCARD_NON_TOKEN
+#undef NOTE_DISCARDED_HEADER
     result.count = RAW_BITS;
     goto done;
 eop:
@@ -560,11 +666,11 @@ static bool __not_in_flash_func(observe_idle_j)(void) {
     // Stuffing prohibits eight consecutive J bit times inside a packet.
     // Use tight PHY polling, not sparse timer-paced reads that could miss K.
     const uint32_t start = cycles_now();
-    for (uint32_t i = 0; i < 64u; ++i) {
+    for (uint32_t i = 0; i < FS_IDLE_POLLS; ++i) {
         if (receive_line() != LINE_J)
             return false;
     }
-    return cycles_after(cycles_now(), start) >= (int32_t)(8u * FS_BIT_CYCLES);
+    return cycles_after(cycles_now(), start) >= (int32_t)FS_IDLE_CYCLES;
 }
 
 #if !defined(SWITCH2_PROBE_HUB) || !SWITCH2_PROBE_HUB
@@ -734,8 +840,8 @@ void __not_in_flash_func(probe_router_core1)(void) {
             break;
         }
         // Phase is relative to the observed J->K edge, not a promised physical
-        // edge timestamp. The host sweeps 0..19 cycles and correlates sampled
-        // headers with the native DCD's CRC-accepted SETUP interrupts. A successful
+        // edge timestamp. The host sweeps the compiled bit period and correlates
+        // sampled headers with the native DCD's CRC-accepted SETUP interrupts. A successful
         // passive phase still does NOT prove when the SIE latches its address.
         // Calibrate the real routing instruction path, not a lighter sampler
         // whose phase/register allocation changes when routing is enabled.
@@ -744,6 +850,9 @@ void __not_in_flash_func(probe_router_core1)(void) {
         const raw_packet packet = capture_packet(phase, table, draining);
         #else
         const raw_packet packet = capture_packet(phase, table);
+        #endif
+        #if defined(SWITCH2_PROBE_HUB) && SWITCH2_PROBE_HUB && defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+        count_one(&counters.capture_returns);
         #endif
         if (!packet.sop) {
             if (packet.resync) {

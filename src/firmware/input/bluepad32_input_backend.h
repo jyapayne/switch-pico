@@ -4,6 +4,7 @@
 
 #include "core/controller_color.h"
 #include "core/controller_identity.h"
+#include "core/native_haptics.h"
 #include "profile/controller_profile.h"
 #include "core/controller_state.h"
 #include "input/controller_macro_capture.h"
@@ -155,13 +156,15 @@ bool bluepad32_input_backend_native_sample_request(
 int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t token);
 void bluepad32_input_backend_native_sample_cancel(uint8_t instance);
 // Gameplay blocks replace older gameplay/cues only on the addressed side.
-// Samples divide a 12 ms frame; the last holds up to a 50 ms receipt watchdog.
-// Magnitudes use that source profile's weak/right or strong/left host gain.
+// Conventional samples divide 12 ms; PCM retains native ~5.333 ms/sample.
+// The last host sample holds only to its original 50 ms receipt watchdog.
+// HD preserves both frequency bands and applies their strong/low and weak/high
+// profile gains. Conventional motors retain the per-child peak approximation.
 // Submission copies 1..3 samples; false means invalid/unbound/unsupported,
-// higher-priority local feedback, or a source change during profile resolution.
+// higher-priority feedback, a retired source, or a selected HD stream not accepting.
 // Cancellation retires gameplay only; callers resetting a child also cancel its cue.
 bool bluepad32_input_backend_native_rumble_submit(
-    uint8_t instance, const uint8_t* magnitudes, uint8_t count);
+    uint8_t instance, const NativeHapticsActuatorFrame* frame);
 void bluepad32_input_backend_native_rumble_cancel(uint8_t instance);
 #endif
 

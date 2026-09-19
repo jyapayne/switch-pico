@@ -4,6 +4,9 @@
 
 #include "hardware_stub.h"
 
+static uint32_t startup_clock_hz = NATIVE_TEST_SYS_CLOCK_HZ;
+#define clock_get_hz(clock) ((void)(clock), startup_clock_hz)
+
 static void startup_set_bits(volatile uint32_t* address, uint32_t bits);
 static void startup_clear_bits(volatile uint32_t* address, uint32_t bits);
 static void startup_reset(uint32_t mask);
@@ -195,7 +198,7 @@ static void startup_wait(void) {
 
 void probe_router_init(uint32_t hz) {
     observe_pullup();
-    assert(hz == 240000000u);
+    assert(hz == FS_CLOCK_HZ);
     observer_initialized = true;
     observer_start_us = native_test_time_us;
     memset(routed_addresses,NONE,sizeof(routed_addresses));
@@ -217,7 +220,7 @@ void probe_router_enable(bool enabled) {
 }
 
 bool probe_router_set_phase(uint32_t phase) {
-    (void)phase;
+    assert(phase == PROBE_ROUTER_DEFAULT_PHASE && phase < FS_BIT_CYCLES);
     observe_pullup();
     return true;
 }
@@ -247,6 +250,10 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     if (strcmp(argv[1],"delayed") == 0) ready_delay_us = 75000u;
     else if (strcmp(argv[1],"timeout") == 0) observer_never_ready = true;
+    else if (strcmp(argv[1],"mismatched-clock") == 0)
+        startup_clock_hz = FS_CLOCK_HZ == 240000000u ? 300000000u : 240000000u;
+    else if (strcmp(argv[1],"unsupported-clock") == 0) startup_clock_hz = 150000000u;
+    else if (strcmp(argv[1],"inexact-clock") == 0) startup_clock_hz = FS_CLOCK_HZ + 1u;
     else assert(strcmp(argv[1],"ready") == 0);
 
     // No native_test_initialize/startup helper: call the actual initializer
@@ -254,6 +261,13 @@ int main(int argc, char** argv) {
     assert(!physical_pullup());
     bool initialized = native_hub_init();
     observe_pullup();
+    if (startup_clock_hz != FS_CLOCK_HZ) {
+        assert(!initialized && !started && !physical_pullup());
+        assert(!attach_edges && !detach_edges && !enumeration_done && !setup_irqs);
+        assert(!controller_resets && !observer_initialized && !observer_launched);
+        assert(!irq_enabled && !addresses_published && !routing_enabled && !wait_us);
+        return 0;
+    }
     assert(controller_resets == 1 && detach_edges == 0);
     if (observer_never_ready) {
         assert(!initialized && !started && !physical_pullup());

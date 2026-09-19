@@ -301,6 +301,13 @@ struct NativeGamepadCue {
     bool active = false;
     bool consumed = false;
     bool in_flight = false;
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    uint32_t hd_run_id = 0;
+    uint32_t hd_packet_baseline = 0;
+    uint32_t hd_submitted_us = 0;
+    uint32_t hd_expires_us = 0;
+    bool hd_pending = false;
+#endif
 };
 
 struct NativeGamepadMotorOutput {
@@ -329,8 +336,8 @@ constexpr NativeGamepadCuePattern kNativeGamepadCuePatterns[8] = {
 constexpr uint32_t kNativeGamepadCueDeadlineMs = 2000;
 // One host block spans 12 ms; the last magnitude holds only until the 50 ms
 // receipt watchdog. ERM compatibility ignores carrier frequencies, not timing.
-constexpr uint32_t kNativeGameplayFrameMs = 12;
-constexpr uint32_t kNativeGameplayWatchdogMs = 50;
+constexpr uint32_t kNativeGameplayFrameMs = NATIVE_HAPTICS_COMPAT_FRAME_US / 1000;
+constexpr uint32_t kNativeGameplayWatchdogMs = NATIVE_HAPTICS_WATCHDOG_US / 1000;
 #endif
 
 
@@ -513,6 +520,16 @@ uint32_t g_native_slot_epoch[kSlotCount]{};
 uint64_t g_next_native_token = 1;
 uni_hid_device_t* g_native_pending_devices[kSlotCount]{};
 NativeGamepadReportIngress g_native_reports[kSlotCount]{};
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+// Backend-lock protected attachment mirror. Generation changes are reconciled
+// on the BT core; Core 0 may only cancel through the haptics mailbox.
+struct NativeHapticsAttachment {
+    uni_hid_device_t* device = nullptr;
+    uint32_t generation = 0;
+    uint8_t cancel_mask = 0;
+};
+NativeHapticsAttachment g_native_haptics[kSlotCount]{};
+#endif
 
 bool native_device_allowed(const uni_hid_device_t* device) {
     if (device == nullptr || !uni_hid_device_is_gamepad(device)) return false;
@@ -585,6 +602,9 @@ void cancel_native_cue_locked(NativeGamepadCue& cue) {
         ++g_native_output_revision[&cue - g_native_cues];
     cue.active = false;
     cue.result = -1;
+    #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    cue.hd_pending = false;
+    #endif
     // The slot's last motor output remains owned until the timer replaces it.
 }
 
@@ -596,6 +616,9 @@ bool native_feedback_owns(const BackendSlot& slot, uint32_t now_ms) {
 }
 
 void cancel_native_gameplay_locked(const BackendSlot& slot) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    g_native_haptics[&slot - g_slots].cancel_mask |= 3;
+#endif
     for (NativeGamepadCue& cue : g_native_cues)
         if (cue.rumble_count != 0 && cue.slot == &slot - g_slots)
             cancel_native_cue_locked(cue);
@@ -680,6 +703,9 @@ void refresh_native_source_locked(uint8_t reselected_pair = 0xff) {
     for (uint8_t index = 0; index < kSlotCount; ++index) {
         if ((retired_slots & (1u << index)) == 0) continue;
         BackendSlot& slot = g_slots[index];
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        g_native_haptics[index].cancel_mask |= 3;
+#endif
         g_macro_capture.disconnect(index, slot.connection_generation, time_us_32());
         ++slot.connection_generation;
         ++slot.state_generation;
@@ -698,6 +724,9 @@ void refresh_native_source_locked(uint8_t reselected_pair = 0xff) {
 }
 
 void retire_native_slot(uint8_t index) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    g_native_haptics[index].cancel_mask |= 3;
+#endif
     ++g_native_slot_epoch[index];
     for (NativeGamepadBinding& binding : g_native_bindings) {
         if (binding.slot != index) continue;
@@ -721,6 +750,99 @@ bool native_cue_current(uint8_t pair, const NativeGamepadCue& cue) {
         g_slots[cue.slot].active &&
         cue.connection_generation == g_slots[cue.slot].connection_generation;
 }
+
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+void flush_native_haptics_cancellations() {
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        state_lock_enter();
+        NativeHapticsAttachment& attached = g_native_haptics[index];
+        const uint32_t generation = attached.generation;
+        const uint8_t mask = attached.cancel_mask;
+        attached.cancel_mask = 0;
+        // Only callback-free mailbox operations may nest backend -> haptics.
+        // Apply the fence before releasing state: another flusher must not
+        // return while this old mask can still erase a newer admission.
+        if (mask != 0)
+            haptics_experiment_cancel_native(index, generation, mask);
+        state_lock_exit();
+    }
+}
+
+// BT context only. Attachment/scheduler operations stay outside backend state.
+void sync_native_haptics_attachments() {
+    flush_native_haptics_cancellations();
+    for (uint8_t index = 0; index < kSlotCount; ++index) {
+        state_lock_enter();
+        const BackendSlot& slot = g_slots[index];
+        const NativeHapticsAttachment previous = g_native_haptics[index];
+        uni_hid_device_t* device = slot.active && slot.companion == nullptr
+            ? slot.device : nullptr;
+        const uint32_t generation = slot.connection_generation;
+        const bool changed = previous.device != device ||
+            previous.generation != generation;
+        state_lock_exit();
+        if (!changed) continue;
+        haptics_experiment_cancel_native(index, previous.generation, 3);
+        if (device != nullptr && !uni_hid_parser_switch2_is_ble_device(device))
+            haptics_experiment_attach(index, generation, device);
+        state_lock_enter();
+        g_native_haptics[index].device = device;
+        g_native_haptics[index].generation = generation;
+        state_lock_exit();
+    }
+}
+
+bool native_haptics_selected(const uni_hid_device_t* device) {
+    uint8_t index = kSlotCount;
+    uint32_t generation = 0;
+    uint32_t attached_generation = 0;
+    state_lock_enter();
+    for (uint8_t candidate = 0; candidate < kSlotCount; ++candidate) {
+        if (device != nullptr && g_slots[candidate].device == device) {
+            index = candidate;
+            generation = g_slots[candidate].connection_generation;
+            attached_generation = g_native_haptics[candidate].generation;
+            break;
+        }
+    }
+    state_lock_exit();
+    return index < kSlotCount &&
+        (haptics_experiment_native_selected(index, generation) ||
+         haptics_experiment_native_selected(index, attached_generation));
+}
+
+void complete_native_hd_cues() {
+    HapticsExperimentDiagnostics status{};
+    haptics_experiment_snapshot(&status);
+    state_lock_enter();
+    for (uint8_t instance = 0; instance < kNativeChildCount; ++instance) {
+        NativeGamepadCue& cue = g_native_cues[instance];
+        if (!cue.hd_pending) continue;
+        if (!native_cue_current(instance / 2, cue) ||
+            cue.hd_run_id != status.run_id || cue.slot != status.slot ||
+            cue.connection_generation != status.connection_generation) {
+            cancel_native_cue_locked(cue);
+        } else if (status.sent_packets > cue.hd_packet_baseline &&
+                   status.sent_packets > 1 &&
+                   static_cast<int32_t>(status.last_pcm_end_us - cue.hd_submitted_us) >= 334) {
+            // Quantize conservatively: the last emitted sample precedes the
+            // interval end by ceil(1000/3) us; rounded packet starts must not
+            // claim an already expired cue at a one-microsecond boundary.
+            constexpr uint32_t packet_us = 32u * 1000u / 3u;
+            if (static_cast<int32_t>(status.last_pcm_end_us - packet_us - cue.hd_expires_us) >= 0) {
+                // A late packet past the whole cue is not a cue dispatch.
+                cancel_native_cue_locked(cue);
+                continue;
+            }
+            // The first report only enables audio; only a subsequent successful
+            // PCM write can complete a cue. Timeline admission is not dispatch.
+            cue.result = 1;
+            cue.hd_pending = false;
+        }
+    }
+    state_lock_exit();
+}
+#endif
 #endif
 
 // These fields are only read or written by the BTstack execution context.
@@ -2806,6 +2928,10 @@ void process_configuration_timer(btstack_timer_source_t* timer) {
 
 void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
                      uint8_t weak, uint8_t strong) {
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    if (haptics_experiment_feedback(device, strong, weak, duration_ms) ||
+        haptics_experiment_owns(device)) return;
+#endif
 #if SWITCH2_BRIDGE_FULL_INPUT
     if (device->controller_type == CONTROLLER_TYPE_PS5Controller &&
         device->report_parser.parse_input_report == uni_hid_parser_ds5_parse_input_report) {
@@ -2818,11 +2944,6 @@ void dispatch_rumble(uni_hid_device_t* device, uint16_t duration_ms,
 #endif
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
     if (switch_native_output_feedback(device, strong, weak, duration_ms)) return;
-#endif
-#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-    if (haptics_experiment_feedback(device, strong, weak, duration_ms)) {
-        return;
-    }
 #endif
     device->report_parser.play_dual_rumble(device, 0, duration_ms, weak, strong);
 }
@@ -3000,7 +3121,11 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
         if (cue.in_flight) return true;
         if (cue.result != 0 && !cue.active) continue;
         command->token[side] = cue.token;
-        pending |= cue.result == 0;
+        pending |= cue.result == 0
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+            && !cue.hd_pending
+#endif
+            ;
         if (cue.rumble_count != 0) {
             const uint32_t elapsed = now_ms - cue.requested_ms;
             const uint32_t phase_ms = kNativeGameplayFrameMs / cue.rumble_count;
@@ -3069,10 +3194,16 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
     return true;
 }
 
-bool submit_native_rumble(uni_hid_device_t* device, uint16_t duration,
+bool submit_native_rumble(uni_hid_device_t* device, uint64_t received_us, uint16_t duration,
                           uint8_t right, uint8_t left) {
     if (device == nullptr || device->report_parser.play_dual_rumble == nullptr)
         return false;
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    if (haptics_experiment_native_feedback(device, received_us, left, right, duration)) return true;
+    if (native_haptics_selected(device) || haptics_experiment_owns(device)) return false;
+#else
+    (void)received_us;
+#endif
     if (device->controller_type == CONTROLLER_TYPE_PS5Controller &&
         device->report_parser.parse_input_report == uni_hid_parser_ds5_parse_input_report) {
         return uni_hid_parser_ds5_bridge_rumble(device, duration, right, left);
@@ -3090,6 +3221,13 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
     BackendSlot& slot = g_slots[command.slot];
     const bool paired = command.companion != nullptr;
     bool submitted[2]{};
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    const bool hd_overlay = !paired && haptics_experiment_gameplay_owns(command.device);
+    HapticsExperimentDiagnostics hd_status{};
+    if (hd_overlay) haptics_experiment_snapshot(&hd_status);
+    uint32_t hd_submitted_us = 0;
+    uint32_t hd_expires_us = 0;
+#endif
     uint32_t dispatch_ms = btstack_run_loop_get_time_ms();
     for (uint8_t target = 0; target < (paired ? 2 : 1); ++target) {
         state_lock_enter();
@@ -3122,8 +3260,15 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
             ? command.companion : command.device;
         const uint8_t right = command.magnitude[paired ? target : 0];
         const uint8_t left = command.magnitude[paired ? target : 1];
+        const uint64_t submitted_us = time_us_64();
+        const uint16_t submitted_duration = (right | left) == 0 ? 0 : duration;
         if (!submit_native_rumble(
-                device, (right | left) == 0 ? 0 : duration, right, left)) continue;
+                device, submitted_us, submitted_duration, right, left)) continue;
+        #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        hd_submitted_us = static_cast<uint32_t>(submitted_us);
+        hd_expires_us = hd_submitted_us +
+            (submitted_duration == 0 ? kNativeGamepadCueDeadlineMs : submitted_duration) * 1000u;
+        #endif
         __atomic_add_fetch(&g_rumble_dispatches, 1, __ATOMIC_RELAXED);
         if (paired) submitted[target] = true;
         else submitted[0] = submitted[1] = true;
@@ -3157,6 +3302,16 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
             cancel_native_cue_locked(cue);
         } else if (submitted[side] && cue.result == 0) {
             cue.result = 1;  // Accepted source submission, never a native ACK.
+            #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+            if (hd_overlay) {
+                cue.result = 0;
+                cue.hd_pending = true;
+                cue.hd_run_id = hd_status.run_id;
+                cue.hd_packet_baseline = hd_status.sent_packets;
+                cue.hd_submitted_us = hd_submitted_us;
+                cue.hd_expires_us = hd_expires_us;
+            }
+            #endif
             if (cue.rumble_count == 0) {
                 cue.started_ms = command.prepared_ms;
                 cue.active = cue.sample_id != 0;
@@ -3303,8 +3458,14 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
     const bool xinput_host_mode =
         host_rumble_duration_ms() == kXInputHostRumbleDurationMs;
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#if SWITCH2_BRIDGE_FULL_INPUT
+    sync_native_haptics_attachments();
+#endif
     if (xinput_host_mode) seed_native_host_rumble();
     haptics_experiment_poll();
+    #if SWITCH2_BRIDGE_FULL_INPUT
+    complete_native_hd_cues();
+    #endif
 #endif
 
     for (uint8_t slot_index = 0; slot_index < kSlotCount; ++slot_index) {
@@ -3329,6 +3490,20 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 #if SWITCH2_BRIDGE_FULL_INPUT
         NativeGamepadCueDispatch native_dispatch{};
 #endif
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        state_lock_enter();
+        uni_hid_device_t* haptics_device = g_slots[slot_index].device;
+        const uint32_t haptics_generation = g_slots[slot_index].connection_generation;
+        state_lock_exit();
+        const bool haptics_owned = haptics_experiment_owns(haptics_device);
+        const bool haptics_gameplay = haptics_experiment_gameplay_owns(haptics_device);
+#if SWITCH2_BRIDGE_FULL_INPUT
+        const bool haptics_selected = haptics_experiment_native_selected(
+            slot_index, haptics_generation);
+#else
+        (void)haptics_generation;
+#endif
+#endif
 
         state_lock_enter();
         BackendSlot& slot = g_slots[slot_index];
@@ -3344,8 +3519,16 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             slot.retained_host_rumble = {};
         }
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-        if (haptics_experiment_owns(slot.device) &&
-            !haptics_experiment_gameplay_owns(slot.device)) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+        if (haptics_selected) {
+            // No stale compatibility gameplay may become an HD local overlay.
+            // Native samples enter the PCM mailbox directly, not this scheduler.
+            for (NativeGamepadCue& cue : g_native_cues)
+                if (cue.slot == slot_index && cue.rumble_count != 0)
+                    cancel_native_cue_locked(cue);
+        }
+#endif
+        if (haptics_owned && !haptics_gameplay) {
             // Fixture/startup/restoration exclusively own output. Preserve
             // stateful XInput requests until compatibility restoration ends.
             if (!xinput_host_mode) slot.rumble_pending = false;
@@ -3478,8 +3661,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
             && !native_owns_rumble
 #endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
-            && !(xinput_host_mode &&
-                 haptics_experiment_gameplay_owns(slot.device))
+            && !(xinput_host_mode && haptics_gameplay)
 #endif
         ) {
             envelope = slot.pending_rumble;
@@ -4118,7 +4300,11 @@ void platform_on_device_disconnected(uni_hid_device_t* device) {
     // DS4/PSMove and other finite-rumble drivers keep timers in parser_data.
     // Retire those timers before Bluepad32 reuses that memory. Call the real
     // driver directly: a feedback scheduler must not defer this local teardown.
-    if (device->report_parser.play_dual_rumble != nullptr)
+    if (device->report_parser.play_dual_rumble != nullptr
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        && !native_haptics_selected(device) && !haptics_experiment_owns(device)
+#endif
+    )
         device->report_parser.play_dual_rumble(device, 0, 0, 0, 0);
 #endif
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
@@ -4234,6 +4420,9 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
     lighting_generation = current.connection_generation;
     connection_identity = current.identity;
     state_lock_exit();
+#if SWITCH2_BRIDGE_FULL_INPUT && defined(SWITCH_PICO_HAPTICS_EXPERIMENT)
+    sync_native_haptics_attachments();
+#endif
     if (became_active) {
         apply_radio_connection_policy();
 #ifdef SWITCH_PICO_NATIVE_SWITCH_RUMBLE
@@ -4243,10 +4432,12 @@ uni_error_t platform_on_device_ready(uni_hid_device_t* device) {
         }
 #endif
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+#if !SWITCH2_BRIDGE_FULL_INPUT
         if (!paired && !uni_hid_parser_switch2_is_ble_device(device)) {
             haptics_experiment_attach(
                 static_cast<uint8_t>(slot_index), lighting_generation, device);
         }
+#endif
 #ifdef SWITCH_PICO_HD_RUMBLE
         if (connection_identity.vendor_id == 0x054c &&
             (connection_identity.product_id == 0x0ce6 ||
@@ -4906,6 +5097,9 @@ void bluepad32_input_backend_select_native_source(
     binding.reservation = {};
     refresh_native_source_locked(pair_index);
     state_lock_exit();
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    flush_native_haptics_cancellations();
+#endif
 }
 
 void bluepad32_input_backend_native_snapshot(
@@ -4919,12 +5113,18 @@ void bluepad32_input_backend_native_snapshot(
 }
 
 bool bluepad32_input_backend_native_rumble_submit(
-    uint8_t instance, const uint8_t* magnitudes, uint8_t count) {
-    if (!g_initialized || instance >= kNativeChildCount || magnitudes == nullptr ||
-        count == 0 || count > 3) return false;
+    uint8_t instance, const NativeHapticsActuatorFrame* frame) {
+    if (!g_initialized || instance >= kNativeChildCount || frame == nullptr ||
+        frame->sample_count == 0 || frame->sample_count > 3) return false;
+    NativeHapticsActuatorFrame samples = *frame;
+    for (uint8_t sample = 0; sample < samples.sample_count; ++sample) {
+        const NativeHapticsSample& value = samples.samples[sample];
+        if (value.low_amplitude > 1023 || value.high_amplitude > 1023 ||
+            value.low_frequency_code > 1023 || value.high_frequency_code > 1023)
+            return false;
+    }
+    const uint64_t received_us = time_us_64();
     const uint32_t received_ms = btstack_run_loop_get_time_ms();
-    uint8_t samples[3]{};
-    memcpy(samples, magnitudes, count);
     state_lock_enter();
     const NativeGamepadBinding& binding = g_native_bindings[instance / 2];
     const uint8_t index = binding.slot;
@@ -4941,20 +5141,49 @@ bool bluepad32_input_backend_native_rumble_submit(
         slot.pre_hotkey_button_mask, slot.state, slot.accelerometer,
         slot.nunchuk_accelerometer};
     const uint32_t revision = g_native_output_revision[instance];
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    const uint32_t attached_generation = g_native_haptics[index].generation;
+#endif
     state_lock_exit();
 
-    // Profile resolution may call services: never hold the backend lock over
-    // it. Full-scale input obtains the existing weak/strong gain once per block.
+    // A logical source epoch can move on Core 0 before its BT-core attachment
+    // refresh. Preserve HD ownership across that interval; reject, never fall
+    // back to a compatibility report while the selected attachment catches up.
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    const bool hd_selected = haptics_experiment_native_selected(index, attached_generation) ||
+        haptics_experiment_native_selected(index, snapshot.connection_generation);
+    if (hd_selected && attached_generation != snapshot.connection_generation) return false;
+#endif
     const ControllerRumbleOutput gains = controller_profile_runtime_scale_host_rumble(
         index, snapshot, ControllerRumbleOutput{UINT8_MAX, UINT8_MAX});
+    uint8_t magnitudes[3]{};
     const uint8_t gain = (instance & 1u) == 0
         ? gains.high_frequency_magnitude : gains.low_frequency_magnitude;
-    for (uint8_t sample = 0; sample < count; ++sample)
-        samples[sample] = controller_profile_scale_rumble_magnitude(samples[sample], gain);
+    for (uint8_t sample = 0; sample < samples.sample_count; ++sample) {
+        NativeHapticsSample& value = samples.samples[sample];
+        #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        if (hd_selected) {
+            if ((value.low_amplitude != 0 &&
+                 (value.low_frequency_code == 0 || value.low_frequency_code > 670)) ||
+                (value.high_amplitude != 0 &&
+                 (value.high_frequency_code == 0 || value.high_frequency_code > 670)))
+                return false;
+            value.low_amplitude = static_cast<uint16_t>(
+                (uint32_t{value.low_amplitude} * gains.low_frequency_magnitude + 127u) / 255u);
+            value.high_amplitude = static_cast<uint16_t>(
+                (uint32_t{value.high_amplitude} * gains.high_frequency_magnitude + 127u) / 255u);
+            continue;
+        }
+        #endif
+        const uint16_t peak = value.low_amplitude > value.high_amplitude
+            ? value.low_amplitude : value.high_amplitude;
+        magnitudes[sample] = controller_profile_scale_rumble_magnitude(
+            static_cast<uint8_t>((uint32_t{peak} * 255u + 511u) / 1023u), gain);
+    }
 
     state_lock_enter();
     const uint32_t now_ms = btstack_run_loop_get_time_ms();
-    const bool accepted = binding.slot == index && slot.active &&
+    bool accepted = binding.slot == index && slot.active &&
         binding.generation == snapshot.connection_generation &&
         slot.connection_generation == snapshot.connection_generation &&
         g_native_output_revision[instance] == revision && g_next_native_token != 0 &&
@@ -4965,17 +5194,35 @@ bool bluepad32_input_backend_native_rumble_submit(
         ++g_native_output_revision[instance];
         NativeGamepadCue& cue = g_native_cues[instance];
         cue = {};
-        cue.token = g_next_native_token++;
-        cue.slot = index;
-        cue.connection_generation = snapshot.connection_generation;
-        cue.requested_ms = received_ms;
-        cue.rumble_count = count;
-        memcpy(cue.rumble_magnitude, samples, count);
-        cue.result = 0;
-        cue.active = true;
-        __atomic_add_fetch(&g_host_rumble_requests, 1, __ATOMIC_RELAXED);
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        if (!hd_selected)
+#endif
+        {
+            cue.token = g_next_native_token++;
+            cue.slot = index;
+            cue.connection_generation = snapshot.connection_generation;
+            cue.requested_ms = received_ms;
+            cue.rumble_count = samples.sample_count;
+            memcpy(cue.rumble_magnitude, magnitudes, samples.sample_count);
+            cue.result = 0;
+            cue.active = true;
+        }
+        #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        if (hd_selected) {
+            NativeHapticsFrame stereo{};
+            stereo.actuators[(instance & 1u) == 0 ? 1 : 0] = samples;
+            // Commit this bounded, callback-free mailbox copy under the same
+            // state lock as the revision check. Cancellation cannot cross it.
+            accepted = haptics_experiment_submit_native(
+                index, snapshot.connection_generation, received_us, stereo);
+        }
+        #endif
     }
     state_lock_exit();
+#ifndef SWITCH_PICO_HAPTICS_EXPERIMENT
+    (void)received_us;
+#endif
+    if (accepted) __atomic_add_fetch(&g_host_rumble_requests, 1, __ATOMIC_RELAXED);
     return accepted;
 }
 
@@ -4984,7 +5231,16 @@ void bluepad32_input_backend_native_rumble_cancel(uint8_t instance) {
     state_lock_enter();
     NativeGamepadCue& cue = g_native_cues[instance];
     if (cue.rumble_count != 0) cancel_native_cue_locked(cue);
+    ++g_native_output_revision[instance];
+    #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    const uint8_t index = g_native_bindings[instance / 2].slot;
+    if (index < kSlotCount)
+        g_native_haptics[index].cancel_mask |= (instance & 1u) == 0 ? 2 : 1;
+    #endif
     state_lock_exit();
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    flush_native_haptics_cancellations();
+#endif
 }
 
 bool bluepad32_input_backend_native_sample_request(
@@ -5001,6 +5257,9 @@ bool bluepad32_input_backend_native_sample_request(
         native_rumble_capable(g_slots[index], instance & 1u);
     if (accepted) {
         ++g_native_output_revision[instance];
+        #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+        g_native_haptics[index].cancel_mask |= (instance & 1u) == 0 ? 2 : 1;
+        #endif
         cue = {};
         cue.token = g_next_native_token++;
         cue.slot = index;
@@ -5011,6 +5270,9 @@ bool bluepad32_input_backend_native_sample_request(
         *token = cue.token;
     }
     state_lock_exit();
+#ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
+    flush_native_haptics_cancellations();
+#endif
     return accepted;
 }
 

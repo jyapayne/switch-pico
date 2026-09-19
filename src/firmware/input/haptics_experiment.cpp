@@ -19,7 +19,7 @@
 namespace {
 
 constexpr uint32_t kPacketFrames = SWITCH_PICO_HD_PACKET_FRAMES;
-static_assert(kPacketFrames == 32 || kPacketFrames == 64);
+static_assert(kPacketFrames == 32, "HD output requires the qualified 32-frame packet format");
 constexpr uint32_t kPacketDenominator = 3;
 constexpr uint32_t kPackets = 18432 / kPacketFrames;
 constexpr uint32_t kPrimingPackets = 3072 / kPacketFrames;
@@ -60,12 +60,19 @@ struct Command {
     uint8_t mode = 0;
 };
 
+enum class HostKind : uint8_t { kSwitch, kNative, kRumble, kFeedback };
+
 struct HostUpdate {
     uint64_t received_us = 0;
-    SwitchHapticsFrame frame{};
-    bool rumble = false;
+    union {
+        SwitchHapticsFrame frame;
+        NativeHapticsFrame native_frame;
+    };
+    HostKind kind = HostKind::kSwitch;
+    uint32_t duration_us = 0;
     uint8_t low = 0;
     uint8_t high = 0;
+    HostUpdate() : frame{} {}
 };
 constexpr uint8_t kHostQueueCapacity = 16;
 
@@ -84,6 +91,9 @@ uint8_t g_host_head = 0;
 uint8_t g_host_count = 0;
 uint32_t g_host_updates = 0;
 uint32_t g_host_drops = 0;
+uint8_t g_native_cancel = 0;
+bool g_have_host_timestamp = false;
+uint64_t g_last_host_us = 0;
 
 // Written on core 1 under the lock; core 0 only reads identities for requests.
 Attachment g_attachments[4];
@@ -135,34 +145,53 @@ uint32_t packet_numerator_us() {
 
 void drain_host_updates() {
     // Bound work even if USB keeps publishing while the BT core drains.
-    for (uint8_t index = 0; index < kHostQueueCapacity; ++index) {
+    for (uint8_t index = 0; index <= kHostQueueCapacity; ++index) {
         HostUpdate update;
         critical_section_enter_blocking(&g_lock);
-        if (g_host_count == 0) {
-            critical_section_exit(&g_lock);
-            break;
+        const uint8_t cancel = g_native_cancel;
+        g_native_cancel = 0;
+        const bool available = g_host_count != 0 && index < kHostQueueCapacity;
+        if (available) {
+            update = g_host_queue[g_host_head];
+            g_host_head = (g_host_head + 1) % kHostQueueCapacity;
+            --g_host_count;
         }
-        update = g_host_queue[g_host_head];
-        g_host_head = (g_host_head + 1) % kHostQueueCapacity;
-        --g_host_count;
         critical_section_exit(&g_lock);
-        if (update.rumble) {
-            g_synth.push_rumble(update.low, update.high, update.received_us);
-        } else {
-            g_synth.push(update.frame, update.received_us);
+        if (cancel) g_synth.cancel_native(cancel);
+        if (!available) break;
+        switch (update.kind) {
+            case HostKind::kRumble:
+                g_synth.push_rumble(update.low, update.high, update.received_us);
+                break;
+            case HostKind::kNative:
+                g_synth.push_native(update.native_frame, update.received_us);
+                break;
+            case HostKind::kFeedback:
+                g_synth.feedback(update.received_us, update.duration_us, update.low, update.high);
+                break;
+            case HostKind::kSwitch:
+                g_synth.push(update.frame, update.received_us);
+                break;
         }
     }
+}
+
+bool selected_locked(uint8_t slot, uint32_t generation) {
+    return g_busy && g_snapshot.slot == slot &&
+           g_snapshot.connection_generation == generation &&
+           g_attachments[slot].device != nullptr &&
+           g_attachments[slot].generation == generation;
 }
 
 bool submit_host_update(uint8_t slot, uint32_t generation,
                         const HostUpdate& update) {
     if (!g_prepared || slot >= 4) return false;
     critical_section_enter_blocking(&g_lock);
-    const bool accepted = g_accept_host && g_busy && g_snapshot.mode == 1 &&
-                          g_snapshot.slot == slot &&
-                          g_snapshot.connection_generation == generation &&
-                          g_attachments[slot].device != nullptr &&
-                          g_attachments[slot].generation == generation;
+    const bool host = update.kind != HostKind::kFeedback;
+    const bool ordered = !host || !g_have_host_timestamp ||
+                         update.received_us - g_last_host_us <= INT64_MAX;
+    const bool accepted = g_accept_host && g_snapshot.mode == 1 &&
+                          selected_locked(slot, generation) && ordered;
     if (accepted) {
         if (g_host_count == kHostQueueCapacity) {
             g_host_head = (g_host_head + 1) % kHostQueueCapacity;
@@ -172,7 +201,11 @@ bool submit_host_update(uint8_t slot, uint32_t generation,
         const uint8_t index = (g_host_head + g_host_count) % kHostQueueCapacity;
         g_host_queue[index] = update;
         ++g_host_count;
-        if (g_host_updates != UINT32_MAX) ++g_host_updates;
+        if (host) {
+            g_have_host_timestamp = true;
+            g_last_host_us = update.received_us;
+            if (g_host_updates != UINT32_MAX) ++g_host_updates;
+        }
     }
     critical_section_exit(&g_lock);
     return accepted;
@@ -454,7 +487,7 @@ bool HAPTICS_HOT(generate_packet)(uint8_t* report, uint32_t packet,
         report[5] = 0x80; // AllowAudioControl; default route/MicSelect.
         sample_offset = 68;
         frames = 0; // State-only setup, not an audio sample interval.
-    } else if (kPacketFrames == 32) {
+    } else {
         // Preserve the physically qualified full-control, single-block format.
         frames = 32;
         report[3] = 0x91;
@@ -465,23 +498,12 @@ bool HAPTICS_HOT(generate_packet)(uint8_t* report, uint32_t packet,
         report[12] = 0x92;
         report[13] = 64;
         sample_offset = 14;
-    } else {
-        // Retained only as an explicit, physically unqualified experiment.
-        frames = 64;
-        report[3] = 0x91;
-        report[4] = 3;
-        report[5] = 0x62;
-        report[6] = 16;
-        report[7] = static_cast<uint8_t>(g_diagnostics.sent_packets * (frames / 32));
-        report[8] = 0xd2;
-        report[9] = 64;
-        sample_offset = 10;
     }
     bool tone = false;
     if (gameplay() && !silence) {
         drain_host_updates();
-        // One report of causal lookback preserves every 8 ms USB command,
-        // including substeps arriving between Bluetooth sends.
+        // One report of causal lookback retains fixed 16-frame native samples
+        // and legacy 8 ms substeps, without a PCM backlog.
         if (packet != 0 && g_diagnostics.sent_packets != 0) {
             const uint64_t first_sample = uint64_t{packet - 1} * frames;
             g_synth.render(first_sample, frames, report + sample_offset);
@@ -723,6 +745,8 @@ bool haptics_experiment_request(uint8_t action, uint8_t slot) {
             g_accept_host = action == 2;
             g_host_head = 0;
             g_host_count = 0;
+            g_native_cancel = 0;
+            g_have_host_timestamp = false;
             g_host_updates = 0;
             g_host_drops = 0;
             g_snapshot_waiting = false;
@@ -747,17 +771,81 @@ bool haptics_experiment_request(uint8_t action, uint8_t slot) {
 bool haptics_experiment_submit(uint8_t slot, uint32_t generation,
                                uint64_t received_us,
                                const SwitchHapticsFrame& frame) {
-    if (frame.actuators[0].sample_count > 3 || frame.actuators[1].sample_count > 3 ||
-        (frame.actuators[0].sample_count == 0 && frame.actuators[1].sample_count == 0)) {
+    if (frame.actuators[0].sample_count == 0 && frame.actuators[1].sample_count == 0) {
         return false;
     }
-    return submit_host_update(slot, generation, {received_us, frame});
+    for (const auto& actuator : frame.actuators) {
+        if (actuator.sample_count > 3) return false;
+        for (unsigned index = 0; index < actuator.sample_count; ++index) {
+            const auto& sample = actuator.samples[index];
+            if (sample.low_frequency_index > 127 || sample.high_frequency_index > 127 ||
+                sample.low_amplitude_q15 > 32768 || sample.high_amplitude_q15 > 32768) {
+                return false;
+            }
+        }
+    }
+    HostUpdate update;
+    update.received_us = received_us;
+    update.frame = frame;
+    return submit_host_update(slot, generation, update);
+}
+
+bool haptics_experiment_submit_native(uint8_t slot, uint32_t generation,
+                                      uint64_t received_us,
+                                      const NativeHapticsFrame& frame) {
+    if (!SwitchHdRumbleSynth::valid_native(frame) ||
+        (!frame.actuators[0].sample_count && !frame.actuators[1].sample_count)) {
+        return false;
+    }
+    HostUpdate update;
+    update.received_us = received_us;
+    update.kind = HostKind::kNative;
+    update.native_frame = frame;
+    return submit_host_update(slot, generation, update);
+}
+
+bool haptics_experiment_native_selected(uint8_t slot, uint32_t generation) {
+    if (!g_prepared || slot >= 4) return false;
+    critical_section_enter_blocking(&g_lock);
+    const bool selected = selected_locked(slot, generation);
+    critical_section_exit(&g_lock);
+    return selected;
+}
+
+void haptics_experiment_cancel_native(uint8_t slot, uint32_t generation,
+                                      uint8_t side_mask) {
+    side_mask &= 3;
+    if (!g_prepared || slot >= 4 || !side_mask) return;
+    critical_section_enter_blocking(&g_lock);
+    if (selected_locked(slot, generation)) {
+        g_native_cancel |= side_mask;
+        uint8_t kept = 0;
+        for (uint8_t index = 0; index < g_host_count; ++index) {
+            HostUpdate& update = g_host_queue[(g_host_head + index) % kHostQueueCapacity];
+            if (update.kind == HostKind::kNative) {
+                for (unsigned side = 0; side < 2; ++side) {
+                    if (side_mask & (1u << side)) update.native_frame.actuators[side].sample_count = 0;
+                }
+                if (!update.native_frame.actuators[0].sample_count &&
+                    !update.native_frame.actuators[1].sample_count) continue;
+            }
+            if (kept != index) g_host_queue[(g_host_head + kept) % kHostQueueCapacity] = update;
+            ++kept;
+        }
+        g_host_count = kept;
+    }
+    critical_section_exit(&g_lock);
 }
 
 bool haptics_experiment_submit_rumble(uint8_t slot, uint32_t generation,
                                       uint64_t received_us,
                                       uint8_t low, uint8_t high) {
-    return submit_host_update(slot, generation, {received_us, {}, true, low, high});
+    HostUpdate update;
+    update.received_us = received_us;
+    update.kind = HostKind::kRumble;
+    update.low = low;
+    update.high = high;
+    return submit_host_update(slot, generation, update);
 }
 
 void haptics_experiment_snapshot(HapticsExperimentDiagnostics* output) {
@@ -785,14 +873,35 @@ void haptics_experiment_attach(uint8_t slot, uint32_t generation,
         return;
     }
     const uint16_t cid = device->conn.interrupt_cid;
-    if (g_phase != Phase::kIdle &&
-        (g_diagnostics.slot == slot || g_connection.device == device) &&
-        (g_diagnostics.slot != slot || g_connection.device != device ||
-         g_connection.generation != generation || g_connection.cid != cid)) {
+    const bool migrate_live = g_phase != Phase::kIdle && gameplay() &&
+                              g_diagnostics.slot == slot &&
+                              g_connection.device == device && g_connection.cid == cid &&
+                              g_connection.generation != generation;
+    if (migrate_live) {
+        // A source epoch is not a Bluetooth reconnect. Cancel only admission
+        // tied to the retired generation; keep oscillator/other-side state.
+        native_output_scheduler_cancel(device);
+        g_send_requested = false;
+        g_connection.generation = generation;
+        g_diagnostics.connection_generation = generation;
+    } else if (g_phase != Phase::kIdle &&
+               (g_diagnostics.slot == slot || g_connection.device == device) &&
+               (g_diagnostics.slot != slot || g_connection.device != device ||
+                g_connection.generation != generation || g_connection.cid != cid)) {
         finish(HapticsExperimentState::kDisconnected, kConnection);
     }
     // A reused instance must not remain selectable through an old slot.
     critical_section_enter_blocking(&g_lock);
+    const bool migrate_pending = g_busy && g_snapshot.mode == 1 &&
+                                 g_snapshot.slot == slot &&
+                                 g_attachments[slot].device == device &&
+                                 g_attachments[slot].cid == cid;
+    if (migrate_pending || migrate_live) {
+        g_snapshot.connection_generation = generation;
+        if (g_command.pending && g_command.slot == slot) {
+            g_command.connection.generation = generation;
+        }
+    }
     for (Attachment& attached : g_attachments) {
         if (attached.device == device) {
             attached = {};
@@ -800,6 +909,9 @@ void haptics_experiment_attach(uint8_t slot, uint32_t generation,
     }
     g_attachments[slot] = {device, generation, cid};
     critical_section_exit(&g_lock);
+    if (migrate_live && (g_phase == Phase::kPattern || g_phase == Phase::kDrain)) {
+        request_send();
+    }
 }
 
 void haptics_experiment_detach(uni_hid_device_t* device) {
@@ -872,9 +984,31 @@ bool haptics_experiment_gameplay_owns(const uni_hid_device_t* device) {
 
 bool haptics_experiment_feedback(uni_hid_device_t* device,
                                  uint8_t low, uint8_t high, uint16_t duration_ms) {
+    if (device == nullptr) return false;
+    critical_section_enter_blocking(&g_lock);
+    const uint8_t slot = g_snapshot.slot;
+    const uint32_t generation = g_snapshot.connection_generation;
+    const bool selected = slot < 4 && selected_locked(slot, generation) &&
+                          g_attachments[slot].device == device;
+    critical_section_exit(&g_lock);
+    if (!selected) return false;
+    HostUpdate update;
+    update.received_us = time_us_64();
+    update.kind = HostKind::kFeedback;
+    update.duration_us = uint32_t{duration_ms} * 1000;
+    update.low = low;
+    update.high = high;
+    // Pending gameplay cues retain their original lifetime. Fixture, drain,
+    // and restoration are exclusive: consume the cue without compatibility.
+    submit_host_update(slot, generation, update);
+    return true;
+}
+
+bool haptics_experiment_native_feedback(uni_hid_device_t* device, uint64_t received_us,
+                                        uint8_t left, uint8_t right, uint16_t duration_ms) {
     if (!haptics_experiment_gameplay_owns(device)) return false;
     drain_host_updates();
-    g_synth.feedback(time_us_64(), uint32_t{duration_ms} * 1000, low, high);
+    g_synth.feedback_native(received_us, uint32_t{duration_ms} * 1000, left, right);
     return true;
 }
 
@@ -1010,6 +1144,11 @@ bool HAPTICS_HOT(on_output_grant)(uni_hid_device_t* device, uint16_t cid, uint32
         if (g_diagnostics.sent_packets != 0) {
             update_max(&g_diagnostics.max_send_gap_us,
                        static_cast<uint32_t>(submit_us) - g_diagnostics.last_sent_us);
+        }
+        if (gameplay() && !stopping && g_diagnostics.sent_packets != 0 && g_next_packet != 0) {
+            // Packet n renders [(n-1)*32, n*32). A causal-lookback packet sent
+            // after cue admission may still precede the cue on this timeline.
+            g_diagnostics.last_pcm_end_us = static_cast<uint32_t>(packet_due(g_next_packet));
         }
         ++g_diagnostics.sent_packets;
         g_diagnostics.last_sent_us = static_cast<uint32_t>(submit_us);

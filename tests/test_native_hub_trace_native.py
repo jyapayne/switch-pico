@@ -60,6 +60,8 @@ def test_native_hub_trace_lifecycle(tmp_path: Path, controller_count: int) -> No
         "approved-status-reset-during-completion",
         "approved-status-port-reset-ready",
         "approved-status-port-reset-queued",
+        "port-reset-interrupt-progress",
+        "port-reset-interrupt-reset",
         "approved-status-invalid-length",
         "approved-status-watch",
         "status-out-rejected-data",

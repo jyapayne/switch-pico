@@ -7,8 +7,7 @@
 
 namespace {
 
-constexpr int64_t kWatchdogSamples = 150;  // 50 ms at 3 kHz.
-constexpr unsigned kWindowSamples = 24;    // 8 ms, independently split per side.
+constexpr int64_t kWatchdogSamples = NATIVE_HAPTICS_WATCHDOG_US * 3 / 1000;
 
 // round(40 * 2^(index/32) * 2^32 / 3000), index 0..159. High-band
 // indices address the same logarithmic table with an offset of 32 (80 Hz base).
@@ -34,6 +33,31 @@ constexpr uint32_t kPhaseIncrement[160] = {
     1295786880u, 1324160918u, 1353156266u, 1382786530u, 1413065613u, 1444007720u, 1475627372u, 1507939404u,
     1540958977u, 1574701585u, 1609183060u, 1644419580u, 1680427680u, 1717224255u, 1754826570u, 1793252268u,
 };
+
+// One 1/96-octave table at 10 Hz, with seven extra fractional bits. Shifting
+// octaves before rounding retains the native wire precision without floating
+// point, a 670-entry table, or any conversion in the per-sample oscillator.
+constexpr uint32_t kNativeIncrementQ7[96] = {
+    1832519380u, 1845798570u, 1859173988u, 1872646329u, 1886216296u, 1899884597u, 1913651944u, 1927519055u,
+    1941486652u, 1955555465u, 1969726226u, 1983999674u, 1998376554u, 2012857614u, 2027443610u, 2042135302u,
+    2056933456u, 2071838844u, 2086852242u, 2101974434u, 2117206207u, 2132548356u, 2148001681u, 2163566986u,
+    2179245085u, 2195036793u, 2210942934u, 2226964338u, 2243101840u, 2259356280u, 2275728507u, 2292219374u,
+    2308829741u, 2325560473u, 2342412443u, 2359386529u, 2376483616u, 2393704596u, 2411050366u, 2428521831u,
+    2446119901u, 2463845495u, 2481699535u, 2499682953u, 2517796686u, 2536041678u, 2554418882u, 2572929254u,
+    2591573760u, 2610353372u, 2629269068u, 2648321836u, 2667512668u, 2686842564u, 2706312533u, 2725923589u,
+    2745676755u, 2765573061u, 2785613543u, 2805799247u, 2826131225u, 2846610537u, 2867238250u, 2888015441u,
+    2908943191u, 2930022592u, 2951254744u, 2972640752u, 2994181733u, 3015878808u, 3037733109u, 3059745775u,
+    3081917954u, 3104250802u, 3126745483u, 3149403170u, 3172225044u, 3195212294u, 3218366119u, 3241687727u,
+    3265178333u, 3288839161u, 3312671445u, 3336676428u, 3360855361u, 3385209504u, 3409740128u, 3434448510u,
+    3459335940u, 3484403714u, 3509653140u, 3535085533u, 3560702220u, 3586504536u, 3612493827u, 3638671446u,
+};
+
+uint32_t native_increment(uint16_t code) {
+    if (code == 0 || code > 670) return 0; // Silent, unmeasured band.
+    const unsigned index = code - 1;
+    return static_cast<uint32_t>(
+        ((uint64_t{kNativeIncrementQ7[index % 96]} << (index / 96)) + 64) >> 7);
+}
 
 // round(127 * 256 * sin(2*pi*index/256)). Linear interpolation retains
 // sub-byte precision until the final two-band mix; opposite phases are exact
@@ -124,6 +148,7 @@ void SwitchHdRumbleSynth::reset(uint64_t epoch_us) {
     }
     feedback_expires_ = 0;
     feedback_low_ = feedback_high_ = 0;
+    separate_feedback_ = false;
 }
 
 void SwitchHdRumbleSynth::count_drop() {
@@ -180,10 +205,96 @@ bool SwitchHdRumbleSynth::push(const SwitchHapticsFrame& frame,
     have_host_ = true;
     last_host_us_ = received_us;
     if (has_update) {
-        command.frame = frame;
+        for (unsigned side = 0; side < 2; ++side) {
+            const auto& source = frame.actuators[side];
+            auto& target = command.actuators[side];
+            target.sample_count = source.sample_count;
+            for (unsigned index = 0; index < source.sample_count; ++index) {
+                const auto& sample = source.samples[index];
+                target.samples[index] = {
+                    kPhaseIncrement[sample.low_frequency_index],
+                    kPhaseIncrement[sample.high_frequency_index + 32],
+                    sample.low_amplitude_q15, sample.high_amplitude_q15};
+            }
+        }
         enqueue(command);
     }
     return true;
+}
+
+bool SwitchHdRumbleSynth::valid_native(const NativeHapticsFrame& frame) {
+    for (const auto& actuator : frame.actuators) {
+        if (actuator.sample_count > 3) return false;
+        for (unsigned index = 0; index < actuator.sample_count; ++index) {
+            const auto& sample = actuator.samples[index];
+            if (sample.low_amplitude > 1023 || sample.high_amplitude > 1023 ||
+                sample.low_frequency_code > 1023 || sample.high_frequency_code > 1023 ||
+                (sample.low_amplitude &&
+                 (sample.low_frequency_code == 0 || sample.low_frequency_code > 670)) ||
+                (sample.high_amplitude &&
+                 (sample.high_frequency_code == 0 || sample.high_frequency_code > 670))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool SwitchHdRumbleSynth::push_native(const NativeHapticsFrame& frame,
+                                      uint64_t received_us) {
+    Command command;
+    if (!valid_native(frame) ||
+        (have_host_ && older(received_us, last_host_us_)) ||
+        !timestamp_sample(received_us, command.sample) ||
+        command.sample + kWatchdogSamples <= 0) {
+        count_drop();
+        return false;
+    }
+    bool has_update = false;
+    command.native = true;
+    for (unsigned side = 0; side < 2; ++side) {
+        const auto& source = frame.actuators[side];
+        auto& target = command.actuators[side];
+        has_update |= source.sample_count != 0;
+        target.sample_count = source.sample_count;
+        for (unsigned index = 0; index < source.sample_count; ++index) {
+            const auto& sample = source.samples[index];
+            target.samples[index] = {
+                native_increment(sample.low_frequency_code),
+                native_increment(sample.high_frequency_code),
+                static_cast<uint16_t>((uint32_t{sample.low_amplitude} * 32768 + 511) / 1023),
+                static_cast<uint16_t>((uint32_t{sample.high_amplitude} * 32768 + 511) / 1023)};
+        }
+    }
+    have_host_ = true;
+    last_host_us_ = received_us;
+    if (has_update) enqueue(command);
+    return true;
+}
+
+void SwitchHdRumbleSynth::cancel_native(uint8_t side_mask) {
+    unsigned kept = 0;
+    for (unsigned index = 0; index < count_; ++index) {
+        Command& command = commands_[(head_ + index) % kCapacity];
+        if (command.native) {
+            for (unsigned side = 0; side < 2; ++side) {
+                if (side_mask & (1u << side)) command.actuators[side].sample_count = 0;
+            }
+            if (!command.actuators[0].sample_count && !command.actuators[1].sample_count) continue;
+        }
+        if (kept != index) commands_[(head_ + kept) % kCapacity] = command;
+        ++kept;
+    }
+    count_ = static_cast<uint8_t>(kept);
+    for (unsigned side = 0; side < 2; ++side) {
+        if ((side_mask & (1u << side)) && sides_[side].native) {
+            // Keep oscillator phase and frequency, but not a future substep.
+            const Sample current = host_sample(side);
+            sides_[side].frame = {1, {current}};
+            sides_[side].frame.samples[0].low_amplitude_q15 = 0;
+            sides_[side].frame.samples[0].high_amplitude_q15 = 0;
+        }
+    }
 }
 
 bool SwitchHdRumbleSynth::push_rumble(uint8_t low_magnitude,
@@ -198,19 +309,29 @@ bool SwitchHdRumbleSynth::push_rumble(uint8_t low_magnitude,
     have_host_ = true;
     last_host_us_ = received_us;
     command.persistent = true;
-    command.frame.actuators[0].sample_count = 1;
-    command.frame.actuators[1].sample_count = 1;
-    command.frame.actuators[0].samples[0].low_amplitude_q15 =
+    command.actuators[0].sample_count = 1;
+    command.actuators[1].sample_count = 1;
+    command.actuators[0].samples[0].low_amplitude_q15 =
         (static_cast<uint32_t>(low_magnitude) * 32768u + 127u) / 255u;
-    command.frame.actuators[1].samples[0].high_amplitude_q15 =
+    command.actuators[1].samples[0].high_amplitude_q15 =
         (static_cast<uint32_t>(high_magnitude) * 32768u + 127u) / 255u;
     enqueue(command);
     return true;
 }
 
 void SwitchHdRumbleSynth::feedback(uint64_t at_us, uint32_t duration_us,
-                                  uint8_t low_magnitude,
-                                  uint8_t high_magnitude) {
+                                  uint8_t low_magnitude, uint8_t high_magnitude) {
+    queue_feedback(at_us, duration_us, low_magnitude, high_magnitude, false);
+}
+
+void SwitchHdRumbleSynth::feedback_native(uint64_t at_us, uint32_t duration_us,
+                                         uint8_t left, uint8_t right) {
+    queue_feedback(at_us, duration_us, left, right, true);
+}
+
+void SwitchHdRumbleSynth::queue_feedback(uint64_t at_us, uint32_t duration_us,
+                                        uint8_t low_magnitude,
+                                        uint8_t high_magnitude, bool separate) {
     Command command;
     if ((have_feedback_ && older(at_us, last_feedback_us_)) ||
         !timestamp_sample(at_us, command.sample) ||
@@ -221,6 +342,7 @@ void SwitchHdRumbleSynth::feedback(uint64_t at_us, uint32_t duration_us,
     have_feedback_ = true;
     last_feedback_us_ = at_us;
     command.is_feedback = true;
+    command.separate_feedback = separate;
     command.low = (static_cast<uint32_t>(low_magnitude) * 32768u + 127u) / 255u;
     command.high = (static_cast<uint32_t>(high_magnitude) * 32768u + 127u) / 255u;
     enqueue(command);
@@ -256,11 +378,15 @@ void SwitchHdRumbleSynth::apply(const Command& command) {
         feedback_expires_ = command.expires;
         feedback_low_ = command.low;
         feedback_high_ = command.high;
+        separate_feedback_ = command.separate_feedback;
         return;
     }
     for (unsigned side = 0; side < 2; ++side) {
-        if (command.frame.actuators[side].sample_count) {
-            sides_[side].frame = command.frame.actuators[side];
+        if (command.actuators[side].sample_count) {
+            sides_[side].frame = command.actuators[side];
+            sides_[side].sample_spacing = command.native
+                ? NATIVE_HAPTICS_SAMPLE_PCM_FRAMES : 24 / command.actuators[side].sample_count;
+            sides_[side].native = command.native;
             sides_[side].start = command.sample;
             sides_[side].expires = command.sample + kWatchdogSamples;
             sides_[side].persistent = command.persistent;
@@ -279,9 +405,9 @@ void SwitchHdRumbleSynth::apply_due(bool discarded) {
     }
 }
 
-const SwitchHapticsSample& SwitchHdRumbleSynth::host_sample(unsigned side) const {
+const SwitchHdRumbleSynth::Sample& SwitchHdRumbleSynth::host_sample(unsigned side) const {
     const Side& state = sides_[side];
-    const unsigned spacing = kWindowSamples / state.frame.sample_count;
+    const unsigned spacing = state.sample_spacing;
     unsigned index = 0;
     while (index + 1 < state.frame.sample_count &&
            due(state.start + (index + 1) * spacing, cursor_)) {
@@ -300,7 +426,7 @@ uint64_t SwitchHdRumbleSynth::next_boundary(uint64_t limit) const {
         consider(commands_[head_].sample);
     }
     for (const Side& side : sides_) {
-        const unsigned spacing = kWindowSamples / side.frame.sample_count;
+        const unsigned spacing = side.sample_spacing;
         for (unsigned index = 1; index < side.frame.sample_count; ++index) {
             consider(side.start + index * spacing);
         }
@@ -315,8 +441,8 @@ void SwitchHdRumbleSynth::advance_phases(uint64_t samples) {
     const uint32_t count = static_cast<uint32_t>(samples);
     for (unsigned side = 0; side < 2; ++side) {
         const auto& sample = host_sample(side);
-        phase_[side][0] += kPhaseIncrement[sample.low_frequency_index] * count;
-        phase_[side][1] += kPhaseIncrement[sample.high_frequency_index + 32] * count;
+        phase_[side][0] += sample.low_increment * count;
+        phase_[side][1] += sample.high_increment * count;
     }
 }
 
@@ -362,13 +488,15 @@ void SwitchHdRumbleSynth::render(uint64_t first_sample, uint32_t frames,
                              (feedback_low_ || feedback_high_);
         for (unsigned side = 0; side < 2; ++side) {
             const auto& sample = host_sample(side);
-            increment[side][0] = kPhaseIncrement[sample.low_frequency_index];
-            increment[side][1] = kPhaseIncrement[sample.high_frequency_index + 32];
+            increment[side][0] = sample.low_increment;
+            increment[side][1] = sample.high_increment;
             const bool expired = !sides_[side].persistent &&
                                  due(sides_[side].expires, cursor_);
             amplitude[side][0] = expired ? 0 : sample.low_amplitude_q15;
             amplitude[side][1] = expired ? 0 : sample.high_amplitude_q15;
-            if (!overlay) apply_host_gain(amplitude[side][0], amplitude[side][1]);
+            const bool side_overlay = overlay &&
+                (!separate_feedback_ || (side == 0 ? feedback_low_ : feedback_high_));
+            if (!side_overlay) apply_host_gain(amplitude[side][0], amplitude[side][1]);
         }
         uint32_t feedback_low_phase = kPhaseIncrement[64] *
                                       static_cast<uint32_t>(cursor_);
@@ -376,10 +504,19 @@ void SwitchHdRumbleSynth::render(uint64_t first_sample, uint32_t frames,
                                        static_cast<uint32_t>(cursor_);
         for (; cursor_ < boundary; ++cursor_) {
             if (overlay) {
-                const uint8_t value = mix(feedback_low_phase, feedback_high_phase,
-                                          feedback_low_, feedback_high_);
-                *interleaved_stereo++ = value;
-                *interleaved_stereo++ = value;
+                if (separate_feedback_) {
+                    *interleaved_stereo++ = feedback_low_
+                        ? mix(feedback_low_phase, 0, feedback_low_, 0)
+                        : mix(phase_[0][0], phase_[0][1], amplitude[0][0], amplitude[0][1]);
+                    *interleaved_stereo++ = feedback_high_
+                        ? mix(0, feedback_high_phase, 0, feedback_high_)
+                        : mix(phase_[1][0], phase_[1][1], amplitude[1][0], amplitude[1][1]);
+                } else {
+                    const uint8_t value = mix(feedback_low_phase, feedback_high_phase,
+                                              feedback_low_, feedback_high_);
+                    *interleaved_stereo++ = value;
+                    *interleaved_stereo++ = value;
+                }
                 feedback_low_phase += kPhaseIncrement[64];
                 feedback_high_phase += kPhaseIncrement[96];
             } else {

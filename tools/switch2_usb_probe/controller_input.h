@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "core/native_haptics.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,10 +52,10 @@ void probe_controller_input_set_native_features(uint8_t features);
 // Supply each child's advertised, validated nine-byte stick record. Native
 // output stays unavailable until that child's calibration has been supplied.
 void probe_controller_input_set_full_stick_calibration(uint8_t instance, const uint8_t calibration[9]);
-// Native single-actuator gameplay envelope for this virtual half. Backend owns
-// binding/generation checks, profile gain, finite playback and stale-stream stop.
-bool probe_controller_input_submit_rumble(uint8_t instance, const uint8_t* magnitudes,
-                                          uint8_t count);
+// Lossless native waveform for this virtual half. Backend owns source binding,
+// profile gain, selected HD output and bounded conventional fallback.
+bool probe_controller_input_submit_rumble(uint8_t instance,
+                                          const NativeHapticsActuatorFrame* frame);
 void probe_controller_input_cancel_rumble(uint8_t instance);
 #endif
 // Core0 native07/08 output. Disable discards queued/prepared data; repeated

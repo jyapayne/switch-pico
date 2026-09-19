@@ -192,7 +192,7 @@ size_t encode_transaction(uint8_t* output, size_t output_size) {
 size_t encode_info(uint8_t* output, size_t output_size) {
     uint8_t payload[8] = {
 #if SWITCH2_PROBE_HUB
-        0, 102, 0, 2,
+        0, 108, 0, 2,
         kNativeHubActiveMode,
         USB_OUTPUT_CAPABILITY_INPUT | USB_OUTPUT_CAPABILITY_RUMBLE |
             USB_OUTPUT_CAPABILITY_MOTION,

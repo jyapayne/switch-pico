@@ -34,6 +34,21 @@ SwitchHapticsFrame one_side(unsigned side, SwitchHapticsSample sample = state())
     return frame;
 }
 
+NativeHapticsSample native_state(uint16_t low_code = 385, uint16_t low = 1023,
+                                 uint16_t high_code = 481, uint16_t high = 0) {
+    return {low_code, high_code, low, high};
+}
+
+NativeHapticsFrame native_side(unsigned side, NativeHapticsSample sample = native_state()) {
+    NativeHapticsFrame frame{};
+    frame.actuators[side] = {1, {sample}};
+    return frame;
+}
+
+uint16_t native_q15(uint16_t amplitude) {
+    return static_cast<uint16_t>((uint32_t{amplitude} * 32768 + 511) / 1023);
+}
+
 std::vector<uint8_t> render(SwitchHdRumbleSynth& synth, uint64_t first,
                             uint32_t frames) {
     std::vector<uint8_t> pcm(static_cast<size_t>(frames) * 2, 0xcc);
@@ -556,6 +571,194 @@ void test_duplicate_order_and_invalid_frames() {
     }, "duplicate timestamp last-wins without phase reset or malformed-state mutation");
 }
 
+void test_native_precision_and_bands() {
+    for (uint16_t code : {1, 193, 385, 481, 482, 483, 670}) {
+        for (unsigned band = 0; band < 2; ++band) {
+            SwitchHdRumbleSynth synth;
+            synth.reset(0);
+            const unsigned side = band;
+            const auto frame = native_side(side, native_state(code, band ? 0 : 1023,
+                                                               code, band ? 1023 : 0));
+            std::vector<uint8_t> pcm(12000);
+            for (unsigned first = 0; first < 6000; first += 60) {
+                expect(synth.push_native(frame, first * 1000 / 3),
+                       "native periodic refresh accepted");
+                synth.render(first, 60, pcm.data() + first * 2);
+            }
+            const double hz = 10 * std::exp2((code - 1) / 96.0);
+            expect_wave(pcm, side, [hz](size_t n) { return wave(hz * n / 3000); },
+                        "native 96-step frequency retains wire precision");
+            expect_wave(pcm, 1 - side, [](size_t) { return 0; },
+                        "native bands stay on their physical actuator");
+            expect(spectral_amplitude(pcm, side, hz) > 125,
+                   "native PCM has its expected physical spectral peak");
+            if (code >= 481 && code <= 483) {
+                const double adjacent = 10 * std::exp2(code / 96.0);
+                expect(spectral_amplitude(pcm, side, adjacent) < 15,
+                       "adjacent native codes are spectrally distinct, not rounded to Switch indices");
+            }
+        }
+    }
+
+    SwitchHdRumbleSynth synth;
+    synth.reset(0);
+    synth.push_native(native_side(0, native_state(385, 682, 481, 341)), 0);
+    expect_wave(render(synth, 0, 150), 0, [](size_t n) {
+        return 127.0 * (2 * std::sin(kTau * 160 * n / 3000) +
+                        std::sin(kTau * 320 * n / 3000)) / 3;
+    }, "native joint gain preserves independent band mixture");
+
+    std::vector<uint8_t> previous;
+    for (uint16_t amplitude : {128, 129}) {
+        synth.reset(0);
+        synth.push_native(native_side(0, native_state(385, amplitude)), 0);
+        auto pcm = render(synth, 0, 150);
+        expect_wave(pcm, 0, [amplitude](size_t n) {
+            return wave(160.0 * n / 3000, native_q15(amplitude));
+        }, "native amplitude normalizes all ten bits before existing gain");
+        if (!previous.empty()) expect(previous != pcm, "adjacent ten-bit amplitudes remain distinguishable");
+        previous = pcm;
+    }
+}
+
+void test_native_windows_watchdogs_and_legacy() {
+    SwitchHdRumbleSynth synth;
+    synth.reset(0);
+    NativeHapticsFrame frame{};
+    frame.actuators[0] = {3, {native_state(), native_state(385, 0), native_state(385, 512)}};
+    frame.actuators[1] = {2, {native_state(385, 0), native_state(385, 0, 481, 1023)}};
+    synth.push_native(frame, 0);
+    synth.push_native(native_side(0, native_state(385, 512)), 20000);
+    synth.push_native(NativeHapticsFrame{}, 40000);
+    const auto pcm = render(synth, 0, 230);
+    expect_wave(pcm, 0, [](size_t n) {
+        return n < 210 ? wave(160.0 * n / 3000,
+            n < 16 ? 32768 : n < 32 ? 0 : native_q15(512)) : 0;
+    }, "native samples use fixed 16-frame spacing with an independent refreshed watchdog");
+    expect_wave(pcm, 1, [](size_t n) {
+        return n >= 16 && n < 150 ? wave(320.0 * n / 3000) : 0;
+    }, "native two-sample update uses 16-frame spacing and untouched side expires at 50 ms");
+
+    synth.reset(0);
+    synth.push_native(frame, 0);
+    auto legacy = one_side(0);
+    legacy.actuators[0] = {3, {state(), state(64, 0), state(64, 16384)}};
+    synth.push(legacy, 0);
+    const auto mixed = render(synth, 0, 40);
+    expect_wave(mixed, 0, [](size_t n) {
+        return wave(160.0 * n / 3000, n < 8 ? 32768 : n < 16 ? 0 : 16384);
+    }, "legacy replacement uses its own 8 ms window in a native stream");
+    expect_wave(mixed, 1, [](size_t n) { return n < 16 ? 0 : wave(320.0 * n / 3000); },
+                "legacy partial update does not shorten the other native window");
+    expect(!synth.push_native(frame, UINT64_MAX),
+           "native and legacy updates share host timestamp ordering");
+
+    synth.reset(0);
+    synth.push_rumble(255, 255, 0);
+    synth.push_native(native_side(0, native_state(385, 0)), 1000);
+    auto held = render(synth, 0, 300);
+    expect_wave(held, 0, [](size_t n) { return n < 3 ? wave(160.0 * n / 3000) : 0; },
+                "native zero stops the targeted persistent motor");
+    expect_wave(held, 1, [](size_t n) { return wave(320.0 * n / 3000); },
+                "native zero-count side preserves stateful XInput output");
+}
+
+void test_native_late_overflow_and_cancellation() {
+    NativeHapticsFrame steps{};
+    steps.actuators[0] = {3, {native_state(), native_state(385, 512), native_state(385, 256)}};
+    SwitchHdRumbleSynth synth;
+    synth.reset(10000);
+    expect(synth.push_native(steps, 4000), "recent pre-epoch native update accepted");
+    expect_wave(render(synth, 0, 150), 0, [](size_t n) {
+        return n < 132 ? wave(160.0 * n / 3000, native_q15(n < 14 ? 512 : 256)) : 0;
+    }, "pre-epoch native update keeps original 16-frame sample positions and expiry");
+    synth.reset(0);
+    render(synth, 0, 40);
+    synth.push_native(steps, 0);
+    expect_wave(render(synth, 40, 130), 0, [](size_t n) {
+        return n + 40 < 150 ? wave(160.0 * (n + 40) / 3000, native_q15(256)) : 0;
+    }, "late native update skips elapsed substeps without refreshing expiry");
+    synth.reset(100000);
+    expect(!synth.push_native(steps, 50000), "expired native pre-epoch command rejected");
+
+    SwitchHdRumbleSynth reference;
+    synth.reset(0);
+    reference.reset(0);
+    for (unsigned n = 0; n < 40; ++n) {
+        const auto frame = native_side(n % 2, native_state(static_cast<uint16_t>(385 + n % 5)));
+        synth.push_native(frame, n * 1000);
+        reference.push_native(frame, n * 1000);
+        render(reference, n * 3, 3);
+    }
+    expect(synth.dropped_updates() > 0, "native bounded timeline accounts for overflow");
+    expect_silent(render(synth, 0, 30), "native overflow never replays discarded history");
+    expect(render(synth, 120, 120) == render(reference, 120, 120),
+           "native overflow preserves partial sides and full-precision accumulated phases");
+
+    synth.reset(0);
+    auto both = native_side(0);
+    both.actuators[1] = both.actuators[0];
+    synth.push_native(both, 0);
+    render(synth, 0, 15);
+    synth.push_native(both, 10000); // Queued update must also be canceled.
+    synth.feedback(5000, 5000, 0, 255);
+    synth.cancel_native(1);
+    const auto canceled = render(synth, 15, 90);
+    expect_wave(canceled, 0, [](size_t n) {
+        return n < 15 ? feedback_wave(320.0 * (n + 15) / 3000) : 0;
+    }, "native cancel preserves overlay but removes live and queued left host work");
+    expect_wave(canceled, 1, [](size_t n) {
+        return n < 15 ? feedback_wave(320.0 * (n + 15) / 3000) :
+                        wave(160.0 * (n + 15) / 3000);
+    }, "native cancellation leaves the other side and its queued updates intact");
+    synth.push_native(native_side(0), 35000);
+    expect_wave(render(synth, 105, 30), 0, [](size_t n) {
+        return wave(160.0 * (n + 105) / 3000);
+    }, "fresh native command after cancellation resumes without oscillator reset");
+    synth.cancel_native(3);
+    expect_silent(render(synth, 135, 120), "both-side cancellation is a lasting stop");
+    synth.push_native(both, 100000);
+    synth.reset(100000);
+    expect_silent(render(synth, 0, 150), "stream reset discards pending native work");
+}
+
+void test_native_validation_is_atomic() {
+    SwitchHdRumbleSynth synth;
+    synth.reset(0);
+    synth.push_native(native_side(0), 0);
+    auto invalid = native_side(0, native_state(385, 0));
+    invalid.actuators[1] = {1, {native_state(671)}};
+    expect(!synth.push_native(invalid, 2000), "unmeasured active native frequency rejects whole frame");
+    invalid.actuators[1] = {1, {native_state(0)}};
+    expect(!synth.push_native(invalid, 2000), "active code zero cannot generate DC");
+    invalid.actuators[1] = {1, {native_state(385, 1024)}};
+    expect(!synth.push_native(invalid, 2000), "native amplitude overflow rejected");
+    invalid.actuators[1].sample_count = 4;
+    expect(!synth.push_native(invalid, 2000), "native count overflow rejected");
+    expect(synth.push_native(native_side(1, native_state(0, 0, 1023, 0)), 1000),
+           "invalid frames do not advance timestamp ordering; silent bands accept wire range");
+    const auto pcm = render(synth, 0, 120);
+    expect_wave(pcm, 0, [](size_t n) { return wave(160.0 * n / 3000); },
+                "malformed right side cannot partially stop left host state");
+    expect_wave(pcm, 1, [](size_t) { return 0; }, "silent arbitrary codes never produce DC");
+}
+
+void test_native_side_feedback_preserves_host() {
+    SwitchHdRumbleSynth synth;
+    synth.reset(0);
+    auto both = native_side(0);
+    both.actuators[1] = both.actuators[0];
+    synth.push_native(both, 0);
+    synth.feedback_native(5000, 10000, 0, 255);
+    const auto pcm = render(synth, 0, 90);
+    expect_wave(pcm, 0, [](size_t n) { return wave(160.0 * n / 3000); },
+                "right native cue does not mute or attenuate the untouched left host");
+    expect_wave(pcm, 1, [](size_t n) {
+        return n >= 15 && n < 45 ? feedback_wave(320.0 * n / 3000) :
+                                  wave(160.0 * n / 3000);
+    }, "native cue overlays only the requested side and resumes live host on expiry");
+}
+
 }  // namespace
 
 int main() {
@@ -573,6 +776,11 @@ int main() {
     test_stateful_rumble_hd_order_and_watchdogs();
     test_stateful_rumble_feedback_resume();
     test_stateful_rumble_overflow_and_reset();
+    test_native_precision_and_bands();
+    test_native_windows_watchdogs_and_legacy();
+    test_native_late_overflow_and_cancellation();
+    test_native_validation_is_atomic();
+    test_native_side_feedback_preserves_host();
     if (failures) {
         std::cerr << failures << " synthesis scenarios failed\n";
         return 1;

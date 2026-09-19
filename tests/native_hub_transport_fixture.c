@@ -14,6 +14,7 @@ uint32_t native_test_received_count[CHILDREN][2];
 uint16_t native_test_received_length[CHILDREN][2];
 uint8_t native_test_received_data[CHILDREN][2][PACKET];
 static bool servicing_interrupt;
+static void (*native_test_reset_hook)(uint8_t instance);
 
 #ifndef NATIVE_TEST_EXTERNAL_IRQ
 void native_test_service_interrupt(void) {
@@ -42,7 +43,9 @@ const uint8_t* native_joycon_configuration_descriptor(uint8_t instance) { (void)
 const uint16_t* native_joycon_string_descriptor(uint8_t instance, uint8_t index, uint16_t language) {
     (void)instance; (void)language; return hub_string(index);
 }
-void native_joycon_usb_reset(uint8_t instance) { (void)instance; }
+void native_joycon_usb_reset(uint8_t instance) {
+    if (native_test_reset_hook) native_test_reset_hook(instance);
+}
 const uint8_t* tud_hid_descriptor_report_cb(uint8_t instance) { (void)instance; return NULL; }
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t id, hid_report_type_t type, uint8_t* data, uint16_t length) {
     (void)instance; (void)id; (void)type; (void)data; (void)length; return 0;
@@ -86,6 +89,7 @@ void native_test_initialize(void) {
     native_test_abort_stuck = false;
     native_test_interrupt_mask = 0;
     servicing_interrupt = false;
+    native_test_reset_hook = NULL;
     failed = bus_suspended = false;
     bank_lock = spin_lock_instance(0);
     active_device = default_device = 0;

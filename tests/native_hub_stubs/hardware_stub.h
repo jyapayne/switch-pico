@@ -10,6 +10,11 @@
 #define __dmb() ((void)0)
 
 typedef struct { unsigned unused; } spin_lock_t;
+typedef struct {
+    void (*out_chars)(const char*, int);
+    void (*out_flush)(void);
+} stdio_driver_t;
+extern stdio_driver_t stdio_uart;
 extern uint32_t native_test_interrupt_mask;
 void native_test_service_interrupt(void);
 static inline uint32_t save_and_disable_interrupts(void) {
@@ -51,7 +56,7 @@ typedef struct {
     uint8_t ep0_buf_a[64];
     uint8_t padding[3776];
 } usb_device_dpram_t;
-typedef struct { volatile uint32_t mtime, gpio_hi_oe_clr; } sio_hw_t;
+typedef struct { volatile uint32_t mtime, gpio_hi_oe_clr, gpio_hi_in; } sio_hw_t;
 extern usb_hw_t native_test_usb;
 extern usb_device_dpram_t native_test_dpram;
 extern sio_hw_t native_test_sio;
@@ -104,7 +109,12 @@ static inline void hw_set_bits(volatile uint32_t* address, uint32_t bits) {
 #define USBCTRL_IRQ 0u
 #define clk_sys 0u
 
-static inline uint32_t clock_get_hz(unsigned clock) { (void)clock; return 240000000u; }
+#ifdef SWITCH_PICO_SYS_CLOCK_MHZ
+#define NATIVE_TEST_SYS_CLOCK_HZ (SWITCH_PICO_SYS_CLOCK_MHZ * 1000000u)
+#else
+#define NATIVE_TEST_SYS_CLOCK_HZ 240000000u
+#endif
+static inline uint32_t clock_get_hz(unsigned clock) { (void)clock; return NATIVE_TEST_SYS_CLOCK_HZ; }
 static inline void reset_block(uint32_t mask) { (void)mask; }
 static inline void unreset_block_wait(uint32_t mask) { (void)mask; }
 static inline void multicore_launch_core1(void (*entry)(void)) { (void)entry; }

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include "core/native_haptics.h"
 #include "usb/switch/switch_haptics.h"
 
 // Single-core, allocation-free 3 kHz stereo PCM timeline. All times use the same
@@ -22,6 +23,16 @@ public:
     // at the render cursor's current substep, never replaying earlier substeps
     // or extending their original expiry.
     bool push(const SwitchHapticsFrame& frame, uint64_t received_us);
+
+    // Native frequency codes retain 1/96-octave precision; each sample lasts
+    // 16 PCM frames (~5.333 ms), independent of legacy Switch's 8 ms/count.
+    static bool valid_native(const NativeHapticsFrame& frame);
+    bool push_native(const NativeHapticsFrame& frame, uint64_t received_us);
+
+    // Single-core cancellation fence: erase affected queued native updates and
+    // silence their live state without touching the other side or feedback.
+    // A later native push is a new effect, even at the same timestamp.
+    void cancel_native(uint8_t side_mask);
 
     // Profile-scaled conventional host rumble: low drives left at 160 Hz and
     // high drives right at 320 Hz, with the opposite bands silent. Both sides
@@ -44,24 +55,44 @@ public:
     // Feedback timestamps are chronological independently of both host APIs.
     void feedback(uint64_t at_us, uint32_t duration_us,
                   uint8_t low_magnitude, uint8_t high_magnitude);
+    // Side-isolated local cue: left uses 160 Hz, right uses 320 Hz. Unlike the
+    // conventional feedback mix, a zero side reveals its unchanged host state.
+    void feedback_native(uint64_t at_us, uint32_t duration_us,
+                         uint8_t left, uint8_t right);
 
     uint32_t dropped_updates() const { return dropped_updates_; }
 
 private:
     static constexpr uint8_t kCapacity = 16;
 
+    struct Sample {
+        uint32_t low_increment = 229064922u;  // 160 Hz.
+        uint32_t high_increment = 458129845u; // 320 Hz.
+        uint16_t low_amplitude_q15 = 0;
+        uint16_t high_amplitude_q15 = 0;
+    };
+
+    struct Actuator {
+        uint8_t sample_count = 0;
+        Sample samples[3]{};
+    };
+
     struct Command {
         int64_t sample = 0;
         int64_t expires = 0;
-        SwitchHapticsFrame frame{};
+        Actuator actuators[2]{};
         uint16_t low = 0;
         uint16_t high = 0;
         bool is_feedback = false;
         bool persistent = false;
+        bool native = false;
+        bool separate_feedback = false;
     };
 
     struct Side {
-        SwitchHapticsActuatorFrame frame{1, {}};
+        Actuator frame{1, {}};
+        uint8_t sample_spacing = 24;
+        bool native = false;
         bool persistent = false;
         int64_t start = 0;
         int64_t expires = 0;
@@ -78,9 +109,11 @@ private:
     void advance_to(uint64_t sample, bool discarded = false);
     void advance_phases(uint64_t samples);
     uint64_t next_boundary(uint64_t limit) const;
-    const SwitchHapticsSample& host_sample(unsigned side) const;
+    const Sample& host_sample(unsigned side) const;
     bool timestamp_sample(uint64_t timestamp_us, int64_t& sample) const;
     void count_drop();
+    void queue_feedback(uint64_t at_us, uint32_t duration_us,
+                        uint8_t low, uint8_t high, bool separate);
 
     uint64_t epoch_us_ = 0;
     uint64_t cursor_ = 0;
@@ -97,4 +130,5 @@ private:
     int64_t feedback_expires_ = 0;
     uint16_t feedback_low_ = 0;
     uint16_t feedback_high_ = 0;
+    bool separate_feedback_ = false;
 };

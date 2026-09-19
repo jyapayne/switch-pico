@@ -101,6 +101,7 @@ def test_switch2_usb_probe_protocol(
             f"-DSWITCH2_PROBE_NEUTRAL_INPUT={int(hub)}",
             *([f"-DSWITCH2_PROBE_{imu_mode}=1"] if imu_mode else []),
             f"-I{probe}",
+            f"-I{root / 'src' / 'firmware'}",
             f"-I{tmp_path}",
             f"-I{mbedtls / 'include'}",
             str(probe / "protocol.c"),

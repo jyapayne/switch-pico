@@ -1,10 +1,11 @@
 #include "hardware_stub.h"
+#include "router.h"
 #include <assert.h>
 #include <stdio.h>
 
-// The real router tables and token-header decision run on the host. Only the
-// clock/pad registers and the SIE bank-selection receiver are modeled here;
-// the timing loop is compiled but never run against a simulated USB wire.
+// The real router tables, deadline sampler and token-header decision run on
+// the host. Scripted register reads exercise timing boundaries, not physical
+// pad latency, instruction timing or USB signal integrity.
 #define PICO_RP2350 1
 #undef SIO_GPIO_HI_IN_USB_DP_BITS
 #undef SIO_GPIO_HI_IN_USB_DM_BITS
@@ -15,11 +16,34 @@
 #define __wfe() ((void)0)
 #define __dsb() ((void)0)
 #define __isb() ((void)0)
-static struct {
+typedef struct {
     volatile uint32_t mtime, mtimeh, mtimecmp, mtimecmph, mtime_ctrl, gpio_hi_in;
-} router_test_sio;
+} router_test_registers;
+static router_test_registers router_test_sio;
+enum { MANUAL_READS, IDLE_READS, DRAIN_READS };
+static unsigned read_mode, register_reads, nonidle_read;
+static uint32_t simulated_start, simulated_elapsed;
+
+static router_test_registers* router_test_read_registers(void) {
+    if (read_mode == IDLE_READS) {
+        ++register_reads;
+        router_test_sio.mtime = simulated_start +
+            simulated_elapsed * (register_reads - 1u) / (FS_IDLE_POLLS + 1u);
+        router_test_sio.gpio_hi_in = (register_reads == nonidle_read ? 2u : 1u) << 24;
+    } else if (read_mode == DRAIN_READS) {
+        ++register_reads;
+        // SE0 is observed at zero and returns to J after the requested delay.
+        // A subsequent K either becomes SOP after qualified EOP or remains
+        // untrusted packet data until the real capture drain timeout expires.
+        router_test_sio.mtime = register_reads < 4u ? 0u :
+            register_reads < 9u ? simulated_elapsed : FS_CLOCK_HZ / 10000u;
+        router_test_sio.gpio_hi_in =
+            (register_reads < 4u ? 0u : register_reads < 7u ? 1u : 2u) << 24;
+    }
+    return &router_test_sio;
+}
 #undef sio_hw
-#define sio_hw (&router_test_sio)
+#define sio_hw router_test_read_registers()
 #include "router.c"
 
 usb_hw_t native_test_usb;
@@ -36,6 +60,15 @@ bool native_hub_select_device(uint8_t address, uint8_t owner, uint32_t cutoff) {
     selected_owner = owner;
     return accept_selection;
 }
+
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+void native_hub_note_selected_token(uint8_t address, uint8_t owner, uint32_t cutoff, uint8_t pid) {
+    (void)address; (void)owner; (void)cutoff; (void)pid;
+}
+void native_hub_note_failed_select(uint8_t address, uint8_t owner, uint32_t cutoff, uint8_t pid) {
+    (void)address; (void)owner; (void)cutoff; (void)pid;
+}
+#endif
 
 static const routing_table* current_table(void) {
     uint32_t generation;
@@ -99,7 +132,163 @@ static void expect_prefixes(const routing_table* table, const uint8_t* addresses
     }
 }
 
+static void test_clock_and_phase_guards(void) {
+    const uint32_t bad_clocks[] = {
+        FS_CLOCK_HZ == 240000000u ? 300000000u : 240000000u,
+        FS_CLOCK_HZ + 1u,
+        150000000u,
+    };
+    for (unsigned i = 0; i < sizeof(bad_clocks) / sizeof(bad_clocks[0]); ++i) {
+        probe_router_init(bad_clocks[i]);
+        assert(!probe_router_set_phase(0));
+        // Even a stale ready flag cannot arm a differently compiled receiver.
+        counters.ready = 1;
+        probe_router_enable(true);
+        selections = 0;
+        raw_packet packet = {0};
+        route_header(current_table(),0,TOKEN_SETUP_SIGNATURE,127,100,&packet);
+        assert(!selections && !packet.retargets);
+    }
+
+    probe_router_init(FS_CLOCK_HZ);
+    assert(probe_router_set_phase(0));
+    assert(probe_router_set_phase(FS_BIT_CYCLES - 1u));
+    assert(!probe_router_set_phase(FS_BIT_CYCLES));
+    assert(!probe_router_set_phase(UINT32_MAX));
+    counters.ready = 1;
+    probe_router_enable(true);
+    assert(!probe_router_set_phase(0));
+    probe_router_enable(false);
+    assert(probe_router_set_phase(0));
+}
+
+static void test_sample_deadlines(void) {
+    const uint32_t bit_cycles = FS_CLOCK_MHZ == 300u ? 25u : 20u;
+    uint32_t deadline = 1000u, line = LINE_SE1;
+    router_test_sio.mtime = deadline;
+    router_test_sio.gpio_hi_in = LINE_J << 24;
+    assert(sample_line(&deadline,&line));
+    assert(line == LINE_J && deadline == 1000u + bit_cycles);
+
+    router_test_sio.mtime = deadline + bit_cycles - 1u;
+    router_test_sio.gpio_hi_in = LINE_K << 24;
+    assert(sample_line(&deadline,&line));
+    assert(line == LINE_K && deadline == 1000u + 2u * bit_cycles);
+
+    router_test_sio.mtime = deadline + bit_cycles;
+    router_test_sio.gpio_hi_in = LINE_J << 24;
+    assert(!sample_line(&deadline,&line));
+    assert(line == LINE_K && deadline == 1000u + 2u * bit_cycles);
+
+    deadline = UINT32_MAX - bit_cycles + 1u;
+    router_test_sio.mtime = deadline;
+    assert(sample_line(&deadline,&line));
+    assert(line == LINE_J && deadline == 0u);
+    router_test_sio.mtime = bit_cycles - 1u;
+    assert(sample_line(&deadline,&line) && deadline == bit_cycles);
+}
+
+static void test_drain_qualification(void) {
+    const uint32_t bit_cycles = FS_CLOCK_MHZ == 300u ? 25u : 20u;
+    read_mode = IDLE_READS;
+    simulated_start = UINT32_MAX - 100u;
+    simulated_elapsed = 8u * bit_cycles - 1u;
+    register_reads = nonidle_read = 0;
+    assert(!observe_idle_j());
+    simulated_elapsed = 8u * bit_cycles;
+    register_reads = 0;
+    assert(observe_idle_j());
+    register_reads = 0;
+    nonidle_read = FS_IDLE_POLLS / 2u;
+    assert(!observe_idle_j());
+
+    read_mode = DRAIN_READS;
+    simulated_elapsed = (bit_cycles + 1u) / 2u - 1u;
+    register_reads = 0;
+    raw_packet packet = capture_packet(PROBE_ROUTER_DEFAULT_PHASE,current_table(),true);
+    assert(!packet.sop && packet.resync);
+    simulated_elapsed = (bit_cycles + 1u) / 2u;
+    register_reads = 0;
+    packet = capture_packet(PROBE_ROUTER_DEFAULT_PHASE,current_table(),true);
+    assert(packet.sop && packet.late);
+    read_mode = MANUAL_READS;
+}
+
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+static void test_root_response_attribution(void) {
+    const uint32_t nak = 0x96a5a666u, data1 = 0x965aa666u;
+    probe_router_stats snapshot;
+    probe_router_init(FS_CLOCK_HZ);
+    counters.ready = 1;
+    probe_router_enable(true);
+    uint8_t addresses[PROBE_ROUTER_SLOTS];
+    for (unsigned i = 0; i < PROBE_ROUTER_SLOTS; ++i) addresses[i] = 5u+i;
+    probe_router_publish(addresses,PROBE_ROUTER_UNASSIGNED);
+    const routing_table* table = current_table();
+    raw_packet packet = {0};
+
+    // Two decisions for one physical token must retain a single observation.
+    route_header(table,5,TOKEN_IN_SIGNATURE,0,1000,&packet);
+    route_header(table,5,TOKEN_IN_SIGNATURE,0,1000,&packet);
+    router_test_sio.mtime = 1100;
+    observe_discarded_header(nak);
+    root_observe_eop(1200,true);
+    probe_router_snapshot(&snapshot);
+    assert(snapshot.root_in_count == 1 && snapshot.root_header == nak);
+    assert(snapshot.root_header_cycle == 1100 && snapshot.root_eop_cycle == 1200);
+
+    // Recovery's own response cannot erase the pre-SETUP NAK observation.
+    route_header(table,5,TOKEN_SETUP_SIGNATURE,0,2000,&packet);
+    route_header(table,5,TOKEN_IN_SIGNATURE,0,2200,&packet);
+    router_test_sio.mtime = 2250;
+    observe_discarded_header(data1);
+    root_observe_eop(2300,true);
+    probe_router_snapshot(&snapshot);
+    assert(snapshot.root_header == data1);
+    assert(snapshot.before_setup_in_count == 1 && snapshot.before_setup_in_cutoff == 1000);
+    assert(snapshot.before_setup_header == nak && snapshot.before_setup_header_cycle == 1100);
+    assert(snapshot.before_setup_eop_cycle == 1200);
+
+    // A child token, even a rejected or unmapped one, ends root attribution.
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        route_header(table,5,TOKEN_IN_SIGNATURE,0,3000+kind*1000,&packet);
+        accept_selection = kind != 2;
+        route_header(table,kind == 1 ? 127 : 6,TOKEN_IN_SIGNATURE,0,3100+kind*1000,&packet);
+        accept_selection = true;
+        observe_discarded_header(nak);
+        root_observe_eop(3200+kind*1000,true);
+        probe_router_snapshot(&snapshot);
+        assert(snapshot.root_header == 0 && snapshot.root_eop_cycle == 0);
+    }
+
+    // Idle qualification is not an observed EOP; a later packet cannot fill it.
+    route_header(table,5,TOKEN_IN_SIGNATURE,0,6000,&packet);
+    observe_discarded_header(nak);
+    root_observe_eop(6100,false);
+    root_observe_eop(6200,true);
+    probe_router_snapshot(&snapshot);
+    assert(snapshot.root_header == nak && snapshot.root_eop_cycle == 0);
+
+    counters.root_in_count = UINT32_MAX;
+    route_header(table,5,TOKEN_IN_SIGNATURE,0,7000,&packet);
+    route_header(table,5,TOKEN_IN_SIGNATURE,0,7000,&packet);
+    probe_router_snapshot(&snapshot);
+    assert(snapshot.root_in_count == 0);
+
+    probe_router_init(FS_CLOCK_HZ);
+    observe_discarded_header(nak);
+    probe_router_snapshot(&snapshot);
+    assert(snapshot.root_header == 0 && snapshot.before_setup_header == 0);
+}
+#endif
+
 int main(void) {
+    test_clock_and_phase_guards();
+    test_sample_deadlines();
+    test_drain_qualification();
+#if defined(SWITCH2_PROBE_TRACE_NATIVE_INPUT)
+    test_root_response_attribution();
+#endif
     probe_router_init(FS_CLOCK_HZ);
     // Simulate observer readiness, not USB timing; this enables the actual
     // routing decision without starting the hardware-bound sampling loop.
