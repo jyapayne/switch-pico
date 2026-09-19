@@ -1294,7 +1294,9 @@ bool native_hub_init(void) {
     active_device = 0; addresses[0] = 0; default_device = 0;
     usb_hw->muxing = USB_USB_MUXING_TO_PHY_BITS | USB_USB_MUXING_SOFTCON_BITS | USB_USB_MUXING_USBPHY_AS_GPIO_BITS;
     sio_hw->gpio_hi_oe_clr = SIO_GPIO_HI_IN_USB_DP_BITS | SIO_GPIO_HI_IN_USB_DM_BITS;
-    hw_set_bits(&usb_hw->phy_direct,USB_USBPHY_DIRECT_DP_PULLUP_EN_BITS);
+    // GPIO-observer mode needs the physical override, but asserting it here
+    // would advertise attachment before the SIE, router and IRQ are ready.
+    hw_clear_bits(&usb_hw->phy_direct,USB_USBPHY_DIRECT_DP_PULLUP_EN_BITS);
     hw_set_bits(&usb_hw->phy_direct_override,USB_USBPHY_DIRECT_OVERRIDE_DP_PULLUP_EN_OVERRIDE_EN_BITS);
     usb_hw->pwr = USB_USB_PWR_VBUS_DETECT_BITS | USB_USB_PWR_VBUS_DETECT_OVERRIDE_EN_BITS;
     usb_hw->main_ctrl = USB_MAIN_CTRL_CONTROLLER_EN_BITS;
@@ -1316,8 +1318,12 @@ bool native_hub_init(void) {
 #endif
     irq_set_priority(USBCTRL_IRQ,0);
     irq_set_enabled(USBCTRL_IRQ,true);
-    hw_set_bits(&usb_hw->sie_ctrl,USB_SIE_CTRL_PULLUP_EN_BITS);
     watchdog_enable(8000,false); started = true; startup_time = time_us_32();
+    __dmb();
+    hw_set_bits(&usb_hw->sie_ctrl,USB_SIE_CTRL_PULLUP_EN_BITS);
+    // The forced physical pull-up is the actual attach edge. Publish it last:
+    // even an immediate host reset/SETUP now has an initialized receiver.
+    hw_set_bits(&usb_hw->phy_direct,USB_USBPHY_DIRECT_DP_PULLUP_EN_BITS);
 #if CHILDREN == 2
     probe_debug_printf("[NATIVE_HUB] stock USB, SIO phase=%u, 240MHz; hub2068 R2066 L2067; isolated EP0/1/2 banks\n",NATIVE_HUB_SAMPLE_PHASE);
 #else

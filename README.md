@@ -886,6 +886,15 @@ not reset the other, including when physical slot indices are reused. The
 existing IMU target mask is side-local and repeats for each pair. Physical
 Bluetooth capacity remains four devices: a physical Joy-Con pair uses two links.
 
+GAMEPAD/DUALSENSE builds from 0.101 translate native gameplay vibration into
+conventional source-driver rumble, including a Wii Remote used as a GAMEPAD
+source. Each virtual R/L half controls only its assigned source's right/weak
+or left/strong contribution; mono actuators combine those contributions.
+Source profile rumble gains apply. This does not require the optional DualSense
+HD-haptics experiment and does not reproduce HD carrier-wave frequencies.
+The separate JOYCON2 relay and dedicated Wii-IR builds retain their existing
+built-in sample support; this gameplay translation is for full-controller mode.
+
 With the four private capture sets described below prepared, build separately:
 
 ```sh
@@ -1236,8 +1245,65 @@ region byte-for-byte. Its single hardware capture passed all 16 initialization
 exchanges and 20 descriptor/isolation rounds (415 control requests), including
 one-, seven- and fifteen-byte version reads on all four children. No host error,
 retry or reset occurred; sustained traffic and gameplay remain unqualified.
-Gameplay rumble is not implemented in this native output path: HID output
-reports are logged, while built-in vibration samples use a separate cue path.
+That 0.100 image did not implement gameplay rumble: HID output reports were
+logged, while built-in vibration samples used a separate cue path.
+
+**0.101 gameplay-rumble candidate:** native Output Report `0x01` now reaches the
+existing source-driver scheduler in GAMEPAD/DUALSENSE mode. Interrupt reports
+including the ID and SET_REPORT payloads excluding it are normalized without
+copying their padding. The decoder requires a complete 16-byte LRA block and
+format `01`, preserves one to three samples, and converts the larger of the two
+10-bit amplitudes to a conventional 8-bit magnitude. Count-zero HOLD does not
+change output or refresh its watchdog; an explicit zero-amplitude sample stops
+only that side. Unknown formats, wrong IDs and truncated frames do not dispatch.
+
+For compatibility playback, samples divide a 12 ms envelope; the last magnitude
+holds only until the 50 ms receipt deadline. The existing 5 ms rumble timer skips
+missed sample boundaries rather than replaying stale pulses. Physical drivers
+receive finite durations. New gameplay and built-in cue requests replace older
+work on the same side; local/profile feedback has priority and interrupted game
+output cannot resume later. Driver calls run outside the backend lock with
+source-generation and output-revision checks. Reset, suspend, disconnect and
+source reassignment retire affected work without stopping another pair.
+
+The layout is grounded in [native report research](https://github.com/ndeadly/switch2_controller_research/blob/master/hid_reports.md#output-report-0x01),
+[SDL's Switch 2 encoder](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_switch2.c),
+and existing public Pro Controller USB blocks with the shared LRA layout.
+Host smoke coverage runs the actual HID callback, decoder and backend against
+instrumented source drivers; it checks independent pairs, side stops, watchdog
+expiry and reset/suspend cancellation. It does not qualify physical motor
+sensation, HD fidelity or console transport timing. The authorized 0.101 flash
+preserved persistent bytes; the user subsequently reported working rumble, but
+also second-player latency and failure to enumerate on the first cold connection
+to the Switch. HD reproduction is deferred. Picotool and management labels are
+synchronized from this candidate onward.
+
+**0.102 attach-last startup candidate:** the native initializer previously
+forced the physical D+ pull-up on before configuring the controller/EP0,
+starting the Core 1 observer, publishing routing and installing the USB IRQ.
+The physical override made the later logical SIE pull-up write insufficient
+as an attach gate. A warm replug occurs after that initialization has finished.
+
+Startup now forces the physical pull-up off while those dependencies initialize.
+After the observer is ready, address routing and IRQ handling are enabled, and
+the started/watchdog timestamp state is published, the physical pull-up is
+asserted last. Observer timeout leaves the device detached. No retry, arbitrary
+startup delay, USB identity replacement or storage change is introduced.
+
+The host register model fails with the old initializer and passes with the new
+one for two/four children, traced/untraced builds, immediate/delayed observer
+readiness and timeout. It also services a root descriptor, SET_ADDRESS and the
+next descriptor from the first attach edge without replugging. This proves the
+software attach-before-ready defect; it is not a physical USB timing trace.
+After the authorized 0.102 flash preserved persistent bytes, the user reported
+that the cold-start connection now works. That is user qualification, not an
+instrumented electrical measurement or a long-run reliability claim.
+
+The Pico is running 0.102. Gameplay rumble, USB runtime scheduling and player
+routing are unchanged by the startup correction. Second-player latency
+remains a separate open investigation: a 20-second concurrent PC capture showed
+roughly 231–232 reports/second across all four children, which does not establish
+equal physical input-to-display latency on the Switch.
 
 **Neutral two-pair transport experiment (0.91):** the standalone probe can expose
 four native children, ordered **A-R, A-L, B-R, B-L** on hub ports 1–4. This is an

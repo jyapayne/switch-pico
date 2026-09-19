@@ -79,6 +79,9 @@ typedef struct {
     bool native_stream_ready;
     uint32_t last_hid_complete_ms;
     bool hid_completion_seen;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    bool gameplay_rumble_seen;
+#endif
     uint32_t mouse_delivered_reports, mouse_logged_reports;
     int64_t mouse_delivered_x, mouse_delivered_y;
 #ifdef SWITCH2_PROBE_TRACE_NATIVE_INPUT
@@ -298,6 +301,21 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                            hid_report_type_t report_type, const uint8_t* buffer,
                            uint16_t length) {
     ++hid_packets;
+#if defined(SWITCH2_PROBE_USB_INIT) && SWITCH2_BRIDGE_FULL_INPUT
+    if (instance < PROBE_CONTROLLER_COUNT && report_type == HID_REPORT_TYPE_OUTPUT &&
+        controllers[instance].protocol.initialized &&
+        probe_transport_mounted(instance) && !probe_transport_suspended(instance)) {
+        probe_rumble_frame frame;
+        if (probe_protocol_decode_rumble(report_id, buffer, length, &frame)) {
+            // Count-zero HOLD leaves both motor state and watchdog untouched.
+            // Valid gameplay traffic must not fill the slow UART log ring.
+            if (frame.count && probe_controller_input_submit_rumble(
+                    instance, frame.magnitude, frame.count))
+                controllers[instance].gameplay_rumble_seen = true;
+            return;
+        }
+    }
+#endif
     probe_debug_printf("[PROBE] HID_REPORT_TYPE=%u\n", report_type);
     log_packet("HID_OUT", instance, report_id, buffer, length);
 }
@@ -329,6 +347,9 @@ static void reset_controller_protocol(uint8_t instance) {
     probe_usb_controller* controller = &controllers[instance];
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
     probe_controller_input_cancel_sample(instance);
+#if SWITCH2_BRIDGE_FULL_INPUT
+    probe_controller_input_cancel_rumble(instance);
+#endif
     probe_controller_input_set_native_stream(instance, false);
 #endif
     memset(controller, 0, sizeof(*controller));
@@ -483,8 +504,16 @@ static void controller_input_task(probe_usb_controller* controller, uint32_t now
     probe_protocol_state* protocol = &controller->protocol;
     probe_controller_input source = {0};
     probe_controller_input_poll(instance, now, &source);
-    const bool output_active = source.active && probe_transport_mounted(instance) &&
-                               !probe_transport_suspended(instance);
+    const bool usb_active = probe_transport_mounted(instance) &&
+                            !probe_transport_suspended(instance);
+    const bool output_active = source.active && usb_active;
+#if SWITCH2_BRIDGE_FULL_INPUT
+    if (!usb_active) probe_controller_input_cancel_sample(instance);
+    if (controller->gameplay_rumble_seen && (!output_active || !protocol->initialized)) {
+        probe_controller_input_cancel_rumble(instance);
+        controller->gameplay_rumble_seen = false;
+    }
+#endif
     if (protocol->controller_active != output_active)
         probe_debug_printf("[PROBE] Controller input itf=%u %s\n",
                            instance, output_active ? "active" : "neutral (disconnected/stale)");
@@ -783,6 +812,11 @@ void tud_suspend_cb(bool remote_wakeup_en) {
         controller->protocol.controller_active = false;
 #ifdef SWITCH_PICO_SWITCH2_USB_BRIDGE
         probe_controller_input_set_native_stream(instance, false);
+#if SWITCH2_BRIDGE_FULL_INPUT
+        probe_controller_input_cancel_sample(instance);
+        probe_controller_input_cancel_rumble(instance);
+        controller->gameplay_rumble_seen = false;
+#endif
         controller->native_stream_ready = false;
         controller->hid_completion_seen = false;
 #endif

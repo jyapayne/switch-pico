@@ -680,7 +680,122 @@ static void test_indexed_memory(void) {
     }
 }
 
+static void expect_invalid_rumble(uint8_t report_id, const uint8_t* data, size_t length) {
+    probe_rumble_frame output = {.count = 3, .magnitude = {17, 93, 241}};
+    assert(!probe_protocol_decode_rumble(report_id, data, length, &output));
+    assert(output.count == 3);
+    assert(output.magnitude[0] == 17 && output.magnitude[1] == 93 && output.magnitude[2] == 241);
+}
+
+static void test_native_rumble(void) {
+    // Independent block bytes from public rumble-procon-gccon.pcapng.gz,
+    // packets 9970 and 257200. These are Pro Controller report 02 LRA blocks;
+    // the report 01 wrapper below is synthetic, not a captured Joy-Con packet.
+    static const uint8_t captured_blocks[][16] = {
+        {0x50, 0x81, 0x01, 0x10, 0x1e, 0x00},
+        {0x52, 0x9f, 0x19, 0xe0, 0x9d, 0x00},
+    };
+    probe_rumble_frame output;
+    uint8_t wire[65];
+    for (unsigned i = 0; i < 2; ++i) {
+        memset(wire, 0xa5, sizeof(wire));
+        wire[0] = 0x01;
+        memcpy(wire + 1, captured_blocks[i], sizeof(captured_blocks[i]));
+        assert(probe_protocol_decode_rumble(0, wire, 64, &output));
+        assert(output.count == 1 && output.magnitude[0] == i);
+        assert(probe_protocol_decode_rumble(1, wire + 1, 63, &output));
+        assert(output.count == 1 && output.magnitude[0] == i);
+    }
+
+    // Manually specified byte boundaries, not an encoder/decoder roundtrip.
+    // Frequencies are both 1023: they must not leak into either amplitude,
+    // nor be rejected merely because this compatibility decoder ignores them.
+    static const struct {
+        uint8_t sample[5];
+        uint8_t expected;
+    } boundaries[] = {
+        {{0xff, 0x03, 0xf0, 0x3f, 0x00}, 0},   // amplitudes 0, 0
+        {{0xff, 0x0b, 0xf0, 0x3f, 0x00}, 0},   // 2, 0 rounds down
+        {{0xff, 0x03, 0xf0, 0xff, 0x00}, 1},   // 0, 3 rounds up
+        {{0xff, 0xff, 0xf0, 0x3f, 0x00}, 16},  // 63, 0
+        {{0xff, 0x03, 0xf1, 0x3f, 0x00}, 16},  // 64, 0
+        {{0xff, 0xff, 0xf7, 0x3f, 0x80}, 128}, // 511, 512
+        {{0xff, 0x03, 0xf8, 0xff, 0x7f}, 128}, // 512, 511
+        {{0xff, 0xff, 0xff, 0x3f, 0x00}, 255}, // 1023, 0
+        {{0xff, 0x03, 0xf0, 0xff, 0xff}, 255}, // 0, 1023
+    };
+    wire[1] = 0x5f;
+    for (unsigned i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); ++i) {
+        memcpy(wire + 2, boundaries[i].sample, 5);
+        assert(probe_protocol_decode_rumble(0, wire, 17, &output));
+        assert(output.count == 1 && output.magnitude[0] == boundaries[i].expected);
+    }
+
+    // Three distinguishable samples retain wire order; a shorter count ignores
+    // stale later samples. Both callback envelopes accept minimal/compact/USB sizes.
+    static const uint8_t ordered[16] = {
+        0x70,
+        0x00, 0xfc, 0x0f, 0x00, 0x00, // amplitudes 1023, 0 -> 255
+        0x00, 0x00, 0x00, 0xc0, 0x3f, // amplitudes 0, 255 -> 64
+        0xff, 0xff, 0xf7, 0x3f, 0x80, // amplitudes 511, 512 -> 128
+    };
+    static const size_t lengths[] = {17, 42, 64};
+    memcpy(wire + 1, ordered, sizeof(ordered));
+    for (unsigned count = 1; count <= 3; ++count) {
+        for (unsigned sequence = 0; sequence < 16; ++sequence) {
+            wire[1] = (uint8_t)(0x40u | (count << 4) | sequence);
+            for (unsigned i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+                for (unsigned form = 0; form < 2; ++form) {
+                    assert(probe_protocol_decode_rumble((uint8_t)form, wire + form,
+                                                        lengths[i] - form, &output));
+                    assert(output.count == count && output.magnitude[0] == 255);
+                    if (count >= 2) assert(output.magnitude[1] == 64);
+                    if (count == 3) assert(output.magnitude[2] == 128);
+                }
+            }
+        }
+    }
+
+    wire[1] = 0x4f; // HOLD: nonzero stale samples must not become a stop/update.
+    assert(probe_protocol_decode_rumble(0, wire, 17, &output));
+    assert(output.count == 0);
+    assert(probe_protocol_decode_rumble(1, wire + 1, 16, &output));
+    assert(output.count == 0);
+
+    // Complete 16-byte block required even for HOLD or a one-sample update.
+    for (unsigned count = 0; count <= 3; ++count) {
+        wire[1] = (uint8_t)(0x40u | (count << 4));
+        for (size_t length = 0; length < 17; ++length)
+            expect_invalid_rumble(0, wire, length);
+        for (size_t length = 0; length < 16; ++length)
+            expect_invalid_rumble(1, wire + 1, length);
+    }
+    expect_invalid_rumble(0, wire, 65);
+    expect_invalid_rumble(1, wire + 1, 64);
+    expect_invalid_rumble(0, wire, SIZE_MAX);
+    expect_invalid_rumble(1, wire + 1, SIZE_MAX);
+    expect_invalid_rumble(0, NULL, 64);
+    expect_invalid_rumble(1, NULL, 63);
+    assert(!probe_protocol_decode_rumble(0, wire, 64, NULL));
+    assert(!probe_protocol_decode_rumble(1, wire + 1, 63, NULL));
+    for (unsigned id = 0; id <= UINT8_MAX; ++id) {
+        if (id != 1) {
+            wire[0] = (uint8_t)id;
+            expect_invalid_rumble(0, wire, 64);
+        }
+        if (id > 1) expect_invalid_rumble((uint8_t)id, wire + 1, 63);
+    }
+    wire[0] = 1;
+    for (unsigned header = 0; header <= UINT8_MAX; ++header) {
+        if ((header & 0xc0u) == 0x40u) continue;
+        wire[1] = (uint8_t)header;
+        expect_invalid_rumble(0, wire, 64);
+        expect_invalid_rumble(1, wire + 1, 63);
+    }
+}
+
 int main(void) {
+    test_native_rumble();
     test_indexed_memory();
     test_descriptors();
     for (unsigned side = 0; side < 2; ++side) {

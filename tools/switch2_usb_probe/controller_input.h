@@ -51,6 +51,11 @@ void probe_controller_input_set_native_features(uint8_t features);
 // Supply each child's advertised, validated nine-byte stick record. Native
 // output stays unavailable until that child's calibration has been supplied.
 void probe_controller_input_set_full_stick_calibration(uint8_t instance, const uint8_t calibration[9]);
+// Native single-actuator gameplay envelope for this virtual half. Backend owns
+// binding/generation checks, profile gain, finite playback and stale-stream stop.
+bool probe_controller_input_submit_rumble(uint8_t instance, const uint8_t* magnitudes,
+                                          uint8_t count);
+void probe_controller_input_cancel_rumble(uint8_t instance);
 #endif
 // Core0 native07/08 output. Disable discards queued/prepared data; repeated
 // enable preserves it. Joy-Con mode relays its bounded FIFO; right-only Wii
@@ -66,7 +71,7 @@ uint32_t probe_controller_input_peek_native_report(uint8_t instance, uint32_t no
 // Remove only the exact current head once. A stale/replaced token cannot pop a
 // new stream's packet. Before flash-ready startup peek/commit return 0/false.
 bool probe_controller_input_commit_native_report(uint8_t instance, uint32_t serial);
-// Built-in vibration samples only; raw HD-rumble output is not forwarded.
+// Built-in vibration samples; separate from full-controller gameplay envelopes.
 // A nonzero token means queued, not completed. Result:0 pending,1 completion,
 // -1 failed/stale. Joy-Con completion is its application ACK; Wii/DualSense
 // completion is actual bounded rumble-driver dispatch, not a source application

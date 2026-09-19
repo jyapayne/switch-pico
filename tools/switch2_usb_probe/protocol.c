@@ -407,3 +407,34 @@ void probe_protocol_gate_native_report(const probe_protocol_state* state,
         memset(input + imu_length_offset, 0, 41);
 #endif
 }
+
+bool probe_protocol_decode_rumble(uint8_t report_id, const uint8_t* data,
+                                  size_t length, probe_rumble_frame* output) {
+    if (!data || !output) return false;
+    if (report_id == 0) {
+        if (length < 17 || length > 64 || data[0] != 0x01) return false;
+        ++data;
+    } else if (report_id != 0x01 || length < 16 || length > 63) {
+        return false;
+    }
+    if ((data[0] & 0xc0u) != 0x40u) return false;
+
+    // Wire block: ndeadly/switch2_controller_research hid_reports.md#output-report-0x01.
+    // SDL src/joystick/hidapi/SDL_hidapi_switch2.c (EncodeHDRumble / UpdateRumble)
+    // packs frequency/amplitude/frequency/amplitude as four 10-bit LE fields.
+    // Header: format 01 [7:6], sample count [5:4], sequence [3:0].
+    // Sequence is informational; unused sample bytes and USB padding may be stale.
+    probe_rumble_frame decoded = {.count = (data[0] >> 4) & 3u};
+    for (unsigned i = 0; i < decoded.count; ++i) {
+        const uint8_t* sample = data + 1u + 5u * i;
+        const unsigned first = (sample[1] >> 2) | ((sample[2] & 0x0fu) << 6);
+        const unsigned second = (sample[3] >> 6) | ((unsigned)sample[4] << 2);
+        const unsigned amplitude = first > second ? first : second;
+        // ERM compatibility, not HD waveform reproduction: ignore frequencies
+        // and round max(amplitudes) across the full 10-bit range to 0..255.
+        // SDL's conservative outbound clamp is not an inbound validity limit.
+        decoded.magnitude[i] = (uint8_t)((amplitude * 255u + 511u) / 1023u);
+    }
+    *output = decoded;
+    return true;
+}

@@ -53,13 +53,37 @@ def test_native_gamepad_backend_native(
         check=True,
         cwd=root,
     )
-    scenarios = ["stable-logical-slot", "cue-lifetime", "cue-races"]
+    scenarios = [
+        "stable-logical-slot",
+        "cue-lifetime",
+        "cue-races",
+        "gameplay-timeline",
+        "gameplay-availability",
+        "gameplay-priority",
+        "gameplay-source-epochs",
+        "gameplay-profile-gain",
+    ]
     if controller_count == 2:
         scenarios.append("source-isolation")
     else:
-        scenarios.extend(("two-pair-sources", "two-pair-cues", "explicit-precedence"))
+        scenarios.extend(
+            (
+                "two-pair-sources",
+                "two-pair-cues",
+                "explicit-precedence",
+                "gameplay-two-pairs",
+            )
+        )
     if source == "GAMEPAD":
-        scenarios.extend(("paired-source", "pair-cue-races", "mono-rumble"))
+        scenarios.extend(
+            (
+                "paired-source",
+                "pair-cue-races",
+                "mono-rumble",
+                "gameplay-paired-revision",
+                "gameplay-wii",
+            )
+        )
         if controller_count == 2:
             scenarios.extend(("sensorless-admission", "independent-motion"))
         else:

@@ -76,6 +76,13 @@ void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
     assert(instance < PROBE_CONTROLLER_COUNT);
     cue_tokens[instance] = 0;
 }
+bool bluepad32_input_backend_native_rumble_submit(uint8_t, const uint8_t*, uint8_t) {
+    assert(false && "gameplay motor dispatch belongs to the native backend fixture");
+    return false;
+}
+void bluepad32_input_backend_native_rumble_cancel(uint8_t) {
+    assert(false && "gameplay motor cancellation belongs to the native backend fixture");
+}
 void bluepad32_input_backend_queue_profile_feedback(uint8_t, uint32_t, uint8_t, ControllerProfileConfirmationPolicy) {}
 void controller_profile_runtime_reset() {
     for (ControllerProfile& value : profiles)

@@ -17,6 +17,9 @@
 #endif
 #include "configuration/configuration_service.h"
 #include "profile/profile_service.h"
+#if SWITCH2_BRIDGE_FULL_INPUT
+#include "profile/controller_profile_runtime.h"
+#endif
 #include <limits.h>
 #include <math.h>
 #include <stddef.h>
@@ -291,6 +294,9 @@ struct NativeGamepadCue {
     uint32_t started_ms = 0;
     uint8_t slot = 0xff;
     uint8_t sample_id = 0;
+    // Nonzero selects host gameplay instead of the built-in sample vocabulary.
+    uint8_t rumble_count = 0;
+    uint8_t rumble_magnitude[3]{};
     int result = -1;
     bool active = false;
     bool consumed = false;
@@ -298,7 +304,7 @@ struct NativeGamepadCue {
 };
 
 struct NativeGamepadMotorOutput {
-    uint32_t deadline_ms = 0;
+    uint32_t deadline_ms[2]{};
     uint8_t magnitude[2]{};
     bool owned = false;
 };
@@ -321,6 +327,10 @@ constexpr NativeGamepadCuePattern kNativeGamepadCuePatterns[8] = {
     {{120}, 1, 220},
 };
 constexpr uint32_t kNativeGamepadCueDeadlineMs = 2000;
+// One host block spans 12 ms; the last magnitude holds only until the 50 ms
+// receipt watchdog. ERM compatibility ignores carrier frequencies, not timing.
+constexpr uint32_t kNativeGameplayFrameMs = 12;
+constexpr uint32_t kNativeGameplayWatchdogMs = 50;
 #endif
 
 
@@ -498,6 +508,8 @@ struct NativeGamepadBinding {
 constexpr uint8_t kNativeChildCount = BLUEPAD32_NATIVE_PAIR_COUNT * 2;
 NativeGamepadBinding g_native_bindings[BLUEPAD32_NATIVE_PAIR_COUNT]{};
 NativeGamepadCue g_native_cues[kNativeChildCount]{};
+uint32_t g_native_output_revision[kNativeChildCount]{};
+uint32_t g_native_slot_epoch[kSlotCount]{};
 uint64_t g_next_native_token = 1;
 uni_hid_device_t* g_native_pending_devices[kSlotCount]{};
 NativeGamepadReportIngress g_native_reports[kSlotCount]{};
@@ -569,9 +581,24 @@ bool native_rumble_capable(const BackendSlot& slot, uint8_t side) {
 }
 
 void cancel_native_cue_locked(NativeGamepadCue& cue) {
+    if (cue.active || cue.result == 0)
+        ++g_native_output_revision[&cue - g_native_cues];
     cue.active = false;
     cue.result = -1;
     // The slot's last motor output remains owned until the timer replaces it.
+}
+
+bool native_feedback_owns(const BackendSlot& slot, uint32_t now_ms) {
+    return slot.feedback_pending || slot.pending_profile_feedback_count != 0 ||
+        slot.profile_feedback.active ||
+        (slot.feedback_until_ms != 0 &&
+         static_cast<int32_t>(now_ms - slot.feedback_until_ms) < 0);
+}
+
+void cancel_native_gameplay_locked(const BackendSlot& slot) {
+    for (NativeGamepadCue& cue : g_native_cues)
+        if (cue.rumble_count != 0 && cue.slot == &slot - g_slots)
+            cancel_native_cue_locked(cue);
 }
 
 void refresh_native_source_locked(uint8_t reselected_pair = 0xff) {
@@ -671,14 +698,18 @@ void refresh_native_source_locked(uint8_t reselected_pair = 0xff) {
 }
 
 void retire_native_slot(uint8_t index) {
+    ++g_native_slot_epoch[index];
     for (NativeGamepadBinding& binding : g_native_bindings) {
         if (binding.slot != index) continue;
         binding.slot = 0xff;
         binding.generation = 0;
         binding.snapshot = {};
     }
-    for (NativeGamepadCue& cue : g_native_cues)
-        if (cue.slot == index) cue = {};
+    for (NativeGamepadCue& cue : g_native_cues) {
+        if (cue.slot != index) continue;
+        cancel_native_cue_locked(cue);
+        cue = {};
+    }
     g_slots[index].native_motion = {};
     g_slots[index].native_output = {};
 }
@@ -2099,6 +2130,9 @@ struct HotkeyDecision {
 void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
                           uint8_t weak_magnitude,
                           uint8_t strong_magnitude) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+    cancel_native_gameplay_locked(slot);
+#endif
     slot.feedback_pending = true;
     slot.pending_feedback = {
         slot.connection_generation, duration_ms, weak_magnitude,
@@ -2108,6 +2142,9 @@ void queue_local_feedback(BackendSlot& slot, uint16_t duration_ms,
 
 void queue_profile_feedback(BackendSlot& slot,
                             const ProfileFeedbackEnvelope& feedback) {
+#if SWITCH2_BRIDGE_FULL_INPUT
+    cancel_native_gameplay_locked(slot);
+#endif
     if (slot.pending_profile_feedback_count < kProfileFeedbackQueueCapacity) {
         slot.pending_profile_feedback[
             slot.pending_profile_feedback_count++] = feedback;
@@ -2925,6 +2962,8 @@ struct NativeGamepadCueDispatch {
     uint32_t connection_generation = 0;
     uint32_t prepared_ms = 0;
     uint64_t token[2]{};
+    uint32_t revision[2]{};
+    uint32_t slot_epoch = 0;
     uint16_t duration_ms = 0;
     uint8_t magnitude[2]{};
     uint8_t slot = 0xff;
@@ -2948,11 +2987,13 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
         NativeGamepadCue& cue = g_native_cues[pair * 2 + side];
         if (cue.slot != index) continue;
         if (!native_cue_current(pair, cue) ||
-            (cue.result == 0 && now_ms - cue.requested_ms >= kNativeGamepadCueDeadlineMs) ||
-            (cue.active && now_ms - cue.started_ms >= kNativeGamepadCueDeadlineMs))
+            (cue.rumble_count != 0
+                ? now_ms - cue.requested_ms >= kNativeGameplayWatchdogMs
+                : ((cue.result == 0 && now_ms - cue.requested_ms >= kNativeGamepadCueDeadlineMs) ||
+                   (cue.active && now_ms - cue.started_ms >= kNativeGamepadCueDeadlineMs))))
             cancel_native_cue_locked(cue);
         if (local_active || local_dispatch) {
-            if (cue.active) cancel_native_cue_locked(cue);
+            if (cue.active || cue.rumble_count != 0) cancel_native_cue_locked(cue);
             busy |= cue.result == 0;
             continue;
         }
@@ -2960,6 +3001,19 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
         if (cue.result != 0 && !cue.active) continue;
         command->token[side] = cue.token;
         pending |= cue.result == 0;
+        if (cue.rumble_count != 0) {
+            const uint32_t elapsed = now_ms - cue.requested_ms;
+            const uint32_t phase_ms = kNativeGameplayFrameMs / cue.rumble_count;
+            const uint8_t phase = elapsed >= kNativeGameplayFrameMs
+                ? cue.rumble_count - 1 : static_cast<uint8_t>(elapsed / phase_ms);
+            magnitude[side] = cue.rumble_magnitude[phase];
+            const uint32_t boundary = phase + 1u < cue.rumble_count
+                ? (phase + 1u) * phase_ms : kNativeGameplayWatchdogMs;
+            const uint16_t remaining = static_cast<uint16_t>(boundary - elapsed);
+            if (magnitude[side] != 0 && remaining < duration) duration = remaining;
+            busy = true;
+            continue;
+        }
         if (cue.sample_id == 0) continue;
         const NativeGamepadCuePattern& pattern = kNativeGamepadCuePatterns[cue.sample_id];
         uint32_t elapsed = cue.active ? now_ms - cue.started_ms : 0;
@@ -2987,7 +3041,8 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
     const uint32_t deadline = duration == 0 ? 0 : now_ms + duration;
     const bool changed = magnitude[0] != previous.magnitude[0] ||
         magnitude[1] != previous.magnitude[1] ||
-        (duration != 0 && deadline != previous.deadline_ms);
+        (magnitude[0] != 0 && deadline != previous.deadline_ms[0]) ||
+        (magnitude[1] != 0 && deadline != previous.deadline_ms[1]);
     if (!pending && !changed) return busy || previous.owned;
     if (!slot.active || slot.device == nullptr ||
         (!native_rumble_capable(slot, 0) && !native_rumble_capable(slot, 1))) {
@@ -3005,6 +3060,10 @@ bool prepare_native_cues(uint8_t index, uint32_t now_ms,
     command->magnitude[1] = magnitude[1];
     command->slot = index;
     command->pair = pair;
+    command->slot_epoch = g_native_slot_epoch[index];
+    if (pair != 0xff)
+        for (uint8_t side = 0; side < 2; ++side)
+            command->revision[side] = g_native_output_revision[pair * 2 + side];
     for (uint8_t side = 0; side < 2; ++side)
         if (command->token[side] != 0) g_native_cues[pair * 2 + side].in_flight = true;
     return true;
@@ -3018,6 +3077,8 @@ bool submit_native_rumble(uni_hid_device_t* device, uint16_t duration,
         device->report_parser.parse_input_report == uni_hid_parser_ds5_parse_input_report) {
         return uni_hid_parser_ds5_bridge_rumble(device, duration, right, left);
     }
+    if (device->controller_type == CONTROLLER_TYPE_WiiController &&
+        !uni_hid_parser_wii_rumble_ready(device)) return false;
     // Existing finite-duration dispatch is the strongest observable result
     // most drivers expose. It is not transport acceptance or a remote ACK.
     dispatch_rumble(device, duration, right, left);
@@ -3034,9 +3095,15 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
         state_lock_enter();
         bool current = slot.active && slot.device == command.device &&
             slot.companion == command.companion &&
-            slot.connection_generation == command.connection_generation;
+            slot.connection_generation == command.connection_generation &&
+            g_native_slot_epoch[command.slot] == command.slot_epoch &&
+            !native_feedback_owns(slot, btstack_run_loop_get_time_ms());
         for (uint8_t side = 0; side < 2; ++side) {
-            if ((paired && side != target) || command.token[side] == 0) continue;
+            if (paired && side != target) continue;
+            if (command.pair != 0xff)
+                current &= command.revision[side] ==
+                    g_native_output_revision[command.pair * 2 + side];
+            if (command.token[side] == 0) continue;
             const NativeGamepadCue& cue = g_native_cues[command.pair * 2 + side];
             current &= cue.token == command.token[side] && cue.in_flight &&
                 cue.result != -1 && native_cue_current(command.pair, cue);
@@ -3063,18 +3130,18 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
 
         state_lock_enter();
         if (slot.active && slot.device == command.device &&
-            slot.companion == command.companion) {
+            slot.companion == command.companion &&
+            g_native_slot_epoch[command.slot] == command.slot_epoch) {
             // Retain each actual submission even if USB canceled/reselected
             // during its driver call, or the other half cannot be submitted.
             NativeGamepadMotorOutput& output = slot.native_output;
-            if (paired) output.magnitude[target] = command.magnitude[target];
-            else {
-                output.magnitude[0] = command.magnitude[0];
-                output.magnitude[1] = command.magnitude[1];
+            for (uint8_t side = 0; side < 2; ++side) {
+                if (paired && side != target) continue;
+                output.magnitude[side] = command.magnitude[side];
+                output.deadline_ms[side] = command.magnitude[side] != 0
+                    ? command.prepared_ms + command.duration_ms : 0;
             }
             output.owned = (output.magnitude[0] | output.magnitude[1]) != 0;
-            output.deadline_ms = output.owned
-                ? command.prepared_ms + command.duration_ms : 0;
         }
         state_lock_exit();
     }
@@ -3085,12 +3152,15 @@ void dispatch_native_cues(const NativeGamepadCueDispatch& command) {
         if (cue.token != command.token[side]) continue;
         cue.in_flight = false;
         if (!native_cue_current(command.pair, cue) ||
-            (cue.result == 0 && dispatch_ms - cue.requested_ms >= kNativeGamepadCueDeadlineMs)) {
+            (cue.result == 0 && dispatch_ms - cue.requested_ms >=
+                (cue.rumble_count != 0 ? kNativeGameplayWatchdogMs : kNativeGamepadCueDeadlineMs))) {
             cancel_native_cue_locked(cue);
         } else if (submitted[side] && cue.result == 0) {
             cue.result = 1;  // Accepted source submission, never a native ACK.
-            cue.started_ms = command.prepared_ms;
-            cue.active = cue.sample_id != 0;
+            if (cue.rumble_count == 0) {
+                cue.started_ms = command.prepared_ms;
+                cue.active = cue.sample_id != 0;
+            }
         }
     }
     state_lock_exit();
@@ -3321,6 +3391,7 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
         }
 
         const bool feedback_active =
+            slot.feedback_until_ms != 0 &&
             static_cast<int32_t>(now_ms - slot.feedback_until_ms) < 0;
         if (!slot.profile_feedback.active && !feedback_active &&
             slot.pending_profile_feedback_count != 0) {
@@ -3386,8 +3457,8 @@ void process_rumble_timer(btstack_timer_source_t* timer) {
 
         const bool local_feedback_active =
             slot.profile_feedback.active ||
-            static_cast<int32_t>(
-                now_ms - slot.feedback_until_ms) < 0;
+            (slot.feedback_until_ms != 0 && static_cast<int32_t>(
+                now_ms - slot.feedback_until_ms) < 0);
 #ifdef SWITCH2_BRIDGE_WII_INPUT
         const bool wii_cue_owns_rumble = prepare_wii_cue(
             slot_index, now_ms, local_feedback_active,
@@ -4847,6 +4918,75 @@ void bluepad32_input_backend_native_snapshot(
     state_lock_exit();
 }
 
+bool bluepad32_input_backend_native_rumble_submit(
+    uint8_t instance, const uint8_t* magnitudes, uint8_t count) {
+    if (!g_initialized || instance >= kNativeChildCount || magnitudes == nullptr ||
+        count == 0 || count > 3) return false;
+    const uint32_t received_ms = btstack_run_loop_get_time_ms();
+    uint8_t samples[3]{};
+    memcpy(samples, magnitudes, count);
+    state_lock_enter();
+    const NativeGamepadBinding& binding = g_native_bindings[instance / 2];
+    const uint8_t index = binding.slot;
+    if (index >= kSlotCount || !g_slots[index].active ||
+        g_slots[index].connection_generation != binding.generation ||
+        !native_rumble_capable(g_slots[index], instance & 1u) ||
+        native_feedback_owns(g_slots[index], received_ms)) {
+        state_lock_exit();
+        return false;
+    }
+    const BackendSlot& slot = g_slots[index];
+    const Bluepad32SlotSnapshot snapshot{
+        slot.active, slot.connection_generation, slot.identity,
+        slot.pre_hotkey_button_mask, slot.state, slot.accelerometer,
+        slot.nunchuk_accelerometer};
+    const uint32_t revision = g_native_output_revision[instance];
+    state_lock_exit();
+
+    // Profile resolution may call services: never hold the backend lock over
+    // it. Full-scale input obtains the existing weak/strong gain once per block.
+    const ControllerRumbleOutput gains = controller_profile_runtime_scale_host_rumble(
+        index, snapshot, ControllerRumbleOutput{UINT8_MAX, UINT8_MAX});
+    const uint8_t gain = (instance & 1u) == 0
+        ? gains.high_frequency_magnitude : gains.low_frequency_magnitude;
+    for (uint8_t sample = 0; sample < count; ++sample)
+        samples[sample] = controller_profile_scale_rumble_magnitude(samples[sample], gain);
+
+    state_lock_enter();
+    const uint32_t now_ms = btstack_run_loop_get_time_ms();
+    const bool accepted = binding.slot == index && slot.active &&
+        binding.generation == snapshot.connection_generation &&
+        slot.connection_generation == snapshot.connection_generation &&
+        g_native_output_revision[instance] == revision && g_next_native_token != 0 &&
+        native_rumble_capable(slot, instance & 1u) &&
+        !native_feedback_owns(slot, now_ms) &&
+        now_ms - received_ms < kNativeGameplayWatchdogMs;
+    if (accepted) {
+        ++g_native_output_revision[instance];
+        NativeGamepadCue& cue = g_native_cues[instance];
+        cue = {};
+        cue.token = g_next_native_token++;
+        cue.slot = index;
+        cue.connection_generation = snapshot.connection_generation;
+        cue.requested_ms = received_ms;
+        cue.rumble_count = count;
+        memcpy(cue.rumble_magnitude, samples, count);
+        cue.result = 0;
+        cue.active = true;
+        __atomic_add_fetch(&g_host_rumble_requests, 1, __ATOMIC_RELAXED);
+    }
+    state_lock_exit();
+    return accepted;
+}
+
+void bluepad32_input_backend_native_rumble_cancel(uint8_t instance) {
+    if (!g_initialized || instance >= kNativeChildCount) return;
+    state_lock_enter();
+    NativeGamepadCue& cue = g_native_cues[instance];
+    if (cue.rumble_count != 0) cancel_native_cue_locked(cue);
+    state_lock_exit();
+}
+
 bool bluepad32_input_backend_native_sample_request(
     uint8_t instance, uint8_t sample_id, uint64_t* token) {
     if (token == nullptr) return false;
@@ -4857,9 +4997,10 @@ bool bluepad32_input_backend_native_sample_request(
     const NativeGamepadBinding& binding = g_native_bindings[instance / 2];
     const uint8_t index = binding.slot;
     const bool accepted = index < kSlotCount && g_next_native_token != 0 &&
-        native_rumble_capable(g_slots[index], instance & 1u) &&
-        !cue.in_flight && (sample_id == 0 || (cue.result != 0 && !cue.active));
+        g_slots[index].active && g_slots[index].connection_generation == binding.generation &&
+        native_rumble_capable(g_slots[index], instance & 1u);
     if (accepted) {
+        ++g_native_output_revision[instance];
         cue = {};
         cue.token = g_next_native_token++;
         cue.slot = index;
@@ -4893,7 +5034,8 @@ int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t toke
 void bluepad32_input_backend_native_sample_cancel(uint8_t instance) {
     if (!g_initialized || instance >= kNativeChildCount) return;
     state_lock_enter();
-    cancel_native_cue_locked(g_native_cues[instance]);
+    NativeGamepadCue& cue = g_native_cues[instance];
+    if (cue.rumble_count == 0) cancel_native_cue_locked(cue);
     state_lock_exit();
 }
 #endif

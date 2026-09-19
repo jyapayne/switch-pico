@@ -489,6 +489,17 @@ extern "C" void probe_controller_input_set_full_stick_calibration(
     uint8_t instance, const uint8_t calibration[9]) {
     probe_native_gamepad_input_set_stick_calibration(instance, calibration);
 }
+
+extern "C" bool probe_controller_input_submit_rumble(
+    uint8_t instance, const uint8_t* magnitudes, uint8_t count) {
+    return g_flash_ready && instance < PROBE_CONTROLLER_COUNT &&
+        bluepad32_input_backend_native_rumble_submit(instance, magnitudes, count);
+}
+
+extern "C" void probe_controller_input_cancel_rumble(uint8_t instance) {
+    if (instance < PROBE_CONTROLLER_COUNT)
+        bluepad32_input_backend_native_rumble_cancel(instance);
+}
 #endif
 
 extern "C" void probe_controller_input_set_native_stream(uint8_t instance, bool enabled) {

@@ -1,8 +1,29 @@
 // Reuse the backend's transport/storage fixture; these scenarios exercise only
 // the native gamepad contract, not a second implementation of its scheduler.
+#include <uni.h>
+extern "C" bool uni_hid_parser_wii_rumble_ready(uni_hid_device_t*);
+#define profile_service_active_profile_snapshot fixture_active_profile_snapshot
 #define main backend_fixture_main
 #include "bluepad32_backend_lifecycle_test.cpp"
 #undef main
+#undef profile_service_active_profile_snapshot
+
+namespace {
+void (*during_profile_resolution)() = nullptr;
+bool native_wii_ready = true;
+}
+
+void profile_service_active_profile_snapshot(
+    const ControllerIdentity& identity, ProfileServiceActiveProfileSnapshot* output) {
+    require(state_lock_depth == 0, "profile service callbacks must not hold the backend lock");
+    if (during_profile_resolution) during_profile_resolution();
+    fixture_active_profile_snapshot(identity, output);
+}
+
+extern "C" bool uni_hid_parser_wii_rumble_ready(uni_hid_device_t*) {
+    require(state_lock_depth == 0, "Wii readiness must not hold the backend lock");
+    return native_wii_ready;
+}
 
 namespace {
 struct SensorFixture {
@@ -600,6 +621,316 @@ void mono_rumble() {
             "retired mono work must never enter a replacement connection");
 }
 
+void gameplay_timeline() {
+    start_pairing_backend();
+    auto pad = dualsense(0);
+    require(platform_on_device_ready(&pad) == UNI_ERROR_SUCCESS, "gameplay source must connect");
+    uint8_t right[] = {40, 80, 120};
+    const uint8_t left[] = {60, 180};
+    const uint8_t stop = 0;
+    require(bluepad32_input_backend_native_rumble_submit(0, right, 3) &&
+                bluepad32_input_backend_native_rumble_submit(1, left, 2),
+            "mixed sample counts must be accepted independently");
+    right[0] = 255;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 40 && pad.last_low == 60 && pad.last_rumble_duration_ms == 4,
+            "copied right/weak and left/strong samples share the earliest finite boundary");
+    now_ms = 5;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 80 && pad.last_low == 60 && pad.last_rumble_duration_ms == 1,
+            "5 ms polling skips elapsed time rather than replaying the first sample");
+    now_ms = 10;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 120 && pad.last_low == 180 && pad.last_rumble_duration_ms == 40,
+            "last samples hold only to their original receipt watchdog");
+    require(bluepad32_input_backend_native_rumble_submit(0, &stop, 1),
+            "explicit zero magnitude must be a valid side stop");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 0 && pad.last_low == 180 && pad.last_rumble_duration_ms == 40,
+            "right stop must preserve the left contribution and deadline");
+    now_ms = 49;
+    const int calls = pad.rumble_calls;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == calls, "unchanged finite holds must not produce duplicate writes");
+    now_ms = 50;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_rumble_duration_ms == 0, "watchdog expiry must stop without further host packets");
+    now_ms = 500;
+    process_rumble_timer(&g_rumble_timer);
+    const int stopped = pad.rumble_calls;
+    const uint8_t delayed[] = {21, 42, 84};
+    require(bluepad32_input_backend_native_rumble_submit(0, delayed, 3), "delayed block must queue");
+    now_ms = 520;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == stopped + 1 && pad.last_high == 84 &&
+                pad.last_rumble_duration_ms == 30,
+            "a stalled timer dispatches only the current sample with its remaining lifetime");
+    bluepad32_input_backend_native_rumble_cancel(0);
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_rumble_duration_ms == 0, "explicit cancellation must stop its live hold");
+    now_ms = UINT32_MAX - 9u;
+    const uint8_t pulse = 99;
+    require(bluepad32_input_backend_native_rumble_submit(1, &pulse, 1), "pre-wrap request must queue");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_low == 99 && pad.last_rumble_duration_ms == 50,
+            "finite host lifetime must remain valid before clock wrap");
+    now_ms = 39;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_low == 99, "wrap must not cause early watchdog expiry");
+    now_ms = 40;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_rumble_duration_ms == 0, "watchdog must expire exactly across clock wrap");
+}
+
+void gameplay_availability() {
+    start_pairing_backend();
+    auto pad = dualsense(0);
+    require(platform_on_device_ready(&pad) == UNI_ERROR_SUCCESS, "busy gameplay source must connect");
+    const uint8_t old[] = {10, 20, 30};
+    const uint8_t newest[] = {70, 140};
+    require(bluepad32_input_backend_native_rumble_submit(0, old, 3), "old block must queue");
+    dualsense_transport_available = false;
+    process_rumble_timer(&g_rumble_timer);
+    now_ms = 5;
+    require(bluepad32_input_backend_native_rumble_submit(0, newest, 2), "busy source must retain a new block");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == 0, "driver rejection cannot count as a successful output");
+    now_ms = 15;
+    dualsense_transport_available = true;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == 1 && pad.last_high == 140 && pad.last_rumble_duration_ms == 40,
+            "driver recovery must dispatch only the newest current phase, not old samples");
+    const uint8_t next = 210;
+    during_dualsense_dispatch = [] {
+        const uint8_t replacement = 33;
+        require(bluepad32_input_backend_native_rumble_submit(0, &replacement, 1),
+                "gameplay must replace work while an earlier driver call is in flight");
+    };
+    require(bluepad32_input_backend_native_rumble_submit(0, &next, 1), "dispatch race must queue");
+    process_rumble_timer(&g_rumble_timer);
+    during_dualsense_dispatch = nullptr;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 33 && pad.last_rumble_duration_ms == 50,
+            "older dispatch completion cannot consume a newly accepted revision");
+    bluepad32_input_backend_native_rumble_cancel(0);
+    process_rumble_timer(&g_rumble_timer);
+    const int stopped = pad.rumble_calls;
+    dualsense_transport_available = false;
+    require(bluepad32_input_backend_native_rumble_submit(0, old, 3), "stale block must queue");
+    now_ms += 50;
+    process_rumble_timer(&g_rumble_timer);
+    dualsense_transport_available = true;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == stopped, "expired rejected work must never replay after driver recovery");
+}
+
+void gameplay_priority() {
+    start_pairing_backend();
+    auto pad = dualsense(0);
+    require(platform_on_device_ready(&pad) == UNI_ERROR_SUCCESS, "priority source must connect");
+    report_dualsense(pad);
+    const uint8_t game = 45;
+    uint64_t old_cue, new_cue;
+    require(bluepad32_input_backend_native_sample_request(0, 1, &old_cue) &&
+                bluepad32_input_backend_native_rumble_submit(0, &game, 1),
+            "gameplay must replace a pending cue on the same side");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 45 &&
+                bluepad32_input_backend_native_sample_result(0, old_cue) == -1,
+            "replaced cue cannot dispatch or complete after gameplay");
+    require(bluepad32_input_backend_native_sample_request(0, 6, &new_cue),
+            "a new cue must replace live gameplay");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 96 && pad.last_rumble_duration_ms == 60 &&
+                bluepad32_input_backend_native_sample_result(0, new_cue) == 1,
+            "built-in cue completion must retain its driver-dispatch semantics");
+    require(bluepad32_input_backend_native_rumble_submit(0, &game, 1) &&
+                bluepad32_input_backend_native_rumble_submit(1, &game, 1),
+            "fresh gameplay must replace the playing cue");
+    process_rumble_timer(&g_rumble_timer);
+    const auto source = bridge_snapshot();
+    bluepad32_input_backend_queue_profile_feedback(source.slot,
+        source.controller.connection_generation, 1, ControllerProfileConfirmationPolicy::kRumble);
+    require(!bluepad32_input_backend_native_rumble_submit(0, &game, 1),
+            "queued higher-priority feedback must not admit gameplay for later replay");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == UINT8_MAX && pad.last_low == UINT8_MAX &&
+                pad.last_rumble_duration_ms == 75, "profile feedback must own the only motor writer");
+    now_ms = 150;
+    process_rumble_timer(&g_rumble_timer);
+    const int after_feedback = pad.rumble_calls;
+    now_ms = 155;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == after_feedback, "profile completion must never resurrect interrupted gameplay");
+    require(bluepad32_input_backend_native_rumble_submit(0, &game, 1), "fresh post-feedback gameplay must resume");
+    process_rumble_timer(&g_rumble_timer);
+    require(bluepad32_input_backend_toggle_motion(source.slot, source.controller.connection_generation),
+            "motion feedback must queue through the existing local-feedback path");
+    process_rumble_timer(&g_rumble_timer);
+    const int local_calls = pad.rumble_calls;
+    now_ms += 3000;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == local_calls, "local feedback must cancel rather than retain interrupted gameplay");
+}
+
+void gameplay_source_epochs() {
+    start_pairing_backend();
+    auto pad = dualsense(0);
+    require(platform_on_device_ready(&pad) == UNI_ERROR_SUCCESS, "epoch source must connect");
+    const uint8_t game = 170;
+    require(!bluepad32_input_backend_native_rumble_submit(0, nullptr, 1) &&
+                !bluepad32_input_backend_native_rumble_submit(0, &game, 0) &&
+                !bluepad32_input_backend_native_rumble_submit(0, &game, 4) &&
+                !bluepad32_input_backend_native_rumble_submit(PROBE_CONTROLLER_COUNT, &game, 1),
+            "invalid gameplay frames must fail before dispatch");
+    pad.report_parser.play_dual_rumble = nullptr;
+    require(!bluepad32_input_backend_native_rumble_submit(0, &game, 1),
+            "source without a rumble driver must reject gameplay");
+    pad.report_parser.play_dual_rumble = observe_dualsense_rumble;
+    require(bluepad32_input_backend_native_rumble_submit(0, &game, 1), "epoch block must queue");
+    during_dualsense_dispatch = [] { bluepad32_input_backend_select_native_source(0, nullptr); };
+    process_rumble_timer(&g_rumble_timer);
+    during_dualsense_dispatch = nullptr;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_rumble_duration_ms == 0, "same-source reselection must stop an in-flight retired epoch");
+    require(bluepad32_input_backend_native_rumble_submit(1, &game, 1), "disconnect block must queue");
+    process_rumble_timer(&g_rumble_timer);
+    platform_on_device_disconnected(&pad);
+    require(pad.last_rumble_duration_ms == 0 &&
+                !bluepad32_input_backend_native_rumble_submit(0, &game, 1),
+            "disconnect must retire the driver's finite timer and refuse new work");
+    pad = dualsense(0);
+    platform_on_device_connected(&pad);
+    require(platform_on_device_ready(&pad) == UNI_ERROR_SUCCESS, "same-address slot replacement must connect");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == 0, "slot memory reuse cannot inherit old samples or stop obligations");
+    controller_profile_runtime_reset();
+    during_profile_resolution = [] { bluepad32_input_backend_select_native_source(0, nullptr); };
+    require(!bluepad32_input_backend_native_rumble_submit(0, &game, 1),
+            "source generation must be rechecked after unlocked profile callbacks");
+    during_profile_resolution = nullptr;
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.rumble_calls == 0, "a profile-resolution race cannot reach the replacement epoch");
+}
+
+void gameplay_profile_gain() {
+    start_pairing_backend();
+    initialize_runtime_profile_storage();
+    auto pad = dualsense(0);
+    require(platform_on_device_ready(&pad) == UNI_ERROR_SUCCESS, "profile source must connect");
+    const auto identity = identity_for_device(&pad);
+    auto profile = controller_profile_default(identity, 0);
+    profile.weak_rumble_scale = 128;
+    profile.strong_rumble_scale = 64;
+    require(runtime_profile_storage.set(identity, 0, profile) == ProfileStorageResult::kOk,
+            "profile must configure independent host motor gains");
+    const uint8_t maximum = 255;
+    require(bluepad32_input_backend_native_rumble_submit(0, &maximum, 1) &&
+                bluepad32_input_backend_native_rumble_submit(1, &maximum, 1), "scaled gameplay must queue");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 128 && pad.last_low == 64,
+            "right/weak and left/strong magnitudes must use their matching persisted profile gains");
+    profile.weak_rumble_scale = 0;
+    profile.strong_rumble_scale = 0;
+    require(runtime_profile_storage.set(identity, 0, profile) == ProfileStorageResult::kOk,
+            "profile mute must update its generation");
+    require(bluepad32_input_backend_native_rumble_submit(0, &maximum, 1) &&
+                bluepad32_input_backend_native_rumble_submit(1, &maximum, 1), "muted gameplay must queue");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 0 && pad.last_low == 0 && pad.last_rumble_duration_ms == 0,
+            "muting a profile must stop live host output rather than retaining unscaled samples");
+    uint64_t cue;
+    require(bluepad32_input_backend_native_sample_request(0, 7, &cue), "muted profile still permits local cues");
+    process_rumble_timer(&g_rumble_timer);
+    require(pad.last_high == 220 && bluepad32_input_backend_native_sample_result(0, cue) == 1,
+            "host gain must not scale built-in local confirmation cues");
+}
+
+void gameplay_two_pairs() {
+    start_pairing_backend();
+    auto first = dualsense(0);
+    auto second = dualsense(1);
+    require(platform_on_device_ready(&first) == UNI_ERROR_SUCCESS &&
+                platform_on_device_ready(&second) == UNI_ERROR_SUCCESS, "both gameplay pairs must connect");
+    const uint8_t values[] = {31, 62, 93, 124};
+    for (uint8_t instance = 0; instance < 4; ++instance)
+        require(bluepad32_input_backend_native_rumble_submit(instance, values + instance, 1),
+                "each gameplay child must bind its own pair");
+    process_rumble_timer(&g_rumble_timer);
+    require(first.last_high == 31 && first.last_low == 62 &&
+                second.last_high == 93 && second.last_low == 124,
+            "four logical contributions must route to two independent physical sources");
+    bluepad32_input_backend_native_rumble_cancel(0);
+    now_ms = 10;
+    process_rumble_timer(&g_rumble_timer);
+    require(first.last_high == 0 && first.last_low == 62 && first.last_rumble_duration_ms == 40 &&
+                second.rumble_calls == 1, "side cancellation cannot dispatch into another pair");
+    bluepad32_input_backend_select_native_source(0, nullptr);
+    process_rumble_timer(&g_rumble_timer);
+    require(first.last_rumble_duration_ms == 0 && second.rumble_calls == 1,
+            "source reselection must retire only its own pair's output");
+    platform_on_device_disconnected(&first);
+    now_ms = 50;
+    process_rumble_timer(&g_rumble_timer);
+    require(second.last_rumble_duration_ms == 0 && second.rumble_calls == 2,
+            "the surviving pair must expire on its original independent watchdog");
+}
+
+void gameplay_paired_revision() {
+    start_pairing_backend();
+    auto left = switch2_device(0, UNI_SW2_JOYCON_L_PID);
+    auto right = switch2_device(1, UNI_SW2_JOYCON_R_PID);
+    ready_switch2(left);
+    ready_switch2(right);
+    right.report_parser.play_dual_rumble = [](
+        uni_hid_device_t* pad, uint16_t delay, uint16_t duration, uint8_t weak, uint8_t strong) {
+        play_rumble(pad, delay, duration, weak, strong);
+        const uint8_t fresh = 150;
+        require(bluepad32_input_backend_native_rumble_submit(1, &fresh, 1),
+                "right dispatch may accept a newer left revision");
+    };
+    const uint8_t game = 75;
+    require(bluepad32_input_backend_native_rumble_submit(0, &game, 1), "paired gameplay must queue");
+    const int previous_left = left.rumble_calls;
+    process_rumble_timer(&g_rumble_timer);
+    require(right.last_high == 75 && right.last_low == 75 && left.rumble_calls == previous_left,
+            "new left work must invalidate even a prepared zero-output command before left dispatch");
+    right.report_parser.play_dual_rumble = play_rumble;
+    process_rumble_timer(&g_rumble_timer);
+    require(left.last_high == 150 && left.last_low == 150,
+            "the newer paired-side revision must remain pending until its real driver dispatch");
+    const uint8_t stop = 0;
+    require(bluepad32_input_backend_native_rumble_submit(0, &stop, 1), "paired right stop must queue");
+    process_rumble_timer(&g_rumble_timer);
+    require(right.last_rumble_duration_ms == 0 && left.last_high == 150 &&
+                left.last_rumble_duration_ms == 50, "paired stop must preserve only the live sibling contribution");
+}
+
+void gameplay_wii() {
+    start_pairing_backend();
+    auto remote = wii_device(0);
+    remote.report_parser.play_dual_rumble = observe_mono_rumble;
+    require(platform_on_device_ready(&remote) == UNI_ERROR_SUCCESS, "Wii GAMEPAD source must connect");
+    const uint8_t right = 70, left = 140;
+    require(bluepad32_input_backend_native_rumble_submit(0, &right, 1) &&
+                bluepad32_input_backend_native_rumble_submit(1, &left, 1), "Wii contributions must queue");
+    native_wii_ready = false;
+    process_rumble_timer(&g_rumble_timer);
+    require(remote.rumble_calls == 0, "Wii topology setup must not consume pending output");
+    native_wii_ready = true;
+    now_ms = 10;
+    process_rumble_timer(&g_rumble_timer);
+    require(mono_magnitude == 140 && remote.last_rumble_duration_ms == 40,
+            "Wii compatibility combines both contributions on its finite mono motor");
+    bluepad32_input_backend_native_rumble_cancel(1);
+    process_rumble_timer(&g_rumble_timer);
+    require(mono_magnitude == 70 && remote.last_rumble_duration_ms == 40,
+            "Wii side cancellation must not stop its sibling's mono contribution");
+    now_ms = 50;
+    process_rumble_timer(&g_rumble_timer);
+    require(mono_magnitude == 0, "Wii gameplay must stop at its original watchdog");
+}
+
 }  // namespace
 
 extern "C" void uni_hid_parser_ds5_parse_input_report(uni_hid_device_t*, const uint8_t*, uint16_t) {}
@@ -993,6 +1324,14 @@ int main(int argc, char** argv) {
     if (scenario == "source-isolation") source_isolation();
     else if (scenario == "cue-lifetime") cue_lifetime();
     else if (scenario == "cue-races") cue_races();
+    else if (scenario == "gameplay-timeline") gameplay_timeline();
+    else if (scenario == "gameplay-availability") gameplay_availability();
+    else if (scenario == "gameplay-priority") gameplay_priority();
+    else if (scenario == "gameplay-source-epochs") gameplay_source_epochs();
+    else if (scenario == "gameplay-profile-gain") gameplay_profile_gain();
+    else if (scenario == "gameplay-two-pairs") gameplay_two_pairs();
+    else if (scenario == "gameplay-paired-revision") gameplay_paired_revision();
+    else if (scenario == "gameplay-wii") gameplay_wii();
     else if (scenario == "stable-logical-slot") stable_logical_slot();
     else if (scenario == "sensorless-admission") sensorless_admission();
     else if (scenario == "independent-motion") independent_motion();

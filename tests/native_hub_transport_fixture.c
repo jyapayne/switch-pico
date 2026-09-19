@@ -15,6 +15,7 @@ uint16_t native_test_received_length[CHILDREN][2];
 uint8_t native_test_received_data[CHILDREN][2][PACKET];
 static bool servicing_interrupt;
 
+#ifndef NATIVE_TEST_EXTERNAL_IRQ
 void native_test_service_interrupt(void) {
     if (native_test_interrupt_mask || servicing_interrupt || !usb_hw->ints) return;
     servicing_interrupt = true;
@@ -22,13 +23,16 @@ void native_test_service_interrupt(void) {
     usb_hw->ints = 0;
     servicing_interrupt = false;
 }
+#endif
 
+#ifndef NATIVE_TEST_EXTERNAL_ROUTER
 void probe_router_init(uint32_t hz) { (void)hz; }
 void probe_router_core1(void) {}
 void probe_router_publish(const uint8_t values[PROBE_ROUTER_SLOTS], uint8_t slot) { (void)values; (void)slot; }
 void probe_router_enable(bool enabled) { (void)enabled; }
 bool probe_router_set_phase(uint32_t phase) { (void)phase; return true; }
 void probe_router_snapshot(probe_router_stats* snapshot) { memset(snapshot,0,sizeof(*snapshot)); snapshot->ready = 1; }
+#endif
 #ifndef NATIVE_TEST_EXTERNAL_LOG
 int probe_debug_printf(const char* format, ...) { (void)format; return 0; }
 #endif

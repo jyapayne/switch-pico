@@ -154,6 +154,15 @@ bool bluepad32_input_backend_native_sample_request(
     uint8_t instance, uint8_t sample_id, uint64_t* token);
 int bluepad32_input_backend_native_sample_result(uint8_t instance, uint64_t token);
 void bluepad32_input_backend_native_sample_cancel(uint8_t instance);
+// Gameplay blocks replace older gameplay/cues only on the addressed side.
+// Samples divide a 12 ms frame; the last holds up to a 50 ms receipt watchdog.
+// Magnitudes use that source profile's weak/right or strong/left host gain.
+// Submission copies 1..3 samples; false means invalid/unbound/unsupported,
+// higher-priority local feedback, or a source change during profile resolution.
+// Cancellation retires gameplay only; callers resetting a child also cancel its cue.
+bool bluepad32_input_backend_native_rumble_submit(
+    uint8_t instance, const uint8_t* magnitudes, uint8_t count);
+void bluepad32_input_backend_native_rumble_cancel(uint8_t instance);
 #endif
 
 // Side-effect-free raw input snapshot for management telemetry. Unlike the

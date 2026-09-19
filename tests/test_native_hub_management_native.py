@@ -93,3 +93,43 @@ def test_native_hub_management_native(
         cwd=root,
     )
     subprocess.run([str(router_executable)], check=True, cwd=root)
+
+
+@pytest.mark.parametrize("controller_count", [2, 4], ids=["one-pair", "two-pair"])
+@pytest.mark.parametrize("trace_enabled", [False, True], ids=["plain", "trace"])
+def test_native_hub_cold_startup(
+    tmp_path: Path, controller_count: int, trace_enabled: bool
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    cc = shutil.which("cc") or shutil.which("gcc")
+    assert cc is not None, "a host C compiler is required"
+    executable = tmp_path / "native_hub_startup_test"
+    flags = [f"-DPROBE_CONTROLLER_COUNT={controller_count}"]
+    if trace_enabled:
+        flags.append("-DSWITCH2_PROBE_TRACE_NATIVE_INPUT=1")
+    subprocess.run(
+        [
+            cc,
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-pedantic",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-DSWITCH2_PROBE_HUB=1",
+            *flags,
+            f"-I{root / 'tests' / 'native_hub_stubs'}",
+            f"-I{root / 'src' / 'firmware'}",
+            f"-I{root / 'tools' / 'pico_usb_address_probe'}",
+            f"-I{root / 'tools' / 'switch2_usb_probe'}",
+            str(root / "tests" / "native_hub_startup_test.c"),
+            "-Wl,--gc-sections",
+            "-o",
+            str(executable),
+        ],
+        check=True,
+        cwd=root,
+    )
+    for scenario in ("ready", "delayed", "timeout"):
+        subprocess.run([str(executable), scenario], check=True, cwd=root)
