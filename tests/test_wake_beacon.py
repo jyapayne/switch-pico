@@ -179,6 +179,28 @@ def test_fragmented_burst_completes_once_and_excludes_retained_id(beacon):
     assert beacon.closed
 
 
+def test_slow_serial_reconfiguration_does_not_delay_each_response_byte(
+    beacon, monkeypatch
+):
+    # pyserial reconfigures an open Windows port even when assigned the same
+    # timeout. Model USB control-transfer latency on each such assignment.
+    def set_timeout(device, value):
+        device.__dict__["timeout"] = value
+        device.clock.sleep(0.02)
+
+    monkeypatch.setattr(
+        SimulatedBeacon,
+        "timeout",
+        property(lambda device: device.__dict__["timeout"], set_timeout),
+        raising=False,
+    )
+    result = wake.request_wake("COM13", timeout=1)
+    assert result.state == "complete"
+    assert beacon.bursts == 1
+    assert beacon.clock.now < 1
+    assert beacon.closed
+
+
 @pytest.mark.parametrize(
     "change",
     [

@@ -224,13 +224,20 @@ class WakeBeaconClient:
 
     def _exchange(self, command: bytes, deadline: float) -> WakeBeaconStatus:
         try:
-            self.transport.write_timeout = min(0.25, self._remaining(deadline))
+            write_timeout = min(0.25, self._remaining(deadline))
+            if self.transport.write_timeout != write_timeout:
+                self.transport.write_timeout = write_timeout
             # A partial write may already have reached the device. Never resend.
             if self.transport.write(command) != len(command):
                 raise TransportError("Incomplete serial write; command was not retried")
             response = bytearray()
             while True:
-                self.transport.timeout = min(0.1, self._remaining(deadline))
+                read_timeout = min(0.1, self._remaining(deadline))
+                # pyserial reconfigures the Windows port on every assignment,
+                # even for an unchanged timeout. Avoid USB control transfers
+                # per response byte, while still shortening reads at deadline.
+                if self.transport.timeout != read_timeout:
+                    self.transport.timeout = read_timeout
                 chunk = self.transport.read(1)
                 if not chunk:
                     continue
@@ -398,7 +405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": exc.status.to_dict() if exc.status else None,
         }
         if args.json:
-            print(json.dumps(result, separators=(",", ":")))
+            print(json.dumps(result, indent=2))
         else:
             print(f"Wake beacon: {exc}", file=sys.stderr)
         return 1
@@ -406,11 +413,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             json.dumps(
                 {"ok": True, "action": action, "status": status.to_dict()},
-                separators=(",", ":"),
+                indent=2,
             )
         )
     elif args.status:
-        print(json.dumps(status.to_dict(), sort_keys=True))
+        print(json.dumps(status.to_dict(), indent=2, sort_keys=True))
     else:
         print(
             f"Advertising burst complete (request {status.request_id}); console power state is not confirmed."
