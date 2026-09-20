@@ -454,6 +454,8 @@ uint32_t g_clear_pairings_requested_token = 0;
 uint32_t g_clear_pairings_in_progress_token = 0;
 uint32_t g_next_clear_pairings_request_token = 1;
 bool g_pairing_snapshot_requested = false;
+Bluepad32Switch2WakeStatus g_usb_wake_status{};
+Switch2WakeDiagnostics g_cached_wake_diagnostics{};
 bool g_initialized = false;
 bool g_started = false;
 #ifdef SWITCH2_BRIDGE_WII_INPUT
@@ -848,6 +850,7 @@ void complete_native_hd_cues() {
 // These fields are only read or written by the BTstack execution context.
 btstack_timer_source_t g_rumble_timer{};
 btstack_timer_source_t g_configuration_timer{};
+Switch2WakeDiagnostics g_usb_wake_baseline{};
 ConnectionStatus g_connection_status = ConnectionStatus::Initializing;
 btstack_packet_callback_registration_t g_pairing_event_callback{};
 btstack_packet_callback_registration_t g_identity_event_callback{};
@@ -3437,10 +3440,68 @@ void seed_native_host_rumble() {
 }
 #endif
 
+void copy_wake_diagnostics(Bluepad32Switch2WakeStatus& status,
+                           const Switch2WakeDiagnostics& diagnostics) {
+    status.configured = diagnostics.configured;
+    status.busy = diagnostics.busy;
+    status.accepted_requests = diagnostics.accepted_requests;
+    status.completed_bursts = diagnostics.completed_bursts;
+    status.failures = diagnostics.failures;
+}
+
+void process_usb_switch2_wake(bool dispatch_pending) {
+    // Only the BTstack owner may inspect or dispatch the real wake machine.
+    Switch2WakeDiagnostics diagnostics{};
+    switch2_wake_diagnostics(&diagnostics);
+    state_lock_enter();
+    g_cached_wake_diagnostics = diagnostics;
+    Bluepad32Switch2WakeStatus status = g_usb_wake_status;
+    if (status.state == Bluepad32Switch2WakeState::kIdle) {
+        copy_wake_diagnostics(g_usb_wake_status, diagnostics);
+    }
+    state_lock_exit();
+
+    if (status.state == Bluepad32Switch2WakeState::kQueued) {
+        if (!dispatch_pending) return;
+        if (!diagnostics.configured) {
+            status.state = Bluepad32Switch2WakeState::kUnconfigured;
+        } else if (diagnostics.busy) {
+            // A chord/startup already owns the wake machine. Do not retry.
+            status.state = Bluepad32Switch2WakeState::kBusy;
+        } else {
+            g_usb_wake_baseline = diagnostics;
+            status.state = switch2_wake_request()
+                               ? Bluepad32Switch2WakeState::kBroadcasting
+                               : Bluepad32Switch2WakeState::kFailed;
+            switch2_wake_diagnostics(&diagnostics);
+        }
+    } else if (status.state == Bluepad32Switch2WakeState::kBroadcasting) {
+        // Cleanup after a failed HCI command can also advance completed_bursts.
+        // Failure wins, including when both changes occur between timer ticks.
+        if (diagnostics.failures != g_usb_wake_baseline.failures) {
+            status.state = Bluepad32Switch2WakeState::kFailed;
+        } else if (diagnostics.completed_bursts !=
+                   g_usb_wake_baseline.completed_bursts) {
+            status.state = Bluepad32Switch2WakeState::kComplete;
+        } else if (!diagnostics.busy) {
+            status.state = Bluepad32Switch2WakeState::kFailed;
+        }
+    } else {
+        // Never replace a retained terminal snapshot with a chord's outcome.
+        return;
+    }
+    copy_wake_diagnostics(status, diagnostics);
+    state_lock_enter();
+    g_cached_wake_diagnostics = diagnostics;
+    g_usb_wake_status = status;
+    state_lock_exit();
+}
+
 void process_rumble_timer(btstack_timer_source_t* timer) {
     __atomic_add_fetch(&g_rumble_timer_ticks, 1, __ATOMIC_RELAXED);
     uint32_t now_ms = btstack_run_loop_get_time_ms();
 
+    process_usb_switch2_wake(true);
     process_clear_pairings(now_ms);
     process_pairing_snapshot_request();
     process_joycon_gestures(now_ms);
@@ -4661,6 +4722,9 @@ void platform_on_controller_data(uni_hid_device_t* device,
     const uint16_t pre_hotkey_button_mask = logical_button_mask(gamepad);
     if (wake_chord_rising_edge(
             static_cast<uint8_t>(slot_index), owner, pre_hotkey_button_mask)) {
+        // Retire any finished USB burst before another chord can advance the
+        // global diagnostics. Queued USB work must not preempt this chord.
+        process_usb_switch2_wake(false);
         switch2_wake_request();
     }
     const HotkeyDecision hotkeys = update_controller_hotkeys(
@@ -4885,6 +4949,9 @@ void bluepad32_input_backend_init() {
     g_joycon_reconcile_requested = false;
     g_pairing_window_requested = false;
     g_pairing_snapshot_requested = false;
+    g_usb_wake_status = {};
+    g_cached_wake_diagnostics = {};
+    g_usb_wake_baseline = {};
     g_pairing_snapshot = {};
     g_pairing_snapshot.status =
         Bluepad32PairingSnapshotStatus::kPending;
@@ -4982,6 +5049,34 @@ uint32_t bluepad32_input_backend_clear_pairings() {
     }
     state_lock_exit();
     return request_token;
+}
+
+bool bluepad32_input_backend_request_switch2_wake(uint32_t request_id) {
+    if (request_id == 0 || request_id > INT32_MAX) return false;
+    if (!g_initialized) bluepad32_input_backend_init();
+
+    state_lock_enter();
+    bool accepted = request_id == g_usb_wake_status.request_id;
+    if (!accepted &&
+        g_usb_wake_status.state != Bluepad32Switch2WakeState::kQueued &&
+        g_usb_wake_status.state != Bluepad32Switch2WakeState::kBroadcasting) {
+        g_usb_wake_status.request_id = request_id;
+        g_usb_wake_status.state = Bluepad32Switch2WakeState::kQueued;
+        copy_wake_diagnostics(g_usb_wake_status, g_cached_wake_diagnostics);
+        accepted = true;
+    }
+    state_lock_exit();
+    return accepted;
+}
+
+void bluepad32_input_backend_switch2_wake_snapshot(
+    Bluepad32Switch2WakeStatus* output) {
+    if (output == nullptr) return;
+    *output = {};
+    if (!g_initialized) return;
+    state_lock_enter();
+    *output = g_usb_wake_status;
+    state_lock_exit();
 }
 
 void bluepad32_input_backend_request_pairing_snapshot() {

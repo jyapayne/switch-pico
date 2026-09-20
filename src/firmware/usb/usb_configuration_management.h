@@ -17,6 +17,8 @@ constexpr uint8_t kProtocolVersion = 1;
 // INFO-only active mode; never persisted as an AdapterRequestedMode.
 constexpr uint8_t kNativeHubActiveMode = 5;
 constexpr size_t kRequestHeaderSize = 16;
+constexpr uint16_t kSwitch2WakeSchemaVersion = 1;
+constexpr size_t kSwitch2WakePayloadSize = 20;
 constexpr size_t kResponseHeaderSize = 20;
 constexpr size_t kPairingRecordSize = 8;
 constexpr size_t kPairingPayloadHeaderSize = 4;
@@ -54,6 +56,7 @@ enum class Operation : uint8_t {
     kModeSet = 0x02,
     kReboot = 0x03,
     kBootselReboot = 0x04,
+    kSwitch2Wake = 0x05,
     kConfigurationRead = 0x10,
     kConfigurationBegin = 0x11,
     kConfigurationChunk = 0x12,
@@ -132,3 +135,11 @@ size_t encode_profile_metadata(
 bool usb_configuration_management_vendor_control(
     uint8_t rhport, uint8_t stage,
     tusb_control_request_t const* request);
+
+#if SWITCH2_PROBE_HUB && !SWITCH2_PROBE_NEUTRAL_INPUT
+// Native child Interface 1 only: read-only INFO and volatile WAKE. Each child
+// owns its EP0 state independently from the root's full management service.
+bool usb_configuration_management_child_vendor_control(
+    uint8_t rhport, uint8_t stage,
+    const tusb_control_request_t* request);
+#endif

@@ -14,6 +14,35 @@
 constexpr uint8_t BLUEPAD32_INPUT_BACKEND_SLOT_COUNT = 4;
 constexpr uint8_t BLUEPAD32_PAIRING_RECORD_CAPACITY = 16;
 
+enum class Bluepad32Switch2WakeState : uint8_t {
+    kIdle = 0,
+    kQueued = 1,
+    kBroadcasting = 2,
+    kComplete = 3,
+    kUnconfigured = 4,
+    kBusy = 5,
+    kFailed = 6,
+};
+
+struct Bluepad32Switch2WakeStatus {
+    uint32_t request_id = 0;
+    Bluepad32Switch2WakeState state = Bluepad32Switch2WakeState::kIdle;
+    bool configured = false;
+    bool busy = false;
+    uint32_t accepted_requests = 0;
+    uint32_t completed_bursts = 0;
+    uint32_t failures = 0;
+};
+
+// Volatile, bounded USB mailbox; only the BTstack-owning timer calls the radio.
+// IDs are nonzero signed-positive u32s. The current ID is idempotent, including
+// terminal outcomes; a different ID cannot replace Queued/Broadcasting work.
+bool bluepad32_input_backend_request_switch2_wake(uint32_t request_id);
+// Read-only cached status. Complete means the radio burst finished, not that
+// the console woke. Terminal snapshots survive until another ID is accepted.
+void bluepad32_input_backend_switch2_wake_snapshot(
+    Bluepad32Switch2WakeStatus* output);
+
 enum class Bluepad32PairingTransport : uint8_t {
     kClassic = 1,
     kBle = 2,

@@ -5,6 +5,7 @@ import struct
 import zlib
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -703,6 +704,256 @@ def test_response_validation() -> None:
     for response in malformed:
         with pytest.raises(config_manager.ConfigManagerError):
             config_manager.parse_response(response, config_manager.OP_INFO)
+
+
+def wake_response(
+    state: int = 0,
+    request_id: int = 0,
+    *,
+    configured: int = 1,
+    busy: int = 0,
+    completed: int = 8,
+) -> bytes:
+    return make_response(
+        config_manager.OP_SWITCH2_WAKE,
+        struct.pack("<IBBBxIII", request_id, state, configured, busy, 10, completed, 2),
+        schema=1,
+        generation=request_id,
+    )
+
+
+class WakeDevice(FakeDevice):
+    def __init__(self, responses: list[bytes | Exception]) -> None:
+        super().__init__()
+        self.wake_responses = responses
+        self.wake_directions: list[int] = []
+        self.wake_timeouts: list[int] = []
+
+    def ctrl_transfer(
+        self,
+        bm_request_type: int,
+        request: int,
+        value: int,
+        index: int,
+        data_or_w_length: object,
+        timeout: int,
+    ) -> bytes | int:
+        if request != config_manager.OP_SWITCH2_WAKE:
+            return super().ctrl_transfer(
+                bm_request_type, request, value, index, data_or_w_length, timeout
+            )
+        assert value == config_manager.REQUEST_VALUE
+        assert index == config_manager.REQUEST_INDEX
+        assert 0 < timeout <= config_manager.USB_TIMEOUT_MS
+        self.wake_directions.append(bm_request_type)
+        self.wake_timeouts.append(timeout)
+        if bm_request_type == 0xC0:
+            response = self.wake_responses[0]
+            if len(self.wake_responses) > 1:
+                self.wake_responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+        assert bm_request_type == 0x40
+        encoded = bytes(data_or_w_length)
+        payload = encoded[config_manager.REQUEST_HEADER_SIZE :]
+        assert len(payload) == 4
+        assert encoded == config_manager.encode_request(request, payload)
+        assert 0 < struct.unpack("<I", payload)[0] <= 0x7FFFFFFF
+        self.out_requests.append((request, payload, encoded))
+        return len(encoded)
+
+
+@pytest.fixture
+def wake_clock(
+    monkeypatch: pytest.MonkeyPatch, haptics_clock: list[float]
+) -> list[float]:
+    monkeypatch.setattr(config_manager.secrets, "randbits", lambda _: 23)
+    return haptics_clock
+
+
+def test_switch2_wake_waits_for_own_burst_despite_startup_snapshot(
+    wake_clock: list[float],
+) -> None:
+    device = WakeDevice(
+        [
+            wake_response(configured=0),
+            wake_response(1, 23, configured=0),
+            wake_response(2, 23, busy=1, completed=9),
+            wake_response(3, 23, completed=10),
+        ]
+    )
+    status = config_manager.request_switch2_wake(device)
+    assert status.state_name == "complete"
+    assert status.completed_bursts == 10
+    assert status.request_id == 23
+    assert device.wake_directions == [0xC0, 0x40, 0xC0, 0xC0, 0xC0]
+    assert wake_clock[0] == pytest.approx(0.1)
+    assert config_manager.read_switch2_wake_status(device) == status
+    assert len(device.out_requests) == 1
+
+
+def test_switch2_wake_avoids_reusing_terminal_id(wake_clock: list[float]) -> None:
+    device = WakeDevice([wake_response(3, 23), wake_response(3, 24)])
+    assert config_manager.request_switch2_wake(device).request_id == 24
+    assert struct.unpack("<I", device.out_requests[0][1])[0] == 24
+
+
+@pytest.mark.parametrize("state", (4, 5, 6))
+def test_switch2_wake_terminal_failure_never_retries(
+    state: int, wake_clock: list[float]
+) -> None:
+    device = WakeDevice([wake_response(), wake_response(state, 23)])
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.request_switch2_wake(device)
+    assert device.wake_directions == [0xC0, 0x40, 0xC0]
+
+
+@pytest.mark.parametrize("state", (1, 2))
+def test_switch2_wake_does_not_replace_active_request(
+    state: int, wake_clock: list[float]
+) -> None:
+    device = WakeDevice([wake_response(state, 19, busy=1)])
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.request_switch2_wake(device)
+    assert device.out_requests == []
+
+
+def test_switch2_wake_rejects_another_requests_completion(
+    wake_clock: list[float],
+) -> None:
+    device = WakeDevice(
+        [wake_response(), wake_response(2, 23), wake_response(3, 24, completed=99)]
+    )
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.request_switch2_wake(device)
+    assert len(device.out_requests) == 1
+
+
+def test_switch2_wake_times_out_without_retry(wake_clock: list[float]) -> None:
+    device = WakeDevice([wake_response(), wake_response(1, 23)])
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.request_switch2_wake(device, timeout=0.12)
+    assert wake_clock[0] == pytest.approx(0.12)
+    assert len(device.out_requests) == 1
+    assert max(device.wake_timeouts) <= 120
+
+
+@pytest.mark.parametrize(
+    "timeout", (0, -1, float("nan"), float("inf"), float("-inf"), True, "1", None)
+)
+def test_switch2_wake_invalid_timeout_never_touches_usb(timeout: object) -> None:
+    device = WakeDevice([wake_response()])
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.request_switch2_wake(device, timeout=timeout)  # type: ignore[arg-type]
+    assert device.wake_directions == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"schema_version": 2},
+        {"payload": b""},
+        {"flags": 1},
+        {"generation": 1},
+        {"payload": struct.pack("<IBBBBIII", 0, 0, 1, 0, 1, 10, 8, 2)},
+        {"payload": struct.pack("<IBBBxIII", 0, 0, 2, 0, 10, 8, 2)},
+        {"payload": struct.pack("<IBBBxIII", 0, 0, 1, 2, 10, 8, 2)},
+        {"payload": struct.pack("<IBBBxIII", 1, 7, 1, 0, 10, 8, 2), "generation": 1},
+        {"payload": struct.pack("<IBBBxIII", 0, 3, 1, 0, 10, 8, 2)},
+        {
+            "payload": struct.pack("<IBBBxIII", 0x80000000, 3, 1, 0, 10, 8, 2),
+            "generation": 0x80000000,
+        },
+        {"status": config_manager.STATUS_PENDING},
+    ),
+)
+def test_switch2_wake_malformed_preflight_cannot_start_burst(
+    changes: dict[str, object],
+) -> None:
+    initial = config_manager.parse_response(
+        wake_response(), config_manager.OP_SWITCH2_WAKE
+    )
+    malformed = replace(initial, **changes)
+    device = WakeDevice(
+        [
+            make_response(
+                config_manager.OP_SWITCH2_WAKE,
+                malformed.payload,
+                status=malformed.status,
+                flags=malformed.flags,
+                schema=malformed.schema_version,
+                generation=malformed.generation,
+            )
+        ]
+    )
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.request_switch2_wake(device)
+    assert device.out_requests == []
+
+
+@pytest.mark.parametrize("errno,backend", ((32, None), (None, -9), (13, -3), (19, -4)))
+def test_switch2_wake_preflight_transport_errors_preserve_real_cause(
+    errno: int | None, backend: int | None
+) -> None:
+    error = config_manager.usb.core.USBError(
+        "transport error", error_code=backend, errno=errno
+    )
+    device = WakeDevice([error])
+    if errno == 32 or backend == -9:
+        with pytest.raises(config_manager.ConfigManagerError) as raised:
+            config_manager.request_switch2_wake(device)
+        assert raised.value.__cause__ is error
+    else:
+        with pytest.raises(config_manager.usb.core.USBError) as raised:
+            config_manager.request_switch2_wake(device)
+        assert raised.value is error
+    assert device.out_requests == []
+
+
+@pytest.mark.parametrize("errno", (32, None))
+def test_switch2_wake_poll_stall_preserves_transport_failure(
+    wake_clock: list[float], errno: int | None
+) -> None:
+    error = config_manager.usb.core.USBError(
+        "transport error", error_code=-9, errno=errno
+    )
+    device = WakeDevice([wake_response(), error])
+    with pytest.raises(config_manager.usb.core.USBError) as raised:
+        config_manager.request_switch2_wake(device)
+    assert raised.value is error
+    assert len(device.out_requests) == 1
+
+
+def test_switch2_wake_cli_selects_device_and_reports_limited_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    wake_clock: list[float],
+) -> None:
+    device = WakeDevice([wake_response(), wake_response(3, 23)])
+    other = WakeDevice([wake_response()])
+    other.address = 8
+    monkeypatch.setattr(config_manager, "_candidate_devices", lambda: [other, device])
+    assert config_manager.main(["--bus", "1", "--address", "7", "wake", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["state_name"] == "complete"
+    assert result["console_power_confirmed"] is False
+    assert len(device.out_requests) == 1
+    assert other.out_requests == []
+    device.wake_responses = [wake_response(), wake_response(6, 23)]
+    assert config_manager.main(["--address", "7", "wake", "--json"]) == 1
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("timeout", ("nan", "inf", "-inf", "0", "-1"))
+def test_switch2_wake_cli_rejects_unbounded_timeout_before_discovery(
+    monkeypatch: pytest.MonkeyPatch, timeout: str
+) -> None:
+    def unexpected_discovery(*args: object) -> None:
+        pytest.fail("invalid wake timeout reached USB discovery")
+
+    monkeypatch.setattr(config_manager, "find_wake_pico", unexpected_discovery)
+    assert config_manager.main([f"--timeout={timeout}", "wake"]) == 2
 
 
 def native_rumble_identity(
@@ -2092,8 +2343,12 @@ def test_set_b_sparse_settings_and_macro_modes_round_trip() -> None:
     del legacy_json["extra_button_map"]
     del legacy_json["shift"]["extra_button_map"]
     for field in (
-        "swing", "nunchuk_swing", "combined_swing", "combination_window_ms",
-        "native_joycon_layout", "swap_sticks",
+        "swing",
+        "nunchuk_swing",
+        "combined_swing",
+        "combination_window_ms",
+        "native_joycon_layout",
+        "swap_sticks",
     ):
         del legacy_json[field]
     assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
@@ -2288,8 +2543,10 @@ def test_source_only_controls_are_not_output_destinations(
 def test_left_stick_direction_destinations_round_trip_without_new_sources() -> None:
     obj = custom_profile().to_json_object()
     obj["button_map"].update(
-        dpad_up="left_stick_up", dpad_down="left_stick_down",
-        dpad_left="left_stick_left", dpad_right="left_stick_right",
+        dpad_up="left_stick_up",
+        dpad_down="left_stick_down",
+        dpad_left="left_stick_left",
+        dpad_right="left_stick_right",
     )
     obj["extra_button_map"]["c"] = "left_stick_left"
     obj["shift"]["button_map"]["south"] = "left_stick_down"
@@ -2421,7 +2678,9 @@ def test_schema10_native_settings_migrate_without_persistent_writes() -> None:
 @pytest.mark.parametrize("version", [1, 2])
 def test_legacy_button_maps_reject_analog_destinations(version: int) -> None:
     payload = legacy_profile_wire(version)
-    assert config_manager.ControllerProfile.from_bytes(payload).button_map == tuple(range(16))
+    assert config_manager.ControllerProfile.from_bytes(payload).button_map == tuple(
+        range(16)
+    )
     payload[4] = 16
     with pytest.raises(config_manager.ConfigManagerError):
         config_manager.ControllerProfile.from_bytes(payload)
@@ -2460,8 +2719,17 @@ def test_schema9_gestures_migrate_without_persistent_writes() -> None:
 
 @pytest.mark.parametrize(
     ("offset", "value"),
-    [(4, 18), (60, 18), (70, 24), (344, 18), (267, 16), (351, 16),
-     (376, 1), (377, 1), (383, 1)],
+    [
+        (4, 18),
+        (60, 18),
+        (70, 24),
+        (344, 18),
+        (267, 16),
+        (351, 16),
+        (376, 1),
+        (377, 1),
+        (383, 1),
+    ],
 )
 def test_schema9_keeps_legacy_output_and_reserved_byte_bounds(
     offset: int, value: int
@@ -2486,9 +2754,14 @@ def test_native_fields_reject_invalid_wire_values(offset: int, value: int) -> No
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("native_joycon_layout", "solo"), ("native_joycon_layout", 1),
-     ("native_joycon_layout", None), ("swap_sticks", 1),
-     ("swap_sticks", "false"), ("swap_sticks", None)],
+    [
+        ("native_joycon_layout", "solo"),
+        ("native_joycon_layout", 1),
+        ("native_joycon_layout", None),
+        ("swap_sticks", 1),
+        ("swap_sticks", "false"),
+        ("swap_sticks", None),
+    ],
 )
 def test_native_fields_reject_invalid_json_types(field: str, value: object) -> None:
     obj = custom_profile().to_json_object()
@@ -2736,8 +3009,11 @@ def test_schema8_swing_migration_preserves_remote_binding() -> None:
     legacy_json["schema_version"] = 8
     del legacy_json["swing"]["macro"]
     for field in (
-        "nunchuk_swing", "combined_swing", "combination_window_ms",
-        "native_joycon_layout", "swap_sticks",
+        "nunchuk_swing",
+        "combined_swing",
+        "combination_window_ms",
+        "native_joycon_layout",
+        "swap_sticks",
     ):
         del legacy_json[field]
     assert config_manager.ControllerProfile.from_bytes(legacy_wire) == profile
@@ -3646,6 +3922,7 @@ def test_discovery_finds_one_adapter_without_its_native_children(
     monkeypatch: pytest.MonkeyPatch,
     identity: tuple[int, int],
 ) -> None:
+    monkeypatch.setattr(config_manager, "sys", SimpleNamespace(platform="linux"))
     device = FakeDevice()
     if identity == (0x057E, 0x2068):
         device.firmware_version = (0, 72, 0)
@@ -3667,6 +3944,7 @@ def test_discovery_finds_one_adapter_without_its_native_children(
 
     monkeypatch.setattr(config_manager.usb.core, "find", find)
     assert config_manager.find_pico(None, None, timeout=0) is device
+    assert config_manager.find_wake_pico(None, None, timeout=0) is device
     for child in (right, left):
         with pytest.raises(config_manager.ConfigManagerError, match="no USB-connected"):
             config_manager.find_pico(child.bus, child.address, timeout=0)
@@ -3685,6 +3963,8 @@ def test_native_discovery_requires_validated_management_info(
     monkeypatch: pytest.MonkeyPatch,
     response: bytes | Exception,
 ) -> None:
+    monkeypatch.setattr(config_manager, "sys", SimpleNamespace(platform="linux"))
+
     class NintendoDevice(FakeDevice):
         address = 8
 
@@ -3721,6 +4001,531 @@ def test_find_requires_selector_for_multiple_picos(
     ):
         config_manager.find_pico(None, None)
     assert config_manager.find_pico(1, 8) is second
+
+
+class WakeDiscoveryBackend:
+    """Descriptor/transport fixture using real PyUSB Device resource management."""
+
+    def __init__(self) -> None:
+        self.nodes: dict[tuple[int, int], SimpleNamespace] = {}
+        self.opened: list[tuple[int, int]] = []
+        self.closed: list[tuple[int, int]] = []
+        self.claimed: list[tuple[tuple[int, int], int]] = []
+        self.released: list[tuple[tuple[int, int], int]] = []
+        self.controls: list[tuple[tuple[int, int], int, int, int, int]] = []
+        self.writes: list[bytes] = []
+
+    def add(
+        self,
+        identity: tuple[int, int],
+        address: int,
+        *,
+        bus: int = 1,
+        ports: tuple[int, ...] | None = (1,),
+        parent: tuple[int, int] | None = None,
+    ) -> tuple[int, int]:
+        native = identity in config_manager.NATIVE_CHILD_IDENTITIES
+        hub = identity == config_manager.NATIVE_HUB_IDENTITY
+        key = (bus, address)
+        self.nodes[key] = SimpleNamespace(
+            descriptor=SimpleNamespace(
+                bLength=18,
+                bDescriptorType=1,
+                bcdUSB=0x200,
+                bDeviceClass=9 if hub else 0xEF if native else 0,
+                bDeviceSubClass=2 if native else 0,
+                bDeviceProtocol=1 if native else 0,
+                bMaxPacketSize0=64,
+                idVendor=identity[0],
+                idProduct=identity[1],
+                bcdDevice=0x110,
+                iManufacturer=0,
+                iProduct=0,
+                iSerialNumber=0,
+                bNumConfigurations=1,
+                address=address,
+                bus=bus,
+                port_number=ports[-1] if ports else None,
+                port_numbers=ports,
+                speed=2,
+            ),
+            interface=SimpleNamespace(
+                bLength=9,
+                bDescriptorType=4,
+                bInterfaceNumber=1,
+                bAlternateSetting=0,
+                bNumEndpoints=2,
+                bInterfaceClass=0xFF,
+                bInterfaceSubClass=0,
+                bInterfaceProtocol=0,
+                iInterface=0,
+                extra_descriptors=b"",
+            ),
+            parent=parent,
+            info=make_response(
+                config_manager.OP_INFO,
+                bytes((0, 110, 0, 2, 5 if native or hub else 1, 7, 0, 2)),
+            ),
+            claim_error=None,
+            request_id=0,
+        )
+        return key
+
+    def enumerate_devices(self) -> object:
+        return iter(self.nodes)
+
+    def get_device_descriptor(self, key: tuple[int, int]) -> SimpleNamespace:
+        return self.nodes[key].descriptor
+
+    def get_parent(self, key: tuple[int, int]) -> tuple[int, int] | None:
+        return self.nodes[key].parent
+
+    def get_configuration_descriptor(
+        self, key: tuple[int, int], configuration: int
+    ) -> SimpleNamespace:
+        if configuration != 0:
+            raise IndexError(configuration)
+        return SimpleNamespace(
+            bLength=9,
+            bDescriptorType=2,
+            wTotalLength=64,
+            bNumInterfaces=2,
+            bConfigurationValue=1,
+            iConfiguration=0,
+            bmAttributes=0x80,
+            bMaxPower=250,
+            extra_descriptors=b"",
+        )
+
+    def get_interface_descriptor(
+        self, key: tuple[int, int], interface: int, alternate: int, configuration: int
+    ) -> SimpleNamespace:
+        if interface != 1 or alternate != 0 or configuration != 0:
+            raise IndexError(interface)
+        descriptor = self.nodes[key].interface
+        if descriptor is None:
+            raise IndexError(interface)
+        return descriptor
+
+    def open_device(self, key: tuple[int, int]) -> tuple[int, int]:
+        self.opened.append(key)
+        return key
+
+    def close_device(self, key: tuple[int, int]) -> None:
+        self.closed.append(key)
+
+    def claim_interface(self, key: tuple[int, int], interface: int) -> None:
+        error = self.nodes[key].claim_error
+        if error is not None:
+            raise error
+        self.claimed.append((key, interface))
+
+    def release_interface(self, key: tuple[int, int], interface: int) -> None:
+        self.released.append((key, interface))
+
+    def ctrl_transfer(
+        self,
+        key: tuple[int, int],
+        direction: int,
+        operation: int,
+        value: int,
+        index: int,
+        data: object,
+        timeout: int,
+    ) -> int:
+        self.controls.append((key, direction, operation, value, index))
+        node = self.nodes[key]
+        if direction & 0x80:
+            if operation == config_manager.OP_INFO:
+                response = node.info
+                if isinstance(response, Exception):
+                    raise response
+            else:
+                assert operation == config_manager.OP_SWITCH2_WAKE
+                response = wake_response(3 if node.request_id else 0, node.request_id)
+            for offset, byte in enumerate(response):
+                data[offset] = byte
+            return len(response)
+        encoded = bytes(data)
+        self.writes.append(encoded)
+        if operation == config_manager.OP_SWITCH2_WAKE:
+            payload = encoded[config_manager.REQUEST_HEADER_SIZE :]
+            assert encoded == config_manager.encode_request(operation, payload)
+            node.request_id = struct.unpack("<I", payload)[0]
+        return len(encoded)
+
+
+@pytest.fixture
+def windows_usb(monkeypatch: pytest.MonkeyPatch) -> WakeDiscoveryBackend:
+    backend = WakeDiscoveryBackend()
+    original_import = config_manager.importlib.import_module
+
+    def import_module(name: str, package: str | None = None) -> object:
+        if name == "libusb_package":
+            return SimpleNamespace(get_libusb1_backend=lambda: backend)
+        return original_import(name, package)
+
+    monkeypatch.setattr(config_manager.importlib, "import_module", import_module)
+    monkeypatch.setattr(
+        config_manager,
+        "sys",
+        SimpleNamespace(platform="win32", stderr=config_manager.sys.stderr),
+    )
+    return backend
+
+
+def test_windows_wake_groups_siblings_without_opening_hub(
+    windows_usb: WakeDiscoveryBackend,
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    right = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
+    windows_usb.add((0x057E, 0x2067), 9, ports=(1, 2), parent=hub)
+
+    device = config_manager.find_wake_pico(None, None, timeout=0)
+
+    assert isinstance(device, config_manager.usb.core.Device)
+    assert device.address == 8
+    assert windows_usb.opened == [right]
+    assert windows_usb.claimed == [(right, 1)]
+    assert windows_usb.controls == [(right, 0xC1, 0x01, 0x5350, 1)]
+    assert windows_usb.writes == []
+    config_manager.usb.util.dispose_resources(device)
+    assert windows_usb.released == [(right, 1)]
+    assert windows_usb.closed == [right]
+
+
+def test_windows_wake_uses_sibling_with_available_vendor_driver(
+    windows_usb: WakeDiscoveryBackend,
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    right = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
+    left = windows_usb.add((0x057E, 0x2067), 9, ports=(1, 2), parent=hub)
+    windows_usb.nodes[right].claim_error = config_manager.usb.core.USBError(
+        "no WinUSB interface", error_code=-12
+    )
+    device = config_manager.find_wake_pico(None, None, timeout=0)
+    assert device.address == 9
+    assert windows_usb.opened == [right, left]
+    assert windows_usb.closed == [right]
+    assert windows_usb.claimed == [(left, 1)]
+    assert windows_usb.controls == [(left, 0xC1, 0x01, 0x5350, 1)]
+    config_manager.usb.util.dispose_resources(device)
+    assert windows_usb.closed == [right, left]
+
+
+def test_windows_wake_distinct_picos_remain_ambiguous(
+    windows_usb: WakeDiscoveryBackend,
+) -> None:
+    for bus in (1, 2):
+        hub = windows_usb.add((0x057E, 0x2068), 7, bus=bus)
+        windows_usb.add((0x057E, 0x2066), 8, bus=bus, ports=(1, 1), parent=hub)
+    with pytest.raises(config_manager.ConfigManagerError, match="multiple switch-pico"):
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert windows_usb.opened == [(1, 8), (2, 8)]
+    assert windows_usb.closed == windows_usb.opened
+    assert windows_usb.released == windows_usb.claimed
+    assert windows_usb.writes == []
+
+
+@pytest.mark.parametrize(
+    "bus,address,expected",
+    (
+        (1, 7, (1, 8)),
+        (1, 9, (1, 9)),
+        (2, None, (2, 11)),
+        (None, 10, (2, 11)),
+        (None, 11, (2, 11)),
+        (1, 11, None),
+    ),
+)
+def test_windows_wake_selectors_accept_parent_or_child(
+    windows_usb: WakeDiscoveryBackend,
+    bus: int | None,
+    address: int | None,
+    expected: tuple[int, int] | None,
+) -> None:
+    first = windows_usb.add((0x057E, 0x2068), 7)
+    windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=first)
+    windows_usb.add((0x057E, 0x2067), 9, ports=(1, 2), parent=first)
+    second = windows_usb.add((0x057E, 0x2068), 10, bus=2)
+    windows_usb.add((0x057E, 0x2066), 11, bus=2, ports=(1, 1), parent=second)
+    if expected is None:
+        with pytest.raises(config_manager.ConfigManagerError):
+            config_manager.find_wake_pico(bus, address, timeout=0)
+        assert windows_usb.opened == []
+    else:
+        device = config_manager.find_wake_pico(bus, address, timeout=0)
+        assert (device.bus, device.address) == expected
+        assert windows_usb.opened == [expected]
+        config_manager.usb.util.dispose_resources(device)
+    assert windows_usb.writes == []
+
+
+@pytest.mark.parametrize("source", ("parent_address", "parent_topology", "topology"))
+def test_windows_wake_groups_by_parent_identity_or_topology(
+    windows_usb: WakeDiscoveryBackend,
+    source: str,
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    for address, product, port in ((8, 0x2066, 1), (9, 0x2067, 2)):
+        child = windows_usb.add(
+            (0x057E, product),
+            address,
+            ports=(1, port),
+            parent=None if source == "topology" else hub,
+        )
+        if source == "parent_address":
+            windows_usb.nodes[child].descriptor.port_numbers = None
+    if source == "parent_address":
+        windows_usb.nodes[hub].descriptor.port_numbers = None
+    elif source == "parent_topology":
+        windows_usb.nodes[hub].descriptor.address = None
+    device = config_manager.find_wake_pico(None, None, timeout=0)
+    assert device.address == 8
+    assert windows_usb.opened == [(1, 8)]
+    config_manager.usb.util.dispose_resources(device)
+
+
+@pytest.mark.parametrize("wake", (False, True))
+def test_windows_normal_adapter_keeps_device_recipient_info(
+    windows_usb: WakeDiscoveryBackend,
+    wake: bool,
+) -> None:
+    windows_usb.add((0x057E, 0x2068), 7)
+    aio = windows_usb.add((0xCAFE, 0x4010), 10, ports=(2,))
+    discover = config_manager.find_wake_pico if wake else config_manager.find_pico
+    device = discover(None, None, timeout=0)
+    assert device.address == 10
+    assert windows_usb.opened == [aio]
+    assert windows_usb.controls == [(aio, 0xC0, 0x01, 0x5350, 1)]
+    assert windows_usb.claimed == []
+    config_manager.usb.util.dispose_resources(device)
+
+
+@pytest.mark.parametrize(
+    "target,field,value",
+    (
+        ("child", "idVendor", 0x1234),
+        ("child", "idProduct", 0x2065),
+        ("child", "bDeviceClass", 9),
+        ("child", "bDeviceSubClass", 0),
+        ("child", "bDeviceProtocol", 0),
+        ("parent", "idVendor", 0x1234),
+        ("parent", "idProduct", 0x2009),
+        ("parent", "bDeviceClass", 0),
+        ("interface", "bInterfaceNumber", 0),
+        ("interface", "bAlternateSetting", 1),
+        ("interface", "bInterfaceClass", 3),
+        ("interface", "bInterfaceSubClass", 1),
+        ("interface", "bInterfaceProtocol", 1),
+        ("missing", "", None),
+        ("orphan", "", None),
+    ),
+)
+def test_windows_wake_rejects_untrusted_descriptors_before_probe(
+    windows_usb: WakeDiscoveryBackend,
+    target: str,
+    field: str,
+    value: object,
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    child = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
+    node = windows_usb.nodes[child]
+    if target == "missing":
+        node.interface = None
+    elif target == "orphan":
+        node.parent = None
+        node.descriptor.port_numbers = None
+    else:
+        descriptor = (
+            node.interface
+            if target == "interface"
+            else windows_usb.nodes[hub].descriptor
+            if target == "parent"
+            else node.descriptor
+        )
+        setattr(descriptor, field, value)
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.find_wake_pico(1, 8, timeout=0)
+    assert windows_usb.opened == []
+    assert windows_usb.controls == []
+    assert windows_usb.writes == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        b"Nintendo",
+        make_response(config_manager.OP_INFO, b""),
+        make_response(config_manager.OP_INFO, bytes((0, 110, 0, 2, 1, 7, 0, 2))),
+        make_response(config_manager.OP_INFO, bytes((0, 110, 0, 2, 5, 0x80, 0, 2))),
+        make_response(config_manager.OP_INFO, bytes((0, 110, 0, 2, 5, 7, 0, 2)))[:-1],
+    ),
+)
+def test_windows_wake_identity_probe_is_read_only_and_fail_closed(
+    windows_usb: WakeDiscoveryBackend,
+    response: bytes,
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    child = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
+    windows_usb.nodes[child].info = response
+    with pytest.raises(config_manager.ConfigManagerError):
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert windows_usb.controls == [(child, 0xC1, 0x01, 0x5350, 1)]
+    assert windows_usb.writes == []
+    assert windows_usb.closed == [child]
+    assert windows_usb.released == [(child, 1)]
+
+
+def test_windows_wake_hub_without_children_never_opens_root(
+    windows_usb: WakeDiscoveryBackend,
+) -> None:
+    windows_usb.add((0x057E, 0x2068), 7)
+    with pytest.raises(config_manager.ConfigManagerError, match="WinUSB"):
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert windows_usb.opened == []
+    assert windows_usb.controls == []
+
+
+def test_windows_wake_missing_driver_reports_safe_binding_guidance(
+    windows_usb: WakeDiscoveryBackend,
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    child = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
+    error = config_manager.usb.core.USBError("no vendor driver", error_code=-12)
+    windows_usb.nodes[child].claim_error = error
+    with pytest.raises(config_manager.ConfigManagerError) as raised:
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert raised.value.__cause__ is error
+    message = str(raised.value)
+    assert "WinUSB" in message and "Interface 1" in message
+    assert "Never replace" in message and "Interface 0" in message
+    assert "composite parent" in message and "hub" in message
+    assert windows_usb.controls == []
+    assert windows_usb.closed == [child]
+
+
+@pytest.mark.parametrize("code", (-3, -4, -9, -7))
+def test_windows_wake_probe_preserves_transport_errors(
+    windows_usb: WakeDiscoveryBackend,
+    code: int,
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    child = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
+    error = config_manager.usb.core.USBError("transport failure", error_code=code)
+    windows_usb.nodes[child].info = error
+    with pytest.raises(config_manager.usb.core.USBError) as raised:
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert raised.value is error
+    assert windows_usb.writes == []
+    assert windows_usb.closed == [child]
+    assert windows_usb.released == [(child, 1)]
+
+
+def test_windows_wake_enumeration_preserves_backend_error(
+    windows_usb: WakeDiscoveryBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = config_manager.usb.core.USBError("enumeration failed", error_code=-1)
+
+    def fail() -> None:
+        raise error
+
+    monkeypatch.setattr(windows_usb, "enumerate_devices", fail)
+    with pytest.raises(config_manager.usb.core.USBError) as raised:
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert raised.value is error
+    assert windows_usb.opened == []
+
+
+def test_windows_backend_initialization_preserves_usb_error(
+    windows_usb: WakeDiscoveryBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = config_manager.usb.core.USBError("backend init failed", error_code=-1)
+
+    def load_backend() -> None:
+        raise error
+
+    monkeypatch.setattr(
+        config_manager.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(get_libusb1_backend=load_backend),
+    )
+    with pytest.raises(config_manager.usb.core.USBError) as raised:
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert raised.value is error
+    assert windows_usb.opened == []
+
+
+@pytest.mark.parametrize("failure", ("package", "dll", "backend"))
+def test_windows_wake_reports_missing_libusb_runtime(
+    windows_usb: WakeDiscoveryBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    def load_backend() -> None:
+        if failure == "dll":
+            raise OSError("DLL could not load")
+
+    def import_module(name: str) -> SimpleNamespace:
+        assert name == "libusb_package"
+        if failure == "package":
+            raise ModuleNotFoundError(name)
+        return SimpleNamespace(get_libusb1_backend=load_backend)
+
+    monkeypatch.setattr(config_manager.importlib, "import_module", import_module)
+    with pytest.raises(config_manager.ConfigManagerError, match="libusb-package"):
+        config_manager.find_wake_pico(None, None, timeout=0)
+    assert windows_usb.opened == []
+
+
+def test_native_child_wake_route_also_works_without_windows_discovery(
+    wake_clock: list[float],
+) -> None:
+    backend = WakeDiscoveryBackend()
+    child = backend.add((0x057E, 0x2066), 8)
+    device = config_manager.usb.core.Device(child, backend)
+    assert (
+        config_manager.read_info(device).active_mode
+        == config_manager.ACTIVE_MODE_NATIVE_HUB
+    )
+    assert config_manager.request_switch2_wake(device).state_name == "complete"
+    config_manager.request_bootsel_reboot(device)
+    assert [
+        (direction, operation) for _, direction, operation, _, _ in backend.controls
+    ] == [
+        (0xC1, 0x01),
+        (0xC1, 0x05),
+        (0x41, 0x05),
+        (0xC1, 0x05),
+        (0x40, 0x04),
+    ]
+    assert all(
+        value == 0x5350 and index == 1 for _, _, _, value, index in backend.controls
+    )
+    config_manager.usb.util.dispose_resources(device)
+
+
+def test_windows_wake_cli_uses_vendor_interface_and_preserves_json(
+    windows_usb: WakeDiscoveryBackend,
+    wake_clock: list[float],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hub = windows_usb.add((0x057E, 0x2068), 7)
+    child = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
+    assert config_manager.main(["--bus", "1", "--address", "7", "wake", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["state_name"] == "complete"
+    assert result["console_power_confirmed"] is False
+    assert result["request_id"] == 23
+    assert windows_usb.controls == [
+        (child, 0xC1, 0x01, 0x5350, 1),
+        (child, 0xC1, 0x05, 0x5350, 1),
+        (child, 0x41, 0x05, 0x5350, 1),
+        (child, 0xC1, 0x05, 0x5350, 1),
+    ]
+    assert len(windows_usb.writes) == 1
 
 
 def haptics_response(

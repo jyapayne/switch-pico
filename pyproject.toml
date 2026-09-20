@@ -15,6 +15,7 @@ dependencies = [
     "rich",
     "hidapi",
     "pyusb",
+    "libusb-package; sys_platform == 'win32'",
 ]
 
 [project.scripts]

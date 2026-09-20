@@ -36,17 +36,10 @@ RAD_TO_DEG = 180.0 / math.pi
 ACCEL_LSB_PER_G = 4096.0
 GYRO_LSB_PER_RAD_S = 818.5
 
-try:
-    import sdl3 as _sdl3  # type: ignore[import-not-found]
-
-    _sensor_accel = getattr(_sdl3, "SDL_SENSOR_ACCEL", 1)
-    _sensor_gyro = getattr(_sdl3, "SDL_SENSOR_GYRO", 2)
-except ImportError:
-    _sensor_accel = 1
-    _sensor_gyro = 2
-
-SENSOR_ACCEL: int = _sensor_accel
-SENSOR_GYRO: int = _sensor_gyro
+# Stable SDL_SensorType ABI values. Importing SDL merely to obtain these IDs
+# adds startup side effects to otherwise SDL-independent UART/USB scripts.
+SENSOR_ACCEL: int = 1
+SENSOR_GYRO: int = 2
 
 
 class SwitchButton(IntFlag):

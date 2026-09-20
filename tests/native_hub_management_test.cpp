@@ -41,6 +41,10 @@ std::array<uint8_t, 64> child_identity[PROBE_CONTROLLER_COUNT];
 bool interleave_identity_ack = false;
 bool synthetic_root_management = false;
 uint32_t bootsel_time_ms = 0;
+uint32_t wake_request_calls = 0;
+uint32_t last_wake_request_id = 0;
+bool accept_wake_request = true;
+Bluepad32Switch2WakeStatus wake_status{};
 
 void require(bool condition, const char* message) {
     if (!condition) { std::cerr << message << '\n'; std::exit(1); }
@@ -66,6 +70,11 @@ tusb_control_request_t request(Operation op, bool input, uint16_t length) {
     setup.bmRequestType = input ? 0xc0 : 0x40;
     setup.bRequest = static_cast<uint8_t>(op);
     setup.wValue = kRequestValue; setup.wIndex = kRequestIndex; setup.wLength = length;
+    return setup;
+}
+tusb_control_request_t child_request(Operation op, bool input, uint16_t length) {
+    auto setup = request(op, input, length);
+    setup.bmRequestType = input ? 0xc1 : 0x41;
     return setup;
 }
 std::vector<uint8_t> envelope(Operation op, const std::vector<uint8_t>& payload) {
@@ -114,6 +123,189 @@ void write_operation(Operation op, const std::vector<uint8_t>& payload, bool ack
     }
     if (ack) acknowledge();
 }
+void test_wake_transport() {
+    const uint32_t writes_before = programs;
+    const uint32_t erases_before = erases;
+    const auto bytes = envelope(Operation::kSwitch2Wake, {1, 0, 0, 0});
+    const auto setup = request(Operation::kSwitch2Wake, false, bytes.size());
+    require(native_test_setup(0, &setup, true) &&
+                native_test_out(0, bytes.data(), bytes.size(), true) &&
+                wake_request_calls == 1,
+            "native wake must be admitted before its status packet");
+    acknowledge();
+    require(wake_request_calls == 1, "native status ACK replayed wake work");
+    wake_status = {1, Bluepad32Switch2WakeState::kQueued, false, false, 0, 0, 0};
+    const auto status = read_operation(Operation::kSwitch2Wake);
+    require(status.size() == 40 && status[6] == 0 && u16(status, 10) == 1 &&
+                u32(status, 12) == 1 && u32(status, 20) == 1 && status[24] == 1 &&
+                wake_request_calls == 1,
+            "native root wake read must remain correlated and read-only");
+    uint8_t packet[64];
+    uint16_t length = 0;
+    accept_wake_request = false;
+    require(native_test_setup(0, &setup, true) &&
+                !native_test_out(0, bytes.data(), bytes.size(), true) &&
+                !native_test_in(0, packet, &length, true) && wake_request_calls == 2,
+            "native busy wake must stall before its status packet");
+    accept_wake_request = true;
+    auto corrupt = bytes;
+    corrupt[12] ^= 1;
+    require(native_test_setup(0, &setup, true) &&
+                !native_test_out(0, corrupt.data(), corrupt.size(), true) &&
+                !native_test_in(0, packet, &length, true) && wake_request_calls == 2,
+            "native malformed wake must not dispatch or obtain status authorization");
+    require(read_operation(Operation::kSwitch2Wake) == status &&
+                programs == writes_before && erases == erases_before,
+            "volatile wake management must not alter status on reads or persist anything");
+}
+
+void read_child(uint8_t slot) {
+    tusb_control_request_t setup{};
+    setup.bmRequestType = 0xc0; setup.bRequest = 3; setup.wLength = 128;
+    require(native_test_setup(slot, &setup, true), "native child identity stalled");
+    const auto bytes = receive(slot);
+    require(bytes == std::vector<uint8_t>(child_identity[slot - 1].begin(), child_identity[slot - 1].end()),
+            "native child identity leaked root or sibling vendor bytes");
+}
+void test_child_wake_transport() {
+    const uint32_t programs_before = programs, erases_before = erases;
+    const auto info_setup = child_request(Operation::kInfo, true, kMaximumResponseSize);
+    const auto status_setup = child_request(Operation::kSwitch2Wake, true, kMaximumResponseSize);
+    const auto setup = child_request(Operation::kSwitch2Wake, false, kRequestHeaderSize + 4);
+    const auto root_info = read_operation(Operation::kInfo);
+    const auto root_status = read_operation(Operation::kSwitch2Wake);
+    uint32_t expected_calls = wake_request_calls;
+    uint8_t packet[64]; uint16_t length;
+    for (uint8_t slot = 1; slot <= PROBE_CONTROLLER_COUNT; ++slot) {
+        require(native_test_setup(slot, &info_setup, true) && receive(slot) == root_info &&
+                native_test_setup(slot, &status_setup, true) && receive(slot) == root_status &&
+                wake_request_calls == expected_calls,
+                "child discovery/status must match the read-only root management schema");
+        const auto bytes = envelope(Operation::kSwitch2Wake, {slot, 0, 0, 0});
+        require(native_test_setup(slot, &setup, true) &&
+                !native_test_in(slot, packet, &length, true) &&
+                !probe_management_vendor_control(slot, CONTROL_STAGE_ACK, &setup) &&
+                wake_request_calls == expected_calls,
+                "child wake must not acknowledge or submit before DATA validation");
+        require(native_test_out(slot, bytes.data(), bytes.size(), true) &&
+                wake_request_calls == ++expected_calls && last_wake_request_id == slot,
+                "child wake did not admit the requested ID before status ACK");
+        require(probe_management_vendor_control(slot, CONTROL_STAGE_DATA, &setup),
+                "repeated validated child DATA changed its admission result");
+        acknowledge(slot);
+        require(probe_management_vendor_control(slot, CONTROL_STAGE_ACK, &setup) &&
+                probe_management_vendor_control(slot, CONTROL_STAGE_DATA, &setup) &&
+                wake_request_calls == expected_calls,
+                "duplicate child DATA/ACK repeated the wake mutation");
+        accept_wake_request = false;
+        require(native_test_setup(slot, &setup, true) &&
+                !native_test_out(slot, bytes.data(), bytes.size(), true) &&
+                !native_test_in(slot, packet, &length, true) &&
+                wake_request_calls == ++expected_calls,
+                "busy child wake must stall before its status packet");
+        require(!probe_management_vendor_control(slot, CONTROL_STAGE_DATA, &setup) &&
+                !probe_management_vendor_control(slot, CONTROL_STAGE_ACK, &setup) &&
+                wake_request_calls == expected_calls,
+                "repeated rejected child stages resubmitted wake");
+        accept_wake_request = true;
+        for (size_t offset : {0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}) {
+            auto corrupt = bytes;
+            corrupt[offset] ^= 1;
+            require(native_test_setup(slot, &setup, true) &&
+                    !native_test_out(slot, corrupt.data(), corrupt.size(), true) &&
+                    !native_test_in(slot, packet, &length, true),
+                    "malformed child envelope obtained status authorization");
+        }
+        for (const auto& invalid : {envelope(Operation::kSwitch2Wake, {0, 0, 0, 0}),
+                                   envelope(Operation::kSwitch2Wake, {0, 0, 0, 0x80})}) {
+            require(native_test_setup(slot, &setup, true) &&
+                    !native_test_out(slot, invalid.data(), invalid.size(), true) &&
+                    !native_test_in(slot, packet, &length, true),
+                    "invalid child request ID obtained status authorization");
+        }
+        require(native_test_setup(slot, &setup, true) &&
+                !native_test_out(slot, bytes.data(), bytes.size() - 1, true) &&
+                !native_test_in(slot, packet, &length, true) &&
+                wake_request_calls == expected_calls,
+                "short child OUT inherited a previous valid envelope");
+        for (uint8_t recipient : {0x40, 0x42, 0x43, 0xc0, 0xc2, 0xc3}) {
+            auto invalid = setup;
+            invalid.bmRequestType = recipient;
+            require(!native_test_setup(slot, &invalid, true),
+                    "child management accepted the wrong recipient");
+        }
+        std::array<tusb_control_request_t, 5> invalid_setups;
+        invalid_setups.fill(setup);
+        invalid_setups[0].wValue ^= 1;
+        invalid_setups[1].wIndex = 0;
+        invalid_setups[2].wIndex = 0x101;
+        invalid_setups[3].wLength -= 1;
+        invalid_setups[4].wLength += 1;
+        for (const auto& invalid : invalid_setups)
+            require(!native_test_setup(slot, &invalid, true),
+                    "child wake accepted an invalid value, interface, or length");
+        for (unsigned op = 0; op <= UINT8_MAX; ++op) {
+            for (bool input : {false, true}) {
+                if (op == static_cast<unsigned>(Operation::kSwitch2Wake) ||
+                    (input && op == static_cast<unsigned>(Operation::kInfo))) continue;
+                const auto invalid = child_request(static_cast<Operation>(op), input,
+                                                   input ? kMaximumResponseSize : kRequestHeaderSize);
+                require(!native_test_setup(slot, &invalid, true),
+                        "child management exposed an operation outside INFO/WAKE");
+            }
+        }
+        read_child(slot);
+    }
+    require(!native_test_setup(0, &setup, true) &&
+            !native_test_setup(0, &info_setup, true),
+            "root management incorrectly accepted interface-recipient requests");
+    profile_service_task_on_storage_core(4500);
+    require(wake_request_calls == expected_calls &&
+            programs == programs_before && erases == erases_before,
+            "child discovery/rejection dispatched wake or persisted a change");
+}
+
+void test_child_management_interleaving() {
+    const uint32_t programs_before = programs, erases_before = erases;
+    uint32_t expected_calls = wake_request_calls;
+    const auto root_setup = request(Operation::kSwitch2Wake, false, kRequestHeaderSize + 4);
+    const auto child_setup = child_request(Operation::kSwitch2Wake, false, kRequestHeaderSize + 4);
+    require(native_test_setup(0, &root_setup, true), "root pending wake setup failed");
+    for (uint8_t slot = 1; slot <= PROBE_CONTROLLER_COUNT; ++slot)
+        require(native_test_setup(slot, &child_setup, true), "concurrent child wake setup failed");
+    const auto root_bytes = envelope(Operation::kSwitch2Wake, {0x70, 0, 0, 0});
+    require(native_test_out(0, root_bytes.data(), root_bytes.size(), true) &&
+            wake_request_calls == ++expected_calls && last_wake_request_id == 0x70,
+            "child SETUP canceled or overwrote root pending wake");
+    acknowledge();
+    for (uint8_t slot = PROBE_CONTROLLER_COUNT; slot; --slot) {
+        const auto bytes = envelope(Operation::kSwitch2Wake, {slot, 0, 0, 0});
+        read_operation(Operation::kInfo);
+        require(native_test_out(slot, bytes.data(), bytes.size(), true) &&
+                wake_request_calls == ++expected_calls && last_wake_request_id == slot,
+                "root or sibling request canceled or overwrote a child's pending wake");
+        acknowledge(slot);
+    }
+    // Distinct snapshots remain stable until each independent IN is consumed.
+    wake_status.request_id = 0x80;
+    const auto root_read = request(Operation::kSwitch2Wake, true, kMaximumResponseSize);
+    const auto child_read = child_request(Operation::kSwitch2Wake, true, kMaximumResponseSize);
+    require(native_test_setup(0, &root_read, true), "root snapshot setup failed");
+    for (uint8_t slot = 1; slot <= PROBE_CONTROLLER_COUNT; ++slot) {
+        wake_status.request_id = slot;
+        require(native_test_setup(slot, &child_read, true), "child snapshot setup failed");
+    }
+    require(u32(receive(), kResponseHeaderSize) == 0x80,
+            "child response overwrote pending root IN");
+    for (uint8_t slot = PROBE_CONTROLLER_COUNT; slot; --slot)
+        require(u32(receive(slot), kResponseHeaderSize) == slot,
+                "root or sibling response overwrote pending child IN");
+    profile_service_task_on_storage_core(4600);
+    require(wake_request_calls == expected_calls &&
+            programs == programs_before && erases == erases_before,
+            "interleaved volatile management unexpectedly mutated or persisted state");
+}
+
 std::vector<uint8_t> identity_payload(uint8_t profile) {
     std::vector<uint8_t> payload(15);
     require(controller_identity_encode(controller_identity_global(), payload.data(), 14), "global identity did not encode");
@@ -155,14 +347,6 @@ void require_profile(const std::vector<uint8_t>& expected) {
     require(bytes[6] == static_cast<uint8_t>(Status::kOk) &&
             std::vector<uint8_t>(bytes.begin() + kResponseHeaderSize, bytes.end()) == expected,
             "host readback differs from the durable selected profile");
-}
-void read_child(uint8_t slot) {
-    tusb_control_request_t setup{};
-    setup.bmRequestType = 0xc0; setup.bRequest = 3; setup.wLength = 128;
-    require(native_test_setup(slot, &setup, true), "native child identity stalled");
-    const auto bytes = receive(slot);
-    require(bytes == std::vector<uint8_t>(child_identity[slot - 1].begin(), child_identity[slot - 1].end()),
-            "native child identity leaked root or sibling vendor bytes");
 }
 
 void assign_address(uint8_t slot, uint8_t address) {
@@ -431,6 +615,11 @@ void test_profile_transport() {
     for (uint8_t slot = 1; slot <= PROBE_CONTROLLER_COUNT; ++slot) read_child(slot);
     const auto child_management = request(Operation::kInfo, true, kMaximumResponseSize);
     require(!native_test_setup(1, &child_management, true), "child INFO was accepted during a root write");
+    if (!SWITCH2_PROBE_NEUTRAL_INPUT) {
+        const auto child_info = child_request(Operation::kInfo, true, kMaximumResponseSize);
+        require(native_test_setup(1, &child_info, true) && receive(1) == info,
+                "child interface discovery failed during multipart root OUT");
+    }
     require(native_test_out(0, chunk.data() + 64, chunk.size() - 64, true), "interleaved child requests corrupted root OUT tail");
     acknowledge();
     for (size_t offset = kMaximumChunkSize; offset < edited.size(); offset += kMaximumChunkSize)
@@ -650,6 +839,7 @@ void test_neutral_management_surface() {
         {Operation::kWiiOrientation, 19}, {Operation::kPairingRefresh, 0},
         {Operation::kPairingClear, 0},
     };
+    const uint32_t wake_calls_before = wake_request_calls;
     for (uint8_t slot = 0; slot <= PROBE_CONTROLLER_COUNT; ++slot) {
         for (Operation op : {Operation::kInfo, Operation::kConfigurationRead,
                 Operation::kTransactionStatus, Operation::kPairingRead,
@@ -663,10 +853,22 @@ void test_neutral_management_surface() {
             const auto setup = request(item.operation, false, kRequestHeaderSize + item.payload_size);
             require(!native_test_setup(slot, &setup, true), "neutral device exposed a management mutation");
         }
+        for (bool input : {false, true}) {
+            const auto wake = request(Operation::kSwitch2Wake, input,
+                                      input ? kMaximumResponseSize : kRequestHeaderSize + 4);
+            const auto child_wake = child_request(Operation::kSwitch2Wake, input, wake.wLength);
+            require(!native_test_setup(slot, &wake, true) &&
+                    !native_test_setup(slot, &child_wake, true),
+                    "neutral firmware exposed a wake management route");
+        }
+        const auto child_info = child_request(Operation::kInfo, true, kMaximumResponseSize);
+        require(!native_test_setup(slot, &child_info, true),
+                "neutral firmware exposed child management discovery");
         if (slot) read_child(slot);
     }
     profile_service_task_on_storage_core(5000);
-    require(programs == programs_before && erases == erases_before,
+    require(programs == programs_before && erases == erases_before &&
+            wake_request_calls == wake_calls_before,
             "neutral management rejection changed saved profiles");
     require_no_bootsel();
 }
@@ -817,6 +1019,14 @@ ConfigurationTransactionStatus configuration_service_set_mode(uint32_t, AdapterR
 const AdapterModeAvailability& adapter_usb_mode_availability() { unexpected_mutation(); }
 bool adapter_reboot_for_mode_transaction(uint32_t) { unexpected_mutation(); }
 bool adapter_reboot_to_bootsel() { unexpected_mutation(); }
+bool bluepad32_input_backend_request_switch2_wake(uint32_t request_id) {
+    ++wake_request_calls;
+    last_wake_request_id = request_id;
+    return accept_wake_request;
+}
+void bluepad32_input_backend_switch2_wake_snapshot(Bluepad32Switch2WakeStatus* out) {
+    *out = wake_status;
+}
 void bluepad32_input_backend_request_pairing_snapshot() { unexpected_mutation(); }
 uint32_t bluepad32_input_backend_clear_pairings() { unexpected_mutation(); }
 void bluepad32_input_backend_pairing_snapshot(Bluepad32PairingSnapshot* out) { *out = {}; }
@@ -862,7 +1072,12 @@ int main(int argc, char** argv) {
     test_profile_transport();
     test_interrupted_transactions();
     test_pending_control_buffer_ownership();
+    test_wake_transport();
     synthetic_root_management = false;
+    if (!SWITCH2_PROBE_NEUTRAL_INPUT) {
+        test_child_wake_transport();
+        test_child_management_interleaving();
+    }
     test_read_ack_allows_usb_progress();
     test_private_transmit_survives_round_robin_tokens();
     test_masked_irq_completion_handoff();

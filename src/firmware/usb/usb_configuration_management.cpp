@@ -100,6 +100,7 @@ bool valid_out_size(Operation operation, size_t size) {
         case Operation::kModeSet:
             return size == kRequestHeaderSize + 5;
         case Operation::kReboot:
+        case Operation::kSwitch2Wake:
             return size == kRequestHeaderSize + 4;
         case Operation::kBootselReboot:
             return size == kRequestHeaderSize;
@@ -147,6 +148,30 @@ bool valid_out_size(Operation operation, size_t size) {
     }
 }
 
+bool process_switch2_wake(const DecodedRequest& request) {
+    if (request.payload_size != 4) return false;
+    const uint32_t request_id = read_u32(request.payload);
+    return request_id != 0 && request_id <= INT32_MAX &&
+           bluepad32_input_backend_request_switch2_wake(request_id);
+}
+
+size_t encode_switch2_wake(uint8_t* output, size_t output_size) {
+    Bluepad32Switch2WakeStatus snapshot{};
+    bluepad32_input_backend_switch2_wake_snapshot(&snapshot);
+    uint8_t payload[kSwitch2WakePayloadSize]{};
+    write_u32(&payload[0], snapshot.request_id);
+    payload[4] = static_cast<uint8_t>(snapshot.state);
+    payload[5] = snapshot.configured ? 1 : 0;
+    payload[6] = snapshot.busy ? 1 : 0;
+    write_u32(&payload[8], snapshot.accepted_requests);
+    write_u32(&payload[12], snapshot.completed_bursts);
+    write_u32(&payload[16], snapshot.failures);
+    return encode_response(
+        Operation::kSwitch2Wake, Status::kOk, 0,
+        kSwitch2WakeSchemaVersion, snapshot.request_id,
+        payload, sizeof(payload), output, output_size);
+}
+
 size_t encode_configuration(uint8_t* output, size_t output_size) {
     ConfigurationServiceSnapshot snapshot{};
     configuration_service_snapshot(&snapshot);
@@ -192,7 +217,7 @@ size_t encode_transaction(uint8_t* output, size_t output_size) {
 size_t encode_info(uint8_t* output, size_t output_size) {
     uint8_t payload[8] = {
 #if SWITCH2_PROBE_HUB
-        0, 108, 0, 2,
+        0, 110, 0, 2,
         kNativeHubActiveMode,
         USB_OUTPUT_CAPABILITY_INPUT | USB_OUTPUT_CAPABILITY_RUMBLE |
             USB_OUTPUT_CAPABILITY_MOTION,
@@ -705,6 +730,7 @@ UsbConfigurationManagement::Operation g_pending_operation =
     UsbConfigurationManagement::Operation::kInfo;
 bool g_out_pending = false;
 bool g_out_processed = false;
+bool g_out_attempted = false;
 size_t g_pending_request_size = 0;
 uint8_t g_pending_rhport = 0;
 tusb_control_request_t g_pending_setup{};
@@ -733,6 +759,8 @@ bool process_out_request() {
 
     const uint8_t* payload = request.payload;
     switch (request.operation) {
+        case Operation::kSwitch2Wake:
+            return process_switch2_wake(request);
         case Operation::kMacroCapture: {
             if (request.payload_size == 16 && payload[0] == 1) {
                 CaptureOptions options{};
@@ -1004,6 +1032,72 @@ bool process_out_request() {
 
 }  // namespace
 
+#if SWITCH2_PROBE_HUB && !SWITCH2_PROBE_NEUTRAL_INPUT
+bool usb_configuration_management_child_vendor_control(
+    uint8_t rhport, uint8_t stage,
+    const tusb_control_request_t* request) {
+    using namespace UsbConfigurationManagement;
+    // The largest child response is WAKE (40 bytes). Never borrow root EP0
+    // storage: the hub and each child can have a transfer in flight together.
+    struct ChildTransfer {
+        uint8_t buffer[kResponseHeaderSize + kSwitch2WakePayloadSize];
+        tusb_control_request_t setup;
+        bool pending;
+        bool attempted;
+        bool accepted;
+    };
+    static ChildTransfer children[PROBE_CONTROLLER_COUNT]{};
+    if (rhport == 0 || rhport > PROBE_CONTROLLER_COUNT) return false;
+    ChildTransfer& transfer = children[rhport - 1];
+    if (stage == CONTROL_STAGE_SETUP) {
+        transfer.pending = false;
+        transfer.attempted = false;
+        transfer.accepted = false;
+    }
+    if (request == nullptr ||
+        (request->bmRequestType != 0xc1 && request->bmRequestType != 0x41) ||
+        request->wValue != kRequestValue || request->wIndex != kRequestIndex) {
+        return false;
+    }
+    const bool input = request->bmRequestType == 0xc1;
+    const Operation operation = static_cast<Operation>(request->bRequest);
+    if (operation != Operation::kSwitch2Wake &&
+        !(input && operation == Operation::kInfo)) return false;
+    if (stage == CONTROL_STAGE_SETUP) {
+        transfer.setup = *request;
+        if (input) {
+            const size_t size = operation == Operation::kInfo
+                ? encode_info(transfer.buffer, sizeof(transfer.buffer))
+                : encode_switch2_wake(transfer.buffer, sizeof(transfer.buffer));
+            transfer.pending = size != 0 && management_control_xfer(
+                rhport, request, transfer.buffer, static_cast<uint16_t>(size));
+        } else {
+            if (!valid_out_size(operation, request->wLength)) return false;
+            // A short OUT must not inherit valid envelope bytes from a prior
+            // request. Native transport also rejects incomplete OUT payloads.
+            memset(transfer.buffer, 0xff, sizeof(transfer.buffer));
+            transfer.pending = management_control_xfer(
+                rhport, request, transfer.buffer, request->wLength);
+        }
+        return transfer.pending;
+    }
+    if (!transfer.pending ||
+        memcmp(request, &transfer.setup, sizeof(*request)) != 0) return false;
+    if (stage != CONTROL_STAGE_DATA && stage != CONTROL_STAGE_ACK) return false;
+    if (input) return true;
+    if (stage == CONTROL_STAGE_DATA && !transfer.attempted) {
+        transfer.attempted = true;
+        DecodedRequest decoded{};
+        // Admission happens before status ACK. Repeated DATA/ACK callbacks
+        // return the original result without submitting the mailbox twice.
+        transfer.accepted = decode_request(operation, transfer.buffer,
+                                            request->wLength, &decoded) &&
+                            process_switch2_wake(decoded);
+    }
+    return transfer.attempted && transfer.accepted;
+}
+#endif
+
 bool usb_configuration_management_vendor_control(
     uint8_t rhport, uint8_t stage,
     tusb_control_request_t const* request) {
@@ -1015,6 +1109,7 @@ bool usb_configuration_management_vendor_control(
     if (stage == CONTROL_STAGE_SETUP) {
         g_out_pending = false;
         g_out_processed = false;
+        g_out_attempted = false;
         g_pending_request_size = 0;
 #if SWITCH2_PROBE_HUB
         g_out_validated = false;
@@ -1062,7 +1157,8 @@ bool usb_configuration_management_vendor_control(
         if (!g_out_validated) return false;
         g_out_validated = false;
 #endif
-        if (operation == Operation::kHapticsExperiment) {
+        if (operation == Operation::kHapticsExperiment ||
+            operation == Operation::kSwitch2Wake) {
             return g_out_processed;
         }
         return process_out_request();
@@ -1078,13 +1174,17 @@ bool usb_configuration_management_vendor_control(
             if (!g_out_validated) return false;
         }
 #endif
-        if (operation == Operation::kHapticsExperiment &&
+        if ((operation == Operation::kHapticsExperiment ||
+             operation == Operation::kSwitch2Wake) &&
             request->bmRequestType_bit.direction == TUSB_DIR_OUT) {
             if (!g_out_pending || operation != g_pending_operation ||
-                g_out_processed) {
+                rhport != g_pending_rhport ||
+                memcmp(request, &g_pending_setup, sizeof(*request)) != 0 ||
+                g_out_attempted) {
                 return false;
             }
             // Reject before the USB status ACK, and never enqueue twice.
+            g_out_attempted = true;
             g_out_processed = process_out_request();
             return g_out_processed;
         }
@@ -1113,6 +1213,9 @@ bool usb_configuration_management_vendor_control(
     switch (operation) {
         case Operation::kInfo:
             response_size = encode_info(response, sizeof(response));
+            break;
+        case Operation::kSwitch2Wake:
+            response_size = encode_switch2_wake(response, sizeof(response));
             break;
         case Operation::kConfigurationRead:
             response_size =

@@ -123,7 +123,7 @@ is introduced.
 
 ### Switch 2 wake from L + R + Home, PS, or Xbox
 
-The AIO firmware can wake a sleeping Switch 2 when a connected controller's
+Configured AIO and native-hub firmware can wake a sleeping Switch 2 when a connected controller's
 physical **L + R + System** chord becomes held: L + R + Home on
 Nintendo-style controllers, L1 + R1 + PS on PlayStation controllers, or
 LB + RB + Xbox on Xbox controllers. Plain Home, PS, or Xbox remains a normal
@@ -203,6 +203,79 @@ Holding the chord does not retrigger it; release at least one chord button
 before another attempt. Plain Home, PS, or Xbox is forwarded normally and does
 not disturb the radio. Because the wake identity is stable from startup,
 the wake code itself does not disconnect the input controller.
+
+**Wake from Python over USB:** firmware with the USB wake command (native
+0.109 and rebuilt AIO images) can send the same burst while the Pico stays
+plugged into the PC. The wake signal goes over BLE; the Pico does not need a
+USB connection to the Switch or a connected controller. The console-specific
+wake configuration above is still required, and Classic-only builds cannot
+broadcast it. The physical controller chord remains available.
+
+From the repository root:
+
+```sh
+uv run python -m switch_pico_bridge.config_manager wake
+# Equivalent CLI, with machine-readable output:
+uv run switch-pico-config wake --json
+```
+
+For multiple Picos, put `--bus N --address N` before `wake`. The command submits
+one volatile request and waits for its advertising burst to finish. It reports
+unconfigured, busy and radio-failure outcomes rather than silently retrying.
+`--timeout SECONDS` bounds the wait, but does not cancel an already accepted
+burst. A successful result confirms the firmware sequence, not physical RF
+delivery or the console's power state. No pairings, profiles, USB mode or
+saved settings are changed.
+
+**Windows native-hub setup (firmware 0.110 or newer):**
+
+Windows libusb backends cannot send these requests to a hub root; see the
+[libusb Windows restrictions](https://github.com/libusb/libusb/wiki/Windows#known-restrictions).
+The wake command instead uses the existing vendor **Interface 1** on one
+native child. The hub and HID drivers, descriptors and USB identities stay
+unchanged.
+
+1. Run `uv sync` (or `python -m pip install -e .`). Windows dependencies include
+   the libusb DLL through `libusb-package`; the command loads it explicitly.
+   The USB management/wake command does not require SDL3.dll.
+2. In Device Manager's connection view, identify the Pico's `057E:2068` hub
+   and one of its native children (`057E:2066` or `057E:2067`).
+3. In [Zadig](https://zadig.akeo.ie/), enable **Options → List All Devices**.
+   Select that child's **Interface 1** (`MI_01`, vendor interface) and install
+   **WinUSB** for that interface only. **Do not replace the hub's driver,
+   Interface 0's HID driver, or the composite-parent driver.** Check the Pico's
+   physical USB tree rather than selecting unrelated Nintendo hardware.
+4. Run the same `wake` command above. Discovery only reads project identity
+   before sending a request, groups siblings into one Pico, and never detaches
+   drivers, resets a device, or installs a driver automatically. On Windows,
+   `--bus/--address` can select the parent hub or the chosen child.
+
+Only INFO and WAKE are exposed through the native child interface. Other
+native-hub management operations still require root access; this does not make
+all configuration/profile commands available through WinUSB on a child.
+Non-hub AIO modes retain their existing device-level transport and require a
+compatible Windows USB driver binding.
+
+The request uses interface-recipient vendor control transfers with `wIndex=1`,
+matching [WinUSB's interface handling](https://learn.microsoft.com/en-us/windows/win32/api/winusb/nf-winusb-winusb_controltransfer).
+Windows discovery/error paths are regression-tested and the same interface
+requests were exercised on a real Pico under Linux. Windows x64 dependency
+resolution was checked for Python 3.9 and 3.11. **Physical Windows driver and
+hardware operation has not been verified on this Linux development machine.**
+
+Scripts can call the same API directly:
+
+```python
+import usb.util
+from switch_pico_bridge.config_manager import find_wake_pico, request_switch2_wake
+
+pico = find_wake_pico(bus=None, address=None)
+try:
+    result = request_switch2_wake(pico, timeout=15.0)
+    print(result.state_name)  # "complete"; errors raise instead of retrying
+finally:
+    usb.util.dispose_resources(pico)
+```
 
 Hardware testing found that the Switch 2 can briefly remove USB power while
 entering or leaving sleep. A Pico powered only by that port necessarily
@@ -893,7 +966,7 @@ existing IMU target mask is side-local and repeats for each pair. Physical
 Bluetooth capacity remains four devices: a physical Joy-Con pair uses two links.
 
 GAMEPAD/DUALSENSE builds support native gameplay vibration. With HD enabled,
-0.108 preserves the native frequency/amplitude timeline for one selected
+0.110 preserves the native frequency/amplitude timeline for one selected
 DualSense, in any physical slot. Other/unselected controllers, including Wii
 Remotes, retain the conventional source-driver path introduced in 0.101.
 Each virtual R/L half controls only its assigned source's right/left actuator;
@@ -920,7 +993,7 @@ cmake --build build-switch2-native-two-pair-live --parallel 4
 ```
 
 That command explicitly retains the 240 MHz compatibility configuration. To
-build the **0.108 diagnostic HD candidate** using the same private inputs:
+build the **0.110 HD/wake candidate** using the same private inputs:
 
 ```sh
 cmake -S . -B build-switch2-native-two-pair-live \
@@ -2578,11 +2651,11 @@ with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
 
 ### Windows tips
 - Use `COMx` for ports (e.g., `COM5`). Auto‑detect lists COM ports.
-- Ensure SDL3.dll is on PATH or alongside the script.
+- Ensure SDL3.dll is on PATH or alongside the script for the SDL controller/UART bridge. The USB configuration/wake CLI does not require SDL3.dll; native-hub wake uses the Interface 1 WinUSB setup described above, not a COM port.
 
 ### Linux tips
 - You may need udev permissions for `/dev/ttyUSB*`/`/dev/ttyACM*` (add user to `dialout`/`uucp` or use `udev` rules).
-- For the development XInput/DInput/Mac identities, install `udev/99-switch-pico.rules` into `/etc/udev/rules.d/`, reload udev, and reconnect the Pico so `switch-pico-config` can access endpoint zero without root.
+- For the native-hub root and development XInput/DInput/Mac identities, install `udev/99-switch-pico.rules` into `/etc/udev/rules.d/`, reload udev, and reconnect the Pico so `switch-pico-config` can access endpoint zero without root.
 
 ## IMU / Motion Controls
 

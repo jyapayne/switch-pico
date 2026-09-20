@@ -37,6 +37,12 @@ bool probe_management_vendor_control(uint8_t rhport, uint8_t stage,
         transfer.validated = false;
     }
 #endif
+#if SWITCH2_PROBE_HUB && !SWITCH2_PROBE_NEUTRAL_INPUT
+    if (rhport != 0 &&
+        usb_configuration_management_child_vendor_control(rhport, stage, request)) {
+        return true;
+    }
+#endif
     if (request == nullptr || request->bmRequestType != 0x40 ||
         request->bRequest != static_cast<uint8_t>(Operation::kBootselReboot) ||
         request->wValue != kRequestValue || request->wIndex != kRequestIndex ||

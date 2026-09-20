@@ -81,6 +81,7 @@ def test_native_gamepad_backend_native(
 ) -> None:
     root, executable = compile_native_backend(tmp_path, source, controller_count)
     scenarios = [
+        "usb-wake",
         "stable-logical-slot",
         "cue-lifetime",
         "cue-races",
@@ -128,6 +129,7 @@ def test_native_gamepad_backend_native(
 def test_native_gamepad_hd_backend_native(tmp_path: Path) -> None:
     root, executable = compile_native_backend(tmp_path, "GAMEPAD", 4, hd=True)
     for scenario in (
+        "usb-wake",
         "hd-second-pair-wii",
         "hd-second-pair-other",
         "hd-unselected-dualsense",

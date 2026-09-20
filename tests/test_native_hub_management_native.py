@@ -8,8 +8,13 @@ import pytest
 @pytest.mark.parametrize("clock_mhz", [240, 300], ids=["240MHz", "300MHz"])
 @pytest.mark.parametrize(
     ("controller_count", "neutral_input"),
-    [(2, False), (2, True), (4, True)],
-    ids=["native-management", "neutral-one-pair", "neutral-two-pair"],
+    [(2, False), (4, False), (2, True), (4, True)],
+    ids=[
+        "native-management",
+        "native-two-pair",
+        "neutral-one-pair",
+        "neutral-two-pair",
+    ],
 )
 def test_native_hub_management_native(
     tmp_path: Path, controller_count: int, neutral_input: bool, clock_mhz: int
@@ -37,6 +42,8 @@ def test_native_hub_management_native(
         f"-DSWITCH_PICO_SYS_CLOCK_MHZ={clock_mhz}",
     ]
     flags.append(f"-DSWITCH2_PROBE_NEUTRAL_INPUT={int(neutral_input)}")
+    if controller_count == 4 and not neutral_input:
+        flags.append("-DSWITCH2_BRIDGE_FULL_INPUT=1")
     transport = tmp_path / "native_hub_transport.o"
     executable = tmp_path / "native_hub_management_test"
     subprocess.run(

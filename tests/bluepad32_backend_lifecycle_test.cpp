@@ -81,6 +81,8 @@ int uni_init_calls = 0;
 void (*during_uni_init)() = nullptr;
 int switch2_wake_initializations = 0;
 int switch2_wake_requests = 0;
+Switch2WakeDiagnostics wake_diagnostics{};
+bool wake_dispatch_available = true;
 bool switch2_connections_ready = true;
 int device_disconnect_calls = 0;
 uni_hid_device_t* last_disconnected_device = nullptr;
@@ -695,6 +697,7 @@ uint64_t time_us_64() { return uint64_t{now_ms} * 1000 + now_sub_ms_us; }
 
 void switch2_wake_initialize() {
     ++switch2_wake_initializations;
+    wake_diagnostics.configured = SWITCH_PICO_ENABLE_BLE;
     if (!SWITCH_PICO_ENABLE_BLE) switch2_connections_ready = true;
 }
 bool switch2_wake_ready_for_connections() {
@@ -705,10 +708,15 @@ bool switch2_wake_ready_for_connections() {
 
 bool switch2_wake_request() {
     ++switch2_wake_requests;
+    if (!wake_diagnostics.configured || wake_diagnostics.busy ||
+        !wake_dispatch_available) return false;
+    ++wake_diagnostics.accepted_requests;
+    wake_diagnostics.busy = true;
     return true;
 }
 
-void switch2_wake_diagnostics(Switch2WakeDiagnostics*) {
+void switch2_wake_diagnostics(Switch2WakeDiagnostics* output) {
+    *output = wake_diagnostics;
 }
 
 #include "core/controller_identity.cpp"
@@ -6226,11 +6234,175 @@ void test_transport_background_scan() {
             "last disconnect must restore foreground scan timing");
 }
 
+Bluepad32Switch2WakeStatus usb_wake_status() {
+    Bluepad32Switch2WakeStatus status{};
+    bluepad32_input_backend_switch2_wake_snapshot(&status);
+    return status;
+}
+
+void test_usb_switch2_wake() {
+    using State = Bluepad32Switch2WakeState;
+    require(usb_wake_status().state == State::kIdle &&
+                !bluepad32_input_backend_request_switch2_wake(0) &&
+                !bluepad32_input_backend_request_switch2_wake(0x80000000u),
+            "invalid IDs must not admit wake work");
+    require(bluepad32_input_backend_request_switch2_wake(17) &&
+                usb_wake_status().request_id == 17 &&
+                usb_wake_status().state == State::kQueued &&
+                !usb_wake_status().configured &&
+                switch2_wake_initializations == 0 && switch2_wake_requests == 0,
+            "USB must publish correlation before radio startup without running radio work");
+    require(bluepad32_input_backend_request_switch2_wake(17) &&
+                !bluepad32_input_backend_request_switch2_wake(18),
+            "queued work must be idempotent and cannot be superseded");
+    start_backend();
+    process_rumble_timer(&g_rumble_timer);
+    auto status = usb_wake_status();
+    if (!SWITCH_PICO_ENABLE_BLE) {
+        require(status.request_id == 17 && status.state == State::kUnconfigured &&
+                    !status.configured && switch2_wake_requests == 0,
+                "Classic-only firmware must report unavailable wake without a radio request");
+        return;
+    }
+    Bluepad32BackendDiagnostics backend{};
+    bluepad32_input_backend_diagnostics(&backend);
+    require(backend.active_slots == 0 && status.request_id == 17 &&
+                status.state == State::kBroadcasting && status.configured && status.busy &&
+                status.accepted_requests == 1 && switch2_wake_requests == 1,
+            "the owning timer must start exactly one real wake request without a controller");
+    require(bluepad32_input_backend_request_switch2_wake(17) &&
+                !bluepad32_input_backend_request_switch2_wake(18),
+            "broadcasting work must remain correlated and bounded");
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_wake_requests == 1 && usb_wake_status().state == State::kBroadcasting,
+            "polling cannot replay an active wake burst");
+    wake_diagnostics.busy = false;
+    ++wake_diagnostics.completed_bursts;
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().state == State::kComplete &&
+                usb_wake_status().completed_bursts == 1 &&
+                bluepad32_input_backend_request_switch2_wake(17),
+            "the originating request must retain its completion and be retry-safe");
+
+    // An unrelated chord after completion must not change the retained result.
+    require(switch2_wake_request(), "the chord fixture must start a separate burst");
+    wake_diagnostics.busy = false;
+    ++wake_diagnostics.completed_bursts;
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().request_id == 17 &&
+                usb_wake_status().state == State::kComplete &&
+                usb_wake_status().accepted_requests == 1 &&
+                usb_wake_status().completed_bursts == 1,
+            "terminal USB snapshots must not be rewritten by a later chord");
+
+    require(bluepad32_input_backend_request_switch2_wake(18),
+            "a new ID must replace a completed request");
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().state == State::kBroadcasting &&
+                usb_wake_status().completed_bursts == 2,
+            "prior chord completions must not complete a new USB request");
+    // Real wake cleanup may increment both counters between backend ticks.
+    ++wake_diagnostics.failures;
+    ++wake_diagnostics.completed_bursts;
+    wake_diagnostics.busy = false;
+    process_rumble_timer(&g_rumble_timer);
+    const int attempts_after_failure = switch2_wake_requests;
+    require(usb_wake_status().request_id == 18 &&
+                usb_wake_status().state == State::kFailed &&
+                bluepad32_input_backend_request_switch2_wake(18),
+            "failed HCI work must not become Complete when cleanup finishes");
+    process_rumble_timer(&g_rumble_timer);
+    require(switch2_wake_requests == attempts_after_failure &&
+                usb_wake_status().state == State::kFailed,
+            "failed requests must remain terminal without automatic retry");
+
+    require(switch2_wake_request(), "the chord fixture must own the radio");
+    const int attempts_with_chord = switch2_wake_requests;
+    require(bluepad32_input_backend_request_switch2_wake(19),
+            "USB must defer the chord-busy decision to the radio owner");
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().request_id == 19 &&
+                usb_wake_status().state == State::kBusy &&
+                switch2_wake_requests == attempts_with_chord,
+            "a chord-owned burst must reject USB without another broadcast");
+    wake_diagnostics.busy = false;
+    ++wake_diagnostics.completed_bursts;
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().state == State::kBusy,
+            "a chord completion must never complete a rejected USB request");
+
+    wake_diagnostics.configured = false;
+    require(bluepad32_input_backend_request_switch2_wake(20),
+            "availability is decided by the radio owner, not stale USB diagnostics");
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().state == State::kUnconfigured &&
+                switch2_wake_requests == attempts_with_chord,
+            "missing wake configuration must be explicit and never start a burst");
+    wake_diagnostics.configured = true;
+    wake_dispatch_available = false;
+    require(bluepad32_input_backend_request_switch2_wake(21),
+            "USB must admit a radio-owner dispatch decision");
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().state == State::kFailed,
+            "an idle but failed radio machine must report Failed, not completion");
+}
+
+void test_usb_wake_chord_correlation() {
+    using State = Bluepad32Switch2WakeState;
+    start_pairing_backend();
+    auto controller = device(0);
+    require(platform_on_device_ready(&controller) == UNI_ERROR_SUCCESS,
+            "chord correlation requires a live controller");
+    require(bluepad32_input_backend_request_switch2_wake(1),
+            "USB wake must queue before the chord");
+    process_rumble_timer(&g_rumble_timer);
+    wake_diagnostics.busy = false;
+    ++wake_diagnostics.completed_bursts;
+    uni_controller_t input{};
+    input.klass = UNI_CONTROLLER_CLASS_GAMEPAD;
+    input.gamepad.buttons = BUTTON_SHOULDER_L | BUTTON_SHOULDER_R;
+    input.gamepad.misc_buttons = MISC_BUTTON_SYSTEM;
+    platform_on_controller_data(&controller, &input);
+    // No backend timer ran between USB completion and the new chord.
+    ++wake_diagnostics.failures;
+    wake_diagnostics.busy = false;
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().request_id == 1 &&
+                usb_wake_status().state == State::kComplete &&
+                usb_wake_status().failures == 0 &&
+                wake_diagnostics.accepted_requests == 2,
+            "a subsequent chord failure must not be attributed to the completed USB burst");
+    input.gamepad.buttons = 0;
+    input.gamepad.misc_buttons = 0;
+    platform_on_controller_data(&controller, &input);
+    require(bluepad32_input_backend_request_switch2_wake(2),
+            "a second USB request must queue");
+    input.gamepad.buttons = BUTTON_SHOULDER_L | BUTTON_SHOULDER_R;
+    input.gamepad.misc_buttons = MISC_BUTTON_SYSTEM;
+    platform_on_controller_data(&controller, &input);
+    require(usb_wake_status().state == State::kQueued &&
+                wake_diagnostics.accepted_requests == 3,
+            "queued USB work must never preempt a rising chord");
+    process_rumble_timer(&g_rumble_timer);
+    require(usb_wake_status().request_id == 2 &&
+                usb_wake_status().state == State::kBusy &&
+                wake_diagnostics.accepted_requests == 3,
+            "the chord must retain its burst while the queued USB request becomes Busy");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     require(argc == 2, "scenario argument required");
     const std::string scenario = argv[1];
+    if (scenario == "usb-wake") {
+        test_usb_switch2_wake();
+        return 0;
+    }
+    if (scenario == "usb-wake-chord") {
+        test_usb_wake_chord_correlation();
+        return 0;
+    }
 #ifdef SWITCH2_BRIDGE_WII_INPUT
     if (scenario == "wii-bridge-sensors") {
         test_wii_bridge_sensors();

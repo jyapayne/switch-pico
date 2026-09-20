@@ -1641,6 +1641,7 @@ void hd_admission_cancel() {
 int main(int argc, char** argv) {
     require(argc == 2, "scenario required");
     const std::string scenario = argv[1];
+    if (scenario == "usb-wake") { test_usb_switch2_wake(); return 0; }
 #ifdef SWITCH_PICO_HAPTICS_EXPERIMENT
     if (scenario == "hd-second-pair-wii") { hd_second_pair(true); return 0; }
     if (scenario == "hd-second-pair-other") { hd_second_pair(false); return 0; }

@@ -40,6 +40,9 @@ bool bootsel_reboot_requested = false;
 bool refresh_requested = false;
 bool clear_requested = false;
 Bluepad32BackendDiagnostics current_diagnostics{};
+Bluepad32Switch2WakeStatus current_wake_status{};
+uint32_t wake_request_calls = 0;
+bool accept_wake_request = true;
 std::vector<uint8_t> control_payload;
 std::vector<uint8_t> next_out_payload;
 uint32_t begin_transaction_id = 0;
@@ -771,6 +774,99 @@ void test_profile_vendor_requests() {
             "short profile selection request was accepted");
 }
 
+std::vector<uint8_t> read_wake_status() {
+    using namespace UsbConfigurationManagement;
+    const auto setup = setup_request(Operation::kSwitch2Wake, TUSB_DIR_IN, 40);
+    require(usb_configuration_management_vendor_control(0, CONTROL_STAGE_SETUP, &setup) &&
+                usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup) &&
+                usb_configuration_management_vendor_control(0, CONTROL_STAGE_ACK, &setup),
+            "read-only wake status transfer was rejected");
+    require(control_payload.size() == 40 && control_payload[5] == 0x05 &&
+                control_payload[6] == 0 && control_payload[7] == 0 &&
+                read_u16(control_payload, 8) == 20 &&
+                read_u16(control_payload, 10) == 1 &&
+                read_u32(control_payload, 12) == read_u32(control_payload, 20) &&
+                control_payload[27] == 0 &&
+                read_u32(control_payload, 16) ==
+                    configuration_crc32(control_payload.data() + 20, 20),
+            "wake schema, request correlation, reserved byte or CRC is invalid");
+    return control_payload;
+}
+
+void test_switch2_wake_requests() {
+    using namespace UsbConfigurationManagement;
+    std::vector<uint8_t> payload(4);
+    write_u32(&payload, 0, 0x12345678);
+    const auto setup = setup_request(Operation::kSwitch2Wake, TUSB_DIR_OUT, 20);
+    for (uint16_t size : {16, 19, 21}) {
+        const auto malformed = setup_request(Operation::kSwitch2Wake, TUSB_DIR_OUT, size);
+        require(!usb_configuration_management_vendor_control(0, CONTROL_STAGE_SETUP, &malformed),
+                "wake OUT accepted a non-u32 payload size");
+    }
+    const auto begin = [&] {
+        next_out_payload = make_request(Operation::kSwitch2Wake, payload);
+        require(usb_configuration_management_vendor_control(0, CONTROL_STAGE_SETUP, &setup),
+                "wake OUT setup was rejected");
+    };
+    begin();
+    require(!usb_configuration_management_vendor_control(0, CONTROL_STAGE_ACK, &setup) &&
+                wake_request_calls == 0,
+            "wake work must be accepted during DATA, never after an unchecked status ACK");
+    for (uint32_t id : {0u, 0x80000000u}) {
+        write_u32(&payload, 0, id);
+        begin();
+        require(!usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup) &&
+                    !usb_configuration_management_vendor_control(0, CONTROL_STAGE_ACK, &setup) &&
+                    wake_request_calls == 0,
+                "invalid wake ID reached the backend or obtained a status ACK");
+    }
+    write_u32(&payload, 0, 0x12345678);
+    next_out_payload = make_request(Operation::kSwitch2Wake, payload);
+    next_out_payload[12] ^= 1;
+    require(usb_configuration_management_vendor_control(0, CONTROL_STAGE_SETUP, &setup) &&
+                !usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup) &&
+                wake_request_calls == 0,
+            "corrupt wake envelope dispatched radio work");
+    begin();
+    auto wrong_setup = setup;
+    --wrong_setup.wLength;
+    require(!usb_configuration_management_vendor_control(1, CONTROL_STAGE_DATA, &setup) &&
+                !usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &wrong_setup) &&
+                wake_request_calls == 0,
+            "another pipe or SETUP must not consume the staged wake request");
+    require(usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup) &&
+                wake_request_calls == 1,
+            "wake acceptance must occur before the status ACK");
+    require(!usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup) &&
+                usb_configuration_management_vendor_control(0, CONTROL_STAGE_ACK, &setup) &&
+                !usb_configuration_management_vendor_control(0, CONTROL_STAGE_ACK, &setup) &&
+                wake_request_calls == 1,
+            "duplicate USB stages must not enqueue another wake");
+    accept_wake_request = false;
+    begin();
+    require(!usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup),
+            "a busy mailbox must reject before status ACK");
+    accept_wake_request = true;
+    require(!usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup) &&
+                !usb_configuration_management_vendor_control(0, CONTROL_STAGE_ACK, &setup) &&
+                wake_request_calls == 2,
+            "a duplicate rejected DATA must not become accepted after the mailbox frees");
+    begin();
+    current_wake_status = {0x12345678, Bluepad32Switch2WakeState::kFailed,
+                           true, false, 7, 4, 2};
+    const auto status = read_wake_status();  // IN SETUP cancels the staged OUT.
+    require(read_u32(status, 20) == 0x12345678 && status[24] == 6 &&
+                status[25] == 1 && status[26] == 0 &&
+                read_u32(status, 28) == 7 && read_u32(status, 32) == 4 &&
+                read_u32(status, 36) == 2,
+            "a failed asynchronous burst must remain correlated in the wire status");
+    require(read_wake_status() == status &&
+                !usb_configuration_management_vendor_control(0, CONTROL_STAGE_DATA, &setup) &&
+                !usb_configuration_management_vendor_control(0, CONTROL_STAGE_ACK, &setup) &&
+                wake_request_calls == 2,
+            "status reads or stale OUT stages must never enqueue or consume wake work");
+}
+
 std::vector<uint8_t> read_haptics_payload() {
     using namespace UsbConfigurationManagement;
     tusb_control_request_t request = setup_request(
@@ -1252,6 +1348,15 @@ bool bluepad32_input_backend_capture_page(
     return true;
 }
 
+bool bluepad32_input_backend_request_switch2_wake(uint32_t) {
+    ++wake_request_calls;
+    return accept_wake_request;
+}
+
+void bluepad32_input_backend_switch2_wake_snapshot(Bluepad32Switch2WakeStatus* output) {
+    *output = current_wake_status;
+}
+
 void bluepad32_input_backend_request_pairing_snapshot() {
     refresh_requested = true;
 }
@@ -1346,6 +1451,7 @@ int main() {
     test_vendor_requests();
     test_mode_vendor_requests();
     test_profile_vendor_requests();
+    test_switch2_wake_requests();
     test_haptics_experiment_requests();
     test_haptics_transport_probe_requests();
     return 0;

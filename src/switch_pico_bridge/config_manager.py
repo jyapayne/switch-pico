@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import usb.core
+import usb.util
 
 USB_IDENTITIES = (
     (0x057E, 0x2009),
@@ -25,6 +26,13 @@ USB_IDENTITIES = (
     (0xCAFE, 0x4010),
     (0xCAFE, 0x4020),
     (0xCAFE, 0x4021),
+)
+NATIVE_HUB_IDENTITY = (0x057E, 0x2068)
+NATIVE_CHILD_IDENTITIES = ((0x057E, 0x2066), (0x057E, 0x2067))
+WINDOWS_WAKE_DRIVER_HINT = (
+    "For native firmware 0.110 or newer, manually bind WinUSB to Interface 1 "
+    "of one native child (057e:2066 or 057e:2067) only. "
+    "Never replace the hub, Interface 0 (HID), or composite parent driver."
 )
 REQUEST_VALUE = 0x5350
 REQUEST_INDEX = 0x0001
@@ -42,6 +50,22 @@ OP_INFO = 0x01
 OP_MODE_SET = 0x02
 OP_REBOOT = 0x03
 OP_BOOTSEL_REBOOT = 0x04
+OP_SWITCH2_WAKE = 0x05
+SWITCH2_WAKE_SCHEMA_VERSION = 1
+SWITCH2_WAKE_STATUS_SIZE = 20
+SWITCH2_WAKE_STATES = (
+    "idle",
+    "queued",
+    "broadcasting",
+    "complete",
+    "unconfigured",
+    "busy",
+    "failed",
+)
+SWITCH2_WAKE_EVIDENCE_NOTE = (
+    "Complete means the firmware finished its advertising burst; "
+    "it does not confirm physical RF delivery or the console's power state."
+)
 OP_CONFIGURATION_READ = 0x10
 OP_CONFIGURATION_BEGIN = 0x11
 OP_CONFIGURATION_CHUNK = 0x12
@@ -300,7 +324,10 @@ EXTRA_BUTTONS = ("c", "gl", "gr", "left_sl", "left_sr", "right_sl", "right_sr")
 LOGICAL_CONTROLS = STANDARD_CONTROLS + EXTRA_BUTTONS
 RAIL_OUTPUTS = ("left_sl", "left_sr", "right_sl", "right_sr")
 LEFT_STICK_DIRECTION_OUTPUTS = (
-    "left_stick_up", "left_stick_down", "left_stick_left", "left_stick_right"
+    "left_stick_up",
+    "left_stick_down",
+    "left_stick_left",
+    "left_stick_right",
 )
 OUTPUT_CONTROLS = STANDARD_CONTROLS + RAIL_OUTPUTS + LEFT_STICK_DIRECTION_OUTPUTS
 PROFILE_LOGICAL_CONTROL_MASK = (1 << len(LOGICAL_CONTROLS)) - 1
@@ -382,6 +409,31 @@ class DeviceInfo:
     def capability_summary(self) -> str:
         names = self.capability_names()
         return "input only" if names == ("input",) else ", ".join(names)
+
+
+@dataclass(frozen=True)
+class Switch2WakeStatus:
+    """Radio wake outcome, not confirmation that the console powered on."""
+
+    request_id: int
+    state: int
+    configured: bool
+    busy: bool
+    accepted_requests: int
+    completed_bursts: int
+    failures: int
+
+    @property
+    def state_name(self) -> str:
+        return SWITCH2_WAKE_STATES[self.state]
+
+    def to_json_object(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "state_name": self.state_name,
+            "console_power_confirmed": False,
+            "evidence_note": SWITCH2_WAKE_EVIDENCE_NOTE,
+        }
 
 
 @dataclass(frozen=True)
@@ -1759,15 +1811,19 @@ class ProfileShift:
             ),
             tuple(
                 _output_index(
-                    mappings[name], f"profile.shift.button_map.{name}",
-                    schema_version=schema_version, shift=True,
+                    mappings[name],
+                    f"profile.shift.button_map.{name}",
+                    schema_version=schema_version,
+                    shift=True,
                 )
                 for name in LOGICAL_BUTTONS
             ),
             tuple(
                 _output_index(
-                    extras[name], f"profile.shift.extra_button_map.{name}",
-                    schema_version=schema_version, shift=True,
+                    extras[name],
+                    f"profile.shift.extra_button_map.{name}",
+                    schema_version=schema_version,
+                    shift=True,
                 )
                 for name in EXTRA_BUTTONS
             ),
@@ -2677,7 +2733,9 @@ class ControllerProfile:
             fields.extend(("nunchuk_swing", "combined_swing", "combination_window_ms"))
         if schema_version >= PROFILE_NATIVE_LAYOUT_SCHEMA_VERSION:
             fields.extend(
-                name for name in ("native_joycon_layout", "swap_sticks") if name in value
+                name
+                for name in ("native_joycon_layout", "swap_sticks")
+                if name in value
             )
         obj = _require_object(value, fields, "profile")
         expected_size = (
@@ -2831,7 +2889,8 @@ class ControllerProfile:
         return cls(
             button_map=tuple(
                 _output_index(
-                    button_map[name], f"profile.button_map.{name}",
+                    button_map[name],
+                    f"profile.button_map.{name}",
                     schema_version=schema_version,
                 )
                 for name in LOGICAL_BUTTONS
@@ -2874,7 +2933,8 @@ class ControllerProfile:
             turbo_overrides=tuple(turbo_overrides),
             extra_button_map=tuple(
                 _output_index(
-                    extras[name], f"profile.extra_button_map.{name}",
+                    extras[name],
+                    f"profile.extra_button_map.{name}",
                     schema_version=schema_version,
                 )
                 for name in EXTRA_BUTTONS
@@ -2888,7 +2948,8 @@ class ControllerProfile:
             ),
             nunchuk_swing=(
                 ProfileSwing.from_json_object(
-                    obj["nunchuk_swing"], "profile.nunchuk_swing",
+                    obj["nunchuk_swing"],
+                    "profile.nunchuk_swing",
                     schema_version=schema_version,
                 )
                 if schema_version >= PROFILE_COMBINED_SWING_SCHEMA_VERSION
@@ -3007,27 +3068,52 @@ def _raise_status(envelope: Envelope, *, pending_ok: bool = False) -> None:
     )
 
 
-def _control_in(device: UsbDevice, operation: int) -> Envelope:
+def _usb_identity(device: UsbDevice) -> tuple[int | None, int | None]:
+    return getattr(device, "idVendor", None), getattr(device, "idProduct", None)
+
+
+def _is_native_child(device: UsbDevice) -> bool:
+    return (
+        _usb_identity(device) in NATIVE_CHILD_IDENTITIES
+        and getattr(device, "bDeviceClass", None) == 0xEF
+        and getattr(device, "bDeviceSubClass", None) == 2
+        and getattr(device, "bDeviceProtocol", None) == 1
+    )
+
+
+def _control_in(
+    device: UsbDevice, operation: int, *, timeout_ms: int = USB_TIMEOUT_MS
+) -> Envelope:
     payload = device.ctrl_transfer(
-        0xC0,
+        0xC1
+        if operation in (OP_INFO, OP_SWITCH2_WAKE) and _is_native_child(device)
+        else 0xC0,
         operation,
         REQUEST_VALUE,
         REQUEST_INDEX,
         MAXIMUM_RESPONSE_SIZE,
-        timeout=USB_TIMEOUT_MS,
+        timeout=timeout_ms,
     )
     return parse_response(bytes(payload), operation)
 
 
-def _control_out(device: UsbDevice, operation: int, payload: bytes = b"") -> None:
+def _control_out(
+    device: UsbDevice,
+    operation: int,
+    payload: bytes = b"",
+    *,
+    timeout_ms: int = USB_TIMEOUT_MS,
+) -> None:
     request = encode_request(operation, payload)
     device.ctrl_transfer(
-        0x40,
+        0x41
+        if operation in (OP_INFO, OP_SWITCH2_WAKE) and _is_native_child(device)
+        else 0x40,
         operation,
         REQUEST_VALUE,
         REQUEST_INDEX,
         request,
-        timeout=USB_TIMEOUT_MS,
+        timeout=timeout_ms,
     )
 
 
@@ -3057,6 +3143,110 @@ def read_info(device: UsbDevice) -> DeviceInfo:
         capabilities=capabilities,
         maximum_configuration_size=struct.unpack_from("<H", envelope.payload, 6)[0],
     )
+
+
+def parse_switch2_wake_status(envelope: Envelope) -> Switch2WakeStatus:
+    _raise_status(envelope)
+    if envelope.schema_version != SWITCH2_WAKE_SCHEMA_VERSION:
+        raise ConfigManagerError(
+            f"unsupported Switch 2 wake schema {envelope.schema_version}"
+        )
+    if len(envelope.payload) != SWITCH2_WAKE_STATUS_SIZE:
+        raise ConfigManagerError("invalid Switch 2 wake status payload size")
+    if envelope.flags != 0 or envelope.payload[7] != 0:
+        raise ConfigManagerError("invalid Switch 2 wake reserved fields")
+    request_id, state, configured, busy, accepted, completed, failures = struct.unpack(
+        "<IBBBxIII", envelope.payload
+    )
+    if request_id > HOST_TRANSACTION_ID_MASK or (request_id == 0 and state != 0):
+        raise ConfigManagerError("invalid Switch 2 wake request ID")
+    if envelope.generation != request_id:
+        raise ConfigManagerError("Switch 2 wake envelope request ID mismatch")
+    if state >= len(SWITCH2_WAKE_STATES):
+        raise ConfigManagerError(f"invalid Switch 2 wake state {state}")
+    if configured not in (0, 1) or busy not in (0, 1):
+        raise ConfigManagerError("invalid Switch 2 wake status boolean")
+    return Switch2WakeStatus(
+        request_id, state, bool(configured), bool(busy), accepted, completed, failures
+    )
+
+
+def _read_switch2_wake_status(device: UsbDevice, timeout_ms: int) -> Switch2WakeStatus:
+    try:
+        envelope = _control_in(device, OP_SWITCH2_WAKE, timeout_ms=timeout_ms)
+    except usb.core.USBError as exc:
+        if exc.errno == 32 or exc.backend_error_code == -9:
+            raise ConfigManagerError(
+                "firmware does not support USB Switch 2 wake operation 0x05; "
+                "update to firmware with USB wake support "
+                f"(native {'0.110' if _is_native_child(device) else '0.109'} or newer)"
+            ) from exc
+        raise
+    return parse_switch2_wake_status(envelope)
+
+
+def read_switch2_wake_status(device: UsbDevice) -> Switch2WakeStatus:
+    """Read the last USB wake status without requesting a broadcast."""
+    return _read_switch2_wake_status(device, USB_TIMEOUT_MS)
+
+
+def request_switch2_wake(
+    device: UsbDevice, timeout: float = DEFAULT_OPERATION_TIMEOUT_SECONDS
+) -> Switch2WakeStatus:
+    """Request one wake burst and wait for its outcome, not console power-on."""
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ConfigManagerError("Switch 2 wake timeout must be finite and positive")
+    deadline = time.monotonic() + timeout
+
+    def transfer_timeout_ms() -> int:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ConfigManagerError(
+                "Switch 2 wake timed out; no automatic retry was sent"
+            )
+        return max(1, math.ceil(min(USB_TIMEOUT_MS / 1000, remaining) * 1000))
+
+    # Validate firmware support and the entire status before any mutation.
+    initial = _read_switch2_wake_status(device, transfer_timeout_ms())
+    if initial.state_name in ("queued", "broadcasting"):
+        raise ConfigManagerError("Switch 2 wake is busy with another USB request")
+    request_id = _host_transaction_id()
+    if request_id == initial.request_id:
+        # The firmware makes the current ID idempotent, including terminal states.
+        request_id = request_id % HOST_TRANSACTION_ID_MASK + 1
+    _control_out(
+        device,
+        OP_SWITCH2_WAKE,
+        struct.pack("<I", request_id),
+        timeout_ms=transfer_timeout_ms(),
+    )
+    while True:
+        # Support was established by preflight. A later STALL is a transport
+        # failure, not evidence that the firmware lacks this operation.
+        status = parse_switch2_wake_status(
+            _control_in(device, OP_SWITCH2_WAKE, timeout_ms=transfer_timeout_ms())
+        )
+        if time.monotonic() >= deadline:
+            raise ConfigManagerError(
+                "Switch 2 wake timed out; no automatic retry was sent"
+            )
+        if status.request_id != request_id:
+            raise ConfigManagerError(
+                "Switch 2 wake request was superseded by a different request ID"
+            )
+        if status.state_name == "complete":
+            return status
+        if status.state_name == "unconfigured":
+            raise ConfigManagerError(
+                "Switch 2 wake is unconfigured or unsupported, or BLE is disabled"
+            )
+        if status.state_name == "busy":
+            raise ConfigManagerError(
+                "Switch 2 wake radio is busy; no burst was started"
+            )
+        if status.state_name == "failed":
+            raise ConfigManagerError("Switch 2 wake advertising burst failed")
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
 def read_macro_capture(
@@ -4490,11 +4680,34 @@ def clear_pairings(device: UsbDevice, timeout: float) -> PairingSnapshot:
     return snapshot
 
 
+def _windows_usb_backend() -> Any:
+    message = (
+        "The Windows libusb runtime is unavailable. Install this project's "
+        "Windows dependencies (libusb-package) and ensure its libusb DLL can load."
+    )
+    try:
+        package = importlib.import_module("libusb_package")
+        backend = package.get_libusb1_backend()
+    except usb.core.USBError:
+        raise
+    except (ImportError, OSError) as exc:
+        raise ConfigManagerError(message) from exc
+    if backend is None:
+        raise ConfigManagerError(message)
+    return backend
+
+
 def _candidate_devices() -> Iterable[UsbDevice]:
+    options = {"backend": _windows_usb_backend()} if sys.platform == "win32" else {}
     for vendor_id, product_id in USB_IDENTITIES:
+        # Windows libusb cannot control a hub root with its standard hub driver.
+        if sys.platform == "win32" and (vendor_id, product_id) == NATIVE_HUB_IDENTITY:
+            continue
         devices = cast(
             Iterable[UsbDevice] | None,
-            usb.core.find(find_all=True, idVendor=vendor_id, idProduct=product_id),
+            usb.core.find(
+                find_all=True, idVendor=vendor_id, idProduct=product_id, **options
+            ),
         )
         if devices is not None:
             yield from devices
@@ -4573,6 +4786,167 @@ def _enumeration_identity(
     if bus is None or address is None:
         return None
     return bus, address
+
+
+def _native_hub_parent(
+    device: usb.core.Device, roots: Sequence[usb.core.Device]
+) -> usb.core.Device | None:
+    # These are cached descriptors/topology, not string or control requests.
+    try:
+        parent = device.parent
+    except (AttributeError, NotImplementedError):
+        parent = None
+    if parent is None:
+        location = _physical_location(device)
+        if location is None:
+            return None
+        parent_location = (location[0], location[1][:-1])
+        parents = [
+            root for root in roots if _physical_location(root) == parent_location
+        ]
+        if len(parents) != 1:
+            return None
+        parent = parents[0]
+    if (
+        _usb_identity(parent) != NATIVE_HUB_IDENTITY
+        or parent.bDeviceClass != 9
+        or (
+            _physical_location(parent) is None and _enumeration_identity(parent) is None
+        )
+    ):
+        return None
+    return parent
+
+
+def find_wake_pico(
+    bus: int | None, address: int | None, timeout: float = 3.0
+) -> UsbDevice:
+    """Find a wake-capable management path without opening Windows hub roots."""
+    if sys.platform != "win32":
+        return find_pico(bus, address, timeout)
+
+    backend = _windows_usb_backend()
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    transport_error: usb.core.USBError | None = None
+    native_found = False
+
+    def selected(device: UsbDevice) -> bool:
+        return (bus is None or device.bus == bus) and (
+            address is None or device.address == address
+        )
+
+    while True:
+        candidates = list(
+            cast(
+                Iterable[usb.core.Device],
+                usb.core.find(find_all=True, backend=backend),
+            )
+        )
+        roots = [
+            device
+            for device in candidates
+            if _usb_identity(device) == NATIVE_HUB_IDENTITY and device.bDeviceClass == 9
+        ]
+        native_found |= any(selected(root) for root in roots)
+        matches: dict[object, usb.core.Device] = {}
+        result = None
+        try:
+            for device in candidates:
+                identity = _usb_identity(device)
+                if identity == NATIVE_HUB_IDENTITY:
+                    continue
+                native = identity in NATIVE_CHILD_IDENTITIES
+                if not native and identity not in USB_IDENTITIES:
+                    continue
+                try:
+                    if native:
+                        if not _is_native_child(device):
+                            continue
+                        parent = _native_hub_parent(device, roots)
+                        if parent is None:
+                            if selected(device):
+                                last_error = ConfigManagerError(
+                                    "native child parent hub cannot be identified safely"
+                                )
+                            continue
+                        if not (selected(device) or selected(parent)):
+                            continue
+                        native_found = True
+                        key = (
+                            "native",
+                            _physical_location(parent) or _enumeration_identity(parent),
+                        )
+                    else:
+                        if not selected(device):
+                            continue
+                        key = ("device", _enumeration_identity(device) or id(device))
+                    if key in matches:
+                        continue
+                    if native:
+                        # Read cached descriptors; never configure, reset or detach.
+                        try:
+                            interface = device[0][(1, 0)]
+                        except IndexError as exc:
+                            raise ConfigManagerError(
+                                "native child has no vendor Interface 1"
+                            ) from exc
+                        if (
+                            interface.bInterfaceNumber != 1
+                            or interface.bAlternateSetting != 0
+                            or interface.bInterfaceClass != 0xFF
+                            or interface.bInterfaceSubClass != 0
+                            or interface.bInterfaceProtocol != 0
+                        ):
+                            raise ConfigManagerError(
+                                "native child has no vendor Interface 1"
+                            )
+                        usb.util.claim_interface(device, 1)
+                    info = read_info(device)
+                    if native and info.active_mode != ACTIVE_MODE_NATIVE_HUB:
+                        raise ConfigManagerError(
+                            "native child did not identify native-hub project firmware"
+                        )
+                except (ConfigManagerError, usb.core.USBError) as exc:
+                    last_error = exc
+                    if isinstance(exc, usb.core.USBError) and not (
+                        native
+                        and (
+                            exc.backend_error_code in (-5, -12) or exc.errno in (2, 38)
+                        )
+                    ):
+                        transport_error = exc
+                    continue
+                matches[key] = device
+            if len(matches) == 1:
+                result = next(iter(matches.values()))
+                return result
+            if len(matches) > 1:
+                locations = ", ".join(
+                    f"{device.bus}:{device.address}" for device in matches.values()
+                )
+                raise ConfigManagerError(
+                    f"multiple switch-pico devices found ({locations}); "
+                    "select one with --bus and --address (parent hub or child)"
+                )
+        finally:
+            for device in candidates:
+                if device is not result:
+                    usb.util.dispose_resources(device)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if transport_error is not None:
+        raise transport_error
+    message = (
+        f"matching USB devices were found, but none accepted the management request; "
+        f"last error: {last_error}"
+        if last_error is not None
+        else "no USB-connected switch-pico firmware found"
+    )
+    if native_found:
+        message += ". " + WINDOWS_WAKE_DRIVER_HINT
+    raise ConfigManagerError(message) from last_error
 
 
 def _capture_reenumeration_snapshot(
@@ -4878,6 +5252,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="show firmware and configuration status")
+    wake = commands.add_parser(
+        "wake", help="request one Switch 2 wake advertising burst"
+    )
+    wake.add_argument(
+        "--json", action="store_true", help="print the wake outcome as JSON"
+    )
     commands.add_parser(
         "diagnostics", help="show live Bluetooth and rumble pipeline counters"
     )
@@ -5057,7 +5437,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.timeout <= 0:
         print("error: --timeout must be positive", file=sys.stderr)
         return 2
-    if args.command == "haptics-experiment" and not math.isfinite(args.timeout):
+    if args.command in ("haptics-experiment", "wake") and not math.isfinite(
+        args.timeout
+    ):
         print("error: --timeout must be finite", file=sys.stderr)
         return 2
     if args.command == "config" and args.config_command == "reset" and not args.yes:
@@ -5096,7 +5478,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "profiles" and args.profile_command == "import":
             imported_profile = _load_profile(args.path)
-        device = find_pico(args.bus, args.address, args.timeout)
+        if args.command == "wake":
+            device = find_wake_pico(args.bus, args.address, args.timeout)
+        else:
+            device = find_pico(args.bus, args.address, args.timeout)
         if args.command == "status":
             info = read_info(device)
             configuration = read_configuration(device)
@@ -5115,6 +5500,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"Joy-Con2 player mode: {JOYCON_MODE_NAMES[configuration.joycon_mode]}"
             )
+        elif args.command == "wake":
+            status = request_switch2_wake(device, args.timeout)
+            if args.json:
+                print(json.dumps(status.to_json_object(), indent=2))
+            else:
+                print(
+                    f"Switch 2 wake advertising burst completed "
+                    f"(request {status.request_id})."
+                )
+                print(SWITCH2_WAKE_EVIDENCE_NOTE)
         elif args.command == "diagnostics":
             diagnostics = read_runtime_diagnostics(device)
             print(f"Initialization stage: {diagnostics.initialization_stage}")

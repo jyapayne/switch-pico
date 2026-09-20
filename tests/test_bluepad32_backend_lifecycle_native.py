@@ -114,6 +114,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             ]
         )
         subprocess.run(command, check=True, cwd=root)
+        subprocess.run([str(executable), "usb-wake"], check=True, cwd=root)
         if wii_bridge:
             for scenario in (
                 "wii-bridge-sensors",
@@ -133,6 +134,7 @@ def test_bluepad32_backend_lifecycle_native(tmp_path: Path) -> None:
             continue
         subprocess.run([str(executable), "xbox-rumble"], check=True, cwd=root)
         for scenario in (
+            "usb-wake-chord",
             "wii-orientation",
             "wii-orientation-races",
             "wii-accelerometers",
