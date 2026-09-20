@@ -209,14 +209,29 @@ def build_cli(tmp_path, monkeypatch):
         "CONFIG_FILE",
         "BUILD_DIR",
         "AIO_BUILD_DIR",
+        "WAKE_CAPTURE_SOURCE_DIR",
+        "WAKE_CAPTURE_BUILD_DIR",
+        "WAKE_ONLY_SOURCE_DIR",
+        "WAKE_ONLY_BUILD_DIR",
         "FIRMWARE_DIR",
         "FIRMWARE_ELF_PATH",
         "FIRMWARE_UF2_PATH",
         "AIO_FIRMWARE_ELF_PATH",
         "AIO_FIRMWARE_UF2_PATH",
+        "WAKE_CAPTURE_FIRMWARE_ELF_PATH",
+        "WAKE_CAPTURE_FIRMWARE_UF2_PATH",
+        "WAKE_ONLY_FIRMWARE_ELF_PATH",
+        "WAKE_ONLY_FIRMWARE_UF2_PATH",
     ):
         original = getattr(build_script, name)
         monkeypatch.setattr(build_script, name, tmp_path / original.relative_to(ROOT))
+    monkeypatch.setattr(
+        build_script,
+        "CMAKE_CACHE_PATHS",
+        tuple(
+            tmp_path / path.relative_to(ROOT) for path in build_script.CMAKE_CACHE_PATHS
+        ),
+    )
     monkeypatch.setattr(
         build_script, "ELF_PATH", tmp_path / "build" / "switch-pico.elf"
     )
@@ -235,8 +250,12 @@ def build_cli(tmp_path, monkeypatch):
         if command[:2] == ["cmake", "--build"]:
             build_dir = Path(command[2])
             build_dir.mkdir(parents=True, exist_ok=True)
+            stem = {
+                "build-wake-capture": "switch2-wake-capture",
+                "build-wake-only": "switch2-wake-beacon",
+            }.get(build_dir.name, "switch-pico")
             for extension in ("elf", "uf2"):
-                (build_dir / f"switch-pico.{extension}").write_bytes(
+                (build_dir / f"{stem}.{extension}").write_bytes(
                     f"{build_dir.name}:{extension}".encode()
                 )
 
@@ -375,3 +394,143 @@ def test_ble_build_preserves_grip_color_options(
     assert (tmp_path / "firmware" / "switch-pico-aio-ble.uf2").read_bytes() == (
         b"build-aio-ble:uf2"
     )
+
+
+def test_wake_only_build_publishes_and_flashes_only_beacon_artifacts(
+    tmp_path, monkeypatch, build_cli
+):
+    firmware = tmp_path / "firmware"
+    firmware.mkdir()
+    unchanged = {}
+    for stem in ("switch-pico", "switch-pico-aio", "switch-pico-wake-capture"):
+        for extension in ("elf", "uf2"):
+            path = firmware / f"{stem}.{extension}"
+            path.write_bytes(f"existing {path.name}".encode())
+            unchanged[path] = path.read_bytes()
+    config = build_script.CONFIG_FILE
+    config.parent.mkdir(parents=True)
+    config.write_bytes(b"controller colors must remain untouched")
+    unchanged[config] = config.read_bytes()
+    override = tmp_path / "custom.elf"
+    override.write_bytes(b"not the wake beacon")
+    monkeypatch.setattr(build_script, "ELF_PATH", override)
+    monkeypatch.setattr(build_script, "UF2_PATH", tmp_path / "custom.uf2")
+    monkeypatch.setattr(build_script.sys, "argv", ["build.py", "--wake-only"])
+
+    build_script.main()
+
+    build_dir = tmp_path / "build-wake-only"
+    assert build_cli == [
+        [
+            "cmake",
+            "-S",
+            str(tmp_path / "tools" / "switch2_wake_beacon"),
+            "-B",
+            str(build_dir),
+            "-DPICO_BOARD=pico2_w",
+        ],
+        ["cmake", "--build", str(build_dir)],
+        ["picotool", "load", str(build_dir / "switch2-wake-beacon.elf"), "-fx"],
+    ]
+    for extension in ("elf", "uf2"):
+        assert (firmware / f"switch-pico-wake-only.{extension}").read_bytes() == (
+            f"build-wake-only:{extension}".encode()
+        )
+    for path, expected in unchanged.items():
+        assert path.read_bytes() == expected
+
+
+def test_wake_only_build_discovers_dependencies_from_its_cache(
+    tmp_path, monkeypatch, build_cli
+):
+    monkeypatch.delenv("PICO_SDK_PATH")
+    monkeypatch.delenv("PICO_TOOLCHAIN_PATH")
+    monkeypatch.setattr(build_script.shutil, "which", no_compiler)
+    monkeypatch.setattr(build_script, "_sdk_fallback_candidates", lambda: ())
+    monkeypatch.setattr(build_script, "_toolchain_fallback_candidates", lambda: ())
+    cache = tmp_path / "build-wake-only" / "CMakeCache.txt"
+    cache.parent.mkdir()
+    cache.write_text(
+        f"PICO_SDK_PATH:PATH={tmp_path / 'sdk'}\n"
+        f"PICO_TOOLCHAIN_PATH:PATH={tmp_path / 'toolchain'}\n",
+        encoding="utf-8",
+    )
+    commands = build_script.run_cmd
+
+    def run_with_dependencies(command):
+        assert build_script.os.environ["PICO_SDK_PATH"] == str(tmp_path / "sdk")
+        assert build_script.os.environ["PICO_TOOLCHAIN_PATH"] == str(
+            tmp_path / "toolchain"
+        )
+        commands(command)
+
+    monkeypatch.setattr(build_script, "run_cmd", run_with_dependencies)
+    monkeypatch.setattr(build_script.sys, "argv", ["build.py", "--wake-only"])
+
+    build_script.main()
+
+    assert (tmp_path / "firmware" / "switch-pico-wake-only.uf2").read_bytes() == (
+        b"build-wake-only:uf2"
+    )
+
+
+@pytest.mark.parametrize("missing_extension", ["elf", "uf2"])
+def test_wake_only_missing_artifact_does_not_publish_or_flash(
+    tmp_path, monkeypatch, build_cli, missing_extension
+):
+    build_dir = tmp_path / "build-wake-only"
+    build_dir.mkdir()
+    for extension in ("elf", "uf2"):
+        (build_dir / f"switch-pico.{extension}").write_bytes(b"wrong target")
+        if extension != missing_extension:
+            (build_dir / f"switch2-wake-beacon.{extension}").write_bytes(b"beacon")
+    firmware = tmp_path / "firmware"
+    firmware.mkdir()
+    for extension in ("elf", "uf2"):
+        (firmware / f"switch-pico-wake-only.{extension}").write_bytes(b"old beacon")
+    monkeypatch.setattr(build_script, "run_cmd", build_cli.append)
+    monkeypatch.setattr(build_script.sys, "argv", ["build.py", "--wake-only"])
+
+    with pytest.raises(SystemExit) as error:
+        build_script.main()
+
+    assert error.value.code == 1
+    assert [command[0] for command in build_cli] == ["cmake", "cmake"]
+    for extension in ("elf", "uf2"):
+        assert (firmware / f"switch-pico-wake-only.{extension}").read_bytes() == (
+            b"old beacon"
+        )
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        ["--aio"],
+        ["--wake-capture"],
+        ["--grip-color", "A1B2C3"],
+        ["--grip-color", ""],
+        ["--random-grip-color"],
+        ["--bluetooth-mode", "mixed"],
+        ["--bluetooth-mode", "ble"],
+        ["--bluetooth-mode", "classic"],
+        ["--input-backend", "BLUEPAD32"],
+        ["--hd-rumble"],
+        ["--native"],
+    ],
+)
+def test_wake_only_conflicts_fail_before_dependencies_or_mutations(
+    monkeypatch, conflict
+):
+    monkeypatch.setattr(
+        build_script.sys, "argv", ["build.py", "--wake-only", *conflict]
+    )
+    monkeypatch.setattr(
+        build_script,
+        "configure_pico_environment",
+        lambda: pytest.fail("invalid wake-only selection reached build setup"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        build_script.main()
+
+    assert error.value.code == 2

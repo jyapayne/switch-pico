@@ -17,6 +17,8 @@ BUILD_DIR = SCRIPT_DIR / "build"
 AIO_BUILD_DIR = SCRIPT_DIR / "build-aio"
 WAKE_CAPTURE_SOURCE_DIR = SCRIPT_DIR / "tools" / "switch2_wake_capture"
 WAKE_CAPTURE_BUILD_DIR = SCRIPT_DIR / "build-wake-capture"
+WAKE_ONLY_SOURCE_DIR = SCRIPT_DIR / "tools" / "switch2_wake_beacon"
+WAKE_ONLY_BUILD_DIR = SCRIPT_DIR / "build-wake-only"
 FIRMWARE_DIR = SCRIPT_DIR / "firmware"
 FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico.elf"
 FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico.uf2"
@@ -24,6 +26,8 @@ AIO_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-aio.elf"
 AIO_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-aio.uf2"
 WAKE_CAPTURE_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-wake-capture.elf"
 WAKE_CAPTURE_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-wake-capture.uf2"
+WAKE_ONLY_FIRMWARE_ELF_PATH = FIRMWARE_DIR / "switch-pico-wake-only.elf"
+WAKE_ONLY_FIRMWARE_UF2_PATH = FIRMWARE_DIR / "switch-pico-wake-only.uf2"
 
 ELF_PATH = Path(os.environ.get("ELF_PATH", BUILD_DIR / "switch-pico.elf")).expanduser()
 UF2_PATH = Path(os.environ.get("UF2_PATH", BUILD_DIR / "switch-pico.uf2")).expanduser()
@@ -40,6 +44,7 @@ CMAKE_CACHE_PATHS = tuple(
         BUILD_DIR,
         AIO_BUILD_DIR,
         WAKE_CAPTURE_BUILD_DIR,
+        WAKE_ONLY_BUILD_DIR,
         *(
             AIO_BUILD_DIR.with_name(f"{AIO_BUILD_DIR.name}-{mode}")
             for mode in ("ble", "classic")
@@ -282,10 +287,15 @@ def parse_args():
         action="store_true",
         help="Build and flash the automatic Switch 2 wake capture firmware.",
     )
+    mode_group.add_argument(
+        "--wake-only",
+        action="store_true",
+        help="Build and flash the standalone USB serial Switch 2 wake beacon.",
+    )
     parser.add_argument(
         "--bluetooth-mode",
         choices=("mixed", "ble", "classic"),
-        default="mixed",
+        default=None,
         help="Select active Bluetooth transports for --aio.",
     )
     group = parser.add_mutually_exclusive_group()
@@ -302,6 +312,13 @@ def parse_args():
     args = parser.parse_args()
     if args.wake_capture and (args.random_grip_color or args.grip_color):
         parser.error("wake capture firmware does not use grip-color options")
+    if args.wake_only:
+        if args.random_grip_color or args.grip_color is not None:
+            parser.error("wake-only firmware does not use grip-color options")
+        if args.bluetooth_mode is not None:
+            parser.error("wake-only firmware does not use --bluetooth-mode")
+    if args.bluetooth_mode is None:
+        args.bluetooth_mode = "mixed"
     if args.bluetooth_mode != "mixed" and not args.aio:
         parser.error("--bluetooth-mode requires --aio")
     return args
@@ -476,6 +493,35 @@ def build_wake_capture():
     return elf_path
 
 
+def build_wake_only():
+    elf_path = WAKE_ONLY_BUILD_DIR / "switch2-wake-beacon.elf"
+    uf2_path = WAKE_ONLY_BUILD_DIR / "switch2-wake-beacon.uf2"
+    run_cmd(
+        [
+            "cmake",
+            "-S",
+            str(WAKE_ONLY_SOURCE_DIR),
+            "-B",
+            str(WAKE_ONLY_BUILD_DIR),
+            "-DPICO_BOARD=pico2_w",
+        ]
+    )
+    run_cmd(["cmake", "--build", str(WAKE_ONLY_BUILD_DIR)])
+    missing_artifacts = [path for path in (elf_path, uf2_path) if not path.is_file()]
+    if missing_artifacts:
+        missing = ", ".join(str(path) for path in missing_artifacts)
+        sys.stderr.write(f"Error: Wake-only build did not produce: {missing}\n")
+        sys.exit(1)
+    FIRMWARE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(elf_path, WAKE_ONLY_FIRMWARE_ELF_PATH)
+    shutil.copy2(uf2_path, WAKE_ONLY_FIRMWARE_UF2_PATH)
+    print(f"Built wake-only ELF: {elf_path}")
+    print(f"Built wake-only UF2: {uf2_path}")
+    print(f"Copied ELF: {WAKE_ONLY_FIRMWARE_ELF_PATH}")
+    print(f"Copied UF2: {WAKE_ONLY_FIRMWARE_UF2_PATH}")
+    return elf_path
+
+
 def flash(elf_path, allow_elf_override):
     picotool = resolve_picotool()
     if not elf_path.exists():
@@ -499,6 +545,10 @@ def main():
     if args.wake_capture:
         wake_capture_elf = build_wake_capture()
         flash(wake_capture_elf, allow_elf_override=False)
+        return
+    if args.wake_only:
+        wake_only_elf = build_wake_only()
+        flash(wake_only_elf, allow_elf_override=False)
         return
 
     color = None

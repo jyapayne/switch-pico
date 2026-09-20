@@ -7,6 +7,7 @@ Raspberry Pi Pico firmware that emulates one or more Switch Pro controllers over
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL3 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Color configuration** (`src/firmware/platform/pico/controller_color_config.h`): compile-time RGB colors for emulated controller grips and supported Bluetooth controller LEDs.
 - **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts four concurrent Bluetooth controllers and sends their controls, calibrated motion, rumble, and slot identity through four separate Switch Pro USB interfaces without a computer.
+- **Wake-only beacon** (`tools/switch2_wake_beacon/`): a dedicated USB-serial Pico 2 W appliance that sends the configured Switch 2 BLE wake burst without hosting, discovering or pairing controllers.
 
 ## Source layout
 
@@ -204,7 +205,62 @@ before another attempt. Plain Home, PS, or Xbox is forwarded normally and does
 not disturb the radio. Because the wake identity is stable from startup,
 the wake code itself does not disconnect the input controller.
 
-**Wake from Python over USB:** firmware with the USB wake command (native
+**Dedicated wake-only Pico:** use this role for a second Pico that should stay
+on the PC without participating in the controller adapter's Bluetooth links.
+It reuses the same private wake capture/address, but has no Bluepad32,
+controller-host, Classic or LE-central stack, no connection pool, and no
+pairing/profile/TLV storage. Startup explicitly disables and reads back Classic
+inquiry/page scanning. The only advertising is the existing two-second
+non-connectable burst after an explicit valid request; boot, status queries,
+malformed input and USB reconnects do not trigger it. The original controller
+Pico and its firmware remain unchanged.
+
+The beacon enumerates as **USB CDC serial, `CAFE:4030`**, product
+`switch-pico wake beacon`, with the board's unique serial number. It has no HID
+controller interfaces. Windows uses its standard USB serial/COM driver—do not
+install a WinUSB/Zadig driver for this role. Linux needs normal permission to
+open its `/dev/ttyACM*` port. Physical Windows execution has not been tested on
+the Linux development machine; CDC descriptors and Windows-style serial
+framing are covered by the implementation and tests.
+
+```sh
+# Automatically find the single wake-only beacon and request one burst:
+uv run switch-pico-wake
+# Same script as a Python module:
+uv run python -m switch_pico_bridge.wake_beacon
+# Explicit Windows port, useful with multiple beacons:
+uv run switch-pico-wake --port COM5 --json
+# Read-only inspection; never broadcasts:
+uv run switch-pico-wake --status --json
+```
+
+Python code can use `wake_beacon.request_wake(port=None, timeout=15)` or
+`wake_beacon.read_status(...)` from `switch_pico_bridge`; both open and close
+the port. Each wake invocation sends one fresh request and polls its retained
+outcome without rebroadcasting after a timeout or disconnect. Completion
+confirms the firmware's advertising sequence, not the console's power state.
+This serial client is separate from `switch-pico-config wake`, which targets
+the full controller firmware below.
+
+Build separately, with the Pico SDK/toolchain available and the existing
+ignored `src/firmware/platform/pico/switch2_wake_config.h` present:
+
+```sh
+cmake -S tools/switch2_wake_beacon -B build-wake-only \
+  -DPICO_BOARD=pico2_w -DCMAKE_BUILD_TYPE=Release
+cmake --build build-wake-only --parallel 4
+```
+
+Before replacing controller firmware, record/export any settings/profiles you
+need and make a verified full-flash backup in BOOTSEL. Then load
+`build-wake-only/switch2-wake-beacon.uf2` with `picotool load -v -x`.
+Alternatively, `uv run python build.py --wake-only` explicitly builds, publishes
+`firmware/switch-pico-wake-only.{elf,uf2}`, and flashes. The beacon has no
+software/baud-rate BOOTSEL shortcut: hold BOOTSEL while reconnecting it for
+future firmware changes. It does not expose configuration/profile management
+or write their flash region.
+
+**Full controller firmware: wake from Python over USB:** firmware with the USB wake command (native
 0.109 and rebuilt AIO images) can send the same burst while the Pico stays
 plugged into the PC. The wake signal goes over BLE; the Pico does not need a
 USB connection to the Switch or a connected controller. The console-specific
