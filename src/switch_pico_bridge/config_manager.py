@@ -4907,7 +4907,9 @@ def find_wake_pico(
                         raise ConfigManagerError(
                             "native child did not identify native-hub project firmware"
                         )
-                except (ConfigManagerError, usb.core.USBError) as exc:
+                except (ConfigManagerError, usb.core.USBError, NotImplementedError) as exc:
+                    # PyUSB maps LIBUSB_ERROR_NOT_SUPPORTED to NotImplementedError,
+                    # not USBError. Try another child when its driver is unavailable.
                     last_error = exc
                     if isinstance(exc, usb.core.USBError) and not (
                         native

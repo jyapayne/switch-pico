@@ -930,6 +930,12 @@ def test_switch2_wake_cli_selects_device_and_reports_limited_evidence(
     capsys: pytest.CaptureFixture[str],
     wake_clock: list[float],
 ) -> None:
+    # This test mocks non-Windows discovery; do not enumerate real Windows USB.
+    monkeypatch.setattr(
+        config_manager,
+        "sys",
+        SimpleNamespace(platform="linux", stderr=config_manager.sys.stderr),
+    )
     device = WakeDevice([wake_response(), wake_response(3, 23)])
     other = WakeDevice([wake_response()])
     other.address = 8
@@ -4194,15 +4200,21 @@ def test_windows_wake_groups_siblings_without_opening_hub(
     assert windows_usb.closed == [right]
 
 
+@pytest.mark.parametrize(
+    "error",
+    (
+        config_manager.usb.core.USBError("no WinUSB interface", error_code=-12),
+        NotImplementedError("Operation not supported or unimplemented on this platform"),
+    ),
+)
 def test_windows_wake_uses_sibling_with_available_vendor_driver(
     windows_usb: WakeDiscoveryBackend,
+    error: Exception,
 ) -> None:
     hub = windows_usb.add((0x057E, 0x2068), 7)
     right = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
     left = windows_usb.add((0x057E, 0x2067), 9, ports=(1, 2), parent=hub)
-    windows_usb.nodes[right].claim_error = config_manager.usb.core.USBError(
-        "no WinUSB interface", error_code=-12
-    )
+    windows_usb.nodes[right].claim_error = error
     device = config_manager.find_wake_pico(None, None, timeout=0)
     assert device.address == 9
     assert windows_usb.opened == [right, left]
@@ -4387,12 +4399,19 @@ def test_windows_wake_hub_without_children_never_opens_root(
     assert windows_usb.controls == []
 
 
+@pytest.mark.parametrize(
+    "error",
+    (
+        config_manager.usb.core.USBError("no vendor driver", error_code=-12),
+        NotImplementedError("Operation not supported or unimplemented on this platform"),
+    ),
+)
 def test_windows_wake_missing_driver_reports_safe_binding_guidance(
     windows_usb: WakeDiscoveryBackend,
+    error: Exception,
 ) -> None:
     hub = windows_usb.add((0x057E, 0x2068), 7)
     child = windows_usb.add((0x057E, 0x2066), 8, ports=(1, 1), parent=hub)
-    error = config_manager.usb.core.USBError("no vendor driver", error_code=-12)
     windows_usb.nodes[child].claim_error = error
     with pytest.raises(config_manager.ConfigManagerError) as raised:
         config_manager.find_wake_pico(None, None, timeout=0)
