@@ -2496,6 +2496,12 @@ The checksum is the sum of the first four bytes modulo 256. Firmware and Python 
 ### Finding your USB↔UART adapter “description” (port filtering)
 If you have multiple serial/COM devices, you can filter which ports the bridge will consider using the port **description** (or vendor/product text) shown by the OS.
 
+Run `uv run controller-uart-bridge --list-ports` to print port names,
+descriptions, and manufacturers, then exit without opening any ports or starting
+controller discovery. This uses the same USB-only default and port filters as
+the bridge; add `--all-ports` to include non-USB serial devices, or
+`--include-port-desc CP210` to preview a description filter.
+
 - **macOS/Linux (terminal)**:
   - Quick list with descriptions: `python -m serial.tools.list_ports -v`
   - Then run the bridge with a filter, for example: `controller-uart-bridge --interactive --include-port-desc CP210`
@@ -2653,6 +2659,7 @@ Options:
 - `--map index:PORT` (repeatable) to pin controller index to serial (e.g., `--map 0:/dev/cu.usbserial-0001` or `--map 0:COM5`).
 - `--ports PORTS...` or `--interactive` for auto/interactive pairing.
 - `--all-ports` to include non-USB serial devices in discovery.
+- `--list-ports` to print serial port names, descriptions, and manufacturers, then exit (respects port filters and `--all-ports`).
 - `--ignore-port-desc SUBSTR` / `--include-port-desc SUBSTR` to filter serial ports by description (repeatable).
 - `--include-controller-name SUBSTR` to only open controllers whose name matches (repeatable).
 - `--list-controllers` to print detected controllers and their GUIDs, then exit (useful for GUID-based options).

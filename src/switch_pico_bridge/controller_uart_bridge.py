@@ -32,6 +32,7 @@ import sdl3
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
+from rich.text import Text
 
 from .switch_pico_uart import (
     UART_BAUD,
@@ -642,6 +643,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Include non-USB serial ports when listing devices.",
     )
     parser.add_argument(
+        "--list-ports",
+        action="store_true",
+        help="List serial ports, descriptions, and manufacturers, then exit. Uses port filters and --all-ports.",
+    )
+    parser.add_argument(
         "--frequency",
         type=float,
         default=500.0,
@@ -999,6 +1005,32 @@ def list_controllers_with_guids(
             str(instance_id), "GameController" if is_gc else "Joystick", name_str, guid_str
         )
     sdl3.SDL_free(joystick_ids)
+    console.print(table)
+
+
+def list_serial_ports(console: Console, args: argparse.Namespace) -> None:
+    """Show available UART ports without opening them or initializing SDL."""
+    ports = discover_serial_ports(
+        include_non_usb=args.all_ports,
+        ignore_descriptions=args.ignore_port_desc,
+        include_descriptions=args.include_port_desc,
+        include_manufacturers=args.include_port_manufacturer,
+    )
+    if not ports:
+        console.print("No matching serial ports found.")
+        if not args.all_ports:
+            console.print("Use --all-ports to include non-USB serial devices.")
+        return
+    table = Table(title="Serial Ports")
+    table.add_column("Port", no_wrap=True)
+    table.add_column("Description")
+    table.add_column("Manufacturer")
+    for port in sorted(ports, key=lambda info: info["device"]):
+        table.add_row(
+            Text(port["device"]),
+            Text(port["description"]),
+            Text(port["manufacturer"] or "Unknown"),
+        )
     console.print(table)
 
 
@@ -1665,6 +1697,9 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
     console = Console()
+    if args.list_ports:
+        list_serial_ports(console, args)
+        return
     config = build_bridge_config(console, args)
     initialize_sdl(parser)
     contexts: Dict[int, ControllerContext] = {}
