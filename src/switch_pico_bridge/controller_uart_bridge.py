@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import math
 import os
 import sys
 import time
@@ -303,6 +304,7 @@ class ControllerContext:
     gyro_bias_samples: int = 0
     gyro_bias_locked: bool = False
     last_debug_imu_print: float = 0.0
+    imu_debug_samples: int = 0
     last_debug_rumble: Optional[Tuple[float, float]] = None
     debug_rumble_frames: int = 0
 
@@ -376,6 +378,14 @@ def initialize_controller_sensors(ctx: ControllerContext, console: Console) -> N
     if not ctx.sensors_enabled:
         console.print(
             f"[yellow]Controller {ctx.controller_index} failed to enable sensors[/yellow]"
+        )
+        return
+    if hasattr(sdl3, "SDL_GetGamepadSensorDataRate"):
+        accel_rate = float(sdl3.SDL_GetGamepadSensorDataRate(ctx.controller, SENSOR_ACCEL))
+        gyro_rate = float(sdl3.SDL_GetGamepadSensorDataRate(ctx.controller, SENSOR_GYRO))
+        console.print(
+            f"[cyan]Controller {ctx.controller_index} sensors enabled "
+            f"(SDL reports accel {accel_rate:.0f} Hz, gyro {gyro_rate:.0f} Hz)[/cyan]"
         )
 
 
@@ -1598,15 +1608,21 @@ def handle_sensor_update(
     if len(ctx.imu_samples) > IMU_SAMPLES_PER_REPORT:
         del ctx.imu_samples[:-IMU_SAMPLES_PER_REPORT]
 
+    ctx.imu_debug_samples += 1
     if config.debug_imu:
         now = time.monotonic()
         if now - ctx.last_debug_imu_print > 0.2:
+            elapsed = now - ctx.last_debug_imu_print
+            rate = ctx.imu_debug_samples / elapsed if ctx.last_debug_imu_print else 0.0
+            ctx.imu_debug_samples = 0
             ctx.last_debug_imu_print = now
+            magnitude = math.sqrt(ax * ax + ay * ay + az * az) / MS2_PER_G
             print(
-                f"[IMU idx={ctx.controller_index}] "
-                f"accel_m_s2=({ax:.3f},{ay:.3f},{az:.3f}) "
+                f"[IMU idx={ctx.controller_index}] rate={rate:.0f}Hz "
+                f"accel_m_s2=({ax:.3f},{ay:.3f},{az:.3f}) |a|={magnitude:.2f}g "
                 f"gyro_rad_s=({gx:.3f},{gy:.3f},{gz:.3f}) "
                 f"bias_rad_s=({bx:.4f},{by:.4f},{bz:.4f}) "
+                f"bias_locked={ctx.gyro_bias_locked} "
                 f"raw=({sample.accel_x},{sample.accel_y},{sample.accel_z};"
                 f"{sample.gyro_x},{sample.gyro_y},{sample.gyro_z})"
             )
@@ -1724,9 +1740,11 @@ def service_link(
         for ctx in members:
             if now - ctx.last_send >= config.interval:
                 if ctx.sensors_enabled and not config.no_imu:
-                    # Keep publishing the latest complete sensor window. Draining
-                    # this at the faster UART rate leaves most USB reports empty.
+                    # Each sample goes over the wire once. The firmware pools
+                    # pending samples until its next USB report, so a stalled
+                    # sensor stream never gets re-integrated as motion.
                     ctx.report.imu_samples = ctx.imu_samples
+                    ctx.imu_samples = []
                 else:
                     ctx.report.imu_samples = []
                 uart.send_report(ctx.report, ctx.slot)

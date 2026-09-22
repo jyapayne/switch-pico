@@ -137,6 +137,38 @@ static void handle_uart_command(const uint8_t* frame, uint8_t length) {
     }
 }
 
+// Controls always reflect the newest UART packet. Motion samples accumulate
+// across packets (newest CONTROLLER_MOTION_SAMPLE_CAPACITY kept) until a USB
+// report consumes them, so the bridge can forward each sensor sample exactly
+// once and the console never integrates a stale window twice.
+static void merge_uart_state(ControllerState& slot_state,
+                             const ControllerState& parsed) {
+    ControllerMotionSample pending[CONTROLLER_MOTION_SAMPLE_CAPACITY];
+    const uint8_t pending_count = slot_state.motion_sample_count;
+    memcpy(pending, slot_state.motion_samples, sizeof(pending));
+
+    slot_state = parsed;
+    const uint8_t incoming = parsed.motion_sample_count;
+    const uint8_t total = static_cast<uint8_t>(pending_count + incoming);
+    const uint8_t kept = total > CONTROLLER_MOTION_SAMPLE_CAPACITY
+                             ? CONTROLLER_MOTION_SAMPLE_CAPACITY
+                             : total;
+    const uint8_t kept_pending =
+        kept > incoming ? static_cast<uint8_t>(kept - incoming) : 0;
+    const uint8_t kept_incoming = static_cast<uint8_t>(kept - kept_pending);
+
+    uint8_t out = 0;
+    for (uint8_t i = static_cast<uint8_t>(pending_count - kept_pending);
+         i < pending_count; ++i) {
+        slot_state.motion_samples[out++] = pending[i];
+    }
+    for (uint8_t i = static_cast<uint8_t>(incoming - kept_incoming);
+         i < incoming; ++i) {
+        slot_state.motion_samples[out++] = parsed.motion_samples[i];
+    }
+    slot_state.motion_sample_count = kept;
+}
+
 // Consume UART bytes and forward complete frames to the Switch Pro driver.
 static bool poll_uart_frames() {
     static uint8_t buffer[64];
@@ -190,7 +222,7 @@ static bool poll_uart_frames() {
             ControllerState parsed{};
             uint8_t slot = 0;
             if (switch_pro_apply_uart_packet(buffer, expected_len, parsed, slot)) {
-                g_user_states[slot] = parsed;
+                merge_uart_state(g_user_states[slot], parsed);
                 new_data = true;
                 LOG_PRINTF("[UART] slot=%u buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
                            slot,
@@ -383,7 +415,12 @@ int main() {
             usb_output_driver_set_input(instance, g_user_states[instance],
                                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD,
                                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
-            (void)usb_output_driver_task(instance);
+            if (usb_output_driver_task(instance)) {
+                // Mirror the AIO backend: motion samples are integrated by
+                // exactly one USB report, then retired. Buttons and sticks
+                // persist until the next UART packet.
+                g_user_states[instance].motion_sample_count = 0;
+            }
         }
 #ifdef SWITCH_PICO_UART_USB_MANAGEMENT
         uart_usb_management_task();

@@ -98,7 +98,10 @@ def test_sensor_buffer_retains_latest_three_samples() -> None:
     ]
 
 
-def test_service_republishes_latest_imu_window(monkeypatch: MonkeyPatch) -> None:
+def test_service_forwards_each_imu_window_once(monkeypatch: MonkeyPatch) -> None:
+    """A stalled sensor stream must not keep re-sending its last window: the
+    firmware pools samples per USB report, so a repeat would be integrated as
+    continuous rotation."""
     uart = RecordingUART()
     controller = cast(sdl3.SDL_Gamepad, object())
     ctx = bridge.ControllerContext(controller, 7, 0, "dualsense", "/dev/null")
@@ -124,6 +127,8 @@ def test_service_republishes_latest_imu_window(monkeypatch: MonkeyPatch) -> None
     console = Console(file=StringIO())
     bridge.service_contexts(1.0, args, config, contexts, links, console)
     bridge.service_contexts(2.0, args, config, contexts, links, console)
+    ctx.imu_samples.append(IMUSample(19, 20, 21, 22, 23, 24))
+    bridge.service_contexts(3.0, args, config, contexts, links, console)
 
-    assert uart.sent_imu == [tuple(samples), tuple(samples)]
-    assert ctx.imu_samples == samples
+    assert uart.sent_imu == [tuple(samples), (), (IMUSample(19, 20, 21, 22, 23, 24),)]
+    assert ctx.imu_samples == []
