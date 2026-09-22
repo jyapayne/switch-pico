@@ -53,9 +53,8 @@ def make_config() -> bridge.BridgeConfig:
 
 def test_sensor_buffer_retains_latest_three_samples() -> None:
     controller = cast(sdl3.SDL_Gamepad, object())
-    ctx = bridge.ControllerContext(controller, 7, 0, "dualsense", None, None)
+    ctx = bridge.ControllerContext(controller, 7, 0, "dualsense", None)
     ctx.sensors_enabled = True
-    ctx.gyro_bias_locked = True
     contexts = {ctx.instance_id: ctx}
     config = make_config()
 

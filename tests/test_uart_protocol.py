@@ -10,6 +10,7 @@ from switch_pico_bridge.switch_pico_uart import (
     UART_HEADER,
     UART_PROTOCOL_VERSION,
     UART_SLOT_COUNT,
+    UartLinkStats,
     RUMBLE_HEADER,
     RUMBLE_TYPE_DECODED,
     RUMBLE_TYPE_SLOT,
@@ -52,6 +53,7 @@ def make_uart(data: bytes = b"") -> tuple[PicoUART, BufferedSerial]:
     serial_port = BufferedSerial(data)
     uart.serial = serial_port
     uart._buffer = bytearray()
+    uart.last_stats = None
     return uart, serial_port
 
 
@@ -227,3 +229,25 @@ def test_reboot_bootsel_frame_matches_firmware_contract():
     assert frame[4:11] == b"BOOTSEL"
     assert len(frame) == 12
     assert frame[-1] == compute_checksum(frame[:-1])
+
+
+def test_stats_request_frame_matches_firmware_contract():
+    frame = PicoUART.stats_request_frame()
+    assert frame[:3] == bytes([UART_HEADER, 0xFE, 8])
+    assert frame[3] == 0x02
+    assert frame[4:11] == b"STATS\0\0"
+    assert frame[-1] == compute_checksum(frame[:-1])
+
+
+def test_stats_reply_is_captured_without_disturbing_rumble_parsing():
+    counters = (1000, 2, 30, 0, 300, 900)
+    stats = bytes([RUMBLE_HEADER, 0x05]) + struct.pack("<6I", *counters)
+    stats += bytes([compute_checksum(stats)])
+    uart, _ = make_uart(make_rumble_frame(5, 6, slot=1) + stats + make_rumble_frame(7, 8))
+
+    assert uart.read_rumble() == pytest.approx((1, 5 / 255.0, 6 / 255.0))
+    assert uart.last_stats is None
+    assert uart.read_rumble() == pytest.approx((0, 7 / 255.0, 8 / 255.0))
+    assert uart.last_stats == UartLinkStats(*counters)
+    later = UartLinkStats(1010, 2, 30, 1, 303, 909)
+    assert later.delta(uart.last_stats) == UartLinkStats(10, 0, 0, 1, 3, 9)

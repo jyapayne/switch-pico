@@ -2478,6 +2478,22 @@ the older 5-byte `0xBB, 0x02` frame (as slot 0). Firmware and bridge from before
 this change are not compatible with each other beyond that: an old bridge sees
 no rumble from new firmware, and an old firmware ignores v3 input.
 
+Motion samples follow the AIO model: the bridge forwards each SDL sensor sample
+once, the firmware pools the newest three per slot, and the next 15 ms USB
+report consumes them (raw frames or quaternion integration), so a stalled or
+bursty controller stream is never re-integrated as motion. Gyro values are
+forwarded as the controller reports them, without host-side zeroing, like the
+AIO's Bluepad32 path.
+
+Link health is queryable: the command `0xAA 0xFE 0x08 0x02 "STATS" 0 0 ck` is
+answered with `0xBB 0x05` followed by six little-endian `u32` counters (frames
+accepted, frames rejected, bytes discarded while resynchronising, RX FIFO
+overruns, motion-carrying frames, motion samples) and a checksum.
+`controller-uart-bridge --debug-uart` polls it once a second and prints the
+firmware counters beside the bridge's own send counts; matching numbers with
+zero rejects/overruns mean the serial link is clean and any motion problem is
+upstream in SDL or the controller.
+
 Bridge usage with several controllers on one Pico:
 
 ```sh

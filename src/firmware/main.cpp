@@ -39,9 +39,11 @@
 #define UART_RX_PIN 5
 #define UART_RUMBLE_HEADER 0xBB
 #define UART_RUMBLE_TYPE_SLOT 0x03
+#define UART_STATS_TYPE 0x05
 // Host -> Pico command frame: 0xAA 0xFE payload_len payload... checksum.
 #define UART_COMMAND_VERSION 0xFE
 #define UART_COMMAND_REBOOT_BOOTSEL 0x01
+#define UART_COMMAND_STATS 0x02
 #endif
 
 #ifdef SWITCH_PICO_BLUEPAD32
@@ -114,26 +116,75 @@ static void on_rumble_from_usb(uint8_t instance,
 }
 
 #ifndef SWITCH_PICO_BLUEPAD32
-// Command frames share the report framing. The only command reboots into the
-// ROM BOOTSEL loader; it must carry the "BOOTSEL" magic so line noise or a
-// mis-framed report can never trigger it.
+// Link health counters, reported on request so the host can tell frame loss
+// from a quiet controller. Overruns count RX FIFO overflows flagged by the UART.
+struct UartLinkStats {
+    uint32_t frames_ok;
+    uint32_t frames_rejected;
+    uint32_t bytes_discarded;
+    uint32_t overruns;
+    uint32_t motion_frames;
+    uint32_t motion_samples;
+};
+static UartLinkStats g_uart_stats{};
+
+static void write_u32_le(uint8_t* dst, uint32_t value) {
+    dst[0] = static_cast<uint8_t>(value);
+    dst[1] = static_cast<uint8_t>(value >> 8);
+    dst[2] = static_cast<uint8_t>(value >> 16);
+    dst[3] = static_cast<uint8_t>(value >> 24);
+}
+
+// Pico -> host: 0xBB 0x05 then six little-endian u32 counters and checksum.
+static void send_stats_uart_frame() {
+    uint8_t frame[2 + 6 * 4 + 1] = {UART_RUMBLE_HEADER, UART_STATS_TYPE};
+    const uint32_t values[6] = {
+        g_uart_stats.frames_ok, g_uart_stats.frames_rejected,
+        g_uart_stats.bytes_discarded, g_uart_stats.overruns,
+        g_uart_stats.motion_frames, g_uart_stats.motion_samples,
+    };
+    for (uint8_t i = 0; i < 6; ++i) {
+        write_u32_le(&frame[2 + i * 4], values[i]);
+    }
+    uint8_t sum = 0;
+    for (uint8_t i = 0; i + 1 < sizeof(frame); ++i) {
+        sum = static_cast<uint8_t>(sum + frame[i]);
+    }
+    frame[sizeof(frame) - 1] = sum;
+    uart_write_blocking(UART_ID, frame, sizeof(frame));
+}
+
+// Command frames share the report framing. BOOTSEL must carry the "BOOTSEL"
+// magic so line noise or a mis-framed report can never trigger it; STATS
+// carries "STATS" for the same reason.
 static void handle_uart_command(const uint8_t* frame, uint8_t length) {
     static const uint8_t kBootselMagic[7] = {'B', 'O', 'O', 'T', 'S', 'E', 'L'};
+    static const uint8_t kStatsMagic[7] = {'S', 'T', 'A', 'T', 'S', 0, 0};
     uint8_t sum = 0;
     for (uint8_t i = 0; i + 1 < length; ++i) {
         sum = static_cast<uint8_t>(sum + frame[i]);
     }
     if (sum != frame[length - 1]) {
+        ++g_uart_stats.frames_rejected;
         return;
     }
     const uint8_t payload_len = frame[2];
     const uint8_t* payload = frame + 3;
-    if (payload_len == 1 + sizeof(kBootselMagic) &&
-        payload[0] == UART_COMMAND_REBOOT_BOOTSEL &&
+    if (payload_len != 8) {
+        ++g_uart_stats.frames_rejected;
+        return;
+    }
+    if (payload[0] == UART_COMMAND_REBOOT_BOOTSEL &&
         memcmp(payload + 1, kBootselMagic, sizeof(kBootselMagic)) == 0) {
         LOG_PRINTF("[UART] reboot to BOOTSEL requested\n");
         uart_tx_wait_blocking(UART_ID);
         reset_usb_boot(0, 0);
+    } else if (payload[0] == UART_COMMAND_STATS &&
+               memcmp(payload + 1, kStatsMagic, sizeof(kStatsMagic)) == 0) {
+        ++g_uart_stats.frames_ok;
+        send_stats_uart_frame();
+    } else {
+        ++g_uart_stats.frames_rejected;
     }
 }
 
@@ -178,11 +229,20 @@ static bool poll_uart_frames() {
     static bool has_last_byte = false;
     bool new_data = false;
 
+    // The UART flags RX FIFO overflow in RSR; clear it once counted.
+    if (uart_get_hw(UART_ID)->rsr & UART_UARTRSR_OE_BITS) {
+        uart_get_hw(UART_ID)->rsr = UART_UARTRSR_BITS;
+        ++g_uart_stats.overruns;
+    }
+
     while (uart_is_readable(UART_ID)) {
         uint8_t byte = uart_getc(UART_ID);
 
         uint64_t now = to_ms_since_boot(get_absolute_time());
         if (has_last_byte && (now - to_ms_since_boot(last_byte_time)) > 20) {
+            if (index != 0) {
+                g_uart_stats.bytes_discarded += index;
+            }
             index = 0; // stale data, restart frame
             expected_len = 0;
         }
@@ -191,11 +251,13 @@ static bool poll_uart_frames() {
 
         if (index == 0) {
             if (byte != 0xAA) {
+                ++g_uart_stats.bytes_discarded;
                 continue; // wait for start-of-frame marker
             }
         }
 
         if (index >= sizeof(buffer)) {
+            g_uart_stats.bytes_discarded += index;
             index = 0;
             expected_len = 0;
         }
@@ -206,6 +268,8 @@ static bool poll_uart_frames() {
             const uint8_t overhead = buffer[1] == 0x03 ? 5u : 4u;
             expected_len = static_cast<uint8_t>(buffer[2] + overhead);
             if (expected_len < 12 || expected_len > sizeof(buffer)) {
+                g_uart_stats.bytes_discarded += index;
+                ++g_uart_stats.frames_rejected;
                 index = 0;
                 expected_len = 0;
                 continue;
@@ -224,6 +288,11 @@ static bool poll_uart_frames() {
             if (switch_pro_apply_uart_packet(buffer, expected_len, parsed, slot)) {
                 merge_uart_state(g_user_states[slot], parsed);
                 new_data = true;
+                ++g_uart_stats.frames_ok;
+                if (parsed.motion_sample_count != 0) {
+                    ++g_uart_stats.motion_frames;
+                    g_uart_stats.motion_samples += parsed.motion_sample_count;
+                }
                 LOG_PRINTF("[UART] slot=%u buttons=0x%04x hat=%u lx=%u ly=%u rx=%u ry=%u\n",
                            slot,
                            (parsed.button_east   ? SWITCH_PRO_MASK_A   : 0) |
@@ -248,6 +317,8 @@ static bool poll_uart_frames() {
                             controller_axis_to_unsigned(parsed.left_stick_y) >> 8,
                             controller_axis_to_unsigned(parsed.right_stick_x) >> 8,
                             controller_axis_to_unsigned(parsed.right_stick_y) >> 8);
+            } else {
+                ++g_uart_stats.frames_rejected;
             }
             index = 0;
             expected_len = 0;

@@ -39,6 +39,7 @@ from rich.text import Text
 from .switch_pico_uart import (
     UART_BAUD,
     UART_SLOT_COUNT,
+    UartLinkStats,
     MS2_PER_G,
     RAD_TO_DEG,
     ACCEL_LSB_PER_G,
@@ -62,7 +63,6 @@ RUMBLE_DURATION_MS = 50
 CONTROLLER_DB_URL_DEFAULT = "https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/refs/heads/master/gamecontrollerdb.txt"
 SDL_TRUE = True
 SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE", 0x658)
-GYRO_BIAS_SAMPLES = 200
 
 
 def parse_mapping(value: str) -> Tuple[int, str, Optional[int]]:
@@ -266,6 +266,15 @@ class UartLink:
     port: str
     uart: Optional[PicoUART] = None
     last_reopen_attempt: float = 0.0
+    # Host-side send counters and the last firmware stats reply for --debug-uart.
+    frames_sent: int = 0
+    motion_frames_sent: int = 0
+    motion_samples_sent: int = 0
+    last_stats_request: float = 0.0
+    last_stats: Optional[UartLinkStats] = None
+    last_stats_frames_sent: int = 0
+    last_stats_motion_frames_sent: int = 0
+    last_stats_motion_samples_sent: int = 0
 
 
 @dataclass
@@ -298,11 +307,6 @@ class ControllerContext:
     sensors_enabled: bool = False
     imu_samples: List[IMUSample] = field(default_factory=list)
     last_accel: Tuple[float, float, float] = (0.0, 0.0, 0.0)
-    gyro_bias_x: float = 0.0
-    gyro_bias_y: float = 0.0
-    gyro_bias_z: float = 0.0
-    gyro_bias_samples: int = 0
-    gyro_bias_locked: bool = False
     last_debug_imu_print: float = 0.0
     imu_debug_samples: int = 0
     last_debug_rumble: Optional[Tuple[float, float]] = None
@@ -857,6 +861,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Print every decoded rumble frame received from the Pico and whether SDL accepted it.",
     )
     parser.add_argument(
+        "--debug-uart",
+        action="store_true",
+        help=(
+            "Once a second, ask the Pico for its UART link counters and print them next "
+            "to what the bridge sent, to spot frame loss, checksum failures or FIFO overruns."
+        ),
+    )
+    parser.add_argument(
         "--rumble-gain",
         type=float,
         default=1.0,
@@ -928,6 +940,7 @@ class BridgeConfig:
     swap_abxy_global: bool
     debug_imu: bool = False
     debug_rumble: bool = False
+    debug_uart: bool = False
     no_imu: bool = False
     gyro_scale: float = 1.0
     rumble_gain: float = 1.0
@@ -1037,6 +1050,7 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         swap_abxy_global=bool(args.swap_abxy),
         debug_imu=bool(args.debug_imu),
         debug_rumble=bool(args.debug_rumble),
+        debug_uart=bool(args.debug_uart),
         no_imu=bool(args.no_imu),
         gyro_scale=float(args.gyro_scale),
         rumble_gain=float(args.rumble_gain),
@@ -1561,31 +1575,9 @@ def handle_sensor_update(
         return
 
     gx, gy, gz = float(data[0]), float(data[1]), float(data[2])
-
-    if not ctx.gyro_bias_locked:
-        if ctx.gyro_bias_samples < GYRO_BIAS_SAMPLES:
-            ctx.gyro_bias_x += gx
-            ctx.gyro_bias_y += gy
-            ctx.gyro_bias_z += gz
-            ctx.gyro_bias_samples += 1
-        if ctx.gyro_bias_samples >= GYRO_BIAS_SAMPLES:
-            n = ctx.gyro_bias_samples
-            ctx.gyro_bias_x /= n
-            ctx.gyro_bias_y /= n
-            ctx.gyro_bias_z /= n
-            ctx.gyro_bias_locked = True
-
-    if not ctx.gyro_bias_locked:
-        bx, by, bz = 0.0, 0.0, 0.0
-    else:
-        bx, by, bz = ctx.gyro_bias_x, ctx.gyro_bias_y, ctx.gyro_bias_z
-
-    ux, uy, uz = gx, gy, gz
-    ux -= bx
-    uy -= by
-    uz -= bz
-
     ax, ay, az = ctx.last_accel
+    # No host-side gyro zeroing: like the AIO backend, forward the controller's
+    # own calibrated values and leave bias handling to the console.
     # SDL (hidapi_switch.c SendSensorUpdate) remaps Nintendo's native axes to match
     # PlayStation convention before emitting sensor events:
     #   SDL_out[0] (X) = -(Nintendo_Y * scale)
@@ -1599,9 +1591,9 @@ def handle_sensor_update(
         accel_x=convert_accel_to_raw(-az),
         accel_y=convert_accel_to_raw(-ax),
         accel_z=convert_accel_to_raw(ay),
-        gyro_x=convert_gyro_to_raw(-uz, config.gyro_scale),
-        gyro_y=convert_gyro_to_raw(-ux, config.gyro_scale),
-        gyro_z=convert_gyro_to_raw(uy, config.gyro_scale),
+        gyro_x=convert_gyro_to_raw(-gz, config.gyro_scale),
+        gyro_y=convert_gyro_to_raw(-gx, config.gyro_scale),
+        gyro_z=convert_gyro_to_raw(gy, config.gyro_scale),
     )
 
     ctx.imu_samples.append(sample)
@@ -1621,8 +1613,6 @@ def handle_sensor_update(
                 f"[IMU idx={ctx.controller_index}] rate={rate:.0f}Hz "
                 f"accel_m_s2=({ax:.3f},{ay:.3f},{az:.3f}) |a|={magnitude:.2f}g "
                 f"gyro_rad_s=({gx:.3f},{gy:.3f},{gz:.3f}) "
-                f"bias_rad_s=({bx:.4f},{by:.4f},{bz:.4f}) "
-                f"bias_locked={ctx.gyro_bias_locked} "
                 f"raw=({sample.accel_x},{sample.accel_y},{sample.accel_z};"
                 f"{sample.gyro_x},{sample.gyro_y},{sample.gyro_z})"
             )
@@ -1725,6 +1715,27 @@ def handle_device_removed(
     sdl3.SDL_CloseGamepad(ctx.controller)
 
 
+def report_link_stats(link: UartLink, stats: UartLinkStats) -> None:
+    """Print firmware-side counters since the previous reply next to host sends."""
+    if link.last_stats is not None:
+        delta = stats.delta(link.last_stats)
+        sent = link.frames_sent - link.last_stats_frames_sent
+        motion_sent = link.motion_frames_sent - link.last_stats_motion_frames_sent
+        samples_sent = link.motion_samples_sent - link.last_stats_motion_samples_sent
+        # The stats request itself is one accepted frame on the firmware side.
+        print(
+            f"[UART {link.port}] host sent frames={sent} motion_frames={motion_sent} "
+            f"samples={samples_sent} | pico ok={delta.frames_ok - 1} "
+            f"motion_frames={delta.motion_frames} samples={delta.motion_samples} "
+            f"rejected={delta.frames_rejected} discarded_bytes={delta.bytes_discarded} "
+            f"fifo_overruns={delta.overruns}"
+        )
+    link.last_stats = stats
+    link.last_stats_frames_sent = link.frames_sent
+    link.last_stats_motion_frames_sent = link.motion_frames_sent
+    link.last_stats_motion_samples_sent = link.motion_samples_sent
+
+
 def service_link(
     now: float,
     config: BridgeConfig,
@@ -1749,6 +1760,14 @@ def service_link(
                     ctx.report.imu_samples = []
                 uart.send_report(ctx.report, ctx.slot)
                 ctx.last_send = now
+                link.frames_sent += 1
+                if ctx.report.imu_samples:
+                    link.motion_frames_sent += 1
+                    link.motion_samples_sent += len(ctx.report.imu_samples)
+
+        if config.debug_uart and now - link.last_stats_request >= 1.0:
+            link.last_stats_request = now
+            uart.request_stats()
 
         # Keep only the freshest rumble command per slot seen during this tick.
         latest_by_slot: Dict[int, Tuple[float, float]] = {}
@@ -1760,6 +1779,10 @@ def service_link(
             slot, low, high = frame
             latest_by_slot[slot] = (low, high)
             frames_by_slot[slot] = frames_by_slot.get(slot, 0) + 1
+
+        if config.debug_uart and uart.last_stats is not None:
+            report_link_stats(link, uart.last_stats)
+            uart.last_stats = None
 
         for ctx in members:
             ctx.debug_rumble_frames += frames_by_slot.get(ctx.slot, 0)

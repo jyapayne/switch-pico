@@ -19,7 +19,7 @@ import math
 import struct
 import time
 import threading
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field
 from enum import IntEnum, IntFlag
 from typing import Iterable, Mapping, Optional, Tuple, Union, List, Dict
 
@@ -28,14 +28,21 @@ from serial.tools import list_ports, list_ports_common
 
 UART_HEADER = 0xAA
 UART_PROTOCOL_VERSION = 0x03
-# Command frames reuse the report framing with this version byte.
+# Command frames reuse the report framing with this version byte and an
+# 8-byte payload: command id, then a magic tag guarding against line noise.
 UART_COMMAND_VERSION = 0xFE
+UART_COMMAND_PAYLOAD_SIZE = 8
 UART_COMMAND_REBOOT_BOOTSEL = 0x01
 UART_BOOTSEL_MAGIC = b"BOOTSEL"
+UART_COMMAND_STATS = 0x02
+UART_STATS_MAGIC = b"STATS"
 RUMBLE_HEADER = 0xBB
 # Legacy 5-byte frame (no slot) from firmware before multi-controller support.
 RUMBLE_TYPE_DECODED = 0x02
 RUMBLE_TYPE_SLOT = 0x03
+# Reply to the stats command: 0xBB 0x05 then six little-endian u32 counters.
+STATS_TYPE = 0x05
+STATS_FRAME_SIZE = 2 + 6 * 4 + 1
 UART_BAUD = 921600
 UART_SLOT_COUNT = 4
 IMU_SAMPLES_PER_REPORT = 3
@@ -284,6 +291,24 @@ class SwitchReport:
         return frame + bytes([compute_checksum(frame)])
 
 
+@dataclass(frozen=True)
+class UartLinkStats:
+    """Firmware-side UART link counters since boot (STATS command reply)."""
+
+    frames_ok: int
+    frames_rejected: int
+    bytes_discarded: int
+    overruns: int
+    motion_frames: int
+    motion_samples: int
+
+    def delta(self, previous: "UartLinkStats") -> "UartLinkStats":
+        """Counter change since ``previous``, tolerant of u32 wrap."""
+        return UartLinkStats(
+            *((a - b) & 0xFFFFFFFF for a, b in zip(astuple(self), astuple(previous)))
+        )
+
+
 class PicoUART:
     def __init__(self, port: str, baudrate: int = UART_BAUD) -> None:
         """Open a UART connection to the Pico with non-blocking IO."""
@@ -300,17 +325,27 @@ class PicoUART:
             dsrdtr=False,
         )
         self._buffer = bytearray()
+        self.last_stats: Optional[UartLinkStats] = None
 
     def send_report(self, report: SwitchReport, slot: int = 0) -> None:
         """Send a controller report to one of the Pico's controller slots."""
         self.serial.write(report.to_bytes(slot))
 
     @staticmethod
-    def reboot_bootsel_frame() -> bytes:
-        """Command frame that makes the UART firmware reboot into ROM BOOTSEL."""
-        payload = bytes([UART_COMMAND_REBOOT_BOOTSEL]) + UART_BOOTSEL_MAGIC
+    def _command_frame(command: int, magic: bytes) -> bytes:
+        payload = (bytes([command]) + magic).ljust(UART_COMMAND_PAYLOAD_SIZE, b"\0")
         frame = bytes([UART_HEADER, UART_COMMAND_VERSION, len(payload)]) + payload
         return frame + bytes([compute_checksum(frame)])
+
+    @classmethod
+    def reboot_bootsel_frame(cls) -> bytes:
+        """Command frame that makes the UART firmware reboot into ROM BOOTSEL."""
+        return cls._command_frame(UART_COMMAND_REBOOT_BOOTSEL, UART_BOOTSEL_MAGIC)
+
+    @classmethod
+    def stats_request_frame(cls) -> bytes:
+        """Command frame asking the firmware for its link counters."""
+        return cls._command_frame(UART_COMMAND_STATS, UART_STATS_MAGIC)
 
     def reboot_bootsel(self) -> None:
         """Ask the Pico to reboot into BOOTSEL so picotool can flash it.
@@ -320,6 +355,10 @@ class PicoUART:
         """
         self.serial.write(self.reboot_bootsel_frame())
         self.serial.flush()
+
+    def request_stats(self) -> None:
+        """Ask for link counters; the reply lands in ``last_stats`` during ``read_rumble``."""
+        self.serial.write(self.stats_request_frame())
 
     def read_rumble(self) -> Optional[Tuple[int, float, float]]:
         """
@@ -350,7 +389,12 @@ class PicoUART:
                 return None
 
             frame_type = self._buffer[start + 1]
-            length = 6 if frame_type == RUMBLE_TYPE_SLOT else 5
+            if frame_type == RUMBLE_TYPE_SLOT:
+                length = 6
+            elif frame_type == STATS_TYPE:
+                length = STATS_FRAME_SIZE
+            else:
+                length = 5
             if len(self._buffer) - start < length:
                 if start > 0:
                     del self._buffer[:start]
@@ -364,6 +408,10 @@ class PicoUART:
                 if frame_type == RUMBLE_TYPE_DECODED:
                     del self._buffer[: start + length]
                     return 0, frame[2] / 255.0, frame[3] / 255.0
+                if frame_type == STATS_TYPE:
+                    del self._buffer[: start + length]
+                    self.last_stats = UartLinkStats(*struct.unpack_from("<6I", frame, 2))
+                    continue
 
             del self._buffer[: start + 1]
 
