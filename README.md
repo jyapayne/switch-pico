@@ -2649,24 +2649,36 @@ The firmware acknowledges the endpoint-zero request, waits 50 ms, and then
 calls the Pico ROM `reset_usb_boot()` entry point. Physical BOOTSEL remains the
 fallback if the firmware or USB management path is unavailable.
 
-The regular UART firmware has the same shortcut over its serial link. The
-host sends the command frame `0xAA 0xFE 0x08 0x01 "BOOTSEL" checksum`; the
-firmware verifies the checksum and magic, flushes UART TX, and calls
-`reset_usb_boot()`. Line noise or a misframed report cannot trigger it. The
-Pico can stay plugged into the Switch or a PC; only the UART adapter needs to
-be connected to the host:
+The regular UART firmware has the same shortcut, reachable two ways:
+
+- **Over USB** (Pico's USB plugged into the PC, no serial adapter needed): the
+  firmware answers the same EP0 vendor `INFO` and `BOOTSEL reboot` requests as
+  the AIO, so `switch-pico-config reboot bootsel` works unchanged. Every other
+  management operation is stalled; `status`, profiles and configuration are
+  AIO-only. The Switch never issues vendor requests, so the handler is
+  invisible to the console.
+- **Over UART** (Pico can stay on the Switch or a PC; only the serial adapter
+  is on the host): the host sends `0xAA 0xFE 0x08 0x01 "BOOTSEL" checksum`;
+  the firmware verifies checksum and magic, flushes UART TX, and calls
+  `reset_usb_boot()`. Line noise or a misframed report cannot trigger it.
 
 ```sh
-# One-off reboot, then flash the published image
+# USB side on the PC
+uv run switch-pico-config reboot bootsel
+picotool load -v -x firmware/switch-pico.uf2
+
+# UART adapter on the PC
 uv run controller-uart-bridge --reboot-bootsel /dev/ttyUSB0
 picotool load -v -x firmware/switch-pico.uf2
 
-# Build, publish, reboot the running Pico and flash in one step
+# Build, publish, reboot the running Pico over UART and flash in one step
 uv run python build.py --uart-port /dev/ttyUSB0
 ```
 
-Firmware from before this command ignores the frame; hold BOOTSEL while
-replugging once to install a build that has it.
+Either way the RPI-RP2 loader appears on whichever USB host the Pico's own
+USB port is connected to, so flashing needs that port on the PC. Firmware from
+before these commands ignores both; hold BOOTSEL while replugging once to
+install a build that has them.
 
 Flash alternatives: bootsel + drag-drop or `picotool load`.
 Flags:

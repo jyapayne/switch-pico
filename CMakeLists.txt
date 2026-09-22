@@ -573,6 +573,16 @@ else()
     target_compile_definitions(switch-pico PRIVATE
             SWITCH_PICO_HID_INSTANCE_COUNT=${SWITCH_PICO_UART_CONTROLLERS}
     )
+    if(NOT SWITCH_PICO_SWITCH2_USB_BRIDGE)
+        # INFO + BOOTSEL reboot over EP0 so switch-pico-config can reflash a
+        # UART Pico plugged into a PC. configuration_storage.cpp provides the
+        # protocol CRC; no storage is instantiated.
+        target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_UART_USB_MANAGEMENT=1)
+        target_sources(switch-pico PRIVATE
+                ${SWITCH_PICO_SOURCE_DIR}/usb/uart_usb_management.cpp
+                ${SWITCH_PICO_SOURCE_DIR}/configuration/configuration_storage.cpp
+        )
+    endif()
 endif()
 
 if(NOT SWITCH_PICO_SWITCH2_USB_BRIDGE)

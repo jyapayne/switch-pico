@@ -164,6 +164,8 @@ CAPABILITY_INPUT = 1 << 0
 CAPABILITY_RUMBLE = 1 << 1
 CAPABILITY_MOTION = 1 << 2
 CAPABILITY_MASK = CAPABILITY_INPUT | CAPABILITY_RUMBLE | CAPABILITY_MOTION
+# USB management info byte 3.
+BOARD_NAMES = {1: "Pico", 2: "Pico 2 W"}
 PAIRING_RECORD_SIZE = 8
 PAIRING_RECORD_CAPACITY = 16
 TRANSPORT_UNKNOWN = 0
@@ -5489,7 +5491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             configuration = read_configuration(device)
             version = ".".join(str(part) for part in info.firmware_version)
             print(f"Firmware: {version}")
-            print(f"Board: Pico 2 W ({info.board})")
+            print(f"Board: {BOARD_NAMES.get(info.board, 'unknown')} ({info.board})")
             print(
                 "Requested USB mode: "
                 f"{REQUESTED_MODE_NAMES[configuration.requested_mode]}"

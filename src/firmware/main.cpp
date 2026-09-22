@@ -8,6 +8,9 @@
 #ifndef SWITCH_PICO_BLUEPAD32
 #include "hardware/uart.h"
 #include "pico/bootrom.h"
+#ifdef SWITCH_PICO_UART_USB_MANAGEMENT
+#include "usb/uart_usb_management.h"
+#endif
 #else
 #include "adapter/adapter_mode_controller.h"
 #include "input/bluepad32_input_backend.h"
@@ -382,6 +385,9 @@ int main() {
                                         SWITCH_PRO_DIGITAL_TRIGGER_THRESHOLD);
             (void)usb_output_driver_task(instance);
         }
+#ifdef SWITCH_PICO_UART_USB_MANAGEMENT
+        uart_usb_management_task();
+#endif
 #endif
         log_usb_state();
     }

@@ -17,6 +17,8 @@
 
 #ifdef SWITCH_PICO_BLUEPAD32
 #include "usb/usb_configuration_management.h"
+#elif defined(SWITCH_PICO_UART_USB_MANAGEMENT)
+#include "usb/uart_usb_management.h"
 #endif
 
 #ifdef SWITCH_PICO_USB_OUTPUT_MODES
@@ -390,6 +392,8 @@ extern "C" bool tud_vendor_control_xfer_cb(
 #ifdef SWITCH_PICO_BLUEPAD32
     return usb_configuration_management_vendor_control(rhport, stage,
                                                        request);
+#elif defined(SWITCH_PICO_UART_USB_MANAGEMENT)
+    return uart_usb_management_vendor_control(rhport, stage, request);
 #else
     (void)rhport;
     (void)stage;

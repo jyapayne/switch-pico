@@ -25,6 +25,11 @@ enum {
     TUSB_DIR_IN = 1,
     TUSB_DESC_ENDPOINT = 5,
     TUSB_DESC_STRING = 3,
+    TUSB_REQ_RCPT_DEVICE = 0,
+    TUSB_REQ_TYPE_VENDOR = 2,
+    CONTROL_STAGE_SETUP = 0,
+    CONTROL_STAGE_DATA = 1,
+    CONTROL_STAGE_ACK = 2,
 };
 
 #pragma pack(push, 1)
@@ -64,12 +69,22 @@ static inline uint8_t tu_edpt_dir(uint8_t endpoint) {
 }
 
 typedef struct {
-    uint8_t bmRequestType;
+    union {
+        struct {
+            uint8_t recipient : 5;
+            uint8_t type : 2;
+            uint8_t direction : 1;
+        } bmRequestType_bit;
+        uint8_t bmRequestType;
+    };
     uint8_t bRequest;
     uint16_t wValue;
     uint16_t wIndex;
     uint16_t wLength;
 } tusb_control_request_t;
+
+bool tud_control_xfer(uint8_t rhport, tusb_control_request_t const* request,
+                      void* buffer, uint16_t length);
 
 bool tud_hid_n_ready(uint8_t instance);
 bool tud_hid_n_report(uint8_t instance, uint8_t report_id,
