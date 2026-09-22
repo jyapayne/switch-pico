@@ -28,6 +28,10 @@ from serial.tools import list_ports, list_ports_common
 
 UART_HEADER = 0xAA
 UART_PROTOCOL_VERSION = 0x03
+# Command frames reuse the report framing with this version byte.
+UART_COMMAND_VERSION = 0xFE
+UART_COMMAND_REBOOT_BOOTSEL = 0x01
+UART_BOOTSEL_MAGIC = b"BOOTSEL"
 RUMBLE_HEADER = 0xBB
 # Legacy 5-byte frame (no slot) from firmware before multi-controller support.
 RUMBLE_TYPE_DECODED = 0x02
@@ -300,6 +304,22 @@ class PicoUART:
     def send_report(self, report: SwitchReport, slot: int = 0) -> None:
         """Send a controller report to one of the Pico's controller slots."""
         self.serial.write(report.to_bytes(slot))
+
+    @staticmethod
+    def reboot_bootsel_frame() -> bytes:
+        """Command frame that makes the UART firmware reboot into ROM BOOTSEL."""
+        payload = bytes([UART_COMMAND_REBOOT_BOOTSEL]) + UART_BOOTSEL_MAGIC
+        frame = bytes([UART_HEADER, UART_COMMAND_VERSION, len(payload)]) + payload
+        return frame + bytes([compute_checksum(frame)])
+
+    def reboot_bootsel(self) -> None:
+        """Ask the Pico to reboot into BOOTSEL so picotool can flash it.
+
+        The serial device disappears once the Pico reboots; callers should
+        close this object afterwards and wait for the BOOTSEL USB device.
+        """
+        self.serial.write(self.reboot_bootsel_frame())
+        self.serial.flush()
 
     def read_rumble(self) -> Optional[Tuple[int, float, float]]:
         """

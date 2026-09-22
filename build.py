@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -309,9 +310,19 @@ def parse_args():
         metavar="RRGGBB",
         help="Set every emulated controller slot to the provided hex color.",
     )
+    parser.add_argument(
+        "--uart-port",
+        metavar="PORT",
+        help=(
+            "Serial port of a running regular (UART) Pico. Sends the BOOTSEL reboot "
+            "command before flashing so the button does not need to be held."
+        ),
+    )
     args = parser.parse_args()
     if args.wake_capture and (args.random_grip_color or args.grip_color):
         parser.error("wake capture firmware does not use grip-color options")
+    if args.uart_port and (args.aio or args.wake_capture or args.wake_only):
+        parser.error("--uart-port only applies to the regular UART firmware")
     if args.wake_only:
         if args.random_grip_color or args.grip_color is not None:
             parser.error("wake-only firmware does not use grip-color options")
@@ -522,7 +533,41 @@ def build_wake_only():
     return elf_path
 
 
-def flash(elf_path, allow_elf_override):
+BOOTSEL_ENUMERATION_TIMEOUT_S = 10.0
+
+
+def reboot_uart_pico_to_bootsel(port):
+    """Ask the running UART firmware to reboot into BOOTSEL and wait for the loader."""
+    from switch_pico_bridge.switch_pico_uart import PicoUART
+
+    try:
+        uart = PicoUART(port)
+    except Exception as exc:
+        sys.stderr.write(f"Error: Cannot open UART {port}: {exc}\n")
+        sys.exit(1)
+    try:
+        uart.reboot_bootsel()
+    finally:
+        uart.close()
+    print(f"Sent BOOTSEL reboot to {port}; waiting for the ROM loader to enumerate...")
+    picotool = resolve_picotool()
+    deadline = time.monotonic() + BOOTSEL_ENUMERATION_TIMEOUT_S
+    while True:
+        result = subprocess.run(
+            [str(picotool), "info"], cwd=SCRIPT_DIR, capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return
+        if time.monotonic() >= deadline:
+            sys.stderr.write(
+                "Error: No BOOTSEL device appeared after the reboot command. "
+                "Check the UART wiring/port or hold BOOTSEL while replugging.\n"
+            )
+            sys.exit(1)
+        time.sleep(0.5)
+
+
+def flash(elf_path, allow_elf_override, uart_port=None):
     picotool = resolve_picotool()
     if not elf_path.exists():
         if allow_elf_override:
@@ -532,6 +577,8 @@ def flash(elf_path, allow_elf_override):
         else:
             sys.stderr.write(f"Error: Cannot find ELF at {elf_path}.\n")
         sys.exit(1)
+    if uart_port:
+        reboot_uart_pico_to_bootsel(uart_port)
     run_cmd([str(picotool), "load", str(elf_path), "-fx"])
 
 
@@ -599,6 +646,7 @@ def main():
     flash(
         elf_path,
         allow_elf_override=not args.aio,
+        uart_port=args.uart_port,
     )
 
 

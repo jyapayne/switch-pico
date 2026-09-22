@@ -2649,6 +2649,25 @@ The firmware acknowledges the endpoint-zero request, waits 50 ms, and then
 calls the Pico ROM `reset_usb_boot()` entry point. Physical BOOTSEL remains the
 fallback if the firmware or USB management path is unavailable.
 
+The regular UART firmware has the same shortcut over its serial link. The
+host sends the command frame `0xAA 0xFE 0x08 0x01 "BOOTSEL" checksum`; the
+firmware verifies the checksum and magic, flushes UART TX, and calls
+`reset_usb_boot()`. Line noise or a misframed report cannot trigger it. The
+Pico can stay plugged into the Switch or a PC; only the UART adapter needs to
+be connected to the host:
+
+```sh
+# One-off reboot, then flash the published image
+uv run controller-uart-bridge --reboot-bootsel /dev/ttyUSB0
+picotool load -v -x firmware/switch-pico.uf2
+
+# Build, publish, reboot the running Pico and flash in one step
+uv run python build.py --uart-port /dev/ttyUSB0
+```
+
+Firmware from before this command ignores the frame; hold BOOTSEL while
+replugging once to install a build that has it.
+
 Flash alternatives: bootsel + drag-drop or `picotool load`.
 Flags:
 - `SWITCH_PICO_LOG`: enable/disable UART logging on the Pico.

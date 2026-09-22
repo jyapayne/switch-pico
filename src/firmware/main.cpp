@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include "bsp/board.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
@@ -6,6 +7,7 @@
 #include "usb/usb_output_driver.h"
 #ifndef SWITCH_PICO_BLUEPAD32
 #include "hardware/uart.h"
+#include "pico/bootrom.h"
 #else
 #include "adapter/adapter_mode_controller.h"
 #include "input/bluepad32_input_backend.h"
@@ -34,6 +36,9 @@
 #define UART_RX_PIN 5
 #define UART_RUMBLE_HEADER 0xBB
 #define UART_RUMBLE_TYPE_SLOT 0x03
+// Host -> Pico command frame: 0xAA 0xFE payload_len payload... checksum.
+#define UART_COMMAND_VERSION 0xFE
+#define UART_COMMAND_REBOOT_BOOTSEL 0x01
 #endif
 
 #ifdef SWITCH_PICO_BLUEPAD32
@@ -106,6 +111,29 @@ static void on_rumble_from_usb(uint8_t instance,
 }
 
 #ifndef SWITCH_PICO_BLUEPAD32
+// Command frames share the report framing. The only command reboots into the
+// ROM BOOTSEL loader; it must carry the "BOOTSEL" magic so line noise or a
+// mis-framed report can never trigger it.
+static void handle_uart_command(const uint8_t* frame, uint8_t length) {
+    static const uint8_t kBootselMagic[7] = {'B', 'O', 'O', 'T', 'S', 'E', 'L'};
+    uint8_t sum = 0;
+    for (uint8_t i = 0; i + 1 < length; ++i) {
+        sum = static_cast<uint8_t>(sum + frame[i]);
+    }
+    if (sum != frame[length - 1]) {
+        return;
+    }
+    const uint8_t payload_len = frame[2];
+    const uint8_t* payload = frame + 3;
+    if (payload_len == 1 + sizeof(kBootselMagic) &&
+        payload[0] == UART_COMMAND_REBOOT_BOOTSEL &&
+        memcmp(payload + 1, kBootselMagic, sizeof(kBootselMagic)) == 0) {
+        LOG_PRINTF("[UART] reboot to BOOTSEL requested\n");
+        uart_tx_wait_blocking(UART_ID);
+        reset_usb_boot(0, 0);
+    }
+}
+
 // Consume UART bytes and forward complete frames to the Switch Pro driver.
 static bool poll_uart_frames() {
     static uint8_t buffer[64];
@@ -150,6 +178,12 @@ static bool poll_uart_frames() {
         }
 
         if (expected_len > 0 && index >= expected_len) {
+            if (buffer[1] == UART_COMMAND_VERSION) {
+                handle_uart_command(buffer, expected_len);
+                index = 0;
+                expected_len = 0;
+                continue;
+            }
             ControllerState parsed{};
             uint8_t slot = 0;
             if (switch_pro_apply_uart_packet(buffer, expected_len, parsed, slot)) {

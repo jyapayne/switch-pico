@@ -217,3 +217,13 @@ def test_rumble_frame_with_out_of_range_slot_is_skipped():
     uart, _ = make_uart(make_rumble_frame(1, 2, slot=UART_SLOT_COUNT) + make_rumble_frame(3, 4))
 
     assert uart.read_rumble() == pytest.approx((0, 3 / 255.0, 4 / 255.0))
+
+
+def test_reboot_bootsel_frame_matches_firmware_contract():
+    """0xAA 0xFE len(8) cmd(1) 'BOOTSEL' checksum: 12 bytes, the parser's minimum frame."""
+    frame = PicoUART.reboot_bootsel_frame()
+    assert frame[:3] == bytes([UART_HEADER, 0xFE, 8])
+    assert frame[3] == 0x01
+    assert frame[4:11] == b"BOOTSEL"
+    assert len(frame) == 12
+    assert frame[-1] == compute_checksum(frame[:-1])

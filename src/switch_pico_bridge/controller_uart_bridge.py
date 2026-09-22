@@ -722,6 +722,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="List serial ports, descriptions, and manufacturers, then exit. Uses port filters and --all-ports.",
     )
     parser.add_argument(
+        "--reboot-bootsel",
+        metavar="PORT",
+        help=(
+            "Send the BOOTSEL reboot command to the Pico on PORT and exit, so it can be "
+            "flashed with picotool without holding the button. Requires UART firmware "
+            "with command support."
+        ),
+    )
+    parser.add_argument(
         "--frequency",
         type=float,
         default=500.0,
@@ -1145,6 +1154,23 @@ def list_serial_ports(console: Console, args: argparse.Namespace) -> None:
             Text(port["manufacturer"] or "Unknown"),
         )
     console.print(table)
+
+
+def reboot_pico_bootsel(port: str, baud: int, console: Console) -> None:
+    """Send the BOOTSEL reboot command over UART; the port vanishes on success."""
+    try:
+        uart = PicoUART(port, baud)
+    except Exception as exc:
+        console.print(f"[red]Failed to open UART {port}: {exc}[/red]")
+        raise SystemExit(1) from exc
+    try:
+        uart.reboot_bootsel()
+    finally:
+        uart.close()
+    console.print(
+        f"[green]Sent BOOTSEL reboot to {port}; wait for the RPI-RP2 device, then "
+        "run picotool load -v -x <image>.[/green]"
+    )
 
 
 def resolve_mapping_slots(
@@ -1865,6 +1891,9 @@ def main() -> None:
     console = Console()
     if args.list_ports:
         list_serial_ports(console, args)
+        return
+    if args.reboot_bootsel:
+        reboot_pico_bootsel(args.reboot_bootsel, args.baud, console)
         return
     config = build_bridge_config(console, args)
     initialize_sdl(parser)
