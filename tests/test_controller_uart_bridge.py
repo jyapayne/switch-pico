@@ -28,10 +28,10 @@ class RecordingUART:
     def __init__(self) -> None:
         self.sent_imu: list[tuple[IMUSample, ...]] = []
 
-    def send_report(self, report: SwitchReport) -> None:
+    def send_report(self, report: SwitchReport, slot: int = 0) -> None:
         self.sent_imu.append(tuple(report.imu_samples))
 
-    def read_rumble(self) -> tuple[float, float] | None:
+    def read_rumble(self) -> tuple[int, float, float] | None:
         return None
 
 
@@ -101,9 +101,8 @@ def test_sensor_buffer_retains_latest_three_samples() -> None:
 def test_service_republishes_latest_imu_window(monkeypatch: MonkeyPatch) -> None:
     uart = RecordingUART()
     controller = cast(sdl3.SDL_Gamepad, object())
-    ctx = bridge.ControllerContext(
-        controller, 7, 0, "dualsense", "/dev/null", cast(PicoUART, cast(object, uart))
-    )
+    ctx = bridge.ControllerContext(controller, 7, 0, "dualsense", "/dev/null")
+    links = {"/dev/null": bridge.UartLink("/dev/null", cast(PicoUART, cast(object, uart)))}
     ctx.sensors_enabled = True
     samples = [
         IMUSample(1, 2, 3, 4, 5, 6),
@@ -123,8 +122,8 @@ def test_service_republishes_latest_imu_window(monkeypatch: MonkeyPatch) -> None
 
     args = Namespace(baud=UART_BAUD)
     console = Console(file=StringIO())
-    bridge.service_contexts(1.0, args, config, contexts, [], console)
-    bridge.service_contexts(2.0, args, config, contexts, [], console)
+    bridge.service_contexts(1.0, args, config, contexts, links, console)
+    bridge.service_contexts(2.0, args, config, contexts, links, console)
 
     assert uart.sent_imu == [tuple(samples), tuple(samples)]
     assert ctx.imu_samples == samples

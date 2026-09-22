@@ -38,9 +38,11 @@ void switch_pro_set_input(uint8_t instance, const ControllerState& state,
 // 0x30 input report was successfully queued.
 bool switch_pro_task(uint8_t instance);
 
-// Convert a packed UART message into controller state (returns true if parsed).
+// Convert a packed UART message (v2 = slot 0, v3 carries a slot byte) into
+// controller state. Returns true if parsed; outputs are untouched on failure.
 bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
-                                  ControllerState& out_state);
+                                  ControllerState& out_state,
+                                  uint8_t& out_slot);
 
 // Driver state helpers
 bool switch_pro_is_ready(uint8_t instance);

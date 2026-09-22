@@ -564,8 +564,14 @@ if(SWITCH_PICO_INPUT_BACKEND STREQUAL "BLUEPAD32")
         target_compile_definitions(switch-pico PRIVATE SWITCH_PICO_HD_RUMBLE=1)
     endif()
 else()
+    set(SWITCH_PICO_UART_CONTROLLERS 4 CACHE STRING
+        "Switch Pro controllers exposed by the UART firmware (1-4, one USB interface each)")
+    if(NOT SWITCH_PICO_UART_CONTROLLERS MATCHES "^[1-4]$")
+        message(FATAL_ERROR
+                "SWITCH_PICO_UART_CONTROLLERS must be 1, 2, 3 or 4 (got '${SWITCH_PICO_UART_CONTROLLERS}')")
+    endif()
     target_compile_definitions(switch-pico PRIVATE
-            SWITCH_PICO_HID_INSTANCE_COUNT=1
+            SWITCH_PICO_HID_INSTANCE_COUNT=${SWITCH_PICO_UART_CONTROLLERS}
     )
 endif()
 

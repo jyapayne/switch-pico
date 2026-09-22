@@ -927,25 +927,37 @@ bool switch_pro_task(uint8_t instance) {
 }
 
 bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
-                                  ControllerState& out_state) {
-    if (packet == nullptr) {
+                                  ControllerState& out_state,
+                                  uint8_t& out_slot) {
+    if (packet == nullptr || length < 12 || packet[0] != 0xAA) {
         return false;
     }
-    // v2 format: 0xAA + 0x02 + payload_len + payload... + checksum
-    if (length < 12 || packet[0] != 0xAA || packet[1] != 0x02) {
+    // v2: 0xAA 0x02 payload_len payload... checksum      (slot 0)
+    // v3: 0xAA 0x03 payload_len slot payload... checksum
+    uint8_t header_len;
+    uint8_t slot = 0;
+    if (packet[1] == 0x02) {
+        header_len = 3;
+    } else if (packet[1] == 0x03) {
+        header_len = 4;
+        slot = packet[3];
+    } else {
         return false;
     }
 
-    uint8_t payload_len = packet[2];
-    if ((uint16_t)payload_len + 4u != length) {
+    const uint8_t payload_len = packet[2];
+    if ((uint16_t)payload_len + header_len + 1u != length) {
         return false;
     }
 
     uint16_t sum = 0;
-    for (uint16_t i = 0; i < (uint16_t)(3u + payload_len); ++i) {
+    for (uint16_t i = 0; i < (uint16_t)(length - 1u); ++i) {
         sum += packet[i];
     }
     if ((sum & 0xFF) != packet[length - 1]) {
+        return false;
+    }
+    if (slot >= SWITCH_PICO_HID_INSTANCE_COUNT) {
         return false;
     }
 
@@ -954,16 +966,17 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
     if (payload_len < 8) {
         return false;
     }
+    const uint8_t* payload = packet + header_len;
 
     SwitchProOutReport out{};
-    out.buttons = static_cast<uint16_t>(packet[3]) |
-                  (static_cast<uint16_t>(packet[4]) << 8);
-    out.hat = packet[5];
-    out.lx = packet[6];
-    out.ly = packet[7];
-    out.rx = packet[8];
-    out.ry = packet[9];
-    uint8_t motion_count = packet[10];
+    out.buttons = static_cast<uint16_t>(payload[0]) |
+                  (static_cast<uint16_t>(payload[1]) << 8);
+    out.hat = payload[2];
+    out.lx = payload[3];
+    out.ly = payload[4];
+    out.rx = payload[5];
+    out.ry = payload[6];
+    uint8_t motion_count = payload[7];
     if (motion_count > CONTROLLER_MOTION_SAMPLE_CAPACITY) {
         motion_count = CONTROLLER_MOTION_SAMPLE_CAPACITY;
     }
@@ -988,7 +1001,7 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
     ControllerState state = make_neutral_state();
     state.motion_sample_count = motion_count;
     for (uint8_t i = 0; i < motion_count; ++i) {
-        const uint8_t* base = &packet[11 + i * 12];
+        const uint8_t* base = &payload[8 + i * 12];
         state.motion_samples[i].accel_x = read_int16(base + 0);
         state.motion_samples[i].accel_y = read_int16(base + 2);
         state.motion_samples[i].accel_z = read_int16(base + 4);
@@ -1053,6 +1066,7 @@ bool switch_pro_apply_uart_packet(const uint8_t* packet, uint8_t length,
     state.right_stick_y = expand_axis(out.ry);
 
     out_state = state;
+    out_slot = slot;
     return true;
 }
 

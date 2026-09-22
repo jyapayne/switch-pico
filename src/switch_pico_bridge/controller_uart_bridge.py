@@ -2,13 +2,14 @@
 """
 Bridge multiple SDL3 controllers to switch-pico over UART and mirror rumble back.
 
-The framing matches ``switch-pico.cpp``:
-  - Host -> Pico : UART v2 controller report
-  - Pico -> Host : 0xBB, 0x02, low-frequency magnitude,
+The framing matches ``src/firmware/main.cpp``:
+  - Host -> Pico : UART v3 controller report (0xAA, 0x03, len, slot, payload, checksum)
+  - Pico -> Host : 0xBB, 0x03, slot, low-frequency magnitude,
                    high-frequency magnitude, checksum
 
 Features inspired by ``host/controller_bridge.py``:
-  - Multiple controllers paired to multiple UART ports
+  - Multiple controllers paired to multiple UART ports, or to the separate
+    controller slots (0-3) of one Pico sharing a single port
   - Rich-powered interactive pairing UI
   - Adjustable send frequency, deadzone, and trigger thresholds
   - Rumble feedback delivered to SDL3 controllers
@@ -36,6 +37,7 @@ from rich.text import Text
 
 from .switch_pico_uart import (
     UART_BAUD,
+    UART_SLOT_COUNT,
     MS2_PER_G,
     RAD_TO_DEG,
     ACCEL_LSB_PER_G,
@@ -62,11 +64,14 @@ SDL_EVENT_GAMEPAD_SENSOR_UPDATE = getattr(sdl3, "SDL_EVENT_GAMEPAD_SENSOR_UPDATE
 GYRO_BIAS_SAMPLES = 200
 
 
-def parse_mapping(value: str) -> Tuple[int, str]:
-    """Parse 'index:serial_port' CLI mapping argument."""
-    if ":" not in value:
-        raise argparse.ArgumentTypeError("Mapping must look like 'index:serial_port'")
-    idx_str, port = value.split(":", 1)
+def parse_mapping(value: str) -> Tuple[int, str, Optional[int]]:
+    """Parse 'index:serial_port[:slot]' CLI mapping argument."""
+    parts = value.split(":")
+    if len(parts) not in (2, 3):
+        raise argparse.ArgumentTypeError(
+            "Mapping must look like 'index:serial_port' or 'index:serial_port:slot'"
+        )
+    idx_str, port = parts[0], parts[1].strip()
     try:
         idx = int(idx_str, 10)
     except ValueError as exc:
@@ -75,7 +80,17 @@ def parse_mapping(value: str) -> Tuple[int, str]:
         ) from exc
     if not port:
         raise argparse.ArgumentTypeError("Serial port cannot be empty")
-    return idx, port.strip()
+    slot: Optional[int] = None
+    if len(parts) == 3:
+        try:
+            slot = int(parts[2], 10)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid slot '{parts[2]}'") from exc
+        if not 0 <= slot < UART_SLOT_COUNT:
+            raise argparse.ArgumentTypeError(
+                f"Slot must be 0-{UART_SLOT_COUNT - 1}, got {slot}"
+            )
+    return idx, port, slot
 
 
 def download_controller_db(console: Console, destination: Path, url: str) -> bool:
@@ -160,26 +175,41 @@ STICK_AXES = tuple(axis for axis, _ in STICK_AXIS_LABELS)
 
 
 def interactive_pairing(
-    console: Console, controller_info: Dict[int, str], ports: List[Dict[str, str]]
-) -> List[Tuple[int, str]]:
-    """Prompt the user to pair controllers to UART ports via Rich UI."""
-    available = ports.copy()
-    mappings: List[Tuple[int, str]] = []
-    for controller_idx in controller_info:
+    console: Console,
+    controller_info: Dict[int, str],
+    ports: List[Dict[str, str]],
+    slots_per_port: int,
+) -> List[Tuple[int, str, Optional[int]]]:
+    """Prompt the user to pair controllers to UART ports via Rich UI.
+
+    A port stays selectable until all of its controller slots are taken.
+    """
+    used_slots: Dict[str, int] = {}
+    mappings: List[Tuple[int, str, Optional[int]]] = []
+    for controller_idx, name in controller_info.items():
+        available = [
+            port for port in ports if used_slots.get(port["device"], 0) < slots_per_port
+        ]
         if not available:
             console.print(
-                "[bold red]No more UART devices available for pairing.[/bold red]"
+                "[bold red]No more UART controller slots available for pairing.[/bold red]"
             )
             break
 
         table = Table(
-            title=f"Available UART Devices for Controller {controller_idx} ({controller_info[controller_idx]})"
+            title=f"Available UART Devices for Controller {controller_idx} ({name})"
         )
         table.add_column("Choice", justify="center")
         table.add_column("Port")
         table.add_column("Description")
+        table.add_column("Slots used", justify="center")
         for i, port in enumerate(available):
-            table.add_row(str(i), port["device"], port["description"])
+            table.add_row(
+                str(i),
+                port["device"],
+                port["description"],
+                f"{used_slots.get(port['device'], 0)}/{slots_per_port}",
+            )
         console.print(table)
         choices = [str(i) for i in range(len(available))] + ["q"]
         selection = Prompt.ask(
@@ -189,11 +219,12 @@ def interactive_pairing(
         )
         if selection == "q":
             break
-        idx = int(selection)
-        port = available.pop(idx)
-        mappings.append((controller_idx, port["device"]))
+        device = available[int(selection)]["device"]
+        slot = used_slots.get(device, 0)
+        used_slots[device] = slot + 1
+        mappings.append((controller_idx, device, slot))
         console.print(
-            f"[bold green]Paired controller {controller_idx} with {port['device']}[/bold green]"
+            f"[bold green]Paired controller {controller_idx} with {device} slot {slot}[/bold green]"
         )
     return mappings
 
@@ -228,13 +259,22 @@ def apply_rumble(
 
 
 @dataclass
+class UartLink:
+    """One serial port shared by every controller mapped to its slots."""
+
+    port: str
+    uart: Optional[PicoUART] = None
+    last_reopen_attempt: float = 0.0
+
+
+@dataclass
 class ControllerContext:
     controller: sdl3.SDL_Gamepad
     instance_id: int
     controller_index: int
     stable_id: str
     port: Optional[str]
-    uart: Optional[PicoUART]
+    slot: int = 0
     report: SwitchReport = field(default_factory=SwitchReport)
     dpad: Dict[str, bool] = field(
         default_factory=lambda: {
@@ -249,7 +289,6 @@ class ControllerContext:
         default_factory=lambda: {"left": False, "right": False}
     )
     last_send: float = 0.0
-    last_reopen_attempt: float = 0.0
     last_rumble_at: float = 0.0
     rumble_active: bool = False
     axis_offsets: Dict[int, int] = field(default_factory=dict)
@@ -644,12 +683,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="append",
         type=parse_mapping,
         default=[],
-        help="Controller mapping 'index:serial_port'. Repeat per controller.",
+        help=(
+            "Controller mapping 'index:serial_port[:slot]'. Repeat per controller; "
+            "controllers sharing a serial port drive that Pico's separate emulated "
+            "controllers. Omitted slots are filled in order from 0."
+        ),
     )
     parser.add_argument(
         "--ports",
         nargs="+",
         help="Serial ports to auto-pair with controllers in ascending index order.",
+    )
+    parser.add_argument(
+        "--slots-per-port",
+        type=int,
+        default=UART_SLOT_COUNT,
+        choices=range(1, UART_SLOT_COUNT + 1),
+        metavar="N",
+        help=(
+            "Emulated controllers per Pico for auto/interactive pairing (default: "
+            f"{UART_SLOT_COUNT}; match the firmware's SWITCH_PICO_UART_CONTROLLERS). "
+            "Auto-pairing spreads controllers across ports before reusing one."
+        ),
     )
     parser.add_argument(
         "--interactive",
@@ -881,8 +936,11 @@ class DisplayIndexAllocator:
 
 @dataclass
 class PairingState:
-    mapping_by_index: Dict[int, str]
+    # controller display index -> (serial port, firmware slot)
+    mapping_by_index: Dict[int, Tuple[str, int]]
+    # Ports auto-pairing may hand out; a port stays here while it has free slots.
     available_ports: List[str]
+    slots_per_port: int = UART_SLOT_COUNT
     auto_assigned_indices: set[int] = field(default_factory=set)
     auto_pairing_enabled: bool = False
     auto_discover_ports: bool = False
@@ -891,6 +949,17 @@ class PairingState:
     include_port_desc: List[str] = field(default_factory=list)
     include_port_mfr: List[str] = field(default_factory=list)
     display_index_alloc: DisplayIndexAllocator = field(default_factory=DisplayIndexAllocator)
+
+    def used_slots(self, port: str) -> set[int]:
+        return {slot for mapped, slot in self.mapping_by_index.values() if mapped == port}
+
+    def free_slot(self, port: str) -> Optional[int]:
+        """Lowest unused slot on ``port`` within the configured slot budget."""
+        used = self.used_slots(port)
+        for slot in range(self.slots_per_port):
+            if slot not in used:
+                return slot
+        return None
 
 
 def load_button_maps(
@@ -1078,6 +1147,31 @@ def list_serial_ports(console: Console, args: argparse.Namespace) -> None:
     console.print(table)
 
 
+def resolve_mapping_slots(
+    mappings: List[Tuple[int, str, Optional[int]]],
+    slots_per_port: int,
+    parser: argparse.ArgumentParser,
+) -> Dict[int, Tuple[str, int]]:
+    """Assign explicit or next-free slots to CLI/interactive mappings."""
+    resolved: Dict[int, Tuple[str, int]] = {}
+    taken: Dict[str, set[int]] = {}
+    for index, port, slot in mappings:
+        if index in resolved:
+            parser.error(f"Controller {index} is mapped more than once.")
+        used = taken.setdefault(port, set())
+        if slot is None:
+            slot = next((s for s in range(slots_per_port) if s not in used), None)
+            if slot is None:
+                parser.error(
+                    f"{port} has no free controller slot (limit {slots_per_port}; see --slots-per-port)."
+                )
+        elif slot in used:
+            parser.error(f"{port} slot {slot} is mapped to more than one controller.")
+        used.add(slot)
+        resolved[index] = (port, slot)
+    return resolved
+
+
 def prepare_pairing_state(
     args: argparse.Namespace,
     console: Console,
@@ -1092,9 +1186,10 @@ def prepare_pairing_state(
     ignore_port_desc = [d.lower() for d in args.ignore_port_desc]
     include_port_desc = [d.lower() for d in args.include_port_desc]
     include_port_mfr = [m.lower() for m in args.include_port_manufacturer]
+    slots_per_port = int(args.slots_per_port)
     available_ports: List[str] = []
 
-    mappings = list(args.map)
+    mappings: List[Tuple[int, str, Optional[int]]] = list(args.map)
     if args.interactive:
         if not controller_indices:
             parser.error("No controllers detected for interactive pairing.")
@@ -1107,7 +1202,7 @@ def prepare_pairing_state(
         )
         if not discovered:
             parser.error("No UART devices found for interactive pairing.")
-        mappings = interactive_pairing(console, controller_names, discovered)
+        mappings = interactive_pairing(console, controller_names, discovered, slots_per_port)
         if not mappings:
             parser.error("No controller-to-UART mappings were selected.")
     elif auto_pairing_enabled:
@@ -1134,10 +1229,10 @@ def prepare_pairing_state(
                     "[yellow]No UART devices detected yet; waiting for hotplug...[/yellow]"
                 )
 
-    mapping_by_index = {index: port for index, port in mappings}
     return PairingState(
-        mapping_by_index=mapping_by_index,
+        mapping_by_index=resolve_mapping_slots(mappings, slots_per_port, parser),
         available_ports=available_ports,
+        slots_per_port=slots_per_port,
         auto_pairing_enabled=auto_pairing_enabled,
         auto_discover_ports=auto_discover_ports,
         include_non_usb=include_non_usb,
@@ -1149,32 +1244,75 @@ def prepare_pairing_state(
 
 def assign_port_for_index(
     pairing: PairingState, idx: int, console: Console
-) -> Optional[str]:
-    """Return the UART assigned to a controller index, auto-pairing if allowed."""
+) -> Optional[Tuple[str, int]]:
+    """Return the (port, slot) for a controller index, auto-pairing if allowed.
+
+    Auto-pairing prefers the port with the fewest controllers so several Picos
+    are filled evenly before any one of them multiplexes.
+    """
     if idx in pairing.mapping_by_index:
         return pairing.mapping_by_index[idx]
     if not pairing.auto_pairing_enabled:
         return None
-    if not pairing.available_ports:
+    candidates = [
+        (len(pairing.used_slots(port)), order, port)
+        for order, port in enumerate(pairing.available_ports)
+        if pairing.free_slot(port) is not None
+    ]
+    if not candidates:
         return None
-    port_choice = pairing.available_ports.pop(0)
-    pairing.mapping_by_index[idx] = port_choice
+    _, _, port_choice = min(candidates)
+    slot = pairing.free_slot(port_choice)
+    assert slot is not None
+    pairing.mapping_by_index[idx] = (port_choice, slot)
     pairing.auto_assigned_indices.add(idx)
-    console.print(f"[green]Auto-paired controller {idx} to {port_choice}[/green]")
-    return port_choice
+    console.print(f"[green]Auto-paired controller {idx} to {port_choice} slot {slot}[/green]")
+    return port_choice, slot
 
 
 def ports_in_use(pairing: PairingState, contexts: Dict[int, ControllerContext]) -> set[str]:
     """Return a set of UART paths currently reserved or mapped."""
-    used = set(pairing.mapping_by_index.values())
+    used = {port for port, _ in pairing.mapping_by_index.values()}
     used.update(ctx.port for ctx in contexts.values() if ctx.port)
     return used
+
+
+def close_link(links: Dict[str, UartLink], port: str) -> None:
+    """Close and forget the shared UART for ``port`` if it is open."""
+    link = links.pop(port, None)
+    if link and link.uart:
+        try:
+            link.uart.close()
+        except Exception:
+            pass
+
+
+def ensure_link(
+    links: Dict[str, UartLink], port: str, baud: int, console: Console, now: float
+) -> UartLink:
+    """Return the shared link for ``port``, opening the serial device if needed."""
+    link = links.get(port)
+    if link is None:
+        link = UartLink(port=port)
+        links[port] = link
+    if link.uart is None:
+        link.last_reopen_attempt = now
+        link.uart = open_uart_or_warn(port, baud, console)
+    return link
+
+
+def detach_context_from_port(ctx: ControllerContext) -> None:
+    sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
+    ctx.port = None
+    ctx.slot = 0
+    ctx.rumble_active = False
 
 
 def handle_removed_port(
     path: str,
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
+    links: Dict[str, UartLink],
     console: Console,
 ) -> None:
     """Clear mappings/contexts for a UART path that disappeared."""
@@ -1184,31 +1322,26 @@ def handle_removed_port(
             f"[yellow]UART {path} removed; dropping from available pool[/yellow]"
         )
     indices_to_clear = [
-        idx for idx, mapped in pairing.mapping_by_index.items() if mapped == path
+        idx for idx, (mapped, _) in pairing.mapping_by_index.items() if mapped == path
     ]
     for idx in indices_to_clear:
         pairing.mapping_by_index.pop(idx, None)
         pairing.auto_assigned_indices.discard(idx)
+    close_link(links, path)
     for ctx in list(contexts.values()):
         if ctx.port != path:
             continue
-        if ctx.uart:
-            try:
-                ctx.uart.close()
-            except Exception:
-                pass
-        sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
-        ctx.uart = None
-        ctx.port = None
-        ctx.rumble_active = False
-        ctx.last_reopen_attempt = time.monotonic()
+        detach_context_from_port(ctx)
         console.print(
             f"[yellow]UART {path} removed; controller {ctx.controller_index} waiting for reassignment[/yellow]"
         )
 
 
 def discover_new_ports(
-    pairing: PairingState, contexts: Dict[int, ControllerContext], console: Console
+    pairing: PairingState,
+    contexts: Dict[int, ControllerContext],
+    links: Dict[str, UartLink],
+    console: Console,
 ) -> None:
     """Scan for new serial ports and add unused ones to the available pool."""
     if not pairing.auto_discover_ports:
@@ -1221,12 +1354,11 @@ def discover_new_ports(
     )
     current_paths = {info["device"] for info in discovered}
     known_paths = set(pairing.available_ports)
-    known_paths.update(pairing.mapping_by_index.values())
-    known_paths.update(ctx.port for ctx in contexts.values() if ctx.port)
+    known_paths.update(ports_in_use(pairing, contexts))
     # Drop any paths we previously knew about that are no longer present.
     removed_paths = [path for path in known_paths if path not in current_paths]
     for path in removed_paths:
-        handle_removed_port(path, pairing, contexts, console)
+        handle_removed_port(path, pairing, contexts, links, console)
     in_use = ports_in_use(pairing, contexts)
     for info in discovered:
         path = info["device"]
@@ -1238,35 +1370,88 @@ def discover_new_ports(
         )
 
 
+def announce_pairing(
+    ctx: ControllerContext, link: UartLink, console: Console
+) -> None:
+    who = f"Controller {ctx.controller_index} (id {ctx.stable_id}, inst {ctx.instance_id})"
+    if link.uart:
+        console.print(f"[green]{who} paired to {link.port} slot {ctx.slot}[/green]")
+    else:
+        console.print(f"[yellow]{who} waiting for UART {link.port} (slot {ctx.slot})[/yellow]")
+
+
 def pair_waiting_contexts(
     args: argparse.Namespace,
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
-    uarts: List[PicoUART],
+    links: Dict[str, UartLink],
     console: Console,
 ) -> None:
-    """Attach UARTs to contexts that are waiting for a port assignment/open."""
+    """Attach ports to contexts that are waiting for a slot assignment."""
     for ctx in list(contexts.values()):
         if ctx.port is not None:
             continue
-        # Try to grab a port for this controller; if none are available, leave it waiting.
-        port_choice = assign_port_for_index(pairing, ctx.controller_index, console)
-        if port_choice is None:
+        # Try to grab a slot for this controller; if none are available, leave it waiting.
+        assignment = assign_port_for_index(pairing, ctx.controller_index, console)
+        if assignment is None:
             continue
-        ctx.port = port_choice
-        uart = open_uart_or_warn(port_choice, args.baud, console)
-        ctx.last_reopen_attempt = time.monotonic()
-        if uart:
-            uarts.append(uart)
-            ctx.uart = uart
-            console.print(
-                f"[green]Controller {ctx.controller_index} (id {ctx.stable_id}, inst {ctx.instance_id}) paired to {port_choice}[/green]"
-            )
-        else:
-            ctx.uart = None
-            console.print(
-                f"[yellow]Controller {ctx.controller_index} (id {ctx.stable_id}, inst {ctx.instance_id}) waiting for UART {port_choice}[/yellow]"
-            )
+        ctx.port, ctx.slot = assignment
+        link = ensure_link(links, ctx.port, args.baud, console, time.monotonic())
+        announce_pairing(ctx, link, console)
+
+
+def attach_controller(
+    sdl_id: int,
+    args: argparse.Namespace,
+    pairing: PairingState,
+    contexts: Dict[int, ControllerContext],
+    links: Dict[str, UartLink],
+    console: Console,
+    config: BridgeConfig,
+) -> None:
+    """Open an SDL gamepad, give it a slot if one is mapped or free, and track it."""
+    if sdl_id in contexts:
+        return
+    if not sdl3.SDL_IsGamepad(sdl_id):
+        name = sdl3.SDL_GetJoystickNameForID(sdl_id)
+        name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
+        console.print(
+            f"[yellow]Device {sdl_id} is not a GameController ({name_str}).[/yellow]"
+        )
+        return
+    display_idx = pairing.display_index_alloc.allocate()
+    assignment = assign_port_for_index(pairing, display_idx, console)
+    if assignment is None and not pairing.auto_pairing_enabled:
+        pairing.display_index_alloc.release(display_idx)
+        return
+    try:
+        controller, instance_id, guid = open_controller(sdl_id)
+    except Exception as exc:
+        console.print(f"[red]Failed to open controller {display_idx}: {exc}[/red]")
+        pairing.display_index_alloc.release(display_idx)
+        return
+    should_swap = display_idx in config.swap_abxy_indices or guid in config.swap_abxy_ids
+    ctx = ControllerContext(
+        controller=controller,
+        instance_id=instance_id,
+        controller_index=display_idx,
+        stable_id=guid,
+        port=assignment[0] if assignment else None,
+        slot=assignment[1] if assignment else 0,
+        swap_abxy=should_swap,
+    )
+    if assignment:
+        link = ensure_link(links, assignment[0], args.baud, console, time.monotonic())
+        announce_pairing(ctx, link, console)
+    else:
+        console.print(
+            f"[yellow]Controller {display_idx} (id {guid}, inst {instance_id}) connected; waiting for an available UART slot[/yellow]"
+        )
+    if not config.no_imu:
+        initialize_controller_sensors(ctx, console)
+    if config.zero_sticks:
+        zero_context_sticks(ctx, console)
+    contexts[instance_id] = ctx
 
 
 def open_initial_contexts(
@@ -1275,62 +1460,13 @@ def open_initial_contexts(
     controller_indices: List[int],
     console: Console,
     config: BridgeConfig,
-) -> Tuple[Dict[int, ControllerContext], List[PicoUART]]:
+) -> Tuple[Dict[int, ControllerContext], Dict[str, UartLink]]:
     """Open initial controllers and UARTs for detected indices."""
     contexts: Dict[int, ControllerContext] = {}
-    uarts: List[PicoUART] = []
+    links: Dict[str, UartLink] = {}
     for instance_id in controller_indices:
-        if not sdl3.SDL_IsGamepad(instance_id):
-            name = sdl3.SDL_GetJoystickNameForID(instance_id)
-            name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
-            console.print(
-                f"[yellow]ID {instance_id} is not a GameController ({name_str}). Trying raw open failed.[/yellow]"
-            )
-            continue
-        display_idx = pairing.display_index_alloc.allocate()
-        port = assign_port_for_index(pairing, display_idx, console)
-        if port is None and not pairing.auto_pairing_enabled:
-            pairing.display_index_alloc.release(display_idx)
-            continue
-        try:
-            controller, opened_instance_id, guid = open_controller(instance_id)
-        except Exception as exc:
-            console.print(f"[red]Failed to open controller {display_idx}: {exc}[/red]")
-            pairing.display_index_alloc.release(display_idx)
-            continue
-        stable_id = guid
-        should_swap = (
-            display_idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
-        )
-        uart = open_uart_or_warn(port, args.baud, console) if port else None
-        if uart:
-            uarts.append(uart)
-            console.print(
-                f"[green]Controller {display_idx} (id {stable_id}, inst {opened_instance_id}) paired to {port}[/green]"
-            )
-        elif port:
-            console.print(
-                f"[yellow]Controller {display_idx} (id {stable_id}, inst {opened_instance_id}) waiting for UART {port}[/yellow]"
-            )
-        else:
-            console.print(
-                f"[yellow]Controller {display_idx} (id {stable_id}, inst {opened_instance_id}) connected; waiting for an available UART[/yellow]"
-            )
-        ctx = ControllerContext(
-            controller=controller,
-            instance_id=opened_instance_id,
-            controller_index=display_idx,
-            stable_id=stable_id,
-            port=port,
-            uart=uart,
-            swap_abxy=should_swap,
-        )
-        if not config.no_imu:
-            initialize_controller_sensors(ctx, console)
-        if config.zero_sticks:
-            zero_context_sticks(ctx, console)
-        contexts[opened_instance_id] = ctx
-    return contexts, uarts
+        attach_controller(instance_id, args, pairing, contexts, links, console, config)
+    return contexts, links
 
 
 def handle_axis_motion(
@@ -1506,72 +1642,22 @@ def handle_device_added(
     args: argparse.Namespace,
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
-    uarts: List[PicoUART],
+    links: Dict[str, UartLink],
     console: Console,
     config: BridgeConfig,
 ) -> None:
-    """Handle controller hotplug by opening and pairing UART if possible."""
-    sdl_id = event.gdevice.which
-    if sdl_id in contexts:
-        return
-    if not sdl3.SDL_IsGamepad(sdl_id):
-        name = sdl3.SDL_GetJoystickNameForID(sdl_id)
-        name_str = name.decode() if isinstance(name, bytes) else str(name) if name else "Unknown"
-        console.print(
-            f"[yellow]Device {sdl_id} is not a GameController ({name_str}).[/yellow]"
-        )
-        return
-    display_idx = pairing.display_index_alloc.allocate()
-    port = assign_port_for_index(pairing, display_idx, console)
-    if port is None and not pairing.auto_pairing_enabled:
-        pairing.display_index_alloc.release(display_idx)
-        return
-    try:
-        controller, instance_id, guid = open_controller(sdl_id)
-    except Exception as exc:
-        console.print(f"[red]Hotplug open failed for controller {display_idx}: {exc}[/red]")
-        pairing.display_index_alloc.release(display_idx)
-        return
-    stable_id = guid
-    should_swap = display_idx in config.swap_abxy_indices or stable_id in config.swap_abxy_ids
-    uart = open_uart_or_warn(port, args.baud, console) if port else None
-    if uart:
-        uarts.append(uart)
-        console.print(
-            f"[green]Controller {display_idx} (id {stable_id}, inst {instance_id}) paired to {port}[/green]"
-        )
-    elif port:
-        console.print(
-            f"[yellow]Controller {display_idx} (id {stable_id}, inst {instance_id}) waiting for UART {port}[/yellow]"
-        )
-    else:
-        console.print(
-            f"[yellow]Controller {display_idx} (id {stable_id}, inst {instance_id}) connected; waiting for an available UART[/yellow]"
-        )
-    ctx = ControllerContext(
-        controller=controller,
-        instance_id=instance_id,
-        controller_index=display_idx,
-        stable_id=stable_id,
-        port=port,
-        uart=uart,
-        swap_abxy=should_swap,
-    )
-    if not config.no_imu:
-        initialize_controller_sensors(ctx, console)
-    if config.zero_sticks:
-        zero_context_sticks(ctx, console)
-    contexts[instance_id] = ctx
+    """Handle controller hotplug by opening it and pairing a UART slot if possible."""
+    attach_controller(event.gdevice.which, args, pairing, contexts, links, console, config)
 
 
 def handle_device_removed(
     event: sdl3.SDL_Event,
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
-    uarts: List[PicoUART],
+    links: Dict[str, UartLink],
     console: Console,
 ) -> None:
-    """Handle controller removal and release any auto-assigned UART."""
+    """Handle controller removal and release any auto-assigned UART slot."""
     instance_id = event.gdevice.which
     ctx = contexts.pop(instance_id, None)
     if not ctx:
@@ -1579,57 +1665,37 @@ def handle_device_removed(
     console.print(
         f"[yellow]Controller {ctx.controller_index} (id {ctx.stable_id}) removed[/yellow]"
     )
-    # Close the UART handle *before* returning the port to the pool so the
-    # next consumer can actually open it (Windows holds the port exclusively).
-    if ctx.uart:
-        try:
-            ctx.uart.close()
-        except Exception:
-            pass
-        if ctx.uart in uarts:
-            uarts.remove(ctx.uart)
-        ctx.uart = None
     sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
+    # Close the serial handle once no controller uses the port so the next
+    # consumer can actually open it (Windows holds the port exclusively).
+    if ctx.port and all(other.port != ctx.port for other in contexts.values()):
+        close_link(links, ctx.port)
     if ctx.controller_index in pairing.auto_assigned_indices:
-        # Return auto-paired UART back to the pool so a future device can use it.
+        # Return the slot to the pool so a future device can use it.
         freed = pairing.mapping_by_index.pop(ctx.controller_index, None)
         pairing.auto_assigned_indices.discard(ctx.controller_index)
-        if freed and freed not in pairing.available_ports:
-            pairing.available_ports.append(freed)
-            console.print(f"[cyan]Released UART {freed} back to pool[/cyan]")
+        if freed:
+            port, slot = freed
+            if port not in pairing.available_ports:
+                pairing.available_ports.append(port)
+            console.print(f"[cyan]Released {port} slot {slot} back to pool[/cyan]")
     pairing.display_index_alloc.release(ctx.controller_index)
     sdl3.SDL_CloseGamepad(ctx.controller)
 
 
-def service_contexts(
+def service_link(
     now: float,
-    args: argparse.Namespace,
     config: BridgeConfig,
-    contexts: Dict[int, ControllerContext],
-    uarts: List[PicoUART],
+    link: UartLink,
+    members: List[ControllerContext],
     console: Console,
 ) -> None:
-    """Poll controllers, reconnect UARTs, send reports, and apply rumble."""
-    for ctx in list(contexts.values()):
-        current_button_map = (
-            config.button_map_swapped
-            if (config.swap_abxy_global or ctx.swap_abxy)
-            else config.button_map_default
-        )
-        poll_controller_buttons(ctx, current_button_map)
-        # Reconnect UART if needed.
-        if ctx.port and ctx.uart is None and (now - ctx.last_reopen_attempt) > 1.0:
-            ctx.last_reopen_attempt = now
-            uart = open_uart_or_warn(ctx.port, args.baud, console)
-            if uart:
-                uarts.append(uart)
-                console.print(
-                    f"[green]Reconnected UART {ctx.port} for controller {ctx.controller_index}[/green]"
-                )
-                ctx.uart = uart
-        if ctx.uart is None:
-            continue
-        try:
+    """Send due reports for every controller on one port and demux its rumble."""
+    uart = link.uart
+    if uart is None:
+        return
+    try:
+        for ctx in members:
             if now - ctx.last_send >= config.interval:
                 if ctx.sensors_enabled and not config.no_imu:
                     # Keep publishing the latest complete sensor window. Draining
@@ -1637,19 +1703,24 @@ def service_contexts(
                     ctx.report.imu_samples = ctx.imu_samples
                 else:
                     ctx.report.imu_samples = []
-                ctx.uart.send_report(ctx.report)
+                uart.send_report(ctx.report, ctx.slot)
                 ctx.last_send = now
 
-            latest_rumble = None
-            while True:
-                rumble = ctx.uart.read_rumble()
-                if rumble is None:
-                    break
-                latest_rumble = rumble
-                ctx.debug_rumble_frames += 1
+        # Keep only the freshest rumble command per slot seen during this tick.
+        latest_by_slot: Dict[int, Tuple[float, float]] = {}
+        frames_by_slot: Dict[int, int] = {}
+        while True:
+            frame = uart.read_rumble()
+            if frame is None:
+                break
+            slot, low, high = frame
+            latest_by_slot[slot] = (low, high)
+            frames_by_slot[slot] = frames_by_slot.get(slot, 0) + 1
 
+        for ctx in members:
+            ctx.debug_rumble_frames += frames_by_slot.get(ctx.slot, 0)
+            latest_rumble = latest_by_slot.get(ctx.slot)
             if latest_rumble is not None:
-                # Apply only the freshest rumble command seen during this tick.
                 ctx.rumble_active, accepted = apply_rumble(
                     ctx.controller,
                     latest_rumble[0],
@@ -1664,30 +1735,65 @@ def service_contexts(
                     ctx.last_debug_rumble = latest_rumble
                     error = "" if accepted else f" sdl_error={sdl3.SDL_GetError().decode(errors='ignore')!r}"
                     print(
-                        f"[RUMBLE idx={ctx.controller_index}] frame#{ctx.debug_rumble_frames} "
+                        f"[RUMBLE idx={ctx.controller_index} slot={ctx.slot}] frame#{ctx.debug_rumble_frames} "
                         f"low={latest_rumble[0]:.3f} high={latest_rumble[1]:.3f} "
                         f"-> motor low={shape_rumble(latest_rumble[0], config.rumble_gain, config.rumble_curve):.3f} "
                         f"high={shape_rumble(latest_rumble[1], config.rumble_gain, config.rumble_curve):.3f} "
                         f"accepted={accepted}{error}"
                     )
-            elif (
-                ctx.rumble_active
-                and (now - ctx.last_rumble_at) > RUMBLE_IDLE_TIMEOUT
-            ):
+            elif ctx.rumble_active and (now - ctx.last_rumble_at) > RUMBLE_IDLE_TIMEOUT:
                 sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
                 ctx.rumble_active = False
-        except SerialException as exc:
-            console.print(f"[yellow]UART {ctx.port} disconnected: {exc}[/yellow]")
-            try:
-                ctx.uart.close()
-            except Exception:
-                pass
+    except SerialException as exc:
+        console.print(f"[yellow]UART {link.port} disconnected: {exc}[/yellow]")
+        try:
+            uart.close()
+        except Exception:
+            pass
+        link.uart = None
+        link.last_reopen_attempt = now
+        for ctx in members:
             sdl3.SDL_RumbleGamepad(ctx.controller, 0, 0, 0)
-            ctx.uart = None
             ctx.rumble_active = False
-            ctx.last_reopen_attempt = now
-        except Exception as exc:
-            console.print(f"[red]UART error on {ctx.port}: {exc}[/red]")
+    except Exception as exc:
+        console.print(f"[red]UART error on {link.port}: {exc}[/red]")
+
+
+def service_contexts(
+    now: float,
+    args: argparse.Namespace,
+    config: BridgeConfig,
+    contexts: Dict[int, ControllerContext],
+    links: Dict[str, UartLink],
+    console: Console,
+) -> None:
+    """Poll controllers, reconnect UARTs, send reports, and apply rumble."""
+    members_by_port: Dict[str, List[ControllerContext]] = {}
+    for ctx in list(contexts.values()):
+        current_button_map = (
+            config.button_map_swapped
+            if (config.swap_abxy_global or ctx.swap_abxy)
+            else config.button_map_default
+        )
+        poll_controller_buttons(ctx, current_button_map)
+        if ctx.port:
+            members_by_port.setdefault(ctx.port, []).append(ctx)
+
+    for port, members in members_by_port.items():
+        link = links.get(port)
+        if link is None:
+            link = UartLink(port=port)
+            links[port] = link
+        # Reconnect the shared UART if needed.
+        if link.uart is None and (now - link.last_reopen_attempt) > 1.0:
+            link.last_reopen_attempt = now
+            link.uart = open_uart_or_warn(port, args.baud, console)
+            if link.uart:
+                console.print(
+                    f"[green]Reconnected UART {port} for controller(s) "
+                    f"{', '.join(str(ctx.controller_index) for ctx in members)}[/green]"
+                )
+        service_link(now, config, link, members, console)
 
 
 def run_bridge_loop(
@@ -1696,7 +1802,7 @@ def run_bridge_loop(
     config: BridgeConfig,
     pairing: PairingState,
     contexts: Dict[int, ControllerContext],
-    uarts: List[PicoUART],
+    links: Dict[str, UartLink],
     hotkey: Optional[HotkeyMonitor] = None,
 ) -> None:
     """Main event loop for bridging controllers to UART and handling rumble."""
@@ -1721,20 +1827,18 @@ def run_bridge_loop(
                 handle_sensor_update(event, contexts, config)
             elif event.type == sdl3.SDL_EVENT_GAMEPAD_ADDED:
                 handle_device_added(
-                    event, args, pairing, contexts, uarts, console, config
+                    event, args, pairing, contexts, links, console, config
                 )
             elif event.type == sdl3.SDL_EVENT_GAMEPAD_REMOVED:
-                handle_device_removed(event, pairing, contexts, uarts, console)
+                handle_device_removed(event, pairing, contexts, links, console)
 
         now = time.monotonic()
         if now - last_port_scan > port_scan_interval:
             # Periodically rescan for new UARTs to auto-pair hotplugged devices.
-            discover_new_ports(pairing, contexts, console)
+            discover_new_ports(pairing, contexts, links, console)
             last_port_scan = now
-            pair_waiting_contexts(args, pairing, contexts, uarts, console)
-        else:
-            pair_waiting_contexts(args, pairing, contexts, uarts, console)
-        service_contexts(now, args, config, contexts, uarts, console)
+        pair_waiting_contexts(args, pairing, contexts, links, console)
+        service_contexts(now, args, config, contexts, links, console)
         if hotkey:
             for key in hotkey.poll_keys():
                 if key == config.zero_hotkey:
@@ -1744,12 +1848,13 @@ def run_bridge_loop(
         sdl3.SDL_Delay(1)
 
 
-def cleanup(contexts: Dict[int, ControllerContext], uarts: List[PicoUART]) -> None:
+def cleanup(contexts: Dict[int, ControllerContext], links: Dict[str, UartLink]) -> None:
     """Gracefully close controllers, UARTs, and SDL subsystems."""
     for ctx in contexts.values():
         sdl3.SDL_CloseGamepad(ctx.controller)
-    for uart in uarts:
-        uart.close()
+    for link in links.values():
+        if link.uart:
+            link.uart.close()
     sdl3.SDL_Quit()
 
 
@@ -1764,7 +1869,7 @@ def main() -> None:
     config = build_bridge_config(console, args)
     initialize_sdl(parser)
     contexts: Dict[int, ControllerContext] = {}
-    uarts: List[PicoUART] = []
+    links: Dict[str, UartLink] = {}
     hotkey_monitor: Optional[HotkeyMonitor] = None
     try:
         if args.list_controllers:
@@ -1790,18 +1895,18 @@ def main() -> None:
             candidate = HotkeyMonitor(console, hotkey_messages)
             if candidate.start():
                 hotkey_monitor = candidate
-        contexts, uarts = open_initial_contexts(
+        contexts, links = open_initial_contexts(
             args, pairing, controller_indices, console, config
         )
         if not contexts:
             console.print(
                 "[yellow]No controllers opened; waiting for hotplug events...[/yellow]"
             )
-        run_bridge_loop(args, console, config, pairing, contexts, uarts, hotkey_monitor)
+        run_bridge_loop(args, console, config, pairing, contexts, links, hotkey_monitor)
     finally:
         if hotkey_monitor:
             hotkey_monitor.stop()
-        cleanup(contexts, uarts)
+        cleanup(contexts, links)
 
 
 if __name__ == "__main__":

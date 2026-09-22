@@ -681,8 +681,10 @@ void test_uart_parser_is_pure() {
         packet.back() = static_cast<uint8_t>(packet.back() + packet[i]);
     }
     ControllerState parsed{};
-    expect(switch_pro_apply_uart_packet(packet.data(), packet.size(), parsed),
+    uint8_t slot = 0xff;
+    expect(switch_pro_apply_uart_packet(packet.data(), packet.size(), parsed, slot),
            "valid UART packet was rejected");
+    expect(slot == 0, "v2 UART packet must map to slot 0");
     expect(parsed.button_east && parsed.button_left_shoulder && parsed.dpad_down &&
                parsed.dpad_left,
            "UART buttons or hat were parsed incorrectly");
@@ -707,12 +709,44 @@ void test_uart_parser_is_pure() {
     ControllerState unchanged{};
     unchanged.button_system = true;
     unchanged.left_stick_x = 123;
+    uint8_t unchanged_slot = 0xff;
     packet.back() ^= 0xffu;
     expect(!switch_pro_apply_uart_packet(packet.data(), packet.size(),
-                                         unchanged),
+                                         unchanged, unchanged_slot),
            "invalid UART checksum was accepted");
-    expect(unchanged.button_system && unchanged.left_stick_x == 123,
-           "failed UART parse modified its output reference");
+    expect(unchanged.button_system && unchanged.left_stick_x == 123 &&
+               unchanged_slot == 0xff,
+           "failed UART parse modified its output references");
+
+    // v3 inserts a slot byte between the length and the payload.
+    std::array<uint8_t, 13> slotted{};
+    slotted[0] = 0xaa;
+    slotted[1] = 0x03;
+    slotted[2] = 8;
+    slotted[3] = 2;
+    std::copy(packet.begin() + 3, packet.begin() + 10, slotted.begin() + 4);
+    for (unsigned i = 0; i < slotted.size() - 1; ++i) {
+        slotted.back() = static_cast<uint8_t>(slotted.back() + slotted[i]);
+    }
+    ControllerState slotted_state{};
+    expect(switch_pro_apply_uart_packet(slotted.data(), slotted.size(),
+                                        slotted_state, slot),
+           "valid v3 UART packet was rejected");
+    expect(slot == 2, "v3 slot byte was not reported");
+    expect(slotted_state.button_east && slotted_state.button_left_shoulder &&
+               slotted_state.dpad_down && slotted_state.dpad_left &&
+               slotted_state.right_stick_y ==
+                   controller_axis_from_unsigned(0x7878),
+           "v3 payload offsets were parsed incorrectly");
+
+    slotted[3] = SWITCH_PICO_HID_INSTANCE_COUNT;
+    slotted.back() = 0;
+    for (unsigned i = 0; i < slotted.size() - 1; ++i) {
+        slotted.back() = static_cast<uint8_t>(slotted.back() + slotted[i]);
+    }
+    expect(!switch_pro_apply_uart_packet(slotted.data(), slotted.size(),
+                                         slotted_state, slot),
+           "out-of-range v3 slot was accepted");
 }
 
 void test_motion_backpressure_retries_without_advancing_state() {

@@ -29,8 +29,9 @@ ALL_BUTTONS = [
 
 def main() -> None:
     # auto_send keeps the current state flowing in the background, so we don't
-    # need to manually pump frames to the Pico.
-    with SwitchUARTClient(PORT, send_interval=SEND_INTERVAL, auto_send=True) as client:
+    # need to manually pump frames to the Pico. slot picks which of the Pico's
+    # four emulated controllers (0-3) this script drives.
+    with SwitchUARTClient(PORT, send_interval=SEND_INTERVAL, auto_send=True, slot=0) as client:
         client.neutral()
 
         # Press every button/DPAD direction one-by-one, holding each briefly.

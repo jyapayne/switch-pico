@@ -1,4 +1,4 @@
-"""Tests for UART v2 protocol serialization in switch_pico_uart."""
+"""Tests for UART v3 protocol serialization in switch_pico_uart."""
 
 import struct
 import pytest
@@ -9,8 +9,10 @@ from switch_pico_bridge.switch_pico_uart import (
     PicoUART,
     UART_HEADER,
     UART_PROTOCOL_VERSION,
+    UART_SLOT_COUNT,
     RUMBLE_HEADER,
     RUMBLE_TYPE_DECODED,
+    RUMBLE_TYPE_SLOT,
     ACCEL_LSB_PER_G,
     GYRO_LSB_PER_RAD_S,
     MS2_PER_G,
@@ -35,7 +37,12 @@ class BufferedSerial:
         self._data.extend(data)
 
 
-def make_rumble_frame(low: int, high: int) -> bytes:
+def make_rumble_frame(low: int, high: int, slot: int = 0) -> bytes:
+    frame = bytes([RUMBLE_HEADER, RUMBLE_TYPE_SLOT, slot, low, high])
+    return frame + bytes([compute_checksum(frame)])
+
+
+def make_legacy_rumble_frame(low: int, high: int) -> bytes:
     frame = bytes([RUMBLE_HEADER, RUMBLE_TYPE_DECODED, low, high])
     return frame + bytes([compute_checksum(frame)])
 
@@ -48,8 +55,8 @@ def make_uart(data: bytes = b"") -> tuple[PicoUART, BufferedSerial]:
     return uart, serial_port
 
 
-def test_v2_frame_with_imu_samples():
-    """V2 frame with 3 IMU samples should be 48 bytes with correct layout."""
+def test_v3_frame_with_imu_samples():
+    """V3 frame with 3 IMU samples should be 49 bytes with correct layout."""
     r = SwitchReport(
         buttons=0,
         imu_samples=[
@@ -59,33 +66,47 @@ def test_v2_frame_with_imu_samples():
         ],
     )
     data = r.to_bytes()
-    assert len(data) == 48, f"Expected 48 bytes, got {len(data)}"
+    assert len(data) == 49, f"Expected 49 bytes, got {len(data)}"
     assert data[0] == UART_HEADER  # 0xAA
-    assert data[1] == UART_PROTOCOL_VERSION  # 0x02
+    assert data[1] == UART_PROTOCOL_VERSION  # 0x03
     assert data[2] == 44  # payload_len
-    assert data[10] == 3  # imu_count
+    assert data[3] == 0  # slot
+    assert data[11] == 3  # imu_count
     # Verify checksum
     assert data[-1] == compute_checksum(data[:-1])
-    # Verify first sample accel_x (int16 LE at byte 11)
-    ax0 = struct.unpack_from("<h", data, 11)[0]
+    # Verify first sample accel_x (int16 LE at byte 12)
+    ax0 = struct.unpack_from("<h", data, 12)[0]
     assert ax0 == 100, f"Expected accel_x=100, got {ax0}"
-    # Verify first sample gyro_z (int16 LE at bytes 21-22)
-    gz0 = struct.unpack_from("<h", data, 21)[0]
+    # Verify first sample gyro_z (int16 LE at bytes 22-23)
+    gz0 = struct.unpack_from("<h", data, 22)[0]
     assert gz0 == 0, f"Expected gyro_z=0, got {gz0}"
 
 
-def test_v2_frame_no_imu():
-    """V2 frame with no IMU samples should be 12 bytes."""
+def test_v3_frame_no_imu():
+    """V3 frame with no IMU samples should be 13 bytes."""
     r = SwitchReport(
         buttons=0x0004, hat=SwitchDpad.CENTER, lx=128, ly=128, rx=128, ry=128
     )
     data = r.to_bytes()
-    assert len(data) == 12, f"Expected 12 bytes, got {len(data)}"
+    assert len(data) == 13, f"Expected 13 bytes, got {len(data)}"
     assert data[0] == UART_HEADER
     assert data[1] == UART_PROTOCOL_VERSION
     assert data[2] == 8  # payload_len
-    assert data[10] == 0  # imu_count
+    assert data[3] == 0  # slot
+    assert data[11] == 0  # imu_count
     assert data[-1] == compute_checksum(data[:-1])
+
+
+def test_v3_frame_addresses_slot():
+    """The slot byte selects which emulated controller receives the report."""
+    data = SwitchReport(buttons=0x0001).to_bytes(slot=3)
+    assert data[3] == 3
+    assert struct.unpack_from("<H", data, 4)[0] == 0x0001
+    assert data[-1] == compute_checksum(data[:-1])
+    with pytest.raises(ValueError):
+        SwitchReport().to_bytes(slot=UART_SLOT_COUNT)
+    with pytest.raises(ValueError):
+        SwitchReport().to_bytes(slot=-1)
 
 
 def test_checksum_validation():
@@ -96,7 +117,7 @@ def test_checksum_validation():
     assert data[-1] == expected_checksum
     # Corrupt a byte and verify mismatch
     corrupted = bytearray(data)
-    corrupted[3] ^= 0xFF  # flip bits in first payload byte
+    corrupted[4] ^= 0xFF  # flip bits in first payload byte
     recalculated = sum(corrupted[:-1]) & 0xFF
     assert corrupted[-1] != recalculated, "Checksum should not match corrupted data"
 
@@ -126,21 +147,21 @@ def test_imu_sample_dataclass():
     s2 = IMUSample(accel_x=99999)
     r = SwitchReport(imu_samples=[s2])
     data = r.to_bytes()
-    ax = struct.unpack_from("<h", data, 11)[0]
+    ax = struct.unpack_from("<h", data, 12)[0]
     assert ax == 32767, f"Expected clamped value 32767, got {ax}"
 
 
-def test_backward_compat_switch_report():
-    """SwitchReport with no imu_samples produces valid v2 frame (backward compat)."""
+def test_switch_report_payload_layout():
+    """Buttons and axes land at the documented v3 payload offsets."""
     r = SwitchReport(buttons=0x000A, lx=200, ly=50, rx=128, ry=128)
     data = r.to_bytes()
-    assert len(data) == 12
-    assert data[1] == 0x02  # still v2
-    # Buttons at bytes 3-4
-    buttons = struct.unpack_from("<H", data, 3)[0]
+    assert len(data) == 13
+    assert data[1] == 0x03
+    # Buttons at bytes 4-5
+    buttons = struct.unpack_from("<H", data, 4)[0]
     assert buttons == 0x000A
-    # lx at byte 6
-    assert data[6] == 200
+    # lx at byte 7
+    assert data[7] == 200
 
 
 def test_max_imu_samples_capped():
@@ -148,37 +169,51 @@ def test_max_imu_samples_capped():
     samples = [IMUSample(i, 0, 0, 0, 0, 0) for i in range(5)]
     r = SwitchReport(imu_samples=samples)
     data = r.to_bytes()
-    assert len(data) == 48  # 3 samples, not 5
-    assert data[10] == 3
+    assert len(data) == 49  # 3 samples, not 5
+    assert data[11] == 3
     assert data[2] == 44  # payload_len for 3 samples
 
 
 def test_decoded_rumble_frame_survives_fragmented_input():
-    frame = make_rumble_frame(64, 192)
+    frame = make_rumble_frame(64, 192, slot=1)
     uart, serial_port = make_uart(frame[:3])
 
     assert uart.read_rumble() is None
 
     serial_port.feed(frame[3:])
-    assert uart.read_rumble() == pytest.approx((64 / 255.0, 192 / 255.0))
+    assert uart.read_rumble() == pytest.approx((1, 64 / 255.0, 192 / 255.0))
 
 
 def test_decoded_rumble_frame_resynchronizes_after_garbage():
     uart, _ = make_uart(b"\x00\xffnot-a-frame" + make_rumble_frame(12, 34))
 
-    assert uart.read_rumble() == pytest.approx((12 / 255.0, 34 / 255.0))
+    assert uart.read_rumble() == pytest.approx((0, 12 / 255.0, 34 / 255.0))
 
 
 def test_decoded_rumble_frame_rejects_bad_checksum():
     corrupted = bytearray(make_rumble_frame(25, 50))
     corrupted[-1] ^= 0x01
-    uart, _ = make_uart(bytes(corrupted) + make_rumble_frame(75, 100))
+    uart, _ = make_uart(bytes(corrupted) + make_rumble_frame(75, 100, slot=2))
 
-    assert uart.read_rumble() == pytest.approx((75 / 255.0, 100 / 255.0))
+    assert uart.read_rumble() == pytest.approx((2, 75 / 255.0, 100 / 255.0))
 
 
 def test_decoded_rumble_zero_and_full_magnitudes():
-    uart, _ = make_uart(make_rumble_frame(0, 0) + make_rumble_frame(255, 255))
+    uart, _ = make_uart(make_rumble_frame(0, 0) + make_rumble_frame(255, 255, slot=3))
 
-    assert uart.read_rumble() == (0.0, 0.0)
-    assert uart.read_rumble() == (1.0, 1.0)
+    assert uart.read_rumble() == (0, 0.0, 0.0)
+    assert uart.read_rumble() == (3, 1.0, 1.0)
+
+
+def test_legacy_rumble_frame_maps_to_slot_zero():
+    """Pre-multi-controller firmware sends 5-byte frames without a slot byte."""
+    uart, _ = make_uart(make_legacy_rumble_frame(10, 20) + make_rumble_frame(30, 40, slot=1))
+
+    assert uart.read_rumble() == pytest.approx((0, 10 / 255.0, 20 / 255.0))
+    assert uart.read_rumble() == pytest.approx((1, 30 / 255.0, 40 / 255.0))
+
+
+def test_rumble_frame_with_out_of_range_slot_is_skipped():
+    uart, _ = make_uart(make_rumble_frame(1, 2, slot=UART_SLOT_COUNT) + make_rumble_frame(3, 4))
+
+    assert uart.read_rumble() == pytest.approx((0, 3 / 255.0, 4 / 255.0))

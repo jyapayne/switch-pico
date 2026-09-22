@@ -4,11 +4,13 @@ Lightweight helpers for talking to the switch-pico firmware over UART.
 
 This module exposes the report structure plus a small convenience wrapper
 so other scripts can do things like "press a button" or "move a stick" without
-depending on SDL. It mirrors the framing in ``switch-pico.cpp``:
+depending on SDL. It mirrors the framing in ``src/firmware/main.cpp``:
 
-  Host -> Pico : UART v2 controller report
-  Pico -> Host : 0xBB, 0x02, low-frequency magnitude, high-frequency magnitude,
-                 checksum (sum of the first 4 bytes)
+  Host -> Pico : UART v3 controller report
+                 0xAA, 0x03, payload_len, slot, payload..., checksum
+                 (v2 frames without the slot byte are still accepted as slot 0)
+  Pico -> Host : 0xBB, 0x03, slot, low-frequency magnitude,
+                 high-frequency magnitude, checksum (sum of the first 5 bytes)
 """
 
 from __future__ import annotations
@@ -25,10 +27,13 @@ import serial
 from serial.tools import list_ports, list_ports_common
 
 UART_HEADER = 0xAA
-UART_PROTOCOL_VERSION = 0x02
+UART_PROTOCOL_VERSION = 0x03
 RUMBLE_HEADER = 0xBB
+# Legacy 5-byte frame (no slot) from firmware before multi-controller support.
 RUMBLE_TYPE_DECODED = 0x02
+RUMBLE_TYPE_SLOT = 0x03
 UART_BAUD = 921600
+UART_SLOT_COUNT = 4
 IMU_SAMPLES_PER_REPORT = 3
 
 MS2_PER_G = 9.80665
@@ -242,8 +247,10 @@ class SwitchReport:
     ry: int = 128
     imu_samples: List[IMUSample] = field(default_factory=list)
 
-    def to_bytes(self) -> bytes:
-        """Serialize the report into UART v2 framed packet format."""
+    def to_bytes(self, slot: int = 0) -> bytes:
+        """Serialize the report into a UART v3 frame addressed to ``slot``."""
+        if not 0 <= slot < UART_SLOT_COUNT:
+            raise ValueError(f"slot must be 0-{UART_SLOT_COUNT - 1}, got {slot}")
         count = min(len(self.imu_samples), IMU_SAMPLES_PER_REPORT)
         payload = struct.pack(
             "<HBBBBBB",
@@ -269,7 +276,7 @@ class SwitchReport:
             )
 
         payload_len = len(payload)
-        frame = bytes([UART_HEADER, UART_PROTOCOL_VERSION, payload_len]) + payload
+        frame = bytes([UART_HEADER, UART_PROTOCOL_VERSION, payload_len, slot]) + payload
         return frame + bytes([compute_checksum(frame)])
 
 
@@ -290,20 +297,21 @@ class PicoUART:
         )
         self._buffer = bytearray()
 
-    def send_report(self, report: SwitchReport) -> None:
-        """Send a controller report to the Pico."""
-        self.serial.write(report.to_bytes())
+    def send_report(self, report: SwitchReport, slot: int = 0) -> None:
+        """Send a controller report to one of the Pico's controller slots."""
+        self.serial.write(report.to_bytes(slot))
 
-    def read_rumble(self) -> Optional[Tuple[float, float]]:
+    def read_rumble(self) -> Optional[Tuple[int, float, float]]:
         """
-        Extract one decoded rumble frame as normalized low/high magnitudes.
+        Extract one decoded rumble frame as (slot, low, high) with magnitudes
+        normalized to 0.0-1.0.
 
         Frame format:
           0: 0xBB (RUMBLE_HEADER)
-          1: type (0x02 for decoded rumble)
-          2: low-frequency magnitude (0-255)
-          3: high-frequency magnitude (0-255)
-          4: checksum (sum of first 4 bytes) & 0xFF
+          1: type (0x03 slot frame; legacy 0x02 has no slot byte and means slot 0)
+          2: slot (0x03 only)
+          then low-frequency magnitude, high-frequency magnitude (0-255)
+          and checksum (sum of the preceding bytes) & 0xFF
         """
         waiting = self.serial.in_waiting
         if waiting:
@@ -317,19 +325,25 @@ class PicoUART:
             if start < 0:
                 self._buffer.clear()
                 return None
+            if len(self._buffer) - start < 2:
+                del self._buffer[:start]
+                return None
 
-            if len(self._buffer) - start < 5:
+            frame_type = self._buffer[start + 1]
+            length = 6 if frame_type == RUMBLE_TYPE_SLOT else 5
+            if len(self._buffer) - start < length:
                 if start > 0:
                     del self._buffer[:start]
                 return None
 
-            frame = self._buffer[start : start + 5]
-            checksum = compute_checksum(bytes(frame[:4]))
-
-            if frame[1] == RUMBLE_TYPE_DECODED and checksum == frame[4]:
-                rumble = (frame[2] / 255.0, frame[3] / 255.0)
-                del self._buffer[: start + 5]
-                return rumble
+            frame = bytes(self._buffer[start : start + length])
+            if compute_checksum(frame[:-1]) == frame[-1]:
+                if frame_type == RUMBLE_TYPE_SLOT and frame[2] < UART_SLOT_COUNT:
+                    del self._buffer[: start + length]
+                    return frame[2], frame[3] / 255.0, frame[4] / 255.0
+                if frame_type == RUMBLE_TYPE_DECODED:
+                    del self._buffer[: start + length]
+                    return 0, frame[2] / 255.0, frame[3] / 255.0
 
             del self._buffer[: start + 1]
 
@@ -408,6 +422,7 @@ class SwitchUARTClient:
         baud: int = UART_BAUD,
         send_interval: float = 1.0 / 500.0,
         auto_send: bool = True,
+        slot: int = 0,
     ) -> None:
         """
         Args:
@@ -416,7 +431,11 @@ class SwitchUARTClient:
             send_interval: Minimum interval between sends in seconds (defaults to 500 Hz).
             auto_send: If True, keep sending the current state in a background thread so the
                        Pico continuously sees the latest input (mirrors controller_uart_bridge).
+            slot: Which of the Pico's emulated controllers (0-3) this client drives.
         """
+        if not 0 <= slot < UART_SLOT_COUNT:
+            raise ValueError(f"slot must be 0-{UART_SLOT_COUNT - 1}, got {slot}")
+        self.slot = slot
         self.uart = PicoUART(port, baud)
         self.state = SwitchControllerState()
         self.send_interval = max(0.0, send_interval)
@@ -432,7 +451,7 @@ class SwitchUARTClient:
         now = time.monotonic()
         if self.send_interval and (now - self._last_send) < self.send_interval:
             return
-        self.uart.send_report(self.state.report)
+        self.uart.send_report(self.state.report, self.slot)
         self._last_send = now
 
     def _start_auto_send_thread(self) -> None:
@@ -517,10 +536,17 @@ class SwitchUARTClient:
 
     def poll_rumble(self) -> Optional[Tuple[float, float]]:
         """
-        Poll for decoded low/high rumble magnitudes normalized to 0.0-1.0.
-        Returns None if no rumble frame was available.
+        Poll for decoded low/high rumble magnitudes normalized to 0.0-1.0 for
+        this client's slot. Returns None if no rumble frame was available;
+        frames addressed to other slots are discarded.
         """
-        return self.uart.read_rumble()
+        while True:
+            frame = self.uart.read_rumble()
+            if frame is None:
+                return None
+            slot, low, high = frame
+            if slot == self.slot:
+                return low, high
 
     def close(self) -> None:
         if self._auto_thread:

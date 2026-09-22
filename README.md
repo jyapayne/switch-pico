@@ -3,7 +3,7 @@
 Raspberry Pi Pico firmware that emulates one or more Switch Pro controllers over USB. Input can come from the SDL3-to-UART computer bridge or, on Pico 2 W, directly from Bluetooth controllers through Bluepad32.
 
 ## What you get
-- **Firmware** (`src/firmware/`): acts as a Switch Pro controller (one on standard Pico, four on Pico 2 W AIO), accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
+- **Firmware** (`src/firmware/`): acts as up to four Switch Pro controllers on one USB device (regular Pico driven over UART, or Pico 2 W AIO), accepting either UART bridge reports or the optional Pico 2 W Bluepad32 backend.
 - **Python bridge** (`switch_pico_bridge.controller_uart_bridge` / CLI `controller-uart-bridge`): reads SDL3 controllers on the host, sends reports over UART, and applies rumble locally. Hot‑plug friendly and cross‑platform (macOS/Windows/Linux).
 - **Color configuration** (`src/firmware/platform/pico/controller_color_config.h`): compile-time RGB colors for emulated controller grips and supported Bluetooth controller LEDs.
 - **Pico 2 W AIO firmware** (`firmware/switch-pico-aio.uf2`): hosts four concurrent Bluetooth controllers and sends their controls, calibrated motion, rumble, and slot identity through four separate Switch Pro USB interfaces without a computer.
@@ -2458,13 +2458,41 @@ RUMBLE (force feedback)
 
 Nintendo sends two stateful four-byte HD-rumble actuator words with full/relative low/high-band commands and up to three substeps. `SwitchHapticsDecoder` retains this timeline as well as conventional strong/weak magnitudes. The selected DualSense's native PCM backend uses the timeline; ordinary controller-parser and UART/SDL paths use the magnitudes. Preserving frequency intent is not a claim of identical force response across actuators. Native forwarding for genuine Switch-family controllers is [planned separately](ADAPTER_PARITY_PLAN.md#native-switch-family-hd-rumble--planned), not enabled by the DualSense implementation.
 
-The UART return frame carries the decoded result rather than raw HD-rumble bytes:
+### UART framing (v3, multi-controller)
+
+The regular Pico firmware exposes up to four Switch Pro controllers on one USB
+device (`SWITCH_PICO_UART_CONTROLLERS`, default 4, CMake cache option). Every
+frame in both directions names the slot it belongs to:
 
 ```text
-0xBB, 0x02, low-frequency magnitude, high-frequency magnitude, checksum
+Host -> Pico : 0xAA, 0x03, payload_len, slot, payload..., checksum
+Pico -> Host : 0xBB, 0x03, slot, low-frequency magnitude, high-frequency magnitude, checksum
 ```
 
-The checksum is the sum of the first four bytes modulo 256. Firmware and Python bridge versions from before this change are not rumble-protocol compatible; controller input framing remains unchanged.
+The checksum is the sum of all preceding bytes modulo 256; the payload is
+unchanged from v2 (buttons, hat, sticks, IMU count and samples). The firmware
+still accepts v2 input frames (`0xAA, 0x02, payload_len, payload..., checksum`)
+as slot 0, so older `switch_pico_uart` scripts keep working, but it only emits
+the slot-tagged rumble frame. The bridge accepts both the 0x03 slot frame and
+the older 5-byte `0xBB, 0x02` frame (as slot 0). Firmware and bridge from before
+this change are not compatible with each other beyond that: an old bridge sees
+no rumble from new firmware, and an old firmware ignores v3 input.
+
+Bridge usage with several controllers on one Pico:
+
+```sh
+# Auto-pairing fills slots 0-3 on a port once every available port has one controller.
+controller-uart-bridge --ports COM11
+# Explicit slots (omitted slots are filled in order from 0).
+controller-uart-bridge --map 0:COM11 --map 1:COM11 --map 2:COM11:3
+# Firmware built with SWITCH_PICO_UART_CONTROLLERS=1, or one controller per Pico:
+controller-uart-bridge --slots-per-port 1
+```
+
+All configured controllers are always present to the Switch, exactly like the
+AIO firmware. Four controllers with IMU enabled at the default 500 Hz exceed the
+921600-baud link (4 x 49 bytes x 500 Hz ~ 98 KB/s vs ~92 KB/s); use
+`--frequency 250` or `--no-imu` when multiplexing all four.
 
 ## Hardware wiring (Pico)
 - UART1 pins (fixed in firmware):
@@ -2698,12 +2726,12 @@ For simple scripts or tests you can skip SDL and drive the Pico directly with `s
 ```python
 from switch_pico_bridge import SwitchUARTClient, SwitchButton, SwitchDpad
 
-with SwitchUARTClient("/dev/cu.usbserial-0001") as client:
+with SwitchUARTClient("/dev/cu.usbserial-0001", slot=0) as client:  # slot selects one of the Pico's four controllers
     client.press(SwitchButton.A)
     client.release(SwitchButton.A)
     client.move_left_stick(0.0, -1.0)  # push up
     client.set_hat(SwitchDpad.UP_RIGHT)
-    print(client.poll_rumble())  # returns (left, right) amplitudes 0.0-1.0 or None
+    print(client.poll_rumble())  # returns (low, high) amplitudes 0.0-1.0 for this slot, or None
 ```
 - `SwitchButton` is an `IntFlag` (bitwise friendly) and `SwitchDpad` is an `IntEnum` for the DPAD/hat values (alias `SwitchHat` remains for older scripts).
 - The helper only depends on `pyserial`; SDL is not required.
