@@ -202,12 +202,15 @@ def apply_rumble(
     controller: sdl3.SDL_Gamepad,
     low_frequency: float,
     high_frequency: float,
-) -> bool:
-    """Apply normalized low/high rumble magnitudes to an SDL controller."""
+) -> Tuple[bool, bool]:
+    """Apply normalized low/high rumble magnitudes to an SDL controller.
+
+    Returns (motor active, SDL accepted the request).
+    """
     low = int(max(0.0, min(1.0, low_frequency)) * 0xFFFF)
     high = int(max(0.0, min(1.0, high_frequency)) * 0xFFFF)
-    sdl3.SDL_RumbleGamepad(controller, low, high, RUMBLE_DURATION_MS)
-    return low != 0 or high != 0
+    accepted = bool(sdl3.SDL_RumbleGamepad(controller, low, high, RUMBLE_DURATION_MS))
+    return low != 0 or high != 0, accepted
 
 
 @dataclass
@@ -247,6 +250,8 @@ class ControllerContext:
     gyro_bias_samples: int = 0
     gyro_bias_locked: bool = False
     last_debug_imu_print: float = 0.0
+    last_debug_rumble: Optional[Tuple[float, float]] = None
+    debug_rumble_frames: int = 0
 
 
 def capture_stick_offsets(controller: sdl3.SDL_Gamepad) -> Dict[int, int]:
@@ -759,6 +764,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Print raw IMU sensor readings and converted values for debugging.",
     )
     parser.add_argument(
+        "--debug-rumble",
+        action="store_true",
+        help="Print every decoded rumble frame received from the Pico and whether SDL accepted it.",
+    )
+    parser.add_argument(
         "--no-imu",
         action="store_true",
         help="Disable IMU/sensor reading entirely. Useful for controllers without gyro.",
@@ -815,6 +825,7 @@ class BridgeConfig:
     swap_abxy_ids: set[str]
     swap_abxy_global: bool
     debug_imu: bool = False
+    debug_rumble: bool = False
     no_imu: bool = False
     gyro_scale: float = 1.0
 
@@ -907,6 +918,7 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         swap_abxy_ids=set(swap_abxy_guids),  # filled later once stable IDs are known
         swap_abxy_global=bool(args.swap_abxy),
         debug_imu=bool(args.debug_imu),
+        debug_rumble=bool(args.debug_rumble),
         no_imu=bool(args.no_imu),
         gyro_scale=float(args.gyro_scale),
     )
@@ -1602,13 +1614,24 @@ def service_contexts(
                 if rumble is None:
                     break
                 latest_rumble = rumble
+                ctx.debug_rumble_frames += 1
 
             if latest_rumble is not None:
                 # Apply only the freshest rumble command seen during this tick.
-                ctx.rumble_active = apply_rumble(
+                ctx.rumble_active, accepted = apply_rumble(
                     ctx.controller, latest_rumble[0], latest_rumble[1]
                 )
                 ctx.last_rumble_at = now
+                if config.debug_rumble and (
+                    latest_rumble != ctx.last_debug_rumble or not accepted
+                ):
+                    ctx.last_debug_rumble = latest_rumble
+                    error = "" if accepted else f" sdl_error={sdl3.SDL_GetError().decode(errors='ignore')!r}"
+                    print(
+                        f"[RUMBLE idx={ctx.controller_index}] frame#{ctx.debug_rumble_frames} "
+                        f"low={latest_rumble[0]:.3f} high={latest_rumble[1]:.3f} "
+                        f"accepted={accepted}{error}"
+                    )
             elif (
                 ctx.rumble_active
                 and (now - ctx.last_rumble_at) > RUMBLE_IDLE_TIMEOUT

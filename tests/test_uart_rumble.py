@@ -46,17 +46,18 @@ def test_apply_rumble_maps_low_and_high_with_50ms_duration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[int, int, int]] = []
-    monkeypatch.setattr(
-        bridge.sdl3,
-        "SDL_RumbleGamepad",
-        lambda _controller, low, high, duration: calls.append((low, high, duration)),
-    )
+
+    def fake_rumble(_controller, low, high, duration):
+        calls.append((low, high, duration))
+        return True
+
+    monkeypatch.setattr(bridge.sdl3, "SDL_RumbleGamepad", fake_rumble)
     controller = cast(sdl3.SDL_Gamepad, object())
 
-    assert bridge.apply_rumble(controller, 1.0, 0.5)
+    assert bridge.apply_rumble(controller, 1.0, 0.5) == (True, True)
     assert calls[-1] == (0xFFFF, 0x7FFF, 50)
 
-    assert not bridge.apply_rumble(controller, 0.0, 0.0)
+    assert bridge.apply_rumble(controller, 0.0, 0.0) == (False, True)
     assert calls[-1] == (0, 0, 50)
 
 
