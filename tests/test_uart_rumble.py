@@ -61,6 +61,20 @@ def test_apply_rumble_maps_low_and_high_with_50ms_duration(
     assert calls[-1] == (0, 0, 50)
 
 
+def test_shape_rumble_curve_and_gain_boost_faint_levels_but_keep_silence() -> None:
+    # Linear defaults are the identity.
+    assert bridge.shape_rumble(0.3, 1.0, 1.0) == pytest.approx(0.3)
+    # Zero must never become a nonzero idle buzz, whatever the shaping.
+    assert bridge.shape_rumble(0.0, 4.0, 0.5) == 0.0
+    # Typical Switch HD levels (~0.03) are lifted into the ERM motor's usable range.
+    boosted = bridge.shape_rumble(0.031, 1.0, 0.5)
+    assert 0.15 < boosted < 0.2
+    # Gain saturates instead of wrapping.
+    assert bridge.shape_rumble(0.467, 4.0, 1.0) == 1.0
+    # Shaping is monotonic so louder input never rumbles softer.
+    assert bridge.shape_rumble(0.1, 2.0, 0.5) < bridge.shape_rumble(0.3, 2.0, 0.5)
+
+
 def test_repeated_constant_rumble_stays_active_until_idle_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

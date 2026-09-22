@@ -198,17 +198,31 @@ def interactive_pairing(
     return mappings
 
 
+def shape_rumble(magnitude: float, gain: float, curve: float) -> float:
+    """Map a decoded Switch magnitude (0-1) onto an ERM motor duty (0-1).
+
+    ``curve`` is a power-law exponent applied before ``gain``; values below 1
+    lift the faint HD-rumble levels most Switch games use. Zero stays zero.
+    """
+    magnitude = max(0.0, min(1.0, magnitude))
+    if magnitude == 0.0:
+        return 0.0
+    return min(1.0, (magnitude**curve) * gain)
+
+
 def apply_rumble(
     controller: sdl3.SDL_Gamepad,
     low_frequency: float,
     high_frequency: float,
+    gain: float = 1.0,
+    curve: float = 1.0,
 ) -> Tuple[bool, bool]:
     """Apply normalized low/high rumble magnitudes to an SDL controller.
 
     Returns (motor active, SDL accepted the request).
     """
-    low = int(max(0.0, min(1.0, low_frequency)) * 0xFFFF)
-    high = int(max(0.0, min(1.0, high_frequency)) * 0xFFFF)
+    low = int(shape_rumble(low_frequency, gain, curve) * 0xFFFF)
+    high = int(shape_rumble(high_frequency, gain, curve) * 0xFFFF)
     accepted = bool(sdl3.SDL_RumbleGamepad(controller, low, high, RUMBLE_DURATION_MS))
     return low != 0 or high != 0, accepted
 
@@ -769,6 +783,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Print every decoded rumble frame received from the Pico and whether SDL accepted it.",
     )
     parser.add_argument(
+        "--rumble-gain",
+        type=float,
+        default=1.0,
+        metavar="FACTOR",
+        help="Multiply decoded rumble before sending it to the controller (default: 1.0; clamped at full strength).",
+    )
+    parser.add_argument(
+        "--rumble-curve",
+        type=float,
+        default=1.0,
+        metavar="EXPONENT",
+        help="Power-law exponent applied to decoded rumble before --rumble-gain. Below 1.0 boosts faint HD rumble on ERM motors, e.g. 0.5 (default: 1.0, linear).",
+    )
+    parser.add_argument(
         "--no-imu",
         action="store_true",
         help="Disable IMU/sensor reading entirely. Useful for controllers without gyro.",
@@ -828,6 +856,8 @@ class BridgeConfig:
     debug_rumble: bool = False
     no_imu: bool = False
     gyro_scale: float = 1.0
+    rumble_gain: float = 1.0
+    rumble_curve: float = 1.0
 
 
 class DisplayIndexAllocator:
@@ -921,6 +951,8 @@ def build_bridge_config(console: Console, args: argparse.Namespace) -> BridgeCon
         debug_rumble=bool(args.debug_rumble),
         no_imu=bool(args.no_imu),
         gyro_scale=float(args.gyro_scale),
+        rumble_gain=float(args.rumble_gain),
+        rumble_curve=float(args.rumble_curve),
     )
 
 
@@ -1619,7 +1651,11 @@ def service_contexts(
             if latest_rumble is not None:
                 # Apply only the freshest rumble command seen during this tick.
                 ctx.rumble_active, accepted = apply_rumble(
-                    ctx.controller, latest_rumble[0], latest_rumble[1]
+                    ctx.controller,
+                    latest_rumble[0],
+                    latest_rumble[1],
+                    config.rumble_gain,
+                    config.rumble_curve,
                 )
                 ctx.last_rumble_at = now
                 if config.debug_rumble and (
@@ -1630,6 +1666,8 @@ def service_contexts(
                     print(
                         f"[RUMBLE idx={ctx.controller_index}] frame#{ctx.debug_rumble_frames} "
                         f"low={latest_rumble[0]:.3f} high={latest_rumble[1]:.3f} "
+                        f"-> motor low={shape_rumble(latest_rumble[0], config.rumble_gain, config.rumble_curve):.3f} "
+                        f"high={shape_rumble(latest_rumble[1], config.rumble_gain, config.rumble_curve):.3f} "
                         f"accepted={accepted}{error}"
                     )
             elif (
